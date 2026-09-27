@@ -167,7 +167,7 @@ struct DeviceIdentityRotationCoordinatorTests {
         #expect(source.contains("validateCommittedAuthorityMatchesPendingNewIdentity(pending)"))
     }
 
-    @Test("Authority readiness gate coalesces concurrent recovery")
+    @Test("Authority readiness gate coalesces concurrent recovery", .timeLimit(.minutes(1)))
     @MainActor
     func authorityReadinessGateCoalescesConcurrentRecovery() async throws {
         let probe = BlockingRotationRecoveryProbe()
@@ -179,53 +179,50 @@ struct DeviceIdentityRotationCoordinatorTests {
         defer {
             first.cancel()
             second.cancel()
+            Task { await probe.release() }
         }
 
-        try await waitForRecoveryCount(1, probe: probe)
+        try #require(await probe.waitForRecoveryStart())
         #expect(await probe.recoveryCount() == 1)
         await probe.release()
         #expect(try await first.value)
         #expect(try await second.value)
         #expect(await probe.recoveryCount() == 1)
+        #expect(try await gate.ensureReady())
+        #expect(await probe.recoveryCount() == 2)
     }
 
     private func position(_ needle: String, in source: String) throws -> String.Index {
         try #require(source.range(of: needle)).lowerBound
     }
 
-    @MainActor
-    private func waitForRecoveryCount(
-        _ expectedCount: Int,
-        probe: BlockingRotationRecoveryProbe
-    ) async throws {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(2))
-        while await probe.recoveryCount() < expectedCount {
-            guard clock.now < deadline else {
-                throw RotationRecoveryProbeError.timedOut
-            }
-            try await Task.sleep(for: .milliseconds(5))
-        }
-    }
 }
 
 private actor BlockingRotationRecoveryProbe {
     private var count = 0
     private var released = false
+    private let started = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+    private let releaseSignal = AsyncStream<Void>.makeStream()
 
     func recover() async -> Bool {
         count += 1
-        while !released {
-            await Task.yield()
+        started.continuation.yield(())
+        if !released {
+            var iterator = releaseSignal.stream.makeAsyncIterator()
+            _ = await iterator.next()
         }
-        return true
+        return released
     }
 
     func recoveryCount() -> Int { count }
 
-    func release() { released = true }
-}
+    func waitForRecoveryStart() async -> Bool {
+        var iterator = started.stream.makeAsyncIterator()
+        return await iterator.next() != nil
+    }
 
-private enum RotationRecoveryProbeError: Error {
-    case timedOut
+    func release() {
+        released = true
+        releaseSignal.continuation.finish()
+    }
 }

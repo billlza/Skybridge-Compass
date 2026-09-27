@@ -26,3 +26,11 @@
 "startup.step.weatherServices" = "天気サービス";
 "startup.step.appleSiliconOptimization" = "Apple Silicon 最適化";
 "startup.step.remoteDesktopServices" = "リモートデスクトップサービス";
+
+/* Account device registration and hardware metadata */
+"discovery.accountDevices.caller.identityMismatch" = "このデバイスの識別情報が以前の登録と一致しません。再度デバイスを確認してください。";
+"discovery.accountDevices.caller.notRegistered" = "このデバイスは未登録です。登録済みデバイスからの承認が必要です。";
+"discovery.accountDevices.caller.pending" = "このデバイスの登録は承認待ちです。";
+"discovery.accountDevices.caller.frozen" = "このデバイスの登録は凍結されています。";
+"discovery.accountDevices.caller.unrecognizedStatus" = "このデバイスの登録状態を確認できません。";
+"discovery.accountDevices.modelNotReported" = "モデル未報告";

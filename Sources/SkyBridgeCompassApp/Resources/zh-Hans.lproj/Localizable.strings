@@ -35,3 +35,11 @@
 "startup.step.weatherServices" = "天气服务";
 "startup.step.appleSiliconOptimization" = "Apple Silicon 优化";
 "startup.step.remoteDesktopServices" = "远程桌面服务";
+
+/* Account device registration and hardware metadata */
+"discovery.accountDevices.caller.identityMismatch" = "本机身份与历史登记不一致，需要重新验证设备。";
+"discovery.accountDevices.caller.notRegistered" = "本机尚未登记，需由已登记设备批准。";
+"discovery.accountDevices.caller.pending" = "本机登记正在等待批准。";
+"discovery.accountDevices.caller.frozen" = "本机登记已冻结。";
+"discovery.accountDevices.caller.unrecognizedStatus" = "暂时无法确认本机的登记状态。";
+"discovery.accountDevices.modelNotReported" = "型号尚未上报";

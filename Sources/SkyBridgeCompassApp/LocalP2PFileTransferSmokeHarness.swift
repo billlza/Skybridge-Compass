@@ -734,6 +734,8 @@ final class LocalP2PFileTransferSmokeHarness {
                 return "mac_smoke_reconnect_local_network_permission_denied"
             case .strictPQCTrustPreflightFailed:
                 return "mac_smoke_reconnect_strict_pqc_trust_preflight_failed"
+            case .peerPQCSuiteUnavailable:
+                return "mac_smoke_reconnect_peer_pqc_suite_unavailable"
             }
         }
 

@@ -118,16 +118,25 @@
     return YES;
 }
 
-- (void)activateRecordedAudioOwnerWithToken:(NSUUID *)ownerToken {
+- (BOOL)activateRecordedAudioOwnerWithToken:(NSUUID *)ownerToken {
     if (ownerToken == nil) {
-        return;
+        return NO;
     }
     [self.stateLock lock];
-    if (![self.recordedAudioOwnerToken isEqual:ownerToken]) {
+    NSUUID *incumbent = self.recordedAudioOwnerToken;
+    if (incumbent != nil && ![incumbent isEqual:ownerToken]) {
+        // A different session already owns capture. Replacing it here would reset the shared
+        // sample cursor and silently stop delivering the incumbent's audio, with nothing to
+        // observe. Refuse and let the caller decide and report.
+        [self.stateLock unlock];
+        return NO;
+    }
+    if (incumbent == nil) {
         self.recordedAudioOwnerToken = [ownerToken copy];
         self.sampleCursor = 0;
     }
     [self.stateLock unlock];
+    return YES;
 }
 
 - (void)retireRecordedAudioOwnerWithToken:(NSUUID *)ownerToken {

@@ -195,6 +195,10 @@ public actor HandshakeContext {
         offeredSuites: [CryptoSuite]? = nil,
         activeProtocolSigningAlgorithm: ProtocolSigningAlgorithm? = nil
     ) async throws -> HandshakeContext {
+        // Preserve an explicit Q request even when startup admission failed.
+        // Every SkyBridge initiator/responder reaches this boundary before a
+        // protocol message or key share can use an ordinary suite instead.
+        let qPeriaptRequested = try QPeriaptPlatformPolicy.requireRequestedRuntimeAdmission()
  // 获取本地能力
  // 注：CryptoProviderSelector.shared 是 static let，无需 await
         let selector = CryptoProviderSelector.shared
@@ -208,6 +212,23 @@ public actor HandshakeContext {
             $0.wireId == CryptoSuite.qperiaptABI2PolicyBound.wireId
         } ?? false
         let suppliedQPeriaptProvider = cryptoProvider as? any QPeriaptSessionBoundCryptoProvider
+        if qPeriaptRequested {
+            guard let frozenSigningAlgorithm else {
+                throw HandshakeError.invalidState(
+                    "Requested Q-Periapt ABI2 has no frozen protocol signing identity"
+                )
+            }
+            guard frozenSigningAlgorithm == .mlDSA65 else {
+                throw HandshakeError.invalidState(
+                    "Requested Q-Periapt ABI2 requires ML-DSA-65; current identity uses \(frozenSigningAlgorithm.rawValue)"
+                )
+            }
+            guard qPeriaptWasOffered || suppliedQPeriaptProvider != nil else {
+                throw HandshakeError.invalidState(
+                    "Requested Q-Periapt ABI2 is absent from the handshake offer and no session-bound Q provider was supplied"
+                )
+            }
+        }
         if suppliedQPeriaptProvider != nil, frozenSigningAlgorithm != .mlDSA65 {
             throw HandshakeError.invalidState(
                 "Q-Periapt ABI2 requires an explicitly frozen ML-DSA-65 protocol identity"
@@ -218,7 +239,7 @@ public actor HandshakeContext {
         if frozenSigningAlgorithm == .mlDSA65, shouldCaptureQPeriapt {
             if let suppliedQPeriaptProvider {
                 frozenQPeriaptProvider = suppliedQPeriaptProvider
-            } else if QPeriaptPlatformPolicy.isEnabledForLocalRuntime(),
+            } else if qPeriaptRequested,
                       let admittedProvider = QPeriaptPlatformPolicy.makeCryptoProvider() {
                 frozenQPeriaptProvider = admittedProvider
             } else {
@@ -226,6 +247,12 @@ public actor HandshakeContext {
             }
         } else {
             frozenQPeriaptProvider = nil
+        }
+
+        if qPeriaptRequested, frozenQPeriaptProvider == nil {
+            throw HandshakeError.invalidState(
+                "Requested Q-Periapt ABI2 could not freeze the admitted Q session provider"
+            )
         }
 
         let admittedOfferedSuites = offeredSuites?.filter { suite in

@@ -11,6 +11,8 @@ struct USBDeviceManagementView: View {
     @State private var isScanning = false
     @State private var lastScanTime: Date?
     @State private var hasLoadedInitialDevices = false
+    @State private var appleUSBDevices: [USBMultiplexDevice] = []
+    @State private var usbInventoryError: String?
 
     init(usbManager: USBCConnectionManager = .shared) {
         _usbManager = StateObject(wrappedValue: usbManager)
@@ -55,6 +57,12 @@ struct USBDeviceManagementView: View {
                     VStack(spacing: 20) {
  // 设备统计卡片
                         deviceStatsCards
+                        if let usbInventoryError {
+                            Text(usbInventoryError).foregroundStyle(.red)
+                        }
+                        ForEach(appleUSBDevices, id: \.udid) { device in
+                            USBPeerConnectionRow(udid: device.udid)
+                        }
                         
  // 设备列表
                         if connectedDevices.isEmpty {
@@ -77,6 +85,7 @@ struct USBDeviceManagementView: View {
             }
         }
         .onAppear(perform: loadCachedDevicesAndScanIfNeeded)
+        .task { await refreshAppleUSBDevices() }
         .onReceive(usbManager.$discoveredUSBDevices) { devices in
             connectedDevices = devices.sorted { $0.name < $1.name }
             lastScanTime = usbManager.lastScanCompletedAt
@@ -185,6 +194,7 @@ struct USBDeviceManagementView: View {
         Task {
  // 扫描USB设备。MFi/ExternalAccessory 扫描必须走显式授权路径，避免刷新页面时隐式触发系统隐私框架。
             await usbManager.scanForUSBDevices()
+            await refreshAppleUSBDevices()
             
  // 获取设备列表
             let devices = usbManager.getConnectedUSBDevices()
@@ -196,12 +206,115 @@ struct USBDeviceManagementView: View {
             }
         }
     }
+
+    @MainActor
+    private func refreshAppleUSBDevices() async {
+        do {
+            appleUSBDevices = try await USBMultiplexTransport.devices()
+            usbInventoryError = nil
+        } catch {
+            appleUSBDevices = []
+            usbInventoryError = String(localized: "无法读取 USB 连接：") + error.localizedDescription
+        }
+    }
     
     private var dateFormatter: DateFormatter {
         let formatter = DateFormatter()
         formatter.dateStyle = .none
         formatter.timeStyle = .medium
         return formatter
+    }
+}
+
+/// A cable selects the route. The chosen, already paired protocol identity is
+/// still checked by the same signed bootstrap and strict PQC handshake as CLI.
+@available(macOS 14.0, *)
+private struct USBPeerConnectionRow: View {
+    let udid: String
+    @ObservedObject private var trust = TrustSyncService.shared
+    @ObservedObject private var service = P2PDiscoveryService.shared
+    @State private var selectedPeer = ""
+    @State private var connecting = false
+    @State private var outcome: String?
+    @State private var failed = false
+
+    private struct PairedPeer: Identifiable {
+        let peerID: String
+        let fingerprint: String
+        let name: String
+        var id: String { peerID + ":" + fingerprint }
+    }
+
+    private var peers: [PairedPeer] {
+        var seen = Set<String>()
+        return trust.activeTrustRecords.flatMap { record -> [PairedPeer] in
+            guard record.isAuthenticationEligible else { return [] }
+            let raw = record.currentDeviceIdMetadata ?? record.deviceId
+            let normalized = raw.lowercased().hasPrefix("id:") ? String(raw.dropFirst(3)) : raw
+            guard let id = UUID(uuidString: normalized) else { return [] }
+            return record.currentPathAuthorityPins.compactMap { pin -> PairedPeer? in
+                guard pin.algorithm == .mlDSA65 || pin.algorithm == .mlDSA87 else { return nil }
+                let peer = PairedPeer(peerID: id.uuidString, fingerprint: pin.fingerprint,
+                                      name: record.deviceName ?? id.uuidString)
+                return seen.insert(peer.id).inserted ? peer : nil
+            }
+        }.sorted { $0.id < $1.id }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(String(localized: "通过 USB 连接 SkyBridge"), systemImage: "cable.connector")
+                .font(.headline)
+            Text("USB · \(udid)").font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Picker(String(localized: "已配对设备"), selection: $selectedPeer) {
+                    Text(String(localized: "选择线缆连接的设备")).tag("")
+                    ForEach(peers) { peer in
+                        Text("\(peer.name) · \(peer.fingerprint.prefix(12))").tag(peer.id)
+                    }
+                }
+                .disabled(connecting)
+                Button(connecting ? String(localized: "正在验证…") : String(localized: "连接")) {
+                    connect()
+                }
+                .disabled(connecting || !peers.contains { $0.id == selectedPeer })
+                .accessibilityIdentifier("usb.connect.\(udid)")
+            }
+            if peers.isEmpty {
+                Text(String(localized: "先在设备管理中完成配对，再选择此 USB 连接。"))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let outcome {
+                Text(outcome).font(.callout).foregroundStyle(failed ? .red : .secondary)
+            }
+            Text(String(localized: "同时连接 USB 和网络时优先使用 USB。"))
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    @MainActor
+    private func connect() {
+        guard let peer = peers.first(where: { $0.id == selectedPeer }) else { return }
+        connecting = true; outcome = nil; failed = false
+        Task { @MainActor in
+            defer { connecting = false }
+            do {
+                let request = try OperatorUSBConnectRequest(params: .init([
+                    "udid": .string(udid), "peer_id": .string(peer.peerID),
+                    "expected_fingerprint": .string(peer.fingerprint)
+                ]))
+                let result = try await OperatorNearbyFileRuntime.connectUSB(request)
+                guard result.transport == "usb", result.pqc == true, let suite = result.negotiated_suite else {
+                    throw CrossnetControlFailure.sessionRuntimeApplyFailed
+                }
+                outcome = String(localized: "USB 身份验证成功，已建立加密连接：") + suite
+            } catch {
+                failed = true
+                outcome = String(localized: "USB 连接失败：") + error.localizedDescription
+            }
+        }
     }
 }
 

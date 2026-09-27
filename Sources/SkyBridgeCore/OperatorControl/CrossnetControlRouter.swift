@@ -1,4 +1,5 @@
 import Foundation
+import SkyBridgeProtocolCore
 
 /// Serializes session-plane mutations so a read-back describes the mutation it
 /// belongs to.
@@ -69,6 +70,20 @@ public struct CrossnetControlRuntime: Sendable {
     /// after the initial response. The stream should coalesce to the latest
     /// value and end when its consumer stops (client disconnect).
     public let statusEvents: (@Sendable () -> AsyncStream<CrossnetControlStatusResult>)?
+    public let nearby: (@Sendable (Int) async throws -> OperatorNearbyResult)?
+    public let connectNearby: (@Sendable (String) async throws -> OperatorNearbyConnectResult)?
+    public let sendFile: (@Sendable (OperatorFileSendRequest) async throws -> AsyncStream<OperatorFileTransferEvent>)?
+    public let usbDevices: (@Sendable () async throws -> OperatorUSBDevicesResult)?
+    public let inspectUSB: (@Sendable (String) async throws -> USBPeerInspection)?
+    public let localApproval: (@Sendable (OperatorLocalApprovalRequest) async throws -> OperatorLocalApprovalResult)?
+    public let usbPeers: (@Sendable () async throws -> OperatorUSBPeersResult)?
+    public let connectUSB: (@Sendable (OperatorUSBConnectRequest) async throws -> OperatorNearbyConnectResult)?
+    public let connectUSBDevice: (@Sendable (OperatorUSBDeviceConnectRequest) async throws -> OperatorNearbyConnectResult)?
+    public let previewTrustRecovery: (@Sendable (String, String, String?) async throws -> TrustRecoveryPreview)?
+    public let desktop: (@Sendable (OperatorDesktopRequest) async throws -> OperatorDesktopResult)?
+    public let fileApproval: (@Sendable (OperatorFileApprovalRequest) async throws -> OperatorFileApprovalResult)?
+    public let handshakeConfiguration: (@Sendable (OperatorHandshakeRequest) async throws -> OperatorHandshakeResult)?
+    public let recoverTrust: (@Sendable (OperatorTrustRecoveryRequest) async throws -> TrustMirrorRecoveryResult)?
 
     public init(
         hello: @escaping @Sendable () async -> CrossnetControlHelloResult,
@@ -91,7 +106,21 @@ public struct CrossnetControlRuntime: Sendable {
         connectOnlineDevice: @escaping @Sendable (String) async throws
             -> CrossnetControlConnectDeviceResult = CrossnetControlRuntime
             .unavailableConnectOnlineDevice,
-        statusEvents: (@Sendable () -> AsyncStream<CrossnetControlStatusResult>)? = nil
+        statusEvents: (@Sendable () -> AsyncStream<CrossnetControlStatusResult>)? = nil,
+        nearby: (@Sendable (Int) async throws -> OperatorNearbyResult)? = nil,
+        connectNearby: (@Sendable (String) async throws -> OperatorNearbyConnectResult)? = nil,
+        sendFile: (@Sendable (OperatorFileSendRequest) async throws -> AsyncStream<OperatorFileTransferEvent>)? = nil,
+        usbDevices: (@Sendable () async throws -> OperatorUSBDevicesResult)? = nil,
+        inspectUSB: (@Sendable (String) async throws -> USBPeerInspection)? = nil,
+        localApproval: (@Sendable (OperatorLocalApprovalRequest) async throws -> OperatorLocalApprovalResult)? = nil,
+        usbPeers: (@Sendable () async throws -> OperatorUSBPeersResult)? = nil,
+        connectUSB: (@Sendable (OperatorUSBConnectRequest) async throws -> OperatorNearbyConnectResult)? = nil,
+        connectUSBDevice: (@Sendable (OperatorUSBDeviceConnectRequest) async throws -> OperatorNearbyConnectResult)? = nil,
+        previewTrustRecovery: (@Sendable (String, String, String?) async throws -> TrustRecoveryPreview)? = nil,
+        recoverTrust: (@Sendable (OperatorTrustRecoveryRequest) async throws -> TrustMirrorRecoveryResult)? = nil,
+        desktop: (@Sendable (OperatorDesktopRequest) async throws -> OperatorDesktopResult)? = nil,
+        fileApproval: (@Sendable (OperatorFileApprovalRequest) async throws -> OperatorFileApprovalResult)? = nil,
+        handshakeConfiguration: (@Sendable (OperatorHandshakeRequest) async throws -> OperatorHandshakeResult)? = nil
     ) {
         self.hello = hello
         self.status = status
@@ -104,6 +133,20 @@ public struct CrossnetControlRuntime: Sendable {
         self.listOnlineDevices = listOnlineDevices
         self.connectOnlineDevice = connectOnlineDevice
         self.statusEvents = statusEvents
+        self.nearby = nearby
+        self.connectNearby = connectNearby
+        self.sendFile = sendFile
+        self.usbDevices = usbDevices
+        self.usbPeers = usbPeers
+        self.inspectUSB = inspectUSB
+        self.localApproval = localApproval
+        self.connectUSB = connectUSB
+        self.connectUSBDevice = connectUSBDevice
+        self.previewTrustRecovery = previewTrustRecovery
+        self.recoverTrust = recoverTrust
+        self.handshakeConfiguration = handshakeConfiguration
+        self.fileApproval = fileApproval
+        self.desktop = desktop
     }
 
     /// Fail-closed default mutation handler.
@@ -173,6 +216,10 @@ public struct CrossnetControlRouter: Sendable {
     /// request — including `watch:true` on a build without a push source —
     /// resolves to `.response` via ``handleLine(_:)``, unchanged.
     public func handleLineStreaming(_ line: Data) async -> CrossnetControlLineOutcome {
+        if let request = try? CrossnetControlWire.decodeRequest(line: line),
+           request.method == "crossnet.file.send" {
+            return await fileStream(request)
+        }
         guard
             let request = try? CrossnetControlWire.decodeRequest(line: line),
             request.method == "crossnet.status",
@@ -218,6 +265,49 @@ public struct CrossnetControlRouter: Sendable {
         return .stream(initial: initial, events: events)
     }
 
+    private func fileStream(_ request: CrossnetControlRequest) async -> CrossnetControlLineOutcome {
+        do {
+            try Self.requireAuthenticatedOperatorContext(await runtime.hello())
+            guard let sendFile = runtime.sendFile else { throw CrossnetControlFailure.methodNotEnabled }
+            let send = try OperatorFileSendRequest(operationID: request.id, params: request.params)
+            let source = try await sendFile(send)
+            let initial = try CrossnetControlWire.successData(
+                id: request.id,
+                result: OperatorFileTransferEvent(request: send, status: .preparing)
+            )
+            let events = AsyncStream<Data>(bufferingPolicy: .bufferingNewest(1)) { continuation in
+                let bridge = Task {
+                    for await event in source {
+                        if Task.isCancelled { break }
+                        do {
+                            guard event.operation_id == send.operationID,
+                                  event.device_ref == send.deviceRef else {
+                                throw CrossnetControlFailure.internalError("transfer event binding mismatch")
+                            }
+                            continuation.yield(try CrossnetControlWire.eventData(
+                                event: "file_transfer", data: event.validated()
+                            ))
+                        } catch {
+                            continuation.yield(CrossnetControlWire.failureData(
+                                id: request.id, failure: .internalError("invalid transfer event")
+                            ))
+                            break
+                        }
+                    }
+                    continuation.finish()
+                }
+                continuation.onTermination = { _ in bridge.cancel() }
+            }
+            return .stream(initial: initial, events: events)
+        } catch let failure as CrossnetControlFailure {
+            return .response(CrossnetControlWire.failureData(id: request.id, failure: failure))
+        } catch {
+            return .response(CrossnetControlWire.failureData(
+                id: request.id, failure: .internalError("file transfer could not start")
+            ))
+        }
+    }
+
     public func handleLine(_ line: Data) async -> Data {
         let request: CrossnetControlRequest
         do {
@@ -233,6 +323,160 @@ public struct CrossnetControlRouter: Sendable {
 
         do {
             switch request.method {
+            case "crossnet.desktop.devices", "crossnet.desktop.start", "crossnet.desktop.status", "crossnet.desktop.stop":
+                try Self.requireAuthenticatedOperatorContext(await runtime.hello())
+                guard let desktop = runtime.desktop,
+                      let action = OperatorDesktopRequest.Action(rawValue: String(request.method.split(separator: ".").last ?? "")) else {
+                    throw CrossnetControlFailure.methodNotEnabled
+                }
+                let input = try OperatorDesktopRequest(action: action, params: request.params)
+                return try CrossnetControlWire.successData(id: request.id, result: await desktop(input))
+            case "crossnet.file.approval.status", "crossnet.file.approval.authorize", "crossnet.file.approval.decide", "crossnet.file.approval.revoke":
+                try Self.requireAuthenticatedOperatorContext(await runtime.hello())
+                guard let handler = runtime.fileApproval,
+                      let action = OperatorFileApprovalRequest.Action(rawValue: String(request.method.split(separator: ".").last ?? "")) else {
+                    throw CrossnetControlFailure.methodNotEnabled
+                }
+                let input = try OperatorFileApprovalRequest(action: action, params: request.params)
+                let result = try await handler(input)
+                return try CrossnetControlWire.successData(id: request.id, result: result)
+            case "crossnet.handshake.list", "crossnet.handshake.status", "crossnet.handshake.set", "crossnet.handshake.revoke":
+                try Self.requireAuthenticatedOperatorContext(await runtime.hello())
+                guard let handler = runtime.handshakeConfiguration,
+                      let action = OperatorHandshakeRequest.Action(rawValue: String(request.method.split(separator: ".").last ?? "")) else {
+                    throw CrossnetControlFailure.methodNotEnabled
+                }
+                let input = try OperatorHandshakeRequest(action: action, params: request.params)
+                let result: OperatorHandshakeResult
+                do {
+                    if action == .set || action == .revoke {
+                        result = try await sessionGate.run { try await handler(input) }
+                    } else { result = try await handler(input) }
+                } catch let failure as CrossnetControlFailure { throw failure }
+                catch { throw CrossnetControlFailure.sessionMutationRejected("handshake_configuration_failed") }
+                return try CrossnetControlWire.successData(id: request.id, result: result)
+            case "crossnet.trust.recover":
+                try Self.requireAuthenticatedOperatorContext(await runtime.hello())
+                guard let recover = runtime.recoverTrust else { throw CrossnetControlFailure.methodNotEnabled }
+                let input = try OperatorTrustRecoveryRequest(params: request.params)
+                do {
+                    let result = try await sessionGate.run { try await recover(input) }
+                    return try CrossnetControlWire.successData(id: request.id, result: result)
+                } catch let failure as CrossnetControlFailure { throw failure }
+                catch { throw Self.nearbyConnectionFailure(error) }
+            case "crossnet.trust.preview":
+                try Self.requireAuthenticatedOperatorContext(await runtime.hello())
+                guard let preview = runtime.previewTrustRecovery else { throw CrossnetControlFailure.methodNotEnabled }
+                let preserved = request.params.string("preserve_shared_peer_id")
+                guard !request.params.contains("preserve_shared_peer_id") || preserved.flatMap(UUID.init(uuidString:)) != nil else {
+                    throw CrossnetControlFailure.malformedRequest("shared peer preservation requires a stable UUID")
+                }
+                guard let peer = request.params.string("peer_id"), UUID(uuidString: peer) != nil,
+                      let fingerprint = request.params.string("expected_fingerprint"), fingerprint.count == 64,
+                      fingerprint.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
+                    throw CrossnetControlFailure.malformedRequest("trust preview requires a stable peer UUID and full lowercase protocol fingerprint")
+                }
+                do {
+                    return try CrossnetControlWire.successData(id: request.id, result: await preview(peer, fingerprint, preserved))
+                } catch let failure as CrossnetControlFailure { throw failure }
+                catch { throw Self.nearbyConnectionFailure(error) }
+            case "crossnet.usb.devices":
+                try Self.requireAuthenticatedOperatorContext(await runtime.hello())
+                guard let devices = runtime.usbDevices else { throw CrossnetControlFailure.methodNotEnabled }
+                do {
+                    return try CrossnetControlWire.successData(id: request.id, result: await devices())
+                } catch let failure as CrossnetControlFailure { throw failure }
+                catch { throw Self.nearbyConnectionFailure(error) }
+            case "crossnet.approval.pending", "crossnet.approval.decide":
+                try Self.requireAuthenticatedOperatorContext(await runtime.hello())
+                guard let handler = runtime.localApproval,
+                      let action = OperatorLocalApprovalRequest.Action(rawValue: String(request.method.split(separator: ".").last ?? "")) else {
+                    throw CrossnetControlFailure.methodNotEnabled
+                }
+                let input = try OperatorLocalApprovalRequest(action: action, params: request.params)
+                return try CrossnetControlWire.successData(id: request.id, result: await handler(input))
+            case "crossnet.usb.inspect":
+                try Self.requireAuthenticatedOperatorContext(await runtime.hello())
+                guard let inspect = runtime.inspectUSB else { throw CrossnetControlFailure.methodNotEnabled }
+                guard let udid = request.params.string("udid"), (24...64).contains(udid.utf8.count),
+                      udid.utf8.allSatisfy({ (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0) || $0 == 45 }) else {
+                    throw CrossnetControlFailure.malformedRequest("USB inspection requires a physical UDID")
+                }
+                let result: USBPeerInspection
+                do { result = try await inspect(udid) }
+                catch let failure as CrossnetControlFailure { throw failure }
+                catch let failure as USBPeerDiscoveryError {
+                    throw CrossnetControlFailure.sessionMutationRejected("usb_inspection_\(failure.rawValue)")
+                } catch let failure as HandshakeConfigurationError {
+                    throw CrossnetControlFailure.sessionMutationRejected("usb_inspection_\(failure.rawValue)")
+                } catch { throw Self.nearbyConnectionFailure(error) }
+                return try CrossnetControlWire.successData(id: request.id, result: result)
+            case "crossnet.usb.peers":
+                try Self.requireAuthenticatedOperatorContext(await runtime.hello())
+                guard let peers = runtime.usbPeers else { throw CrossnetControlFailure.methodNotEnabled }
+                do {
+                    return try CrossnetControlWire.successData(id: request.id, result: await peers())
+                } catch let failure as CrossnetControlFailure { throw failure }
+                catch { throw CrossnetControlFailure.sessionMutationRejected("usb_pairing_catalog_unavailable") }
+            case "crossnet.usb.connect_device":
+                try Self.requireAuthenticatedOperatorContext(await runtime.hello())
+                guard let connect = runtime.connectUSBDevice else { throw CrossnetControlFailure.methodNotEnabled }
+                let input = try OperatorUSBDeviceConnectRequest(params: request.params)
+                let result: OperatorNearbyConnectResult
+                do { result = try await sessionGate.run { try await connect(input) } }
+                catch let failure as CrossnetControlFailure { throw failure }
+                catch { throw Self.nearbyConnectionFailure(error) }
+                guard result.device_ref == input.deviceRef, result.authenticated,
+                      result.transport == "usb", result.pqc == true,
+                      let fingerprint = result.peer_fingerprint, fingerprint.count == 64,
+                      fingerprint.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+                      result.negotiated_suite?.isEmpty == false else {
+                    throw CrossnetControlFailure.sessionRuntimeApplyFailed
+                }
+                return try CrossnetControlWire.successData(id: request.id, result: result)
+            case "crossnet.usb.connect":
+                try Self.requireAuthenticatedOperatorContext(await runtime.hello())
+                guard let connect = runtime.connectUSB else { throw CrossnetControlFailure.methodNotEnabled }
+                let input = try OperatorUSBConnectRequest(params: request.params)
+                let result: OperatorNearbyConnectResult
+                do { result = try await sessionGate.run { try await connect(input) } }
+                catch let failure as CrossnetControlFailure { throw failure }
+                catch { throw Self.nearbyConnectionFailure(error) }
+                guard result.authenticated, result.transport == "usb",
+                      result.pqc == true,
+                      result.peer_fingerprint == input.expectedFingerprint,
+                      result.negotiated_suite?.isEmpty == false else {
+                    throw CrossnetControlFailure.sessionRuntimeApplyFailed
+                }
+                return try CrossnetControlWire.successData(id: request.id, result: result)
+            case "crossnet.nearby":
+                try Self.requireAuthenticatedOperatorContext(await runtime.hello())
+                guard let nearby = runtime.nearby else { throw CrossnetControlFailure.methodNotEnabled }
+                guard let seconds = request.params.int("scan_seconds"), (0...10).contains(seconds) else {
+                    throw CrossnetControlFailure.malformedRequest("scan_seconds must be 0...10")
+                }
+                return try CrossnetControlWire.successData(id: request.id, result: await nearby(seconds))
+            case "crossnet.connect_nearby":
+                try Self.requireAuthenticatedOperatorContext(await runtime.hello())
+                guard let connect = runtime.connectNearby else { throw CrossnetControlFailure.methodNotEnabled }
+                guard let ref = request.params.string("device_ref"), UUID(uuidString: ref) != nil else {
+                    throw CrossnetControlFailure.malformedRequest("device_ref must be a discovery reference")
+                }
+                let result: OperatorNearbyConnectResult
+                do {
+                    result = try await sessionGate.run { try await connect(ref) }
+                } catch let failure as CrossnetControlFailure {
+                    throw failure
+                } catch {
+                    SkyBridgeLogger.p2p.error(
+                        "Operator nearby connection failed: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
+                    )
+                    throw Self.nearbyConnectionFailure(error)
+                }
+                guard result.authenticated, result.device_ref == ref else {
+                    throw CrossnetControlFailure.sessionRuntimeApplyFailed
+                }
+                return try CrossnetControlWire.successData(id: request.id, result: result)
             case "crossnet.hello":
                 return try CrossnetControlWire.successData(
                     id: request.id,
@@ -250,10 +494,14 @@ public struct CrossnetControlRouter: Sendable {
                 let snapshot = try CrossnetControlSettingsProjectionPolicy.validate(
                     await runtime.settingsSnapshot()
                 )
-                return try CrossnetControlWire.successData(
-                    id: request.id,
-                    result: snapshot
-                )
+                guard !request.params.contains("include_extended") || request.params.bool("include_extended") != nil else {
+                    throw CrossnetControlFailure.malformedRequest("include_extended must be boolean")
+                }
+                let projected = request.params.bool("include_extended") == true ? snapshot :
+                    CrossnetControlSettingsSnapshotResult(settings: snapshot.settings.filter {
+                        CrossnetControlSettingsProjectionPolicy.allowedSettingIDs.contains($0.id)
+                    })
+                return try CrossnetControlWire.successData(id: request.id, result: projected)
             case "crossnet.settings.set":
                 try Self.requireAuthenticatedOperatorContext(await runtime.hello())
                 let mutation = try CrossnetControlSettingsMutationPolicy.parse(
@@ -358,6 +606,40 @@ public struct CrossnetControlRouter: Sendable {
                 failure: .internalError("failed to encode response")
             )
         }
+    }
+
+    /// Runtime errors must not fall into the response-encoding failure boundary.
+    /// Publish closed reason codes; peer-supplied descriptions stay out of IPC.
+    private static func nearbyConnectionFailure(_ error: Error) -> CrossnetControlFailure {
+        #if os(macOS)
+        if let usb = error as? USBMultiplexError {
+            if usb == .deviceUnavailable { return .usbDeviceUnavailable }
+            return .sessionMutationRejected("usb_\(usb.rawValue)")
+        }
+        #endif
+        let reason: String
+        if let rejection = error as? AuthenticatedRemoteAuthorityRejection {
+            reason = "nearby_authority_rejected:\(rejection.rawValue)"
+        } else if let discovery = error as? P2PDiscoveryError {
+            switch discovery {
+            case .deviceNotConnected: reason = "nearby_peer_not_connected"
+            case .connectionCancelled: reason = "nearby_connection_cancelled"
+            case .timeout: reason = "nearby_connection_timed_out"
+            case .scanningFailed: reason = "nearby_scan_failed"
+            case .noConnectableEndpoint: reason = "nearby_no_connectable_endpoint"
+            case .noLiveControlRoute: reason = "nearby_no_live_control_route"
+            case .localDeviceTarget: reason = "nearby_local_device_target"
+            case .targetAuthorityConflict: reason = "nearby_identity_conflict"
+            case .localNetworkPermissionDenied: reason = "nearby_local_network_permission_denied"
+            case .strictPQCTrustPreflightFailed: reason = "nearby_trust_preflight_failed"
+            case .peerPQCSuiteUnavailable: return .peerPQCSuiteUnavailable
+            }
+        } else if error is CancellationError {
+            reason = "nearby_connection_cancelled"
+        } else {
+            reason = "nearby_connection_failed"
+        }
+        return .sessionMutationRejected(reason)
     }
 
     private static func requireAuthenticatedOperatorContext(_ hello: CrossnetControlHelloResult) throws {

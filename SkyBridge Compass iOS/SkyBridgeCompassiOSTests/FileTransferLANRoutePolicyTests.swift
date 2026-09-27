@@ -2,6 +2,7 @@ import Foundation
 import CryptoKit
 import Network
 import class SkyBridgeProtocolCore.ClassicTransferOutboundFileReadSession
+import class SkyBridgeProtocolCore.PreparedOutboundFileReadSession
 import class SkyBridgeProtocolCore.ClassicTransferZlibCompressionWorker
 import class SkyBridgeProtocolCore.ClassicTransferZlibDecompressionWorker
 import enum SkyBridgeProtocolCore.ClassicTransferCanonicalTranscript
@@ -610,13 +611,17 @@ final class FileTransferLANRoutePolicyTests: XCTestCase {
         let payload = Data((0..<1_025).map { UInt8($0 % 251) })
         try payload.write(to: fileURL, options: [.withoutOverwriting])
 
-        let reader = try await ClassicTransferOutboundFileReadSession.open(
+        let reader = try await PreparedOutboundFileReadSession.prepare(
             url: fileURL,
-            tracksSHA256: true
+            maximumSize: ClassicTransferInboundPolicy.maximumFileSizeBytes,
+            sourcePolicy: .regularFile,
+            expectedSHA256: Data(SHA256.hash(data: payload))
         )
         let firstChunk = try await reader.read(offset: 0, length: 512)
         let secondChunk = try await reader.read(offset: 512, length: payload.count - 512)
-        let completionDigest = try await reader.finalizeAndClose()
+        try await reader.validateSourceIdentity()
+        let completionDigest = reader.metadata.contentSHA256
+        try await reader.close()
 
         XCTAssertEqual(firstChunk + secondChunk, payload)
         XCTAssertEqual(completionDigest, Data(SHA256.hash(data: payload)))

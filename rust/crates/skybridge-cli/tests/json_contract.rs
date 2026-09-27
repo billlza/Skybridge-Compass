@@ -26,6 +26,43 @@ use skybridge_core::{
 };
 
 #[test]
+fn operator_identity_is_consistent_before_any_runtime_action()
+-> Result<(), Box<dyn std::error::Error>> {
+    let expected = serde_json::json!({
+        "schema_version": 1,
+        "implementation_id": "skybridge-cli",
+        "role": "product_operator",
+        "host_platform": std::env::consts::OS,
+        "app_runtime_control": if cfg!(target_os = "macos") {
+            "mac_app_runtime"
+        } else if cfg!(target_os = "windows") {
+            "windows_app_runtime"
+        } else {
+            "unsupported"
+        },
+        "file_send": {
+            "default_completion": "verified_receipt",
+            "default_implemented": true,
+            "detached_completion": "request_registered"
+        }
+    });
+    for args in [
+        vec!["version"],
+        vec!["version", "--json"],
+        vec!["capabilities", "--json"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_skybridge"))
+            .args(&args)
+            .current_dir(std::env::temp_dir())
+            .output()?;
+        assert_success_with_clean_stderr(&output, &format!("{args:?}"));
+        let payload: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(payload["operator_profile"], expected, "{args:?}");
+    }
+    Ok(())
+}
+
+#[test]
 fn failing_json_commands_emit_one_parseable_document_and_nonzero_exit()
 -> Result<(), Box<dyn std::error::Error>> {
     let cases = [
@@ -84,8 +121,14 @@ fn failing_json_commands_emit_one_parseable_document_and_nonzero_exit()
             "--allow-insecure-loopback",
         ])
         .output()?;
-    assert_success_with_clean_stderr(&nested_doctor, "doctor --json signaling");
-    let nested_doctor_report: Value = serde_json::from_slice(&nested_doctor.stdout)?;
+    let nested_doctor_failure =
+        assert_single_json_failure(&nested_doctor, "doctor --json signaling")?;
+    assert!(nested_doctor.stdout.is_empty());
+    assert_eq!(
+        nested_doctor_failure["error"]["code"],
+        "doctor_checks_failed"
+    );
+    let nested_doctor_report = &nested_doctor_failure["report"];
     assert_eq!(
         nested_doctor_report["target"].as_str(),
         Some("http://127.0.0.1:9")
@@ -252,24 +295,6 @@ fn capabilities_json_contract_is_machine_readable_without_live_success_claims()
     }
 
     assert_eq!(
-        capability_status(capabilities, "crossnet.preflight")?,
-        "read_only"
-    );
-    assert_eq!(
-        capability_runtime_target(capabilities, "crossnet.preflight")?,
-        "mac_app_runtime"
-    );
-    assert_eq!(
-        capability_control_effect(capabilities, "crossnet.preflight")?,
-        "read_only"
-    );
-    let preflight_command = capability_command(capabilities, "crossnet.preflight")?;
-    assert!(
-        preflight_command.contains("crossnet preflight"),
-        "crossnet preflight capability must name the Mac app readiness command"
-    );
-
-    assert_eq!(
         capability_status(capabilities, "session.disconnect")?,
         "available"
     );
@@ -278,129 +303,165 @@ fn capabilities_json_contract_is_machine_readable_without_live_success_claims()
         "read_only"
     );
     assert_eq!(
-        capability_status(capabilities, "crossnet.status.snapshot")?,
-        "read_only"
+        payload["mac_gui_control_supported"],
+        cfg!(target_os = "macos")
     );
-    assert_eq!(
-        capability_runtime_target(capabilities, "crossnet.status.snapshot")?,
-        "mac_app_runtime"
-    );
-    assert_eq!(
-        capability_control_effect(capabilities, "crossnet.status.snapshot")?,
-        "read_only"
-    );
-    let status_snapshot_boundary =
-        capability_authority_boundary(capabilities, "crossnet.status.snapshot")?;
-    assert!(
-        status_snapshot_boundary.contains("redacted session_ref")
-            && status_snapshot_boundary.contains("does not")
-            && status_snapshot_boundary.contains("iOS runtime"),
-        "crossnet.status.snapshot must stay read-only, Mac-only, and redacted"
-    );
-    assert_eq!(
-        capability_status(capabilities, "crossnet.settings.snapshot")?,
-        "read_only"
-    );
-    assert_eq!(
-        capability_runtime_target(capabilities, "crossnet.settings.snapshot")?,
-        "mac_app_runtime"
-    );
-    assert_eq!(
-        capability_control_effect(capabilities, "crossnet.settings.snapshot")?,
-        "read_only"
-    );
-    let settings_snapshot_boundary =
-        capability_authority_boundary(capabilities, "crossnet.settings.snapshot")?;
-    assert!(
-        settings_snapshot_boundary.contains("allowlisted")
-            && settings_snapshot_boundary.contains("non-secret")
-            && settings_snapshot_boundary.contains("does not write UserDefaults")
-            && settings_snapshot_boundary.contains("iOS runtime"),
-        "crossnet.settings.snapshot must stay read-only, allowlisted, and Mac-only"
-    );
-    // The mutation handler is implemented and enabled in the app runtime, so
-    // `planned` would deny a live code path. No live signed-app socket smoke has
-    // been captured, so `available` would claim proof nobody produced.
-    assert_eq!(
-        capability_status(capabilities, "crossnet.settings.set")?,
-        "pending_live_proof"
-    );
-    assert_eq!(
-        capability_runtime_target(capabilities, "crossnet.settings.set")?,
-        "mac_app_runtime"
-    );
-    assert_eq!(
-        capability_control_effect(capabilities, "crossnet.settings.set")?,
-        "mac_runtime_mutation"
-    );
-    let settings_set_boundary =
-        capability_authority_boundary(capabilities, "crossnet.settings.set")?;
-    assert!(
-        settings_set_boundary.contains("typed allowlist")
-            && settings_set_boundary.contains("setting_runtime_apply_failed")
-            && settings_set_boundary.contains("fails closed")
-            && settings_set_boundary.contains("pqc.*")
-            && settings_set_boundary.contains("live signed-app socket smoke"),
-        "crossnet.settings.set must declare its allowlist, read-back failure mode, pqc exclusion, and missing live proof"
-    );
-    assert_eq!(
-        capability_status(capabilities, "crossnet.status.watch")?,
-        "pending_live_proof"
-    );
-    assert_eq!(
-        capability_runtime_target(capabilities, "crossnet.status.watch")?,
-        "mac_app_runtime"
-    );
-    assert_eq!(
-        capability_control_effect(capabilities, "crossnet.status.watch")?,
-        "read_only"
-    );
-    let status_watch_boundary =
-        capability_authority_boundary(capabilities, "crossnet.status.watch")?;
-    assert!(
-        status_watch_boundary.contains("implemented and enabled")
-            && status_watch_boundary.contains("watch_not_supported")
-            && status_watch_boundary.contains("live signed-app socket smoke"),
-        "crossnet.status.watch must disclose the stream, its unwired fallback, and missing live proof"
-    );
-    assert_eq!(
-        capability_status(capabilities, "crossnet.navigation")?,
-        "pending_live_proof"
-    );
-    assert_eq!(
-        capability_control_effect(capabilities, "crossnet.navigation")?,
-        "mac_runtime_mutation"
-    );
-    let navigation_boundary = capability_authority_boundary(capabilities, "crossnet.navigation")?;
-    assert!(
-        navigation_boundary.contains("injected navigation coordinator")
-            && navigation_boundary.contains("navigation_apply_failed")
-            && navigation_boundary.contains("live signed-app socket smoke"),
-        "crossnet.navigation must disclose its coordinator read-back and missing live proof"
-    );
-
-    // These three now reach a real Mac runtime closure that validates its own
-    // read-back, so `planned` would understate them — but the signed-app socket
-    // smoke is still uncaptured, so `available` would overstate them.
-    for session_crossnet in ["crossnet.host", "crossnet.connect", "crossnet.disconnect"] {
+    if cfg!(target_os = "macos") {
         assert_eq!(
-            capability_status(capabilities, session_crossnet)?,
-            "pending_live_proof",
-            "{session_crossnet} must not claim end-to-end availability before signed Mac app socket smoke exists"
+            capability_status(capabilities, "crossnet.preflight")?,
+            "read_only"
         );
-        let boundary = capability_authority_boundary(capabilities, session_crossnet)?;
         assert_eq!(
-            capability_runtime_target(capabilities, session_crossnet)?,
-            "mac_app_runtime",
-            "{session_crossnet} must remain Mac-app scoped, not iOS or native-headless scoped"
+            capability_runtime_target(capabilities, "crossnet.preflight")?,
+            "mac_app_runtime"
         );
-        let effect = capability_control_effect(capabilities, session_crossnet)?;
-        assert_eq!(effect, "mac_session_mutation");
+        assert_eq!(
+            capability_control_effect(capabilities, "crossnet.preflight")?,
+            "read_only"
+        );
+        let preflight_command = capability_command(capabilities, "crossnet.preflight")?;
         assert!(
-            boundary.contains("Mac-only")
-                && boundary.contains("implemented and enabled")
-                && boundary.contains("live signed-app socket smoke"),
-            "{session_crossnet} must keep the Mac-only signed-app smoke gate visible"
+            preflight_command.contains("crossnet preflight"),
+            "crossnet preflight capability must name the Mac app readiness command"
+        );
+
+        assert_eq!(
+            capability_status(capabilities, "crossnet.status.snapshot")?,
+            "read_only"
+        );
+        assert_eq!(
+            capability_runtime_target(capabilities, "crossnet.status.snapshot")?,
+            "mac_app_runtime"
+        );
+        assert_eq!(
+            capability_control_effect(capabilities, "crossnet.status.snapshot")?,
+            "read_only"
+        );
+        let status_snapshot_boundary =
+            capability_authority_boundary(capabilities, "crossnet.status.snapshot")?;
+        assert!(
+            status_snapshot_boundary.contains("redacted session_ref")
+                && status_snapshot_boundary.contains("does not")
+                && status_snapshot_boundary.contains("iOS runtime"),
+            "crossnet.status.snapshot must stay read-only, Mac-only, and redacted"
+        );
+        assert_eq!(
+            capability_status(capabilities, "crossnet.settings.snapshot")?,
+            "read_only"
+        );
+        assert_eq!(
+            capability_runtime_target(capabilities, "crossnet.settings.snapshot")?,
+            "mac_app_runtime"
+        );
+        assert_eq!(
+            capability_control_effect(capabilities, "crossnet.settings.snapshot")?,
+            "read_only"
+        );
+        let settings_snapshot_boundary =
+            capability_authority_boundary(capabilities, "crossnet.settings.snapshot")?;
+        assert!(
+            settings_snapshot_boundary.contains("allowlisted")
+                && settings_snapshot_boundary.contains("non-secret")
+                && settings_snapshot_boundary.contains("does not write UserDefaults")
+                && settings_snapshot_boundary.contains("iOS runtime"),
+            "crossnet.settings.snapshot must stay read-only, allowlisted, and Mac-only"
+        );
+        // The mutation handler is implemented and enabled in the app runtime, so
+        // `planned` would deny a live code path. No live signed-app socket smoke has
+        // been captured, so `available` would claim proof nobody produced.
+        assert_eq!(
+            capability_status(capabilities, "crossnet.settings.set")?,
+            "pending_live_proof"
+        );
+        assert_eq!(
+            capability_runtime_target(capabilities, "crossnet.settings.set")?,
+            "mac_app_runtime"
+        );
+        assert_eq!(
+            capability_control_effect(capabilities, "crossnet.settings.set")?,
+            "mac_runtime_mutation"
+        );
+        let settings_set_boundary =
+            capability_authority_boundary(capabilities, "crossnet.settings.set")?;
+        assert!(
+            settings_set_boundary.contains("typed allowlist")
+                && settings_set_boundary.contains("setting_runtime_apply_failed")
+                && settings_set_boundary.contains("fails closed")
+                && settings_set_boundary.contains("pqc.*")
+                && settings_set_boundary.contains("live signed-app socket smoke"),
+            "crossnet.settings.set must declare its allowlist, read-back failure mode, pqc exclusion, and missing live proof"
+        );
+        assert_eq!(
+            capability_status(capabilities, "crossnet.status.watch")?,
+            "pending_live_proof"
+        );
+        assert_eq!(
+            capability_runtime_target(capabilities, "crossnet.status.watch")?,
+            "mac_app_runtime"
+        );
+        assert_eq!(
+            capability_control_effect(capabilities, "crossnet.status.watch")?,
+            "read_only"
+        );
+        let status_watch_boundary =
+            capability_authority_boundary(capabilities, "crossnet.status.watch")?;
+        assert!(
+            status_watch_boundary.contains("implemented and enabled")
+                && status_watch_boundary.contains("watch_not_supported")
+                && status_watch_boundary.contains("live signed-app socket smoke"),
+            "crossnet.status.watch must disclose the stream, its unwired fallback, and missing live proof"
+        );
+        assert_eq!(
+            capability_status(capabilities, "crossnet.navigation")?,
+            "pending_live_proof"
+        );
+        assert_eq!(
+            capability_control_effect(capabilities, "crossnet.navigation")?,
+            "mac_runtime_mutation"
+        );
+        let navigation_boundary =
+            capability_authority_boundary(capabilities, "crossnet.navigation")?;
+        assert!(
+            navigation_boundary.contains("injected navigation coordinator")
+                && navigation_boundary.contains("navigation_apply_failed")
+                && navigation_boundary.contains("live signed-app socket smoke"),
+            "crossnet.navigation must disclose its coordinator read-back and missing live proof"
+        );
+
+        // These three now reach a real Mac runtime closure that validates its own
+        // read-back, so `planned` would understate them — but the signed-app socket
+        // smoke is still uncaptured, so `available` would overstate them.
+        for session_crossnet in ["crossnet.host", "crossnet.connect", "crossnet.disconnect"] {
+            assert_eq!(
+                capability_status(capabilities, session_crossnet)?,
+                "pending_live_proof",
+                "{session_crossnet} must not claim end-to-end availability before signed Mac app socket smoke exists"
+            );
+            let boundary = capability_authority_boundary(capabilities, session_crossnet)?;
+            assert_eq!(
+                capability_runtime_target(capabilities, session_crossnet)?,
+                "mac_app_runtime",
+                "{session_crossnet} must remain Mac-app scoped, not iOS or native-headless scoped"
+            );
+            let effect = capability_control_effect(capabilities, session_crossnet)?;
+            assert_eq!(effect, "mac_session_mutation");
+            assert!(
+                boundary.contains("Mac-only")
+                    && boundary.contains("implemented and enabled")
+                    && boundary.contains("live signed-app socket smoke"),
+                "{session_crossnet} must keep the Mac-only signed-app smoke gate visible"
+            );
+        }
+    } else {
+        assert!(
+            capabilities.iter().all(|capability| {
+                capability["runtime_target"] != "mac_app_runtime"
+                    && !capability["id"]
+                        .as_str()
+                        .unwrap_or("")
+                        .starts_with("crossnet.")
+            }),
+            "non-Mac builds must not advertise Mac-only commands"
         );
     }
     let discovery_command = capability_command(capabilities, "device.discovery.nearby")?;
@@ -543,8 +604,9 @@ fn crossnet_cli_json_contract_uses_fake_socket_for_preflight_status_connect_json
         }],
     )?;
     let preflight = run_skybridge_with_home(&preflight_home, ["crossnet", "preflight", "--json"])?;
-    assert_success_with_clean_stderr(&preflight, "crossnet preflight --json");
-    let preflight_payload: Value = serde_json::from_slice(&preflight.stdout)?;
+    assert!(!preflight.status.success());
+    assert!(preflight.stdout.is_empty());
+    let preflight_payload: Value = serde_json::from_slice(&preflight.stderr)?;
     assert_eq!(preflight_payload["preconditions_ready"], false);
     assert_eq!(preflight_payload["mutation_methods_enabled"], false);
     assert_eq!(preflight_payload["ready_for_mutation"], false);
@@ -599,6 +661,7 @@ fn crossnet_cli_json_contract_uses_fake_socket_for_preflight_status_connect_json
             FakeCrossnetResponse {
                 method: "crossnet.hello",
                 result: serde_json::json!({
+                "enabled_mutation_methods": ["crossnet.host", "crossnet.connect", "crossnet.disconnect", "crossnet.settings.set", "crossnet.navigation", "crossnet.connect_device"],
                     "engine_version": "test-app",
                     "proto": 1,
                     "auth_loaded": true,
@@ -648,6 +711,7 @@ fn crossnet_cli_json_contract_uses_fake_socket_for_preflight_status_connect_json
             FakeCrossnetResponse {
                 method: "crossnet.hello",
                 result: serde_json::json!({
+                "enabled_mutation_methods": ["crossnet.host", "crossnet.connect", "crossnet.disconnect", "crossnet.settings.set", "crossnet.navigation", "crossnet.connect_device"],
                     "engine_version": "test-app",
                     "proto": 1,
                     "auth_loaded": true,
@@ -665,6 +729,14 @@ fn crossnet_cli_json_contract_uses_fake_socket_for_preflight_status_connect_json
                     "observed_value": true,
                     "runtime_applied": true,
                     "note": null
+                }),
+            },
+            FakeCrossnetResponse {
+                method: "crossnet.settings.snapshot",
+                result: serde_json::json!({
+                    "runtime_target": "mac_app_runtime",
+                    "control_effect": "read_only",
+                    "settings": [{"id":"logging.verbose", "value_type":"bool", "value":true, "mutable":false}]
                 }),
             },
         ],
@@ -693,6 +765,11 @@ fn crossnet_cli_json_contract_uses_fake_socket_for_preflight_status_connect_json
         request_method(&settings_requests[1]),
         Some("crossnet.settings.set")
     );
+    assert_eq!(settings_requests.len(), 3);
+    assert_eq!(
+        request_method(&settings_requests[2]),
+        Some("crossnet.settings.snapshot")
+    );
     let _ = std::fs::remove_dir_all(&settings_home);
 
     Ok(())
@@ -710,6 +787,7 @@ fn crossnet_cli_text_connect_uses_session_ref_without_raw_session_id()
             FakeCrossnetResponse {
                 method: "crossnet.hello",
                 result: serde_json::json!({
+                "enabled_mutation_methods": ["crossnet.host", "crossnet.connect", "crossnet.disconnect", "crossnet.settings.set", "crossnet.navigation", "crossnet.connect_device"],
                     "engine_version": "test-app",
                     "proto": 1,
                     "auth_loaded": true,
@@ -2485,4 +2563,67 @@ fn run_remote_desktop_unavailable_mutation(
     let payload = serde_json::from_slice(&output.stderr)?;
     assert_no_unevidenced_success_or_legacy_ack_terms(&output.stderr);
     Ok(payload)
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn handshake_partial_application_has_one_failure_document_with_both_readbacks()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture_root = make_crossnet_fake_home("handshake-partial")?;
+    let peer = "00000000-0000-0000-0000-000000000001";
+    let snapshot = |profile: &str, suite: &str| {
+        serde_json::json!({
+            "revision":"00000000-0000-0000-0000-000000000002", "configuredProfile":profile,"providerSuite":suite,"busy":false,
+            "options":[{"profile":"qperiapt","selectable":true},{"profile":"xwing","selectable":true},{"profile":"mlkem","selectable":true},{"profile":"classic","selectable":false}]
+        })
+    };
+    let server = spawn_crossnet_fake_server(
+        &fixture_root,
+        vec![
+            FakeCrossnetResponse {
+                method: "crossnet.hello",
+                result: serde_json::json!({
+                    "enabled_mutation_methods":["crossnet.handshake.set"],"engine_version":"test-app","proto":1,"auth_loaded":true,"tenant_bound":true
+                }),
+            },
+            FakeCrossnetResponse {
+                method: "crossnet.handshake.set",
+                result: serde_json::json!({
+                    "runtime_target":"mac_app_runtime","operation":"set","scope":"both","device_ref":peer,
+                    "local":snapshot("mlkem","ML-KEM-768"),"remote":snapshot("xwing","X-Wing"),
+                    "local_applied":false,"remote_applied":true,"local_error":"configuration_changed",
+                    "management_authorized":true,"reconnected":false,"success":false,"partial":true
+                }),
+            },
+        ],
+    )?;
+    let output = run_skybridge_with_home(
+        &fixture_root,
+        [
+            "crossnet",
+            "handshake",
+            "set",
+            "xwing",
+            "--scope",
+            "both",
+            "--to",
+            peer,
+            "--json",
+        ],
+    )?;
+    let failure = assert_single_json_failure(&output, "handshake partial")?;
+    assert!(output.stdout.is_empty());
+    assert_eq!(failure["status"], "partial");
+    assert_eq!(failure["report"]["remote_applied"], true);
+    assert_eq!(failure["report"]["local_applied"], false);
+    assert_eq!(failure["report"]["local"]["configuredProfile"], "mlkem");
+    let requests = join_crossnet_fake_server(server)?;
+    assert_eq!(
+        requests.len(),
+        2,
+        "a mutation must never be retried after partial application"
+    );
+    assert_eq!(requests[1]["params"]["profile"], "xwing");
+    std::fs::remove_dir_all(fixture_root)?;
+    Ok(())
 }

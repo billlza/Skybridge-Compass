@@ -476,7 +476,8 @@
 "settings.advanced.performance.shadowQuality.format" = "Shadow Quality: %@";
 "settings.advanced.performance.postProcessing.format" = "Post Processing: %@";
 "settings.advanced.performance.showRealtimeFPS" = "Show real-time FPS";
-"settings.advanced.performance.showRealtimeFPS.help" = "Show Metal rendering FPS in top navigation; shows placeholder — FPS when unavailable";
+"settings.advanced.performance.showRealtimeFPS.help" = "Actual on-screen FPS of the weather background (rain, clouds and haze), averaged over one second. Other UI and remote sessions are not included. Shows — FPS when unavailable.";
+"metric.frameRate.paused" = "Paused";
 "settings.advanced.hardware.enableAcceleration" = "Enable hardware acceleration";
 "settings.advanced.memory.optimize" = "Optimize memory usage";
 "settings.advanced.backgroundScanning" = "Background scanning";
@@ -704,7 +705,7 @@
 "remote.connectionMode.near" = "Near";
 "remote.connectionMode.far" = "Far";
 "remote.connectionMode.auto.description" = "Automatically selects the best mode (prefers near-field on same network)";
-"remote.connectionMode.near.description" = "Near-field hardware mirroring — low latency on same network (ScreenCaptureKit + HEVC + QUIC)";
+"remote.connectionMode.near.description" = "View and control devices on the same network";
 "remote.connectionMode.far.description" = "Manual RDP (restricted preview) — FreeRDP 3.30 software GDI, strict certificate validation, no channel redirection";
 "common.unknown" = "Unknown";
 "profile.title" = "Profile";
@@ -1271,3 +1272,27 @@
 "dashboard.accountDevices.summary" = "%d devices · %d online";
 "dashboard.accountDevices.viewAll" = "View All";
 "dashboard.accountDevices.empty" = "Other devices signed in with the same account will appear here";
+
+"remoteControl.securityNotice.inputController" = "Input controller";
+
+"remoteControl.securityNotice.observer" = "View only";
+
+"remoteControl.securityNotice.transferInput" = "Transfer input control";
+
+"remoteControl.securityNotice.approveView" = "Allow viewing";
+
+"info.appleSilicon" = "Apple silicon";
+"info.optimizationEnabled" = "Optimizations enabled";
+"info.pCore" = "Performance cores";
+"info.eCore" = "Efficiency cores";
+"info.multiCoreOpt" = "Multicore optimization";
+"info.reqAppleSilicon" = "Apple silicon required";
+"info.deviceUnsupported" = "Unsupported device";
+"info.standardMode" = "Standard mode";
+
+"remoteControl.securityNotice.localInputController" = "This Mac has keyboard and mouse control. Remote viewing continues.";
+
+// Saved pairing identity status
+"discovery.trustedDevices.section" = "Trusted devices";
+"discovery.pendingPairings.section" = "Pairings needing verification";
+"discovery.pendingPairings.explanation" = "These pairing records still need identity verification. They cannot establish whether a device is online.";

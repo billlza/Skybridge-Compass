@@ -24,7 +24,8 @@ public class ThemeConfiguration: ObservableObject {
     }
     
     private init() {
-        isDarkMode = UserDefaults.standard.bool(forKey: Keys.darkMode)
+        // An absent preference is not a request for light mode.
+        isDarkMode = UserDefaults.standard.object(forKey: Keys.darkMode) as? Bool ?? true
         loadAccentColor()
     }
     

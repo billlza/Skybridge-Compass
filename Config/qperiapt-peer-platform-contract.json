@@ -1,0 +1,371 @@
+{
+  "schema_version": 1,
+  "native_admission_required": true,
+  "handshake": [
+    {
+      "version": "macOS 26.0",
+      "eligible": true
+    },
+    {
+      "version": "Mac OS 27.0.1",
+      "eligible": true
+    },
+    {
+      "version": "iOS 26.5",
+      "eligible": true
+    },
+    {
+      "version": "Android 16 API36",
+      "eligible": true
+    },
+    {
+      "version": "Android 16 (API36)",
+      "eligible": true
+    },
+    {
+      "version": "Android 16 (API 36)",
+      "eligible": true
+    },
+    {
+      "version": "Android 17.0 API 37",
+      "eligible": true
+    },
+    {
+      "version": "Ubuntu 24.04",
+      "eligible": true
+    },
+    {
+      "version": "Ubuntu 24.04.1",
+      "eligible": true
+    },
+    {
+      "version": "Ubuntu 25.10",
+      "eligible": true
+    },
+    {
+      "version": "Ubuntu 26.04",
+      "eligible": true
+    },
+    {
+      "version": "Windows 10.0.19041",
+      "eligible": true
+    },
+    {
+      "version": "Windows 10.0.26100",
+      "eligible": true
+    },
+    {
+      "version": " windows 10.0.26200 ",
+      "eligible": true
+    },
+    {
+      "version": null,
+      "eligible": false
+    },
+    {
+      "version": "",
+      "eligible": false
+    },
+    {
+      "version": "26.0",
+      "eligible": false
+    },
+    {
+      "version": "macOS 25.9",
+      "eligible": false
+    },
+    {
+      "version": "iOS 25",
+      "eligible": false
+    },
+    {
+      "version": "Android 16",
+      "eligible": false
+    },
+    {
+      "version": "Android 15 API36",
+      "eligible": false
+    },
+    {
+      "version": "Android 16 API35",
+      "eligible": false
+    },
+    {
+      "version": "Android 16 (API36",
+      "eligible": false
+    },
+    {
+      "version": "Android 16 API36)",
+      "eligible": false
+    },
+    {
+      "version": "Android 16 API36 suffix",
+      "eligible": false
+    },
+    {
+      "version": "Ubuntu 23.10",
+      "eligible": false
+    },
+    {
+      "version": "Ubuntu 24.03",
+      "eligible": false
+    },
+    {
+      "version": "Ubuntu 24",
+      "eligible": false
+    },
+    {
+      "version": "Ubuntu 24.4",
+      "eligible": false
+    },
+    {
+      "version": "Ubuntu 024.04",
+      "eligible": false
+    },
+    {
+      "version": "Ubuntu 24.04.01",
+      "eligible": false
+    },
+    {
+      "version": "Ubuntu 24.00",
+      "eligible": false
+    },
+    {
+      "version": "Ubuntu 24.13",
+      "eligible": false
+    },
+    {
+      "version": "Ubuntu 24.04 LTS",
+      "eligible": false
+    },
+    {
+      "version": "Ubuntu 24.04.1.2",
+      "eligible": false
+    },
+    {
+      "version": "Linux 24.04",
+      "eligible": false
+    },
+    {
+      "version": "Windows 11",
+      "eligible": false
+    },
+    {
+      "version": "windows-dotnet-pqc",
+      "eligible": false
+    },
+    {
+      "version": "Windows 10.0.19040",
+      "eligible": false
+    },
+    {
+      "version": "Windows 10.0",
+      "eligible": false
+    },
+    {
+      "version": "Windows 10.0.019041",
+      "eligible": false
+    },
+    {
+      "version": "Windows 010.0.19041",
+      "eligible": false
+    },
+    {
+      "version": "Windows 10.00.19041",
+      "eligible": false
+    },
+    {
+      "version": "Windows 10.1.19041",
+      "eligible": false
+    },
+    {
+      "version": "Windows 11.0.19041",
+      "eligible": false
+    },
+    {
+      "version": "Windows 10.0.19041.1",
+      "eligible": false
+    },
+    {
+      "version": "Windows 10.0.+19041",
+      "eligible": false
+    },
+    {
+      "version": "Windows 10.0.2147483648",
+      "eligible": false
+    },
+    {
+      "version": "Windows 10.0.19041 suffix",
+      "eligible": false
+    },
+    {
+      "version": "Windows 10.0.\uff11\uff19\uff10\uff14\uff11",
+      "eligible": false
+    },
+    {
+      "version": "Windows\t10.0.26100",
+      "eligible": true
+    },
+    {
+      "version": "Ubuntu  24.04",
+      "eligible": true
+    },
+    {
+      "version": "\u00a0Windows 10.0.26100",
+      "eligible": false
+    },
+    {
+      "version": "Windows 10.0.26100\u00a0",
+      "eligible": false
+    },
+    {
+      "version": "\u00a0macOS 26.0",
+      "eligible": false
+    },
+    {
+      "version": "Ubuntu 24.04\u00a0",
+      "eligible": false
+    },
+    {
+      "version": "Android 16API36",
+      "eligible": false
+    },
+    {
+      "version": "Android 16(API36)",
+      "eligible": false
+    },
+    {
+      "version": "Ubuntu 1000.04",
+      "eligible": false
+    },
+    {
+      "version": "Ubuntu 24.04.1000",
+      "eligible": false
+    },
+    {
+      "version": "Ubuntu 999.12.999",
+      "eligible": true
+    },
+    {
+      "version": "Windows 10.0.2147483647",
+      "eligible": true
+    }
+  ],
+  "app": [
+    {
+      "platform": "macos",
+      "os_version": "26.5",
+      "eligible": true
+    },
+    {
+      "platform": "mac os",
+      "os_version": "Mac OS 26.0",
+      "eligible": true
+    },
+    {
+      "platform": "ios",
+      "os_version": "iOS 26.5",
+      "eligible": true
+    },
+    {
+      "platform": "Android",
+      "os_version": "Android 16 (API 36)",
+      "eligible": true
+    },
+    {
+      "platform": "Ubuntu",
+      "os_version": "24.04",
+      "eligible": true
+    },
+    {
+      "platform": "ubuntu",
+      "os_version": "Ubuntu 26.04.1",
+      "eligible": true
+    },
+    {
+      "platform": "windows",
+      "os_version": "10.0.19041",
+      "eligible": true
+    },
+    {
+      "platform": "Windows",
+      "os_version": "Windows 10.0.26100",
+      "eligible": true
+    },
+    {
+      "platform": null,
+      "os_version": "Windows 10.0.26100",
+      "eligible": false
+    },
+    {
+      "platform": "windows",
+      "os_version": null,
+      "eligible": false
+    },
+    {
+      "platform": "",
+      "os_version": "Windows 10.0.26100",
+      "eligible": false
+    },
+    {
+      "platform": "windows",
+      "os_version": "",
+      "eligible": false
+    },
+    {
+      "platform": "windows",
+      "os_version": "11",
+      "eligible": false
+    },
+    {
+      "platform": "windows",
+      "os_version": "Windows 10.0.19040",
+      "eligible": false
+    },
+    {
+      "platform": "windows",
+      "os_version": "Ubuntu 24.04",
+      "eligible": false
+    },
+    {
+      "platform": "ubuntu",
+      "os_version": "Windows 10.0.26100",
+      "eligible": false
+    },
+    {
+      "platform": "macos",
+      "os_version": "iOS 26.5",
+      "eligible": false
+    },
+    {
+      "platform": "linux",
+      "os_version": "24.04",
+      "eligible": false
+    },
+    {
+      "platform": "android",
+      "os_version": "16",
+      "eligible": false
+    },
+    {
+      "platform": "Ubuntu",
+      "os_version": "24.4",
+      "eligible": false
+    },
+    {
+      "platform": "win",
+      "os_version": "Windows 10.0.26100",
+      "eligible": false
+    },
+    {
+      "platform": "u",
+      "os_version": "Ubuntu 24.04",
+      "eligible": false
+    },
+    {
+      "platform": "mac",
+      "os_version": "macOS 26.0",
+      "eligible": false
+    }
+  ]
+}

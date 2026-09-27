@@ -693,6 +693,11 @@ REMOTE_CONTROL_SECURITY_NOTICE_LOCALIZATION_KEYS=(
   "remoteControl.securityNotice.activeTitle"
   "remoteControl.securityNotice.appName"
   "remoteControl.securityNotice.approve"
+  "remoteControl.securityNotice.approveView"
+  "remoteControl.securityNotice.inputController"
+  "remoteControl.securityNotice.localInputController"
+  "remoteControl.securityNotice.observer"
+  "remoteControl.securityNotice.transferInput"
   "remoteControl.securityNotice.close"
   "remoteControl.securityNotice.collapse"
   "remoteControl.securityNotice.device"
@@ -718,8 +723,8 @@ validate_remote_control_security_notice_localizations() {
   local strings_path
   local locales=("en" "ja" "zh-Hans")
 
-  if [[ "${#REMOTE_CONTROL_SECURITY_NOTICE_LOCALIZATION_KEYS[@]}" -ne 20 ]]; then
-    echo "Remote-control security notice localization contract must contain exactly 20 keys." >&2
+  if [[ "${#REMOTE_CONTROL_SECURITY_NOTICE_LOCALIZATION_KEYS[@]}" -ne 24 ]]; then
+    echo "Remote-control security notice localization contract must contain exactly 24 keys." >&2
     return 1
   fi
 
@@ -1469,6 +1474,7 @@ append_host_status() {
 
 write_mac_host_ready_file() {
   local executable_sha256
+  local runtime_framework
 
   if [[ "$MAC_HOST_ONLY" != "1" ]]; then
     echo "Refusing to write a macOS host-only readiness record outside host-only mode." >&2
@@ -1483,6 +1489,22 @@ write_mac_host_ready_file() {
     echo "Unable to bind the signed macOS host-only executable bytes." >&2
     return 1
   fi
+  if ! verify_macos_smoke_host_rpath_framework_closure "$MAC_APP_BIN"; then
+    echo "Signed macOS host-only framework dependency closure changed before readiness." >&2
+    return 1
+  fi
+  for runtime_framework in WebRTC BoundSessionFFI; do
+    if [[ ! -d "$MAC_APP_BUNDLE/Contents/MacOS/$runtime_framework.framework" || \
+          -L "$MAC_APP_BUNDLE/Contents/MacOS/$runtime_framework.framework" ]]; then
+      echo "Signed macOS host-only runtime framework is missing or unsafe: $runtime_framework" >&2
+      return 1
+    fi
+    if ! /usr/bin/codesign --verify --strict \
+      "$MAC_APP_BUNDLE/Contents/MacOS/$runtime_framework.framework" >/dev/null 2>&1; then
+      echo "Signed macOS host-only runtime framework failed strict signature verification: $runtime_framework" >&2
+      return 1
+    fi
+  done
 
   python3 - \
     "$MAC_HOST_READY_FILE" \
@@ -1553,6 +1575,8 @@ payload = {
     "pqcReportFile": pqc_raw,
     "remoteControlNoticeAutoApprove": False,
     "remotePort": bounded_positive(remote_port_raw, "remote port", 65535),
+    "runtimeFrameworkClosure": "verified",
+    "runtimeFrameworks": ["BoundSessionFFI", "WebRTC"],
     "runnerPID": bounded_positive(runner_pid_raw, "runner PID", 2**31 - 1),
     "schemaVersion": 1,
     "sourceInputDigest": source_digest,
@@ -2303,9 +2327,39 @@ verify_macos_smoke_host_identity_source_unchanged() {
   fi
 }
 
+verify_macos_smoke_host_rpath_framework_closure() {
+  local executable="$1"
+  local actual_dependencies
+  local expected_dependencies
+
+  if [[ ! -x "$executable" || -L "$executable" ]]; then
+    echo "Cannot inspect @rpath framework dependencies for a missing or symlinked executable: $executable" >&2
+    return 1
+  fi
+  expected_dependencies="$(printf '%s\n' \
+    '@rpath/BoundSessionFFI.framework/BoundSessionFFI' \
+    '@rpath/WebRTC.framework/WebRTC' | LC_ALL=C /usr/bin/sort)"
+  if ! actual_dependencies="$(
+    /usr/bin/otool -L "$executable" \
+      | /usr/bin/awk 'NR > 1 && index($1, "@rpath/") == 1 && index($1, ".framework/") > 0 { print $1 }' \
+      | LC_ALL=C /usr/bin/sort -u
+  )"; then
+    echo "Unable to inspect the macOS LAN host framework dependency closure." >&2
+    return 1
+  fi
+  if [[ "$actual_dependencies" != "$expected_dependencies" ]]; then
+    echo "macOS LAN host @rpath framework dependency closure is not fully covered by the signed helper bundle." >&2
+    printf 'expected:\n%s\nactual:\n%s\n' \
+      "$expected_dependencies" \
+      "${actual_dependencies:-none}" >&2
+    return 1
+  fi
+}
+
 prepare_macos_smoke_host_app_bundle() {
   local source_bin="$MAC_DIRECT_BIN"
   local source_webrtc_framework="$SMOKE_BUILD_DIR/debug/WebRTC.framework"
+  local source_bound_session_framework="$SMOKE_BUILD_DIR/debug/BoundSessionFFI.framework"
   local source_core_resource_bundle="$SMOKE_BUILD_DIR/debug/SkyBridgeCompassApp_SkyBridgeCore.bundle"
   local contents_dir="$MAC_APP_BUNDLE/Contents"
   local macos_dir="$contents_dir/MacOS"
@@ -2317,6 +2371,8 @@ prepare_macos_smoke_host_app_bundle() {
   local embedded_profile="$contents_dir/embedded.provisionprofile"
   local scratch_root_dir
   local scratch_debug_dir
+  local source_webrtc_framework_dir
+  local source_bound_session_framework_dir
   local source_resource_dir
   local source_resource_root
   local source_resource_layout
@@ -2346,8 +2402,25 @@ prepare_macos_smoke_host_app_bundle() {
     echo "macOS LAN host executable not found: $source_bin" >&2
     exit 1
   fi
-  if [[ ! -d "$source_webrtc_framework" ]]; then
-    echo "WebRTC framework not found beside the SwiftPM build product: $source_webrtc_framework" >&2
+  if [[ ! -d "$source_webrtc_framework" || -L "$source_webrtc_framework" ]]; then
+    echo "WebRTC framework is missing or symlinked beside the SwiftPM build product: $source_webrtc_framework" >&2
+    exit 1
+  fi
+  if [[ ! -x "$source_webrtc_framework/WebRTC" ]]; then
+    echo "WebRTC framework executable is missing: $source_webrtc_framework/WebRTC" >&2
+    exit 1
+  fi
+  if ! skybridge_assert_webrtc_m150_framework "$source_webrtc_framework"; then
+    echo "WebRTC framework failed the approved binary and bundle-containment gate." >&2
+    exit 1
+  fi
+  if [[ ! -d "$source_bound_session_framework" || -L "$source_bound_session_framework" ]]; then
+    echo "BoundSessionFFI framework is missing or symlinked beside the SwiftPM build product: $source_bound_session_framework" >&2
+    exit 1
+  fi
+  if [[ ! -x "$source_bound_session_framework/BoundSessionFFI" || \
+        -L "$source_bound_session_framework/BoundSessionFFI" ]]; then
+    echo "BoundSessionFFI framework executable is missing or symlinked: $source_bound_session_framework/BoundSessionFFI" >&2
     exit 1
   fi
   if [[ ! -d "$SMOKE_BUILD_DIR" || ! -d "$SMOKE_BUILD_DIR/debug" ]]; then
@@ -2360,6 +2433,8 @@ prepare_macos_smoke_host_app_bundle() {
   fi
   scratch_root_dir="$(cd "$SMOKE_BUILD_DIR" && pwd -P)"
   scratch_debug_dir="$(cd "$SMOKE_BUILD_DIR/debug" && pwd -P)"
+  source_webrtc_framework_dir="$(cd "$source_webrtc_framework" && pwd -P)"
+  source_bound_session_framework_dir="$(cd "$source_bound_session_framework" && pwd -P)"
   source_resource_dir="$(cd "$source_core_resource_bundle" && pwd -P)"
   if [[ "$scratch_debug_dir" != "$scratch_root_dir/"* ]]; then
     echo "SwiftPM debug product directory resolves outside the dedicated smoke scratch." >&2
@@ -2367,6 +2442,17 @@ prepare_macos_smoke_host_app_bundle() {
   fi
   if [[ "$source_resource_dir" != "$scratch_debug_dir/SkyBridgeCompassApp_SkyBridgeCore.bundle" ]]; then
     echo "SkyBridgeCore resource bundle did not resolve directly inside the dedicated smoke scratch." >&2
+    exit 1
+  fi
+  if [[ "$source_webrtc_framework_dir" != "$scratch_debug_dir/WebRTC.framework" ]]; then
+    echo "WebRTC framework did not resolve directly inside the dedicated smoke scratch." >&2
+    exit 1
+  fi
+  if [[ "$source_bound_session_framework_dir" != "$scratch_debug_dir/BoundSessionFFI.framework" ]]; then
+    echo "BoundSessionFFI framework did not resolve directly inside the dedicated smoke scratch." >&2
+    exit 1
+  fi
+  if ! verify_macos_smoke_host_rpath_framework_closure "$source_bin"; then
     exit 1
   fi
   if [[ ! -x /usr/libexec/PlistBuddy ]]; then
@@ -2418,6 +2504,7 @@ prepare_macos_smoke_host_app_bundle() {
   fi
   cp "$source_bin" "$macos_dir/LocalLanInteropHost"
   cp -R "$source_webrtc_framework" "$macos_dir/WebRTC.framework"
+  cp -R "$source_bound_session_framework" "$macos_dir/BoundSessionFFI.framework"
   cp "$MAC_HOST_PRODUCT_PROFILE" "$embedded_profile"
   chmod +x "$macos_dir/LocalLanInteropHost"
   embedded_profile_sha256="$(shasum -a 256 "$embedded_profile" | awk '{print $1}')"
@@ -2443,6 +2530,7 @@ prepare_macos_smoke_host_app_bundle() {
     -c 'Add :NSBonjourServices:3 string _skybridge-rd._tcp' \
     "$plist_path" >/dev/null
   /usr/bin/codesign --force --timestamp=none --options runtime --sign "$MAC_HOST_PRODUCT_SIGN_IDENTITY_HASH" "$macos_dir/WebRTC.framework" >/dev/null
+  /usr/bin/codesign --force --timestamp=none --options runtime --sign "$MAC_HOST_PRODUCT_SIGN_IDENTITY_HASH" "$macos_dir/BoundSessionFFI.framework" >/dev/null
   /usr/bin/codesign \
     --force \
     --timestamp=none \
@@ -2514,7 +2602,7 @@ PY
   clear_runtime_bundle_quarantine_if_present "$MAC_APP_BUNDLE" "product-identity smoke host"
   MAC_APP_BIN="$macos_dir/LocalLanInteropHost"
   register_macos_smoke_host_app_bundle
-  append_host_status "mac-host-signing source=packaged-product mode=$MAC_HOST_LAUNCH_MODE signature=developer-id bundleIdentifier=product team=matched profile=verified entitlements=exact keychainAccess=product resourceBundle=SkyBridgeCompassApp_SkyBridgeCore.bundle resourceBundleLayout=normalized-contents-resources resourceBundleSource=dedicated-swiftpm-scratch resourceBundleSourceLayout=$source_resource_layout resourceBundleSealed=1 identitySourceStaplerValid=$MAC_HOST_IDENTITY_SOURCE_STAPLER_VALID identitySourceGatekeeperAccepted=$MAC_HOST_IDENTITY_SOURCE_GATEKEEPER_ACCEPTED diagnosticOnly=$([[ "$MAC_HOST_LAUNCH_MODE" == "packaged-lab" ]] && echo 1 || echo 0)"
+  append_host_status "mac-host-signing source=packaged-product mode=$MAC_HOST_LAUNCH_MODE signature=developer-id bundleIdentifier=product team=matched profile=verified entitlements=exact keychainAccess=product runtimeFrameworks=WebRTC,BoundSessionFFI runtimeFrameworkClosure=verified resourceBundle=SkyBridgeCompassApp_SkyBridgeCore.bundle resourceBundleLayout=normalized-contents-resources resourceBundleSource=dedicated-swiftpm-scratch resourceBundleSourceLayout=$source_resource_layout resourceBundleSealed=1 identitySourceStaplerValid=$MAC_HOST_IDENTITY_SOURCE_STAPLER_VALID identitySourceGatekeeperAccepted=$MAC_HOST_IDENTITY_SOURCE_GATEKEEPER_ACCEPTED diagnosticOnly=$([[ "$MAC_HOST_LAUNCH_MODE" == "packaged-lab" ]] && echo 1 || echo 0)"
 }
 
 register_launch_services_app_bundle() {
@@ -7472,7 +7560,7 @@ MAC_HOST_STARTED=1
 if mac_host_uses_signed_app_bundle; then
   wait_for_file_pattern \
     "$HOST_STATUS" \
-    'remote-control-localization requiredKeys=20 embeddedRawKeys=0 managerRawKeys=0 source=embedded-signed-core' \
+    'remote-control-localization requiredKeys=25 embeddedRawKeys=0 managerRawKeys=0 source=embedded-signed-core' \
     30 \
     "embedded signed SkyBridgeCore localization contract"
 fi

@@ -1,4 +1,5 @@
 import Foundation
+import SkyBridgeProtocolCore
 
 public actor ApplicationCacheService {
     public static let shared = ApplicationCacheService()
@@ -81,8 +82,23 @@ public actor ApplicationCacheService {
     private let cacheDirectories: [URL]
 
     public init(cacheDirectories: [URL]? = nil) {
-        let directories = cacheDirectories ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
+        let directories = cacheDirectories ?? Self.ownedCacheDirectories(
+            in: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask),
+            bundleIdentifier: Bundle.main.bundleIdentifier ?? "com.skybridge.compass.pro"
+        )
         self.cacheDirectories = directories.map { $0.standardizedFileURL }
+    }
+
+    /// Only disposable caches owned by this app belong in the settings action.
+    /// SkyBridge/ClassicInboundPartials and SkyBridge/ResumeData are live transfer
+    /// state, so the parent SkyBridge directory must never be cleared wholesale.
+    static func ownedCacheDirectories(in userCacheDirectories: [URL], bundleIdentifier: String) -> [URL] {
+        var seen = Set<String>()
+        return userCacheDirectories.flatMap { directory in
+            [directory.appendingPathComponent(bundleIdentifier, isDirectory: true),
+             directory.appendingPathComponent("SkyBridge/Avatars", isDirectory: true)]
+        }.map { $0.standardizedFileURL }
+            .filter { seen.insert($0.path).inserted }
     }
 
     public func cacheUsageSnapshot() throws -> CacheUsageSnapshot {
@@ -97,8 +113,7 @@ public actor ApplicationCacheService {
             do {
                 guard let existingDirectory = try existingCacheDirectory(
                     directory,
-                    operation: .measure,
-                    fileManager: fileManager
+                    operation: .measure
                 ) else {
                     continue
                 }
@@ -138,8 +153,7 @@ public actor ApplicationCacheService {
             do {
                 guard let existingDirectory = try existingCacheDirectory(
                     directory,
-                    operation: .clear,
-                    fileManager: fileManager
+                    operation: .clear
                 ) else {
                     continue
                 }
@@ -153,6 +167,7 @@ public actor ApplicationCacheService {
                 for child in children {
                     let scanResult = scanItem(child, fileManager: fileManager)
                     failures.append(contentsOf: scanResult.failures)
+                    guard scanResult.failures.isEmpty else { continue }
 
                     do {
                         try fileManager.removeItem(at: child)
@@ -196,15 +211,33 @@ public actor ApplicationCacheService {
 
     private func existingCacheDirectory(
         _ directory: URL,
-        operation: CacheOperation,
-        fileManager: FileManager
+        operation: CacheOperation
     ) throws -> URL? {
-        var isDirectory = ObjCBool(false)
-        guard fileManager.fileExists(atPath: directory.path, isDirectory: &isDirectory) else {
-            return nil
+        let canonical = try DarwinSecurePathPolicy.canonicalizingSystemRootAlias(directory)
+        let resolved = try DarwinSecurePathPolicy.canonicalizingSystemRootAlias(
+            canonical.resolvingSymlinksInPath()
+        )
+        guard resolved.path == canonical.path else {
+            throw CacheOperationFailure(
+                operation: operation,
+                path: directory.path,
+                reason: "Cache directories must not traverse symbolic links."
+            )
         }
-
-        guard isDirectory.boolValue else {
+        let values: URLResourceValues
+        do {
+            values = try canonical.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        } catch {
+            // An app that has never cached anything has no directory yet. A
+            // permission or I/O failure is not equivalent to an empty cache.
+            let failure = error as NSError
+            if failure.domain == NSCocoaErrorDomain,
+               [NSFileNoSuchFileError, NSFileReadNoSuchFileError].contains(failure.code) {
+                return nil
+            }
+            throw error
+        }
+        guard values.isDirectory == true, values.isSymbolicLink != true else {
             throw CacheOperationFailure(
                 operation: operation,
                 path: directory.path,
@@ -212,7 +245,7 @@ public actor ApplicationCacheService {
             )
         }
 
-        return directory
+        return canonical
     }
 
     private func scanDirectory(_ directory: URL, fileManager: FileManager) -> DirectoryScanResult {

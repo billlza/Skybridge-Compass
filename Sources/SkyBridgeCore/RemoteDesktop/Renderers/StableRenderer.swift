@@ -12,7 +12,7 @@ import os.log
 /// 稳定渲染器——远程桌面的"保底链"正式产品化。
 ///
 /// 设计原则：
-/// 1. **永不失败**：任何 Metal/VT 操作出错时立即回退到 CGImage 路径
+/// 1. **明确失败**：压缩码流错误上报会话；已解码像素保留 CGImage 转换路径
 /// 2. **增量合成**：利用 damage rects 只更新变化区域，降低每帧渲染成本
 /// 3. **Backing store 复用**：维护一个持久 MTLTexture，不每帧新建
 /// 4. **零依赖高级特性**：不依赖 MetalFX、不依赖 CADisplayLink、不依赖 CIContext
@@ -33,6 +33,27 @@ public final class StableRenderer: @unchecked Sendable {
     /// 帧输出回调。texture 为最终合成结果，backing 持有引用防止提前释放。
     public var frameHandler: ((MTLTexture, AnyObject?) -> Void)?
 
+    /// Decode failures are delivered at the stream boundary, never represented as a frame.
+    public var failureHandler: (@Sendable (RemoteFrameRenderError) -> Void)?
+    var syncFrameHandler: (@Sendable () -> Void)?
+    private lazy var h264Decoder = H264VideoDecoder(
+        maximumWidth: Int32(BGRAFrameBuilder.maximumWidth),
+        maximumHeight: Int32(BGRAFrameBuilder.maximumHeight),
+        frameHandler: { [weak self] frame in
+            self?.handleDecodedPixelBuffer(frame.pixelBuffer,
+                width: CVPixelBufferGetWidth(frame.pixelBuffer), height: CVPixelBufferGetHeight(frame.pixelBuffer),
+                recvTime: DispatchTime(uptimeNanoseconds: frame.recvTimestampNs), bytes: frame.recvBytes)
+        },
+        failureHandler: { [weak self] error in self?.reportH264Failure(error) },
+        syncFrameHandler: { [weak self] in self?.syncFrameHandler?() }
+    )
+
+    private func reportH264Failure(_ error: RemoteFrameRenderError) {
+        log.error("H.264 decode failed: \(error.localizedDescription, privacy: .public)")
+        healthMonitor?.recordDroppedFrame(reason: .decodeFailed)
+        failureHandler?(error)
+    }
+
     // MARK: - Metal 资源
 
     private let device: MTLDevice?
@@ -49,12 +70,12 @@ public final class StableRenderer: @unchecked Sendable {
     private var decompressionSession: VTDecompressionSession?
     private var formatDescription: CMVideoFormatDescription?
     private var currentCodec: RemoteFrameType?
-    /// 安全的回调上下文管理
-    private var callbackContext: StableRendererCallbackContext?
 
     // MARK: - 状态
 
     private var previousFrameTimestamp: DispatchTime?
+    private let outputLock = NSLock()
+    private var acceptsOutput = true
     private let renderQueue = DispatchQueue(label: "com.skybridge.compass.stable.render")
     private let log = Logger(subsystem: "com.skybridge.compass", category: "StableRenderer")
 
@@ -90,12 +111,17 @@ public final class StableRenderer: @unchecked Sendable {
     // MARK: - 生命周期
 
     public func teardown() {
+        outputLock.lock()
+        acceptsOutput = false
+        outputLock.unlock()
+        h264Decoder.teardown()
         invalidateDecompressionSession()
-        backingStore = nil
-        backingStoreWidth = 0
-        backingStoreHeight = 0
-        textureCache = nil
+        // Drain queued composites before retiring the resources they read.
         renderQueue.sync {
+            backingStore = nil
+            backingStoreWidth = 0
+            backingStoreHeight = 0
+            textureCache = nil
             pendingDamageReport = nil
         }
     }
@@ -116,7 +142,7 @@ public final class StableRenderer: @unchecked Sendable {
     /// 处理一帧远程桌面数据。
     ///
     /// 根据帧类型走不同的解码路径，然后执行增量合成到 backing store。
-    /// 永不抛出异常——任何失败都会回退到 CGImage 兜底。
+    /// 压缩码流失败通过 failureHandler 上报，不产生虚假的画面输出。
     @discardableResult
     public func processFrame(
         data: Data,
@@ -136,7 +162,11 @@ public final class StableRenderer: @unchecked Sendable {
         switch type {
         case .bgra:
             processBGRAFrame(data: data, width: width, height: height, stride: stride, recvTime: recvTime)
-        case .h264, .hevc:
+        case .h264:
+            if case .failure(let error) = h264Decoder.submit(data: data) {
+                reportH264Failure(error)
+            }
+        case .hevc:
             processCompressedFrame(data: data, width: width, height: height, codec: type, recvTime: recvTime)
         }
 
@@ -563,6 +593,9 @@ public final class StableRenderer: @unchecked Sendable {
     // MARK: - 帧输出
 
     private func emitTexture(_ texture: MTLTexture, backing: AnyObject?, recvTime: DispatchTime, bytes: Int) {
+        outputLock.lock()
+        defer { outputLock.unlock() }
+        guard acceptsOutput else { return }
         let presentTime = DispatchTime.now()
         let latencyNs = presentTime.uptimeNanoseconds - recvTime.uptimeNanoseconds
 
@@ -686,29 +719,5 @@ private final class StableRendererBacking: @unchecked Sendable {
     init(textureRef: CVMetalTexture, imageBuffer: CVImageBuffer) {
         self.textureRef = textureRef
         self.imageBuffer = imageBuffer
-    }
-}
-
-/// VTDecompressionSession 回调上下文的安全封装
-private final class StableRendererCallbackContext: @unchecked Sendable {
-    private let lock = NSLock()
-    weak var renderer: StableRenderer?
-    private var isActive = true
-
-    init(renderer: StableRenderer) {
-        self.renderer = renderer
-    }
-
-    func deactivate() {
-        lock.lock()
-        isActive = false
-        lock.unlock()
-    }
-
-    func activeRenderer() -> StableRenderer? {
-        lock.lock()
-        defer { lock.unlock() }
-        guard isActive else { return nil }
-        return renderer
     }
 }

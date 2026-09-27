@@ -172,6 +172,14 @@ struct DefaultHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, Ex
         )
     }
 
+    /// Configuration management accepts current durable authority only. A
+    /// bootstrap cache entry cannot preserve management rights after rotation.
+    func currentPathTrustedFingerprints(for deviceId: String) async -> Set<String> {
+        let records = await trustRecords()
+        return resolvedTrustedFingerprints(directRecord: directRecord(for: deviceId, in: records),
+                                          matchingRecords: matchingTrustRecordsSnapshot(records, for: deviceId))
+    }
+
     func trustedFingerprints(for deviceId: String) async -> Set<String> {
         let records = await trustRecords()
         let directRecord = directRecord(for: deviceId, in: records)

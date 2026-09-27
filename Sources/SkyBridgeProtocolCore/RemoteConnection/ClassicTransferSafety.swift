@@ -282,13 +282,12 @@ public enum ClassicTransferCanonicalTranscript {
         senderPlatform: String?,
         senderOSVersion: String?,
         senderModelName: String?,
-        senderChip: String?
+        senderChip: String?,
+        approvalProtocol: String? = nil
     ) throws -> Data {
         try ClassicTransferMetadataContract.validateSecurityVersion(securityVersion)
-        return try transcript(
-            purpose: 1,
-            securityVersion: securityVersion,
-            fields: [
+        try ClassicTransferApprovalContract.validateRequestedProtocol(approvalProtocol)
+        var fields: [(String, String?)] = [
                 ("transfer_id", transferID),
                 ("file_name", fileName),
                 ("file_size", String(fileSize)),
@@ -301,6 +300,30 @@ public enum ClassicTransferCanonicalTranscript {
                 ("sender_os_version", senderOSVersion),
                 ("sender_model_name", senderModelName),
                 ("sender_chip", senderChip)
+            ]
+        // Absence is the original v2 transcript, byte for byte. A negotiated
+        // extension is authenticated, so stripping it cannot select legacy mode.
+        if let approvalProtocol { fields.append(("approval_protocol", approvalProtocol)) }
+        return try transcript(purpose: 1, securityVersion: securityVersion, fields: fields)
+    }
+
+    public static func approvalDecision(
+        transferID: String,
+        metadataDigest: String,
+        accepted: Bool,
+        reason: String?,
+        securityVersion: Int
+    ) throws -> Data {
+        try ClassicTransferMetadataContract.validateSecurityVersion(securityVersion)
+        return try transcript(
+            purpose: 5,
+            securityVersion: securityVersion,
+            fields: [
+                ("transfer_id", transferID),
+                ("metadata_digest", metadataDigest),
+                ("accepted", accepted ? "1" : "0"),
+                ("reason", reason),
+                ("approval_protocol", ClassicTransferApprovalContract.protocolIdentifier)
             ]
         )
     }

@@ -1,4 +1,5 @@
 import SwiftUI
+import SkyBridgeProtocolCore
 #if canImport(UIKit)
 import QuartzCore
 import UIKit
@@ -15,6 +16,7 @@ struct ContentView: View {
     @StateObject private var inboundFileTransferApproval = InboundFileTransferApprovalService.shared
     @Environment(\.scenePhase) private var scenePhase
     @State private var pairingTrustError: String?
+    @StateObject private var handshakeApproval = HandshakeConfigurationApproval.shared
 
     var body: some View {
         Group {
@@ -96,6 +98,24 @@ struct ContentView: View {
                         ?? RuntimeLocalization.string("idleConnection.notification.defaultDevice")
                 )
             )
+        }
+        .sheet(item: Binding(get: { handshakeApproval.pending }, set: { value in
+            if value == nil, let pending = handshakeApproval.pending { handshakeApproval.resolve(pending.id, decision: .reject) }
+        })) { request in
+            NavigationStack {
+                Form {
+                    Section(request.profile == nil ? "已配对设备请求在 CLI 审批文件" : "已配对设备请求管理握手配置") {
+                        if let profile = request.profile { Text("请求切换到 \(profile.title)") }
+                        else { Text("允许此身份在其 CLI 查看并逐次允许或拒绝它发送的文件。不会自动接收，也不能审批其他设备的文件。") }
+                        Text(request.identity.deviceID).font(.caption).textSelection(.enabled)
+                        Text(request.identity.fingerprint).font(.caption.monospaced()).textSelection(.enabled)
+                        if request.profile != nil { Text("授权仅限 Q-Periapt、X-Wing 和 ML-KEM。不会更换配对身份或启用 Classic；现有连接继续使用原套件。") }
+                    }
+                    Button(request.profile == nil ? "允许 10 分钟" : "仅允许本次") { handshakeApproval.resolve(request.id, decision: .allowOnce) }
+                    Button("始终允许此配对身份") { handshakeApproval.resolve(request.id, decision: .alwaysAllow) }
+                    Button("拒绝", role: .cancel) { handshakeApproval.resolve(request.id, decision: .reject) }
+                }.navigationTitle(request.profile == nil ? "CLI 文件审批授权" : "握手配置授权")
+            }
         }
         .sheet(
             item: Binding(

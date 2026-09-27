@@ -503,7 +503,8 @@
 "settings.advanced.performance.shadowQuality.format" = "阴影质量: %@";
 "settings.advanced.performance.postProcessing.format" = "后处理: %@";
 "settings.advanced.performance.showRealtimeFPS" = "显示实时FPS";
-"settings.advanced.performance.showRealtimeFPS.help" = "在顶部导航显示Metal渲染FPS；无数据时显示占位字符 — FPS";
+"settings.advanced.performance.showRealtimeFPS.help" = "显示天气背景（雨、云和霾）实际呈现到屏幕的每秒平均帧数，不包含其他界面和远程会话；无可用测量时显示 — FPS。";
+"metric.frameRate.paused" = "已暂停";
 "settings.advanced.hardware.enableAcceleration" = "启用硬件加速";
 "settings.advanced.memory.optimize" = "优化内存使用";
 "settings.advanced.backgroundScanning" = "后台扫描";
@@ -731,7 +732,7 @@
 "remote.connectionMode.near" = "近距";
 "remote.connectionMode.far" = "远距";
 "remote.connectionMode.auto.description" = "自动选择最佳连接模式（同网优先近距镜像）";
-"remote.connectionMode.near.description" = "近距硬件镜像 - 同网低延迟（ScreenCaptureKit + HEVC + QUIC）";
+"remote.connectionMode.near.description" = "查看并控制同一网络内的设备";
 "remote.connectionMode.far.description" = "手动 RDP（受限预览）- FreeRDP 3.30 软件 GDI、严格证书校验、无通道重定向";
 "common.unknown" = "未知";
 "profile.title" = "用户资料";
@@ -1297,3 +1298,27 @@
 "dashboard.accountDevices.summary" = "%d 台设备 · %d 台在线";
 "dashboard.accountDevices.viewAll" = "查看全部";
 "dashboard.accountDevices.empty" = "登录同一账号的其他设备会显示在这里";
+
+"remoteControl.securityNotice.inputController" = "拥有输入权";
+
+"remoteControl.securityNotice.observer" = "仅观看";
+
+"remoteControl.securityNotice.transferInput" = "交接输入权";
+
+"remoteControl.securityNotice.approveView" = "允许观看";
+
+"info.appleSilicon" = "Apple 芯片";
+"info.optimizationEnabled" = "优化已启用";
+"info.pCore" = "性能核心";
+"info.eCore" = "能效核心";
+"info.multiCoreOpt" = "多核优化";
+"info.reqAppleSilicon" = "需要 Apple 芯片";
+"info.deviceUnsupported" = "不支持此设备";
+"info.standardMode" = "标准模式";
+
+"remoteControl.securityNotice.localInputController" = "本机已收回键盘和鼠标控制权，远端仍可观看。";
+
+// Saved pairing identity status
+"discovery.trustedDevices.section" = "已信任设备";
+"discovery.pendingPairings.section" = "待验证的配对记录";
+"discovery.pendingPairings.explanation" = "这些配对记录尚未完成身份验证，不能据此判断设备是否在线。";

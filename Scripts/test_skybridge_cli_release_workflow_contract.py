@@ -277,7 +277,7 @@ class SkyBridgeCLIReleaseWorkflowContractTests(unittest.TestCase):
         release_build = job_block(self.workflow, "build")
         required_checkout = (
             "repository: billlza/q-periapt",
-            "ref: 5664fd86a617f92b620ea37e7692d3417d0e307d",
+            "ref: 7ed1f96a7ec33732f02a989dd5a4669cdcce39ad",
             "path: External/pqt_hybrid_suite",
             "crates/q-periapt-backends/Cargo.toml",
         )

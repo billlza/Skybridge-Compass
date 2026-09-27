@@ -6,6 +6,7 @@
 import CoreGraphics
 import Foundation
 import VideoToolbox
+import SkyBridgeProtocolCore
 
 enum RemoteControlStreamRequestPolicy {
     static var isAppleSiliconRuntime: Bool {
@@ -23,6 +24,36 @@ enum RemoteControlStreamRequestPolicy {
         }
         var seen: Set<String> = []
         return formats.filter { seen.insert($0).inserted }
+    }
+
+    /// A background preview uses at most 1280 x 720 pixels. Preserve an explicit
+    /// aspect ratio and never upscale a smaller user-selected resolution. With
+    /// automatic sizing the explicit 720p request prevents native-size capture.
+    static func viewerCaptureSize(
+        for tier: ControlledHostSessionPolicy.StreamTier,
+        requestedSize: CGSize?
+    ) -> CGSize? {
+        guard tier == .background else { return requestedSize }
+        let cap = CGSize(width: 1280, height: 720)
+        guard let requestedSize else { return cap }
+        let scale = min(1, min(cap.width / requestedSize.width, cap.height / requestedSize.height))
+        return CGSize(
+            width: max(2, floor(requestedSize.width * scale)),
+            height: max(2, floor(requestedSize.height * scale))
+        )
+    }
+
+    static func acknowledgement(
+        _ acknowledgement: RemoteDesktopStreamConfigurationAcknowledgement,
+        matches configuration: RemoteDesktopStreamConfiguration
+    ) -> Bool {
+        acknowledgement.acceptedAt.isFinite
+            && acknowledgement.acceptedAt > 0
+            && acknowledgement.transaction == configuration.streamConfigurationTransaction
+            && acknowledgement.streamRefreshToken == configuration.streamRefreshToken
+            && acknowledgement.audioEndpointPresent == (configuration.mediaAudioEndpoint != nil)
+            && acknowledgement.screenFrameTransport == configuration.screenFrameTransport
+            && acknowledgement.framePresentationAckVersion == configuration.framePresentationAckVersion
     }
 
     static func request(
@@ -70,7 +101,7 @@ enum RemoteControlStreamRequestPolicy {
         return RemoteControlStreamRequest(
             preferredSize: preferredSize,
             preferredCodec: preferredCodec,
-            targetFrameRate: max(12, min(streamConfiguration?.targetFrameRate ?? settings.targetFrameRate, 120)),
+            targetFrameRate: max(1, min(streamConfiguration?.targetFrameRate ?? settings.targetFrameRate, 120)),
             keyFrameInterval: max(10, min(streamConfiguration?.keyFrameInterval ?? settings.keyFrameInterval, 240)),
             lowLatencyMode: streamConfiguration?.lowLatencyMode ?? settings.lowLatencyMode,
             enableHardwareAcceleration: streamConfiguration?.enableHardwareAcceleration
@@ -224,6 +255,7 @@ enum RemoteControlStreamRequestPolicy {
             streamRefreshToken: current.streamRefreshToken,
             remoteControlSecurityIdentity: current.remoteControlSecurityIdentity ?? previous.remoteControlSecurityIdentity,
             framePresentationAckVersion: current.framePresentationAckVersion,
+            remoteControlAccessVersion: current.remoteControlAccessVersion,
             streamConfigurationTransaction: current.streamConfigurationTransaction,
             sentAt: current.sentAt
         )

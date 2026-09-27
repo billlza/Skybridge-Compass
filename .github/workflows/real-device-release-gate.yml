@@ -43,7 +43,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Require Independent Evidence Approval Environment
+      - name: Require Single-Maintainer Evidence Approval Environment
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ENVIRONMENT_NAME: release-real-device-evidence
@@ -58,7 +58,8 @@ jobs:
             > "$response"
           python3 Scripts/validate_release_environment_protection.py \
             --response "$response" \
-            --expected-name "$RELEASE_ENVIRONMENT_NAME"
+            --expected-name "$RELEASE_ENVIRONMENT_NAME" \
+            --approval-policy single-maintainer
 
   validate-and-publish-evidence:
     needs: verify-evidence-environment-protection
@@ -96,7 +97,8 @@ jobs:
             > "$response"
           python3 Scripts/validate_release_environment_protection.py \
             --response "$response" \
-            --expected-name "$RELEASE_ENVIRONMENT_NAME"
+            --expected-name "$RELEASE_ENVIRONMENT_NAME" \
+            --approval-policy single-maintainer
 
       - name: Require Exact Clean Producer Source
         shell: bash

@@ -278,6 +278,45 @@ function stamp_release_git_provenance() {
   plutil -replace SkyBridgePackagingGitDirtyState -string "${git_dirty}" "${info_plist}"
 }
 
+function packaging_source_input_snapshot() {
+  # 此摘要绑定显式源码范围；编译对应、外部依赖闭包与签名仍须独立验证。
+  python3 "${ROOT_DIR}/Scripts/source_input_digest.py" --root "${ROOT_DIR}" \
+    Package.swift Package.resolved project.yml Config Sources Scripts Packages \
+    "SkyBridge Compass iOS" SkyBridgeWidgets.xcodeproj XcodeSupport VendorProvenance
+}
+
+function validate_packaging_source_input_snapshot() {
+  local source_snapshot="$1"
+  if [[ ! "${source_snapshot}" =~ '^[0-9a-f]{64} [1-9][0-9]*$' ]]; then
+    echo "错误：打包源码摘要输出无效；禁止签名未绑定源码的产物。" >&2
+    return 1
+  fi
+}
+
+function assert_packaging_source_inputs_unchanged() {
+  local source_snapshot=""
+  source_snapshot="$(packaging_source_input_snapshot)" || return 1
+  validate_packaging_source_input_snapshot "${source_snapshot}" || return 1
+  if [[ "${source_snapshot}" != "${PACKAGING_SOURCE_SNAPSHOT_BEFORE}" ]]; then
+    echo "错误：源码在构建或打包期间发生变化；禁止签名混合源码产物。" >&2
+    return 1
+  fi
+}
+
+function stamp_packaging_source_inputs() {
+  local info_plist="$1"
+  local source_digest=""
+  local source_count=""
+  assert_packaging_source_inputs_unchanged || return 1
+  source_digest="${PACKAGING_SOURCE_SNAPSHOT_BEFORE%% *}"
+  source_count="${PACKAGING_SOURCE_SNAPSHOT_BEFORE##* }"
+  plutil -replace SkyBridgePackagingSourceInputDigest -string "${source_digest}" "${info_plist}"
+  plutil -replace SkyBridgePackagingSourceInputCount -integer "${source_count}" "${info_plist}"
+  plutil -replace SkyBridgePackagingSourceInputPaths -json \
+    '["Package.swift","Package.resolved","project.yml","Config","Sources","Scripts","Packages","SkyBridge Compass iOS","SkyBridgeWidgets.xcodeproj","XcodeSupport","VendorProvenance"]' \
+    "${info_plist}"
+}
+
 function require_release_distribution_identity() {
   if ! is_release_distribution_context; then
     return 0
@@ -578,7 +617,15 @@ function copy_resource_bundle_into_app_resources() {
           ( -f "${dest_bundle}/Info.plist" || -f "${dest_bundle}/Contents/Info.plist" ) ]]; then
       normalize_resource_bundle_to_macos_layout "${dest_bundle}"
     fi
-    ditto "${tmp_bundle}" "${dest_bundle}"
+    if [[ "${has_info_plist}" -eq 0 && ! -d "${tmp_bundle}/Contents/Resources" && \
+          -d "${dest_bundle}/Contents/Resources" ]]; then
+      # SwiftPM data-only bundles have no Info.plist and place their resources at
+      # the root. Merge them at the native bundle's actual lookup path; adding a
+      # second root-level Resources directory would leave the old shader active.
+      ditto "${tmp_bundle}" "${dest_bundle}/Contents/Resources"
+    else
+      ditto "${tmp_bundle}" "${dest_bundle}"
+    fi
   else
     mkdir -p "$(dirname "${dest_bundle}")"
     mv "${tmp_bundle}" "${dest_bundle}"
@@ -605,7 +652,6 @@ function graft_xcode_app_compiled_resources_into_module_bundle() {
   local module_bundle="$1"
   local native_resources_dir="${XCODE_APP_BUNDLE}/Contents/Resources"
   local module_resources_dir="${module_bundle}/Contents/Resources"
-  local lproj=""
 
   normalize_resource_bundle_to_macos_layout "${module_bundle}"
   mkdir -p "${module_resources_dir}"
@@ -625,10 +671,6 @@ function graft_xcode_app_compiled_resources_into_module_bundle() {
     exit 1
   }
 
-  for lproj in "${native_resources_dir}"/*.lproj(N); do
-    rm -rf "${module_resources_dir}/$(basename "${lproj}")"
-    ditto "${lproj}" "${module_resources_dir}/$(basename "${lproj}")"
-  done
 }
 
 function copy_xcode_app_compiled_resources_to_main_bundle() {
@@ -991,6 +1033,7 @@ source "${ROOT_DIR}/Scripts/framework_artifact_helpers.sh"
 source "${ROOT_DIR}/Scripts/package_build_policy.sh"
 source "${ROOT_DIR}/Scripts/signing_entitlements_helpers.sh"
 source "${ROOT_DIR}/Scripts/xcodebuild_helpers.sh"
+CONFIGURED_BUILD_JOBS="$(skybridge_configured_build_jobs)"
 XCODE_DERIVED_DATA_PATH="${SKYBRIDGE_XCODE_DERIVED_DATA_PATH:-$(skybridge_default_xcode_derived_data_path)}"
 XCODE_BUILD_DIR="${XCODE_DERIVED_DATA_PATH}/Build/Products/Release"
 BUILD_ARCH="${BUILD_ARCH:-$(skybridge_default_macos_build_arch)}"
@@ -1042,6 +1085,8 @@ XCODE_WORKSPACE="${ROOT_DIR}/.swiftpm/xcode/package.xcworkspace"
 USE_XCODE_WORKSPACE=0
 
 skybridge_assert_release_stable_toolchain "${PACKAGE_CONTEXT}" "${ROOT_DIR}/Scripts/verify_xcode_toolchain.sh" "Release package"
+PACKAGING_SOURCE_SNAPSHOT_BEFORE="$(packaging_source_input_snapshot)"
+validate_packaging_source_input_snapshot "${PACKAGING_SOURCE_SNAPSHOT_BEFORE}"
 
 if [[ -d "${XCODE_WORKSPACE}" ]]; then
   USE_XCODE_WORKSPACE=1
@@ -1115,6 +1160,9 @@ if [[ "${SKIP_BUILD}" != "1" ]]; then
       -c release
       --arch "${BUILD_ARCH}"
     )
+    if [[ -n "${CONFIGURED_BUILD_JOBS}" ]]; then
+      SWIFTPM_BUILD_ARGS+=(--jobs "${CONFIGURED_BUILD_JOBS}")
+    fi
     if [[ -n "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH:-}" ]]; then
       SWIFTPM_BUILD_ARGS+=(--scratch-path "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH}")
     fi
@@ -1179,6 +1227,16 @@ if [[ ! -x "${BUILD_DIR}/${EXECUTABLE}" ]]; then
 fi
 
 log "本次打包使用构建目录: ${BUILD_DIR}"
+
+bound_session_verifier=(
+  python3
+  "${ROOT_DIR}/Scripts/verify_boundsession_xcframework.py"
+  --root "${ROOT_DIR}"
+)
+if is_release_distribution_context; then
+  bound_session_verifier+=(--require-publishable-source)
+fi
+"${bound_session_verifier[@]}"
 
 log "复验并清理既有 App Bundle，然后创建输出结构"
 skybridge_remove_package_app_bundle_for_replacement \
@@ -1362,9 +1420,10 @@ log "拷贝构建产物中的资源 bundle 到 .app/Contents/Resources/"
 found_bundle=0
 resource_bundle_dirs=("${BUILD_DIR}")
 if [[ "${XCODE_BUILD_DIR}" != "${BUILD_DIR}" && -d "${XCODE_BUILD_DIR}" ]]; then
-  # Xcode 编译后的 Bundle.module 资源包含 Assets.car 和 default.metallib；
-  # SwiftPM CLI 目录保留源码资源形态，不能作为发布包中 asset catalog 的最终来源。
-  resource_bundle_dirs+=("${XCODE_BUILD_DIR}")
+  # Xcode supplies compiled assets that SwiftPM does not produce. The selected
+  # executable's build directory is authoritative for overlapping resources,
+  # especially translations, so stage it last.
+  resource_bundle_dirs=("${XCODE_BUILD_DIR}" "${BUILD_DIR}")
 fi
 for bundle_dir in "${resource_bundle_dirs[@]}"; do
   [[ -d "${bundle_dir}" ]] || continue
@@ -1563,6 +1622,9 @@ build_power_metrics_helper() {
     -c release
     --arch "${BUILD_ARCH}"
   )
+  if [[ -n "${CONFIGURED_BUILD_JOBS}" ]]; then
+    swiftpm_build_args+=(--jobs "${CONFIGURED_BUILD_JOBS}")
+  fi
   if [[ -n "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH:-}" ]]; then
     swiftpm_build_args+=(--scratch-path "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH}")
   fi
@@ -1679,6 +1741,7 @@ log "校验资源 bundle 存在性与非致命 Bundle 解析器标记"
 }
 
 # 优先使用正式证书签名；未配置证书时回退 ad-hoc
+stamp_packaging_source_inputs "${INFO_PLIST_DST}"
 if [[ "${IS_ADHOC_SIGNING}" -eq 0 ]]; then
   log "使用证书签名：${SIGN_IDENTITY}"
   resign_embedded_code
@@ -1721,6 +1784,7 @@ else
 fi
 
 # 标记 App Bundle 为最新打包产物，便于后续 DMG 流程做 freshness 校验。
+assert_packaging_source_inputs_unchanged
 touch "${APP_DIR}"
 
 log "完成打包：${APP_DIR}"

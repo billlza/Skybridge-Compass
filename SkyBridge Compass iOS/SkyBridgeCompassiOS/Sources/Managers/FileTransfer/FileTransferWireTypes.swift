@@ -135,6 +135,7 @@ public struct FileMetadata: Codable, Sendable {
     public let senderOSVersion: String?
     public let senderModelName: String?
     public let senderChip: String?
+    public let approvalProtocol: String?
 
     public init(
         transferId: String,
@@ -153,7 +154,8 @@ public struct FileMetadata: Codable, Sendable {
         senderPlatform: String? = nil,
         senderOSVersion: String? = nil,
         senderModelName: String? = nil,
-        senderChip: String? = nil
+        senderChip: String? = nil,
+        approvalProtocol: String? = nil
     ) {
         self.transferId = transferId
         self.fileName = fileName
@@ -172,6 +174,7 @@ public struct FileMetadata: Codable, Sendable {
         self.senderOSVersion = senderOSVersion
         self.senderModelName = senderModelName
         self.senderChip = senderChip
+        self.approvalProtocol = approvalProtocol
     }
 }
 
@@ -185,6 +188,7 @@ public enum TransferMessageType: UInt32, Codable, Sendable {
     case receipt = 4
     case resumeRequest = 5
     case resumeAck = 6
+    case approval = 7
     case unknown = 0
 }
 

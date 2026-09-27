@@ -840,6 +840,26 @@ struct PairingAcceptanceJournalStore: Sendable {
 enum PairingIdentityAuthorityMutationBarrier {
   private static var activePermit: PairingIdentityAuthorityMutationPermit?
 
+  /// A transient write barrier is not a negative trust decision. Wait only for
+  /// the live owner, then perform the caller's strict read without another
+  /// suspension point. An abandoned journal is still rejected by that read.
+  static func readAfterActiveMutation<Value>(
+    timeout: Duration = .seconds(8),
+    _ read: () throws -> Value
+  ) async throws -> Value {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while activePermit != nil {
+      try Task.checkCancellation()
+      guard clock.now < deadline else {
+        throw AuthorityBoundPairingIdentityPersistenceError.transactionInProgress
+      }
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    try Task.checkCancellation()
+    return try read()
+  }
+
   static func acquire(
     transactionID: UUID,
     ownerNonce: UUID,

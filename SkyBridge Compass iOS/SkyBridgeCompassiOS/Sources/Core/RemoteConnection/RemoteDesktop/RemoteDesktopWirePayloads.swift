@@ -326,6 +326,7 @@ struct RemoteDesktopStreamConfigurationPayload: Codable, Sendable, Equatable {
     let streamRefreshToken: UInt64?
     let remoteControlSecurityIdentity: RemoteDesktopSecurityIdentityPayload?
     let framePresentationAckVersion: Int?
+    let remoteControlAccessVersion: Int?
     var streamConfigurationTransaction: RemoteDesktopStreamConfigurationTransaction?
     let sentAt: TimeInterval
 
@@ -367,6 +368,7 @@ struct RemoteDesktopStreamConfigurationPayload: Codable, Sendable, Equatable {
         streamRefreshToken: UInt64? = nil,
         remoteControlSecurityIdentity: RemoteDesktopSecurityIdentityPayload? = nil,
         framePresentationAckVersion: Int? = nil,
+        remoteControlAccessVersion: Int? = 1,
         streamConfigurationTransaction: RemoteDesktopStreamConfigurationTransaction? = nil,
         sentAt: TimeInterval = Date().timeIntervalSince1970
     ) {
@@ -407,6 +409,7 @@ struct RemoteDesktopStreamConfigurationPayload: Codable, Sendable, Equatable {
         self.streamRefreshToken = streamRefreshToken
         self.remoteControlSecurityIdentity = remoteControlSecurityIdentity
         self.framePresentationAckVersion = framePresentationAckVersion
+        self.remoteControlAccessVersion = remoteControlAccessVersion
         self.streamConfigurationTransaction = streamConfigurationTransaction
         self.sentAt = sentAt
     }

@@ -1370,7 +1370,8 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
         XCTAssertTrue(
             server.contains("let handoffConnection = connection")
                 && server.contains("let handoffData = initialData")
-                && server.contains("connection: handoffConnection,\n                        initialData: handoffData"),
+                && server.contains("try self.sessions.accept(")
+                && server.contains("initialData: handoffData"),
             "Server-side first-byte sniffing must transfer real handshake bytes into RemoteControlManager instead of consuming MessageA."
         )
 

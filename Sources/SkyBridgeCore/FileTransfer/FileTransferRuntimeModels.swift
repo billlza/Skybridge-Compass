@@ -34,6 +34,11 @@ public class FileTransfer: ObservableObject, Identifiable {
   public var fileHash: String?
   public var localPath: URL?
   public var receiptDeliveryStatus: FileTransferReceiptDeliveryStatus?
+  /// Set only by the outbound classic-transfer receipt validation path.
+  /// Old persisted history and other transports do not acquire this proof.
+  public internal(set) var receiverReceiptVerified = false
+  /// Observed carrier of the current operation; historical rows make no claim.
+  public internal(set) var actualTransport: String?
   /// 压缩算法：nil/"" 表示不压缩；当前支持 "zlib"
   public var compression: String?
   /// Immutable classic-transfer chunk size negotiated when the send starts.

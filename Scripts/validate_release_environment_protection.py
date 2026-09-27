@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail closed unless a GitHub release environment requires independent review."""
+"""Validate the explicitly selected GitHub release approval policy."""
 
 from __future__ import annotations
 
@@ -14,10 +14,15 @@ from typing import Any, NoReturn
 
 MAXIMUM_RESPONSE_BYTES = 1024 * 1024
 ENVIRONMENT_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z", re.ASCII)
+SINGLE_MAINTAINER_ENVIRONMENTS = frozenset(
+    {"macos-production-release", "release-real-device-evidence"}
+)
+SINGLE_MAINTAINER_LOGIN = "billlza"
+SINGLE_MAINTAINER_ID = 149552943
 
 
 class EnvironmentProtectionError(RuntimeError):
-    """The environment is missing or does not enforce independent approval."""
+    """The environment is missing or does not enforce the selected approval policy."""
 
 
 def fail(message: str) -> NoReturn:
@@ -50,7 +55,16 @@ def load_response(path: Path) -> dict[str, Any]:
     return payload
 
 
-def validate_environment(payload: dict[str, Any], expected_name: str) -> None:
+def validate_environment(
+    payload: dict[str, Any],
+    expected_name: str,
+    approval_policy: str = "independent",
+) -> None:
+    if approval_policy not in {"independent", "single-maintainer"}:
+        fail("unknown release approval policy")
+    single_maintainer = approval_policy == "single-maintainer"
+    if single_maintainer and expected_name not in SINGLE_MAINTAINER_ENVIRONMENTS:
+        fail("single-maintainer approval is not authorized for this environment")
     if ENVIRONMENT_NAME_PATTERN.fullmatch(expected_name) is None:
         fail("expected environment name is invalid")
     if payload.get("name") != expected_name:
@@ -66,11 +80,16 @@ def validate_environment(payload: dict[str, Any], expected_name: str) -> None:
     if len(required_review_rules) != 1:
         fail("environment must have exactly one required_reviewers protection rule")
     rule = required_review_rules[0]
-    if rule.get("prevent_self_review") is not True:
+    if single_maintainer:
+        if rule.get("prevent_self_review") is not False:
+            fail("single-maintainer environment must explicitly permit self-review")
+    elif rule.get("prevent_self_review") is not True:
         fail("environment must prevent self-review")
     reviewers = rule.get("reviewers")
     if not isinstance(reviewers, list) or not reviewers:
         fail("environment required_reviewers rule has no reviewers")
+    if single_maintainer and len(reviewers) != 1:
+        fail("single-maintainer environment must have exactly one reviewer")
     reviewer_ids: set[tuple[str, int]] = set()
     for entry in reviewers:
         if not isinstance(entry, dict) or set(entry) != {"type", "reviewer"}:
@@ -82,6 +101,12 @@ def validate_environment(payload: dict[str, Any], expected_name: str) -> None:
         reviewer_id = reviewer.get("id")
         if isinstance(reviewer_id, bool) or not isinstance(reviewer_id, int) or reviewer_id <= 0:
             fail("environment reviewer id must be a positive integer")
+        if single_maintainer and (
+            reviewer_type != "User"
+            or reviewer_id != SINGLE_MAINTAINER_ID
+            or reviewer.get("login") != SINGLE_MAINTAINER_LOGIN
+        ):
+            fail("single-maintainer reviewer must be the designated billlza account")
         identity = (reviewer_type, reviewer_id)
         if identity in reviewer_ids:
             fail("environment contains a duplicate required reviewer")
@@ -108,17 +133,22 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--response", type=Path, required=True)
     parser.add_argument("--expected-name", required=True)
+    parser.add_argument(
+        "--approval-policy",
+        choices=("independent", "single-maintainer"),
+        default="independent",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     try:
-        validate_environment(load_response(args.response), args.expected_name)
+        validate_environment(load_response(args.response), args.expected_name, args.approval_policy)
     except EnvironmentProtectionError as exc:
         print(f"release environment protection rejected: {exc}", file=os.sys.stderr)
         return 1
-    print(f"release environment protection valid: {args.expected_name}")
+    print(f"release environment protection valid: {args.expected_name} ({args.approval_policy})")
     return 0
 
 

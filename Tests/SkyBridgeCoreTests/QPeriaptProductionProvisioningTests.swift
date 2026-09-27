@@ -112,8 +112,8 @@ final class QPeriaptProductionProvisioningTests: XCTestCase {
         XCTAssertEqual(secondOutcome, .alreadyActive)
 
         // The settings entry point reports support only through this chain.
-        let supported = await QPeriaptPlatformPolicy.prepareLocalRuntimeSupport()
-        XCTAssertTrue(supported)
+        let preparation = try await QPeriaptPlatformPolicy.prepareLocalRuntimeSupport()
+        XCTAssertEqual(preparation, .alreadyActive)
     }
 
     func testSecondActivationAfterRegistryResetReplaysExistingEnrollment() async throws {

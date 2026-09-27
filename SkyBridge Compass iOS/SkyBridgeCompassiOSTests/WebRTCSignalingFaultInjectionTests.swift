@@ -234,6 +234,38 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
         XCTAssertEqual(request.value(forHTTPHeaderField: "X-SkyBridge-Tenant-Id"), "tenant-a")
     }
 
+    func testAccountDeviceGETCarriesVersionHeadersAndTheExactAuthenticatedBinding() async throws {
+        AuthenticatedRequestURLProtocol.reset()
+        defer { AuthenticatedRequestURLProtocol.reset() }
+        let token = try makeAuthTestJWT(subject: "user-123", tenantID: "tenant-a", expiration: 4_102_444_800)
+        let session = makeAuthTestSession(token: token, userID: "user-123", tenantID: "tenant-a")
+        let dependencies = SignalServerClientCompat.AuthenticationDependencies(
+            accessTokenOverride: { "" }, tenantIDOverride: { "" },
+            loadPersistedSession: { session },
+            refreshSession: { _ in throw AuthRequestTestError.unexpectedRefresh },
+            validateRefreshedAccessToken: { _ in throw AuthRequestTestError.unexpectedRefresh },
+            replacePersistedSession: { _, _ in throw AuthRequestTestError.unexpectedRefresh }
+        )
+        let urlSession = makeAuthenticatedRequestTestURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        let client = SignalServerClientCompat(urlSession: urlSession, authenticationDependencies: dependencies)
+        let binding = try makeAuthTestProtocolBinding()
+        let snapshot = try await client.listAccountDevices(binding: binding)
+        XCTAssertEqual(AuthenticatedRequestURLProtocol.requests().count, 1)
+        let request = try XCTUnwrap(AuthenticatedRequestURLProtocol.requests().first)
+        XCTAssertEqual(request.httpMethod, "GET")
+        XCTAssertNil(request.httpBody)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer \(token)")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-SkyBridge-Tenant-Id"), "tenant-a")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-SkyBridge-Client-Version"),
+                       try XCTUnwrap(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String))
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-SkyBridge-Protocol-Version"), "1")
+        XCTAssertEqual(snapshot.callerDeviceId, binding.deviceId)
+        let record = try XCTUnwrap(snapshot.devices.first)
+        XCTAssertTrue(record.isCaller)
+        XCTAssertEqual(record.protocolPublicKeyFingerprint, binding.protocolPublicKeyFingerprint)
+    }
+
     func testRegisterCurrentDeviceBindsTheExactAuthenticatedAuthority() async throws {
         AuthenticatedRequestURLProtocol.reset()
         let token = try makeAuthTestJWT(
@@ -2975,10 +3007,13 @@ private final class AuthenticatedRequestURLProtocol: URLProtocol, @unchecked Sen
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        let missingAccountVersions = request.url?.path == "/api/devices/list" &&
+            (request.value(forHTTPHeaderField: "X-SkyBridge-Client-Version") == nil ||
+             request.value(forHTTPHeaderField: "X-SkyBridge-Protocol-Version") == nil)
         guard let url = request.url,
               let response = HTTPURLResponse(
                 url: url,
-                statusCode: 200,
+                statusCode: missingAccountVersions ? 426 : 200,
                 httpVersion: "HTTP/1.1",
                 headerFields: ["Content-Type": "application/json"]
               ) else {
@@ -2988,7 +3023,23 @@ private final class AuthenticatedRequestURLProtocol: URLProtocol, @unchecked Sen
         let tenantID = request.value(forHTTPHeaderField: "X-SkyBridge-Tenant-Id") ?? "missing"
         let body: [String: Any]
         var capturedRequest = request
-        if request.url?.path == "/api/devices/identity-rotation/challenge" {
+        if request.url?.path == "/api/devices/list" {
+            // Match the deployed server: GET without version headers is rejected, even
+            // when the same client's version-bearing POST heartbeat is accepted.
+            if missingAccountVersions {
+                body = ["error": "client_version_too_old"]
+            } else {
+                let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+                func value(_ name: String) -> String { query.first { $0.name == name }?.value ?? "missing" }
+                body = ["generatedAt": 2_000_000_000_000 as Int64, "callerDeviceId": value("deviceId"),
+                    "truncated": false, "devices": [[
+                        "deviceId": value("deviceId"), "status": "active",
+                        "protocolSigningAlgorithm": value("protocolSigningAlgorithm"),
+                        "protocolPublicKeyFingerprint": value("protocolPublicKeyFingerprint"),
+                        "online": true, "isCaller": true
+                    ]]]
+            }
+        } else if request.url?.path == "/api/devices/identity-rotation/challenge" {
             do {
                 let requestData = try Self.requestBodyData(from: request)
                 capturedRequest.httpBodyStream = nil

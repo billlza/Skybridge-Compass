@@ -128,6 +128,13 @@ enum CanonicalBonjourAdvertisementIdentityProvider {
         let deviceIdentity = try await SelfIdentityProvider.shared
             .snapshotEnsuringProtocolDeviceId(allowCreate: allowCreateDeviceId)
         let protocolIdentity = try await CommittedLocalProtocolIdentitySnapshot.loadActive()
+        return try makeIdentity(deviceIdentity: deviceIdentity, protocolIdentity: protocolIdentity)
+    }
+
+    static func makeIdentity(
+        deviceIdentity: SelfIdentitySnapshot,
+        protocolIdentity: CommittedLocalProtocolIdentitySnapshot
+    ) throws -> CanonicalBonjourAdvertisementIdentity {
         let binding = try ProtocolIdentityBinding(
             deviceId: deviceIdentity.deviceId,
             protocolSigningAlgorithm: protocolIdentity.algorithm,

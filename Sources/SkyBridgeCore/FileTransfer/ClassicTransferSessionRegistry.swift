@@ -1,5 +1,41 @@
 import CryptoKit
 import Foundation
+import struct SkyBridgeProtocolCore.ClassicTransferPeerCapabilities
+
+/// One immutable read of the keys that actually protect this file transfer.
+/// The opaque reference and key cannot be taken from different rekey generations.
+@available(macOS 14.0, iOS 17.0, *)
+struct ClassicTransferKeyMaterial: Sendable {
+    let transferKey: SymmetricKey
+    let sessionReference: String?
+    let role: HandshakeRole
+    let negotiatedSuite: CryptoSuite
+    let approvalCapability: Bool?
+
+    func matches(_ other: Self) -> Bool {
+        guard sessionReference == other.sessionReference, role == other.role,
+              negotiatedSuite == other.negotiatedSuite else { return false }
+        return transferKey.withUnsafeBytes { lhs in
+            other.transferKey.withUnsafeBytes { rhs in
+                guard lhs.count == rhs.count else { return false }
+                var difference: UInt8 = 0
+                for index in lhs.indices { difference |= lhs[index] ^ rhs[index] }
+                return difference == 0
+            }
+        }
+    }
+
+    init(sessionKeys: SessionKeys, transferId: String, capabilityEvidence: ClassicTransferPeerCapabilities? = nil) {
+        transferKey = sessionKeys.deriveClassicFileTransferKey(transferId: transferId)
+        sessionReference = P2PEvidenceReference.sessionIncarnation(
+            sessionID: sessionKeys.sessionId,
+            transcriptHash: sessionKeys.transcriptHash
+        )
+        role = sessionKeys.role
+        negotiatedSuite = sessionKeys.negotiatedSuite
+        approvalCapability = capabilityEvidence?.approvalSupport(sessionID: sessionKeys.sessionId, transcriptHash: sessionKeys.transcriptHash)
+    }
+}
 
 @available(macOS 14.0, iOS 17.0, *)
 struct ClassicTransferSessionSnapshot: Sendable {
@@ -9,6 +45,7 @@ struct ClassicTransferSessionSnapshot: Sendable {
     let aliases: [String]
     let endpointHostOrIP: String?
     let capabilities: [String]
+    let capabilityEvidence: ClassicTransferPeerCapabilities?
     let sessionKeys: SessionKeys
     let lastSeenAt: Date
 
@@ -20,6 +57,7 @@ struct ClassicTransferSessionSnapshot: Sendable {
         endpointHostOrIP: String?,
         capabilities: [String],
         sessionKeys: SessionKeys,
+        capabilityEvidence: ClassicTransferPeerCapabilities? = nil,
         lastSeenAt: Date = Date()
     ) {
         self.sessionId = sessionId
@@ -28,6 +66,7 @@ struct ClassicTransferSessionSnapshot: Sendable {
         self.aliases = aliases
         self.endpointHostOrIP = endpointHostOrIP
         self.capabilities = capabilities
+        self.capabilityEvidence = capabilityEvidence
         self.sessionKeys = sessionKeys
         self.lastSeenAt = lastSeenAt
     }
@@ -86,7 +125,13 @@ actor ClassicTransferSessionRegistry {
         case lease(UUID)
     }
 
+    struct SessionReadHandle: Sendable {
+        let snapshot: ClassicTransferSessionSnapshot
+        fileprivate let generation: UUID
+    }
+
     private struct SessionRegistration {
+        let generation: UUID
         let snapshot: ClassicTransferSessionSnapshot
         let owner: SessionOwner
     }
@@ -170,6 +215,7 @@ actor ClassicTransferSessionRegistry {
 
     func upsert(session snapshot: ClassicTransferSessionSnapshot) {
         sessionsById[snapshot.sessionId] = SessionRegistration(
+            generation: UUID(),
             snapshot: snapshot,
             owner: .legacy
         )
@@ -179,6 +225,7 @@ actor ClassicTransferSessionRegistry {
     func upsertOwned(session snapshot: ClassicTransferSessionSnapshot) -> SessionLease {
         let ownerId = UUID()
         sessionsById[snapshot.sessionId] = SessionRegistration(
+            generation: UUID(),
             snapshot: snapshot,
             owner: .lease(ownerId)
         )
@@ -201,6 +248,7 @@ actor ClassicTransferSessionRegistry {
             return false
         }
         sessionsById[lease.sessionId] = SessionRegistration(
+            generation: registration.generation,
             snapshot: snapshot,
             owner: registration.owner
         )
@@ -235,9 +283,11 @@ actor ClassicTransferSessionRegistry {
                 remoteControlPort: remoteControlPort
             ),
             sessionKeys: current.sessionKeys,
+            capabilityEvidence: current.capabilityEvidence,
             lastSeenAt: now
         )
         sessionsById[lease.sessionId] = SessionRegistration(
+            generation: registration.generation,
             snapshot: refreshed,
             owner: registration.owner
         )
@@ -256,6 +306,22 @@ actor ClassicTransferSessionRegistry {
         }
         sessionsById.removeValue(forKey: lease.sessionId)
         return true
+    }
+
+    func activeSessionHandles(now: Date = Date()) -> [SessionReadHandle] {
+        pruneExpiredSessions(now: now)
+        return sessionsById.values.map {
+            SessionReadHandle(snapshot: $0.snapshot, generation: $0.generation)
+        }
+    }
+
+    func currentKeyMaterial(
+        for handle: SessionReadHandle, transferId: String, now: Date = Date()
+    ) -> ClassicTransferKeyMaterial? {
+        pruneExpiredSessions(now: now)
+        guard let registration = sessionsById[handle.snapshot.sessionId],
+              registration.generation == handle.generation else { return nil }
+        return ClassicTransferKeyMaterial(sessionKeys: registration.snapshot.sessionKeys, transferId: transferId, capabilityEvidence: registration.snapshot.capabilityEvidence)
     }
 
     func activeSessions(now: Date = Date()) -> [ClassicTransferSessionSnapshot] {

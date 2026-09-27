@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-import importlib.util
 import contextlib
+import importlib.util
 import io
 import json
 import os
@@ -19,12 +19,13 @@ from product_release_evidence_test_fixtures import (
     golden_ios_archive_binding,
 )
 
-
 ROOT = Path(__file__).resolve().parent.parent
 VALIDATOR = ROOT / "Scripts/validate_product_release_evidence_log.py"
 COLLECTOR = ROOT / "Scripts/collect_product_release_evidence_log.sh"
 OWNERSHIP_HELPER = ROOT / "Scripts/webrtc_smoke_process_ownership.py"
-SPEC = importlib.util.spec_from_file_location("validate_product_release_evidence_log", VALIDATOR)
+SPEC = importlib.util.spec_from_file_location(
+    "validate_product_release_evidence_log", VALIDATOR
+)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("unable to import product release evidence validator")
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -266,7 +267,106 @@ class ProductReleaseEvidenceLogTests(unittest.TestCase):
                 )
                 MODULE.validate_artifact_log(artifact, kind)
 
-    def test_extract_oslog_strips_machine_metadata_and_records_pid_binding(self) -> None:
+    def test_qperiapt_abi2_keeps_every_existing_product_lifecycle_gate(self) -> None:
+        fixtures = {
+            "p2p": (p2p_remote_lines(), p2p_ios_lines()),
+            "webrtc": (webrtc_remote_lines(), webrtc_ios_lines()),
+            "file-transfer": (file_transfer_lines(), file_transfer_ios_lines()),
+        }
+        for kind, (mac, ios) in fixtures.items():
+            q_mac = [
+                line.replace("suite=X-Wing", "suite=Q-Periapt-ABI2-PolicyBound")
+                for line in mac
+            ]
+            q_ios = [
+                line.replace("suite=X-Wing", "suite=Q-Periapt-ABI2-PolicyBound")
+                for line in ios
+            ]
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                artifact = self.write_artifact(Path(temporary), q_mac, ios_lines=q_ios)
+                MODULE.validate_artifact_log(artifact, kind)
+            for rejected in (
+                "X-Wing",
+                "Q-Periapt-ContextBound",
+                "unknown-18",
+                "X25519-Ed25519",
+            ):
+                changed = [
+                    line.replace(
+                        "suite=Q-Periapt-ABI2-PolicyBound", f"suite={rejected}"
+                    )
+                    for line in q_ios
+                ]
+                with (
+                    self.subTest(kind=kind, rejected=rejected),
+                    tempfile.TemporaryDirectory() as temporary,
+                ):
+                    artifact = self.write_artifact(
+                        Path(temporary), q_mac, ios_lines=changed
+                    )
+                    with self.assertRaises(MODULE.ProductEvidenceError):
+                        MODULE.validate_artifact_log(artifact, kind)
+        # Authenticated Q is not a renderer proof or native RTP/audio readiness receipt.
+        for excluded in (
+            "secureFrameAccepted",
+            "remoteControlNoticeHumanApproved",
+            "webrtcMediaSample",
+        ):
+            mac = [
+                line.replace("suite=X-Wing", "suite=Q-Periapt-ABI2-PolicyBound")
+                for line in webrtc_remote_lines()
+                if not line.startswith(excluded + " ")
+            ]
+            ios = [
+                line.replace("suite=X-Wing", "suite=Q-Periapt-ABI2-PolicyBound")
+                for line in webrtc_ios_lines()
+            ]
+            with (
+                self.subTest(missing=excluded),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                artifact = self.write_artifact(Path(temporary), mac, ios_lines=ios)
+                with self.assertRaises(MODULE.ProductEvidenceError):
+                    MODULE.validate_artifact_log(artifact, "webrtc")
+
+    def test_ios_q_recorder_wiring_uses_authenticated_keys_after_every_await(
+        self,
+    ) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "SkyBridge Compass iOS"
+            / "SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
+        ).read_text()
+        boundary = source.split(
+            "private func publishWebRTCProductEvidenceIfCurrent(", 1
+        )[1].split("private func beginWebRTCProductEvidenceMediaSampling(", 1)[0]
+        self.assertIn(
+            "keys.negotiatedSuite == .xwing || keys.negotiatedSuite == .qperiaptABI2PolicyBound",
+            boundary,
+        )
+        self.assertIn(
+            ".recordWebRTCPQCRekeyAuthenticated(owner: owner, suite: keys.negotiatedSuite)",
+            boundary,
+        )
+        self.assertNotIn("suite: .xwing)", boundary)
+        self.assertEqual(boundary.count("isCurrentSession("), 3)
+        self.assertEqual(boundary.count("handshakeDriver === driver"), 3)
+        self.assertEqual(
+            boundary.count("Self.isSameWebRTCFileTransferSecureSession("), 3
+        )
+        for binding in (
+            "attemptSnapshot.localProtocolSigningAlgorithm",
+            "attemptSnapshot.localProtocolSigningKeyProtection",
+            "attemptSnapshot.localProtocolPublicKey",
+            "localAuthority.identity.algorithm == committedIdentity.algorithm",
+            "localAuthority.identity.protection == committedIdentity.protection",
+            "localAuthority.identity.publicKey == committedIdentity.publicKey",
+        ):
+            self.assertIn(binding, boundary)
+
+    def test_extract_oslog_strips_machine_metadata_and_records_pid_binding(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             executable = root / "SkyBridgeCompassApp"
@@ -296,9 +396,71 @@ class ProductReleaseEvidenceLogTests(unittest.TestCase):
             capture = root / MODULE.CAPTURE_FILE
             ownership = self.write_ownership_record(root, executable)
             MODULE.extract_oslog(raw, 4321, executable, ownership, output, capture)
-            self.assertEqual(output.read_text(encoding="ascii"), "\n".join(p2p_remote_lines()) + "\n")
+            self.assertEqual(
+                output.read_text(encoding="ascii"), "\n".join(p2p_remote_lines()) + "\n"
+            )
             self.assertNotIn("bootUUID", output.read_text(encoding="ascii"))
             MODULE.validate_capture_manifest(capture, len(rows))
+
+    def test_extract_oslog_accepts_exact_native_stream_preamble_only(self) -> None:
+        banner = (
+            'Filtering the log data using "processIdentifier == 4321 AND '
+            '(subsystem == "com.skybridge.compass.release-evidence" AND '
+            'category == "ProductSession")"\n'
+        )
+        cases = {
+            "native": (banner, "", True),
+            "native-finished": (banner, '{"count":1,"finished":1}\n', True),
+            "wrong-count": (banner, '{"count":2,"finished":1}\n', False),
+            "unfinished": (banner, '{"count":1,"finished":0}\n', False),
+            "boolean-count": (banner, '{"count":true,"finished":1}\n', False),
+            "wrong-pid": (banner.replace("4321", "4322"), "", False),
+            "wrong-subsystem": (banner.replace("release-evidence", "other"), "", False),
+            "duplicate": (banner + banner, "", False),
+            "blank-before": ("\n" + banner, "", False),
+            "banner-after-event": ("", banner, False),
+            "arbitrary-text": ("unrecognized capture output\n", "", False),
+            "preamble-only": (banner, "", False),
+            "empty-native": (banner, '{"count":0,"finished":1}\n', False),
+        }
+        for label, (prefix, suffix, accepted) in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                executable = root / "SkyBridgeCompassApp"
+                executable.write_bytes(b"candidate executable")
+                executable.chmod(0o700)
+                row = {
+                    "eventType": "logEvent",
+                    "messageType": "Default",
+                    "subsystem": MODULE.SUBSYSTEM,
+                    "category": MODULE.CATEGORY,
+                    "processID": 4321,
+                    "processImagePath": os.fspath(executable),
+                    "formatString": "%{public}s",
+                    "eventMessage": p2p_remote_lines()[0],
+                }
+                raw = root / "raw.ndjson"
+                payload = (
+                    ""
+                    if label in {"preamble-only", "empty-native"}
+                    else json.dumps(row) + "\n"
+                )
+                raw.write_text(prefix + payload + suffix, encoding="utf-8")
+                ownership = self.write_ownership_record(root, executable)
+                output, capture = root / MODULE.LOG_FILE, root / MODULE.CAPTURE_FILE
+                if accepted:
+                    MODULE.extract_oslog(
+                        raw, 4321, executable, ownership, output, capture
+                    )
+                    self.assertEqual(output.read_text(), p2p_remote_lines()[0] + "\n")
+                    MODULE.validate_capture_manifest(capture, 1)
+                else:
+                    with self.assertRaises(MODULE.ProductEvidenceError):
+                        MODULE.extract_oslog(
+                            raw, 4321, executable, ownership, output, capture
+                        )
+                    self.assertFalse(output.exists())
+                    self.assertFalse(capture.exists())
 
     def test_extract_oslog_rejects_wrong_pid_process_or_private_format(self) -> None:
         mutations = {
@@ -339,7 +501,10 @@ class ProductReleaseEvidenceLogTests(unittest.TestCase):
     def test_private_ownership_record_rejects_pid_or_path_mismatch(self) -> None:
         mutations = ("pid", "path", "start", "audit")
         for mutation in mutations:
-            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+            with (
+                self.subTest(mutation=mutation),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
                 root = Path(temporary)
                 executable = root / "SkyBridgeCompassApp"
                 executable.write_bytes(b"candidate executable")
@@ -355,7 +520,8 @@ class ProductReleaseEvidenceLogTests(unittest.TestCase):
                 else:
                     payload["auditToken"][5] = 9999
                 record.write_text(
-                    json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
                 )
                 with self.assertRaises(MODULE.ProductEvidenceError):
                     MODULE._read_private_ownership_record(record, 4321, executable)
@@ -383,19 +549,23 @@ class ProductReleaseEvidenceLogTests(unittest.TestCase):
             original = OWNERSHIP_MODULE._read_stable_mac_snapshot
             try:
                 for replacement in replacements:
-                    OWNERSHIP_MODULE._read_stable_mac_snapshot = lambda _pid, value=replacement: value
+                    OWNERSHIP_MODULE._read_stable_mac_snapshot = (
+                        lambda _pid, value=replacement: value
+                    )
                     with contextlib.redirect_stderr(io.StringIO()):
                         status = OWNERSHIP_MODULE.mac_status(record)
                     self.assertEqual(status, OWNERSHIP_MODULE.UNVERIFIABLE)
             finally:
                 OWNERSHIP_MODULE._read_stable_mac_snapshot = original
 
-    def test_collector_checks_audit_token_ownership_before_and_after_capture(self) -> None:
+    def test_collector_checks_audit_token_ownership_before_and_after_capture(
+        self,
+    ) -> None:
         source = COLLECTOR.read_text(encoding="utf-8")
         self.assertIn("webrtc_smoke_process_ownership.py", source)
         self.assertIn("mac-capture", source)
         self.assertGreaterEqual(source.count("mac-status --identity"), 2)
-        self.assertIn("--ownership-record \"$OWNERSHIP_RECORD\"", source)
+        self.assertIn('--ownership-record "$OWNERSHIP_RECORD"', source)
         self.assertNotIn("/bin/ps", source)
 
     def test_helper_owner_and_unknown_field_are_rejected(self) -> None:
@@ -404,9 +574,11 @@ class ProductReleaseEvidenceLogTests(unittest.TestCase):
             p2p_remote_lines()[0] + " account=user@example.com",
         )
         for line in mutations:
-            with self.subTest(line=line):
-                with self.assertRaises(MODULE.ProductEvidenceError):
-                    MODULE._parse_event_line(line, 1)
+            with (
+                self.subTest(line=line),
+                self.assertRaises(MODULE.ProductEvidenceError),
+            ):
+                MODULE._parse_event_line(line, 1)
 
     def test_remote_contract_rejects_missing_human_decision(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -426,10 +598,14 @@ class ProductReleaseEvidenceLogTests(unittest.TestCase):
                 for line in p2p_remote_lines()
             ]
             artifact = self.write_artifact(Path(temporary), lines)
-            with self.assertRaisesRegex(MODULE.ProductEvidenceError, "must be presented"):
+            with self.assertRaisesRegex(
+                MODULE.ProductEvidenceError, "must be presented"
+            ):
                 MODULE.validate_artifact_log(artifact, "p2p")
 
-    def test_remote_contract_requires_transport_matched_peer_renderer_proof(self) -> None:
+    def test_remote_contract_requires_transport_matched_peer_renderer_proof(
+        self,
+    ) -> None:
         fixtures = {
             "p2p": (
                 p2p_remote_lines(),
@@ -446,10 +622,14 @@ class ProductReleaseEvidenceLogTests(unittest.TestCase):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
                 mismatched = [line.replace(old, wrong) for line in lines]
                 artifact = self.write_artifact(Path(temporary), mismatched)
-                with self.assertRaisesRegex(MODULE.ProductEvidenceError, "peer .* renderer"):
+                with self.assertRaisesRegex(
+                    MODULE.ProductEvidenceError, "peer .* renderer"
+                ):
                     MODULE.validate_artifact_log(artifact, kind)
 
-    def test_local_frame_presented_cannot_satisfy_formal_secure_frame_effect(self) -> None:
+    def test_local_frame_presented_cannot_satisfy_formal_secure_frame_effect(
+        self,
+    ) -> None:
         for kind, lines in {
             "p2p": p2p_remote_lines(),
             "webrtc": webrtc_remote_lines(),
@@ -463,10 +643,14 @@ class ProductReleaseEvidenceLogTests(unittest.TestCase):
                     for line in lines
                 ]
                 artifact = self.write_artifact(Path(temporary), local_only)
-                with self.assertRaisesRegex(MODULE.ProductEvidenceError, "secureFrameAccepted"):
+                with self.assertRaisesRegex(
+                    MODULE.ProductEvidenceError, "secureFrameAccepted"
+                ):
                     MODULE.validate_artifact_log(artifact, kind)
 
-    def test_local_frame_presented_is_accepted_only_as_non_formal_telemetry(self) -> None:
+    def test_local_frame_presented_is_accepted_only_as_non_formal_telemetry(
+        self,
+    ) -> None:
         for kind, lines in {
             "p2p": p2p_remote_lines(),
             "webrtc": webrtc_remote_lines(),
@@ -491,16 +675,24 @@ class ProductReleaseEvidenceLogTests(unittest.TestCase):
 
     def test_webrtc_contract_rejects_direct_transport(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            lines = [line.replace("selectedTransport=relay", "selectedTransport=direct") for line in webrtc_remote_lines()]
+            lines = [
+                line.replace("selectedTransport=relay", "selectedTransport=direct")
+                for line in webrtc_remote_lines()
+            ]
             artifact = self.write_artifact(Path(temporary), lines)
             with self.assertRaisesRegex(MODULE.ProductEvidenceError, "selected relay"):
                 MODULE.validate_artifact_log(artifact, "webrtc")
 
     def test_effect_sequence_must_be_strictly_increasing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            lines = [line.replace("event_seq=2", "event_seq=1") for line in p2p_remote_lines()]
+            lines = [
+                line.replace("event_seq=2", "event_seq=1")
+                for line in p2p_remote_lines()
+            ]
             artifact = self.write_artifact(Path(temporary), lines)
-            with self.assertRaisesRegex(MODULE.ProductEvidenceError, "strictly increasing"):
+            with self.assertRaisesRegex(
+                MODULE.ProductEvidenceError, "strictly increasing"
+            ):
                 MODULE.validate_artifact_log(artifact, "p2p")
 
     def test_each_effect_must_occur_within_the_active_lifecycle(self) -> None:
@@ -517,17 +709,23 @@ class ProductReleaseEvidenceLogTests(unittest.TestCase):
             )
             lines.insert(disconnected_index + 1, effect)
             artifact = self.write_artifact(Path(temporary), lines)
-            with self.assertRaisesRegex(MODULE.ProductEvidenceError, "notice is active"):
+            with self.assertRaisesRegex(
+                MODULE.ProductEvidenceError, "notice is active"
+            ):
                 MODULE.validate_artifact_log(artifact, "p2p")
 
     def test_optional_local_frame_and_input_effects_are_bounded(self) -> None:
         common = owner_fields("p2p")
         mutations = {
             "local frame": [
-                f"localFramePresented {common} local_frame_seq=1 effect=presented "
-                "proof=local-renderer bytes=2048 width=640 height=480",
-                f"localFramePresented {common} local_frame_seq=2 effect=presented "
-                "proof=local-renderer bytes=2048 width=640 height=480",
+                (
+                    f"localFramePresented {common} local_frame_seq=1 effect=presented "
+                    "proof=local-renderer bytes=2048 width=640 height=480"
+                ),
+                (
+                    f"localFramePresented {common} local_frame_seq=2 effect=presented "
+                    "proof=local-renderer bytes=2048 width=640 height=480"
+                ),
             ],
             "input effect": [
                 f"remoteInputApplied {common} event_seq=3 effect=pointer applied=1",
@@ -593,8 +791,7 @@ class ProductReleaseEvidenceLogTests(unittest.TestCase):
             f"remoteInputApplied {common} event_seq=4 effect=scroll applied=1",
         ]
         events = [
-            MODULE._parse_event_line(line, index)
-            for index, line in enumerate(lines, 1)
+            MODULE._parse_event_line(line, index) for index, line in enumerate(lines, 1)
         ]
         self.assertLessEqual(len(events), MODULE.MAX_EVENT_COUNT_PER_SESSION)
         sessions = MODULE._sessions(events)
@@ -606,20 +803,29 @@ class ProductReleaseEvidenceLogTests(unittest.TestCase):
         primary_disconnect = next(
             event for event in events if event.name == "releaseSessionDisconnected"
         )
-        oversized = [primary_owner] + [repeatable] * MODULE.MAX_EVENT_COUNT_PER_SESSION \
+        oversized = (
+            [primary_owner]
+            + [repeatable] * MODULE.MAX_EVENT_COUNT_PER_SESSION
             + [primary_disconnect]
+        )
         with self.assertRaisesRegex(MODULE.ProductEvidenceError, "fixed 20-event"):
             MODULE._sessions(oversized)
 
     def test_connectivity_requires_exact_fixed_matrix(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             mac_lines, ios_lines = connectivity_lines()
-            mac_lines = [line for line in mac_lines if "attempt_ref=at1:" + "3" * 32 not in line]
-            ios_lines = [line for line in ios_lines if "attempt_ref=at1:" + "3" * 32 not in line]
+            mac_lines = [
+                line for line in mac_lines if "attempt_ref=at1:" + "3" * 32 not in line
+            ]
+            ios_lines = [
+                line for line in ios_lines if "attempt_ref=at1:" + "3" * 32 not in line
+            ]
             artifact = self.write_artifact(
                 Path(temporary), mac_lines, ios_lines=ios_lines
             )
-            with self.assertRaisesRegex(MODULE.ProductEvidenceError, "three success profile pairs"):
+            with self.assertRaisesRegex(
+                MODULE.ProductEvidenceError, "three success profile pairs"
+            ):
                 MODULE.validate_artifact_log(artifact, "connectivity")
 
     def test_connectivity_rejects_legacy_case_and_external_helper_labels(self) -> None:
@@ -634,9 +840,11 @@ class ProductReleaseEvidenceLogTests(unittest.TestCase):
             "result=success"
         )
         for line in (legacy, external):
-            with self.subTest(line=line):
-                with self.assertRaises(MODULE.ProductEvidenceError):
-                    MODULE._parse_event_line(line, 1)
+            with (
+                self.subTest(line=line),
+                self.assertRaises(MODULE.ProductEvidenceError),
+            ):
+                MODULE._parse_event_line(line, 1)
 
     def test_connectivity_rejects_cross_endpoint_join_drift(self) -> None:
         for label in ("session", "suite", "attempt-profile", "role"):
@@ -655,11 +863,11 @@ class ProductReleaseEvidenceLogTests(unittest.TestCase):
                             "session_ref=ev1:" + "a" * 32,
                         )
                     elif label == "suite":
-                        line = line.replace(
-                            "suite=ML-KEM-768", "suite=ML-KEM-768-FS"
-                        )
+                        line = line.replace("suite=ML-KEM-768", "suite=ML-KEM-768-FS")
                     elif label == "attempt-profile":
-                        line = line.replace("attemptProfile=xwing", "attemptProfile=pqc")
+                        line = line.replace(
+                            "attemptProfile=xwing", "attemptProfile=pqc"
+                        )
                         line = line.replace("suite=X-Wing", "suite=ML-KEM-768")
                     else:
                         line = line.replace("role=responder", "role=initiator")
@@ -672,7 +880,9 @@ class ProductReleaseEvidenceLogTests(unittest.TestCase):
                     if label == "role"
                     else "disagree on session, suite, or attempt profile"
                 )
-                with self.assertRaisesRegex(MODULE.ProductEvidenceError, expected_error):
+                with self.assertRaisesRegex(
+                    MODULE.ProductEvidenceError, expected_error
+                ):
                     MODULE.validate_artifact_log(artifact, "connectivity")
 
     def test_connectivity_rejects_local_generation_or_offer_drift(self) -> None:
@@ -710,9 +920,7 @@ class ProductReleaseEvidenceLogTests(unittest.TestCase):
                                 mutation_count += 1
                             line = replacement
                     output.append(line)
-                self.assertEqual(
-                    mutation_count, 1 if label == "generation" else 3
-                )
+                self.assertEqual(mutation_count, 1 if label == "generation" else 3)
                 artifact = self.write_artifact(
                     Path(temporary), output, ios_lines=ios_lines
                 )
@@ -723,14 +931,21 @@ class ProductReleaseEvidenceLogTests(unittest.TestCase):
                     if label == "generation-reuse"
                     else "negotiated suite family was absent from its actual offer"
                 )
-                with self.assertRaisesRegex(MODULE.ProductEvidenceError, expected_error):
+                with self.assertRaisesRegex(
+                    MODULE.ProductEvidenceError, expected_error
+                ):
                     MODULE.validate_artifact_log(artifact, "connectivity")
 
-    def test_connectivity_rejections_require_verified_shipping_responder_pairs(self) -> None:
+    def test_connectivity_rejections_require_verified_shipping_responder_pairs(
+        self,
+    ) -> None:
         mutations = {
             "signature": ("peerOfferSignature=verified", "peerOfferSignature=claimed"),
             "role": ("role=responder", "role=initiator"),
-            "terminal": ("connectivityPolicyRejected", "connectivityAttemptAuthenticated"),
+            "terminal": (
+                "connectivityPolicyRejected",
+                "connectivityAttemptAuthenticated",
+            ),
         }
         for label, (old, new) in mutations.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
@@ -754,7 +969,10 @@ class ProductReleaseEvidenceLogTests(unittest.TestCase):
             "unbound-capture",
             "invalid-archive",
         ):
-            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+            with (
+                self.subTest(mutation=mutation),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
                 mac_lines, ios_lines = connectivity_lines()
                 artifact = self.write_artifact(
                     Path(temporary), mac_lines, ios_lines=ios_lines
@@ -784,7 +1002,9 @@ class ProductReleaseEvidenceLogTests(unittest.TestCase):
         )
         MODULE.validate_artifact_log(fixture, "connectivity")
 
-    def test_decode_only_qperiapt_suite_is_not_formal_connectivity_evidence(self) -> None:
+    def test_decode_only_qperiapt_suite_is_not_formal_connectivity_evidence(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             mac_lines, ios_lines = connectivity_lines()
             mac_lines = [

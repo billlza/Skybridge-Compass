@@ -1,18 +1,30 @@
 # ADR-0001: SkyBridge Core Transport Matrix
 
-**Status:** Proposed for implementation  
-**ADR Version:** 1.0  
-**Date:** 2026-06-07  
-**Scope:** SkyBridge Core, macOS, iOS, Windows, Android, Linux, cross-platform P2P/WebRTC interop, branch hygiene, stale-paper boundary  
+**Status:** Approved target architecture; implementation is tracked separately
+
+**ADR Version:** 1.2
+
+**Date:** 2026-06-07
+
+**Last reviewed:** 2026-09-13
+
+**Scope:** SkyBridge Core, macOS, iOS, Windows, Android, Linux, cross-platform P2P/WebRTC interop, branch hygiene, stale-paper boundary
+
 **Related areas:** P2P discovery, transport selection, WebRTC, Windows native networking, Android Kotlin stack, Android Wi-Fi Aware/NSD, Linux Rust core, Linux Avahi/DNS-SD, Apple Network.framework, QUIC, PQC, trust/pairing, traffic padding, session audit, signaling/TURN deployment
 
-> **⚠️ 实现状态（2026-06-16）**：本 ADR 是**已批准的架构目标（approved target architecture）**，其中
-> 大部分跨平台内容尚未落地。当前实现仅 **Apple↔Apple**：macOS 主机端通过 SkyBridge 私有 PQC 握手 +
-> Bonjour `_skybridge-rd._tcp` 提供远程控制，**只接受已登记信任的 Apple 对端**。
-> 下表中 §6.7 / §1 的 **Apple ↔ Windows/Android/Linux 的 “WebRTC DataChannel MVP 互通路径” 目前尚未接线**：
-> WebRTC 子系统没有任何调用进入远程控制主机（`RemoteControlManager` / `RemoteControlServer`）。
-> Windows/Android/Linux 的 MsQuic / Quinn / Wi-Fi Aware / Avahi 原生栈同样为目标设计，尚无构建目标。
-> 因此非 Apple 设备目前**既不能被 Mac 控制、也不能控制 Mac**。落地顺序见 `ROADMAP.md`。
+> **Decision amendment (2026-09-13):** [ADR-0003](ADR-0003-Native-Runtimes-and-Operator-Contract.md)
+> supersedes this ADR's former requirement for an Android Rust protocol core.
+> Android keeps its Kotlin protocol/runtime modules and existing JNI providers;
+> shared wire, identity, authorization and completion contracts remain mandatory.
+> Language selection is independent of desktop CLI implementation. Linux remains
+> in this historical transport matrix but is outside the current CLI workstream.
+
+> **实现范围复核（2026-09-08）**：本 ADR 的传输矩阵是目标架构，不是已发布功能清单。
+> 2026-06-16 的“仅实现 Apple 对端、WebRTC 未进入远控主机”快照已经过时。
+> 当前构建入口和模块边界见 [README](../README.md) 与 [CoreLayering](CoreLayering.md)；
+> 各端远控角色及已实现限制见 [共享观看与输入权](RemoteControl-SharedViewing.md)。
+> 共享远控的身份、批准和会话所有权由 [ADR-0002](ADR-0002-Remote-Control-Authority-and-Sessions.md) 细化。
+> 平台代码、成功构建、已安装候选和真机互通是分别验收的状态，不能相互替代。
 
 ---
 
@@ -26,13 +38,14 @@ The platform-specific best practices are:
 |---|---|---|
 | Apple ↔ Apple | Apple native path: Network.framework, Bonjour, peer-to-peer where available, QUIC/UDP primary, TCP fallback | Fallback only, not default |
 | Windows ↔ Windows | Windows native path: Windows DNS-SD/mDNS discovery, MsQuic transport, Rust core, Windows crypto/provider integration, ETW/EventSource diagnostics | Cross-NAT fallback and interop option |
-| Android ↔ Android | Android native path: Kotlin app layer, Rust core, Wi-Fi Aware when available, Android NSD/DNS-SD on LAN, QUIC over selected Android `Network` | Cross-NAT fallback and interop option |
+| Android ↔ Android | Kotlin app and protocol/runtime modules; Android NSD/DNS-SD on LAN; authenticated native fast paths after capability and performance validation | Existing interop path; native alternatives require measured acceptance |
 | Linux ↔ Linux | Linux native path: Rust core, Avahi DNS-SD/mDNS discovery, Rust-native QUIC or MsQuic provider, systemd/journal diagnostics | Cross-NAT fallback and interop option |
 | Windows ↔ Linux | SkyBridge native QUIC interop over compatible ALPN/cipher policy | Fallback if native QUIC path fails |
 | Android ↔ Windows/Linux | SkyBridge native QUIC interop when Android network binding succeeds | Fallback if native QUIC path fails |
-| Apple ↔ Windows/Android/Linux | SkyBridge interop path: WebRTC DataChannel + ICE/STUN/TURN for MVP; future SkyBridge native QUIC interop where both sides support it | Primary practical MVP interop path |
+| Apple ↔ Windows/Android/Linux | Preserve compatible SkyBridge LAN paths; WebRTC DataChannel + ICE/STUN/TURN for cross-NAT MVP; native QUIC when implemented and validated on both sides | Cross-NAT MVP interop adapter |
 
-All paths must run above a shared SkyBridge Core overlay layer:
+All paths must implement the same SkyBridge overlay contracts. Shared contracts
+do not require one implementation language or one process runtime:
 
 - device identity
 - pairing ceremony
@@ -82,15 +95,16 @@ The paper can later be updated to reflect the architecture after implementation 
 
 ### 2.3 Current Implemented Build Scope
 
-The current repository build entry is macOS. The core protocol layer contains iOS-specific code paths guarded by `#if os(iOS)` and `@available(iOS ...)`, but Windows, Android, and Linux are architectural targets rather than current implemented build targets.
+The root SwiftPM application build entry is macOS. The iOS client has its own Xcode project in `SkyBridge Compass iOS/`; migrated protocol contracts are consumed through the shared `SkyBridgeProtocolCore` product. Windows, Android, and Linux platform work is not a target of the root macOS SwiftPM application build. Its implementation and validation must be recorded against each platform's own entry point and artifact.
 
 Required wording discipline:
 
 ```text
-Current implemented build entry: macOS
-Current portable code paths: iOS/macOS inside SkyBridgeCore
-Architecture targets in this ADR: Windows, Android, Linux
-Do not present Windows/Android/Linux as already included in the current build or artifact until implemented, tested, and documented separately.
+Root application build entry: macOS SwiftPM
+iOS application build entry: SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj
+Shared Apple protocol product: SkyBridgeProtocolCore; remaining adapters are platform-specific
+Platform implementation or device presence does not establish cross-platform acceptance.
+Validate Windows/Android/Linux using their own build entry and exact installed artifact.
 ```
 
 The current README lists the practical build environment as:
@@ -98,11 +112,13 @@ The current README lists the practical build environment as:
 ```text
 macOS 14+
 Apple Silicon arm64 Mac
-Xcode 26.2+
-Swift 6.2+
+Xcode 26.5 stable release baseline
+Swift 6.3+
 ```
 
 Because the vendored XCFrameworks are arm64-only, Intel x86_64 Macs are out of scope for the current Apple build.
+
+Xcode 27 beta is a separate manual compatibility lane. It does not replace the stable release toolchain or establish release/notarization readiness. The executable toolchain checks and the README own the exact supported Xcode build and SDK requirements.
 
 ### 2.4 Apple PQC Compile-Time Gate
 
@@ -198,7 +214,7 @@ Architecture work must preserve:
 These are architectural constraints, not implementation suggestions:
 
 1. **Linux Core is Rust.** Linux UI is replaceable; Linux protocol, transport, routing, crypto-provider glue, SBP2, and audit logic are Rust.
-2. **Android application stack is Kotlin.** Android UI/service orchestration is Kotlin, preferably with Jetpack Compose for UI. SkyBridge protocol core is Rust and is exposed to Kotlin through JNI or UniFFI.
+2. **Android application and protocol/runtime stack is Kotlin.** Retain the existing Kotlin modules and JNI crypto/provider boundary. Do not introduce a second SkyBridge Rust protocol/runtime solely for language uniformity; compatibility and architecture reassessment follow ADR-0003.
 3. **Windows UI shell is WinUI 3 / Windows App SDK.** .NET 10 is appropriate for the app shell, settings, diagnostics, and selected Windows crypto access. The SkyBridge protocol core remains Rust.
 4. **Apple keeps Swift/Network.framework.** Apple-native behavior must not be weakened for cross-platform convenience.
 5. **WebRTC is not the architecture.** It is an interop and NAT-traversal adapter.
@@ -210,11 +226,13 @@ These are architectural constraints, not implementation suggestions:
 
 This ADR uses a stable-first baseline. Preview and experimental APIs are allowed only behind feature flags.
 
+The table records technology choices, not a continuously updated dependency lockfile. Current versions come from each platform's manifests, lockfiles and validated toolchain receipts. A version update requires compatibility and runtime evidence; editing this table alone does not upgrade an implementation.
+
 | Platform | UI / Shell | Core | Native Discovery | Native Transport | Crypto Provider Baseline | Diagnostics |
 |---|---|---|---|---|---|---|
 | Apple | SwiftUI / AppKit / UIKit | Swift `SkyBridgeCore` | Bonjour / Network.framework | Network.framework QUIC/UDP primary, TCP fallback | CryptoKit / Secure Enclave / liboqs fallback as configured | OSLog / Instruments |
 | Windows | WinUI 3 on Windows App SDK; .NET 10 app shell | Rust core via C ABI / PInvoke / generated bindings | Windows DNS-SD/mDNS | MsQuic 2.5+; ALPN `skybridge-sbq/1` | .NET 10/CNG PQC when supported; OpenSSL/liboqs/Rust provider fallback | ETW / EventSource / structured logs |
-| Android | Kotlin + Jetpack Compose app shell | Rust core via JNI or UniFFI | Wi-Fi Aware; Android NSD/DNS-SD; Wi-Fi Direct only as compatibility fallback | Wi-Fi Aware data path + SkyBridge QUIC; LAN QUIC over selected Android `Network`; WebRTC for NAT/interop | Android Keystore for identity protection; Rust/liboqs/BouncyCastle provider for PQC until platform PQC APIs are available | logcat / Perfetto / structured events |
+| Android | Kotlin + Jetpack Compose | Kotlin protocol/runtime modules with narrow JNI providers | Android NSD/DNS-SD; Wi-Fi Aware/Direct candidates subject to runtime and performance validation | Existing compatible LAN/WebRTC paths; authenticated peer-family fast paths after acceptance | Android Keystore and existing native PQC providers, including the accepted Q-Periapt ABI2 boundary | logcat / Perfetto / structured events |
 | Linux | Qt 6/QML default; GTK4/libadwaita optional GNOME build | Rust core | Avahi DNS-SD/mDNS via D-Bus; mDNSResponder optional fallback | Quinn/rustls QUIC default; MsQuic provider optional for parity/perf; ALPN `skybridge-sbq/1` | OpenSSL provider where available; liboqs/oqs-provider/Rust provider fallback; TPM2/FIDO2 optional identity binding | systemd journal / tracing / perf/eBPF optional |
 
 Rationale:
@@ -222,7 +240,7 @@ Rationale:
 - Windows App SDK and WinUI 3 are the modern Windows desktop direction. WinUI is the app shell; the SkyBridge core remains Rust.
 - .NET 10 has platform-facing PQC APIs, but SkyBridge must keep provider abstraction because algorithm availability is system-dependent.
 - MsQuic remains the Windows-native high-performance QUIC choice and is also useful on Linux where parity or throughput matters.
-- Android is Kotlin at the application layer. Compose is the default UI choice; Rust owns protocol-critical code through JNI/UniFFI.
+- Android is Kotlin at the application and protocol/runtime layers. Compose owns UI; JNI is reserved for existing native providers and measured needs, not a duplicate SkyBridge runtime.
 - Android's native peer-to-peer path is tiered: Wi-Fi Aware for nearby direct connectivity, NSD/DNS-SD for LAN discovery, WebRTC for NAT traversal and mixed-platform fallback.
 - Linux is Rust-first. UI toolkit is not protocol architecture. Qt 6/QML is the broad desktop default; GTK4/libadwaita can be a GNOME-targeted build.
 - Linux should use Avahi for native DNS-SD/mDNS and Quinn/rustls for Rust-native QUIC by default. MsQuic can remain an optional provider.
@@ -327,29 +345,29 @@ MsQuic                    = native same-LAN and managed-network transport
 
 ### 6.3 Android ↔ Android
 
-Default path:
+Accepted baseline and candidate optimizations:
 
 ```text
 Application:      Kotlin + Jetpack Compose
-Core:             Rust via JNI or UniFFI
-Discovery tier 1: Android Wi-Fi Aware publish/subscribe when supported and available
-Discovery tier 2: Android NSD / DNS-SD on LAN
-Discovery tier 3: Wi-Fi Direct service discovery only as compatibility fallback
-Transport tier 1: AndroidNativeAwareTransport using Wi-Fi Aware data path + SkyBridge QUIC
-Transport tier 2: AndroidLanQuicTransport using DNS-SD endpoint + QUIC over selected Android Network
-Transport tier 3: WebRTCInteropTransport for cross-NAT or restricted networks
-Crypto:          Android Keystore for identity protection where compatible; Rust/liboqs/BouncyCastle provider for PQC
+Core:             Existing Kotlin protocol/runtime modules; narrow JNI providers
+LAN discovery:    Android NSD / DNS-SD
+LAN baseline:     Existing compatible authenticated LAN paths
+Cross-NAT:        Existing WebRTC interop path
+Nearby candidates: Wi-Fi Aware / Wi-Fi Direct after capability and lifecycle checks
+Fast-path candidates: QUIC over selected Network / Aware, only after measured acceptance
+Crypto:          Android Keystore and existing native PQC provider boundary
 Diagnostics:     logcat / Perfetto / structured SkyBridge events
 ```
 
-Android ↔ Android must not be treated as generic WebRTC by default. Android has a native nearby-device model, but it is capability-sensitive:
+Preserve the accepted Android-compatible LAN/WebRTC paths. Native nearby paths
+are candidates, not an instruction to replace working transports without evidence:
 
-- Wi-Fi Aware is preferred for nearby direct discovery and data path when runtime checks pass.
+- Wi-Fi Aware may be selected after runtime, peer capability, lifecycle and measured performance checks pass.
 - NSD/DNS-SD is preferred for normal LAN discovery.
 - Wi-Fi Direct is kept as an explicit fallback because user authorization, group formation, and multi-group behavior complicate autonomous SkyBridge routing.
 - Nearby Connections / Google Play services may be used only as optional pairing/bootstrap UX, not as the SkyBridge default transport owner.
 - Kotlin owns UI, lifecycle, permissions, foreground services, notifications, and Android integration.
-- Rust owns protocol framing, handshake, crypto-provider glue, SBP2, transport adapters, routing, and audit events.
+- Existing Kotlin modules own framing, handshake, provider orchestration, routing and audit. Shared test vectors and directional interop tests enforce the cross-platform contract.
 
 ### 6.4 Linux ↔ Linux
 
@@ -403,12 +421,12 @@ Default nearby Android path is still Android-native for Android ↔ Android. Mix
 
 ### 6.7 Apple ↔ Windows/Android/Linux
 
-> **实现状态：未接线（2026-06-16）。** 下述 MVP 路径是目标设计。代码中 WebRTC（`CrossNetworkConnectionManager`）
-> 没有任何路径进入远程控制主机（`RemoteControlManager` / `RemoteControlServer`），主机握手只解析
-> 已登记的 `TrustRecord`（Apple 对端）。要让非 Apple 客户端真正驱动 Mac，需要先实现“非 Apple 入站契约”
-> （标准协议主机或 WebRTC media-track + 标准输入协议 + 信任登记路径）——属于 ROADMAP 后续阶段，非当前可用能力。
+> **路径适用边界（2026-09-08）**：下述 WebRTC 路径描述跨 NAT 的互通适配方向。
+> 它不要求把已经实现的兼容 LAN 连接强制切换到 WebRTC，也不允许为了增加一个平台而建立第二套信任或输入协议。
+> 现有 LAN 远控继续复用 SkyBridge 的身份绑定、签名 KEM 刷新、握手和控制消息。
+> 新增平台应对齐成熟的 Mac/iOS 契约，并按 [ADR-0002](ADR-0002-Remote-Control-Authority-and-Sessions.md) 核对端能力、会话和输入权。
 
-Default MVP path:
+Cross-NAT MVP path:
 
 ```text
 Discovery local:       DNS-SD / Bonjour-compatible records
@@ -462,50 +480,15 @@ Output:
 - selected channel profile
 - audit reason
 
-Recommended selector:
+Selection requirements:
 
-```swift
-func selectTransport(local: PeerCaps, remote: PeerCaps, path: NetworkPath) -> TransportPlan {
-    if local.isApple && remote.isApple && remote.supports("apple-native") {
-        return .appleNative(priority: 100)
-    }
+1. Admit only implemented adapters supported by both peers and allowed by current security, permission and path policy.
+2. Preserve a compatible current LAN path before choosing a cross-NAT adapter. Platform names alone do not determine interoperability.
+3. Select the native QUIC/Aware adapters below when their implementation and capability gates are satisfied; otherwise use an explicitly permitted existing adapter.
+4. Use WebRTC/relay for the applicable NAT path while retaining the same SkyBridge identity, handshake and input authorization contract.
+5. Return an explicit unsupported or failed result when no allowed plan exists. A timeout or trust rejection is not permission to lower the crypto policy.
 
-    if local.isWindows && remote.isWindows && path.isLocal && remote.supports("msquic") {
-        return .windowsNativeMsQuic(priority: 100)
-    }
-
-    if local.isAndroid && remote.isAndroid &&
-       path.isNearby &&
-       local.supports("wifi-aware") &&
-       remote.supports("wifi-aware") {
-        return .androidNativeAware(priority: 100)
-    }
-
-    if local.isAndroid && remote.isAndroid && path.isLocal && remote.supports("android-lan-quic") {
-        return .androidLanQuic(priority: 90)
-    }
-
-    if local.isLinux && remote.isLinux && path.isLocal && remote.supports("linux-native-quic") {
-        return .linuxNativeQuic(priority: 100)
-    }
-
-    if local.supports("skybridge-native-quic") &&
-       remote.supports("skybridge-native-quic") &&
-       path.isLocalOrManaged {
-        return .skyBridgeNativeQuicInterop(priority: 85)
-    }
-
-    if remote.supports("webrtc-dc") {
-        return .webRTCDataChannel(priority: 70)
-    }
-
-    if remote.supports("tcp-fallback") && path.isLocal {
-        return .tcpFallback(priority: 40)
-    }
-
-    return .unsupported(reason: "No compatible transport")
-}
-```
+The transport names and priorities in this ADR describe architecture targets. Concrete selectors use the repository's existing capability definitions; this document does not allocate new wire capability strings.
 
 Priority table:
 
@@ -523,7 +506,7 @@ Priority table:
 | Linux ↔ Linux | No | No | Yes | WebRTCInteropTransport / RelayTransport |
 | Windows ↔ Linux | Yes | No | Optional | SkyBridgeNativeQuicInteropTransport |
 | Android ↔ Windows/Linux | Yes | Optional | Optional | SkyBridgeNativeQuicInteropTransport if Network binding succeeds; otherwise WebRTC |
-| Apple ↔ Windows/Android/Linux | Yes | Optional | Optional | MVP: WebRTCInteropTransport; future: native QUIC interop |
+| Apple ↔ Windows/Android/Linux | Yes | Optional | Optional | Compatible current LAN adapter; cross-NAT WebRTC; native QUIC after validation |
 | Any ↔ Any | No | No | Yes | WebRTCInteropTransport + TURN fallback |
 
 ---
@@ -651,7 +634,7 @@ Windows:
 
 Android:
   1. Android Keystore for identity/private-key protection where compatible
-  2. Rust/liboqs provider for ML-KEM/ML-DSA/X-Wing compatibility
+  2. Existing JNI native providers for ML-KEM/ML-DSA/X-Wing and accepted Q-Periapt ABI2
   3. BouncyCastle provider where JVM-side compatibility is needed
   4. classic X25519/Ed25519 fallback with explicit audit
 
@@ -697,7 +680,7 @@ Requirements:
 - Apply to selected control/framed payloads after handshake policy decides it is enabled.
 - Unwrap before decode/decrypt where appropriate.
 - Record padding statistics for benchmarking and audit.
-- Keep format identical across Swift, Rust, and any Kotlin-facing wrapper.
+- Keep the applicable wire format identical across Swift, Rust and Kotlin implementations.
 - Preserve existing SBP2 sensitivity and date-locking logic when benchmark artifacts are regenerated.
 
 ---
@@ -745,32 +728,16 @@ android/
     // Kotlin + Jetpack Compose
     // lifecycle, permissions, foreground service, notifications, settings
 
-  native/
-    skybridge-core-rs/
-      crates/
-        skybridge-protocol/
-        skybridge-transport-android-aware/
-        skybridge-transport-android-quic/
-        skybridge-transport-webrtc/
-        skybridge-discovery-android/
-        skybridge-crypto-android/
-        skybridge-routing/
-        skybridge-ffi-uniffi-or-jni/
+  shared/             // wire, handshake and native provider/JNI boundary
+  core/               // networking, signaling and protocol orchestration
+  device-discovery/   // Android discovery integration
+  file-transfer/      // transfer lifecycle, persistence and receipts
+  remote-control/     // Android roles and permission/lifecycle integration
 ```
 
-Kotlin boundary:
-
-```kotlin
-SkyBridgeCore.startDiscovery()
-SkyBridgeCore.stopDiscovery()
-SkyBridgeCore.connectPeer(peerId)
-SkyBridgeCore.connectWithCode(code)
-SkyBridgeCore.observeEvents(): Flow<SkyBridgeEvent>
-SkyBridgeCore.sendControl(...)
-SkyBridgeCore.sendFile(...)
-```
-
-Kotlin owns Android UX and OS integration. Rust owns protocol correctness.
+Kotlin owns Android UX, OS integration and protocol/runtime orchestration.
+Native provider code stays behind the existing JNI boundary. Protocol correctness
+is established by contracts and tests, independent of implementation language.
 
 ### 13.3 Linux
 
@@ -808,7 +775,7 @@ Linux packaging targets:
 
 ## 14. macOS/iOS Refactor Scope
 
-The mature macOS/iOS path should be modified only to clarify boundaries and prepare for multi-transport selection.
+The mature macOS/iOS path remains the reference contract. Changes may repair verified correctness, security and lifecycle defects or clarify transport boundaries; they must preserve wire compatibility and platform capability limits. Shared-control authority and failure semantics are specified in [ADR-0002](ADR-0002-Remote-Control-Authority-and-Sessions.md).
 
 Expected changes:
 
@@ -942,7 +909,7 @@ Minimal signaling messages:
 ### Phase 4: Android Native MVP
 
 - Create Kotlin + Jetpack Compose app shell.
-- Expose Rust core through JNI or UniFFI.
+- Preserve the Kotlin protocol/runtime modules and existing JNI providers; enforce shared wire and directional interop tests.
 - Implement Android NSD/DNS-SD LAN discovery.
 - Implement QUIC over selected Android `Network`.
 - Add Wi-Fi Aware publish/subscribe and data path where available.
@@ -991,23 +958,24 @@ Required tests:
 | Android LAN | Android ↔ Android same LAN selects AndroidLanQuicTransport when Wi-Fi Aware unavailable |
 | Linux native | Linux ↔ Linux same LAN selects LinuxNativeQuicTransport |
 | Desktop interop | Windows ↔ Linux same LAN selects SkyBridgeNativeQuicInteropTransport |
-| Interop | Apple ↔ Windows/Android/Linux selects WebRTCInteropTransport for MVP |
+| Interop | Compatible LAN paths retain the shared SkyBridge contract; cross-NAT WebRTC interop is validated separately |
 | Signaling deploy | `/api/turn/credentials` smoke test passes in deploy scripts |
 | Fallback | TURN relay use emits audit/metrics |
 | Network labeling | CGNAT/DS-Lite, IPv6 direct, overlay, relay, and direct paths are labeled distinctly |
 | Security | timeout does not trigger crypto downgrade |
 | Suite negotiation | offered suites come from provider support |
 | Forward compatibility | unknown suite ID is rejected safely |
-| SBP2 | Swift, Rust, and Kotlin-facing wrapper test vectors match |
+| SBP2 | Swift, Rust and Kotlin test vectors match for the negotiated format |
 | Channel mapping | control/file/telemetry map to distinct transport channels |
 | Transport binding | transcript changes if selected transport changes |
+| Shared remote control | ADR-0002 identity, observer/input-owner, cancellation and exact-session acceptance gates pass |
 
 Acceptance criteria:
 
 - Mac/iOS behavior is not degraded by Windows/Android/Linux changes.
 - The ADR does not depend on stale paper claims.
 - Windows has a native same-LAN path independent of WebRTC.
-- Android has a Kotlin app stack and a Rust protocol core.
+- Android has a Kotlin app/protocol stack with shared-contract conformance and explicit native provider boundaries.
 - Android has native nearby/LAN paths independent of WebRTC where available.
 - Linux has a Rust core and native Avahi/QUIC path independent of WebRTC.
 - WebRTC is present for interop and NAT traversal.
@@ -1035,7 +1003,7 @@ This ADR does decide:
 
 - WebRTC is not the architectural center.
 - Windows ↔ Windows needs a native MsQuic path.
-- Android ↔ Android needs a Kotlin app stack and native nearby/LAN paths backed by Rust core.
+- Android ↔ Android retains Kotlin protocol/runtime ownership; nearby/LAN optimizations require authenticated capability selection and measured acceptance.
 - Linux ↔ Linux needs a Rust core and native Avahi/QUIC path.
 - Apple ↔ Apple keeps Apple native best practice.
 - SkyBridge Core owns protocol/security/channel semantics.
@@ -1046,7 +1014,9 @@ This ADR does decide:
 
 ## 19. Repository Impact
 
-Likely files/directories to add:
+Logical platform responsibilities below are a layout sketch, not permission to
+create parallel implementations. Use each platform's existing source tree and
+the ownership recorded in ADR-0003:
 
 ```text
 Docs/ADR-0001-SkyBridge-Core-Transport-Matrix.md
@@ -1056,7 +1026,11 @@ Sources/SkyBridgeCore/Routing/
 windows/SkyBridge.Compass.WinUI/
 windows/native/skybridge-core-rs/
 android/app/
-android/native/skybridge-core-rs/
+android/shared/
+android/core/
+android/device-discovery/
+android/file-transfer/
+android/remote-control/
 linux/ui-qt/
 linux/ui-gtk/
 linux/daemon/
@@ -1101,7 +1075,7 @@ Special note:
 
 SkyBridge should evolve into a self-owned secure collaboration overlay protocol.
 
-Apple ↔ Apple should keep Apple-native best practices. Windows ↔ Windows should use Windows-native best practices. Android ↔ Android should use a Kotlin app stack with native Android discovery/connectivity and Rust protocol core. Linux ↔ Linux should use a Rust core with Avahi discovery and Rust-native QUIC by default. Mixed-platform sessions should use WebRTC/ICE as the practical interop path for MVP, with SkyBridge native QUIC interop as the longer-term target.
+Apple ↔ Apple should keep Apple-native best practices. Windows ↔ Windows should use Windows-native best practices. Android ↔ Android keeps Kotlin application and protocol/runtime modules with native Android discovery/connectivity and existing JNI providers. Linux's Rust/Avahi/QUIC architecture remains a separate deferred workstream. Mixed-platform sessions preserve compatible implemented LAN paths and use WebRTC/ICE for applicable NAT interop; native QUIC remains subject to implementation and validation on both peers.
 
 All combinations must share SkyBridge Core identity, handshake, PQC/classic negotiation, channel semantics, padding, audit, and transport selection.
 

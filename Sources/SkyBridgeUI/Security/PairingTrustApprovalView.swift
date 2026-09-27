@@ -217,9 +217,12 @@ public struct PairingTrustApprovalSheet: View {
         return "该申请用于建立/更新 PQC 引导所需的 KEM 身份公钥信任信息。选择“始终允许”会记住该设备。"
     }
 
-    private var completionText: String {
-        if service.pendingResolutionNotice != nil {
-            return "协议身份已为本次连接完成确认；永久允许策略未保存，下次仍需再次核对。"
+    var completionText: String {
+        if let notice = service.pendingResolutionNotice {
+            return notice
+        }
+        if service.pendingDecision == .reject {
+            return "协议身份授权已拒绝，连接不会继续。"
         }
         if service.pendingVerificationSuite == "PIB-1-v3-candidate" {
             return "候选身份尚未获得授权。请在另一端显示同一验证码并批准；收到签名确认后，本机还会要求你显式批准，之后才会写入信任。"

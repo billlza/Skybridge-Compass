@@ -130,6 +130,40 @@ struct CodablePersistenceStore<Value: Codable>: @unchecked Sendable {
 
     func save(_ value: Value) throws {
         let data = try encoder.encode(value)
+        try saveValidatedData(data)
+    }
+
+    /// A read-only snapshot for recovery/audit. Unlike loadOrThrow, this never
+    /// migrates a legacy value or removes it from UserDefaults.
+    func rawSnapshotOrThrow() throws -> Data? {
+        let data: Data?
+        switch location {
+        case let .userDefaults(key): data = defaults.data(forKey: key)
+        case let .protectedApplicationSupport(path, legacyKey):
+            let url = try resolvedURL(for: path)
+            if fileManager.fileExists(atPath: url.path) {
+                if let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                    try validatePayloadSize(size)
+                }
+                data = try Data(contentsOf: url)
+            } else {
+                data = legacyKey.flatMap { defaults.data(forKey: $0) }
+            }
+        }
+        if let data { try validatePayloadSize(data.count) }
+        return data
+    }
+
+    /// Preserve unrecognized JSON fields during a scoped recovery. The complete
+    /// replacement must still decode as this store's normal value type, and uses
+    /// the same protected, atomic writer as save(_:).
+    func saveRawSnapshot(_ data: Data) throws {
+        try validatePayloadSize(data.count)
+        _ = try decoder.decode(Value.self, from: data)
+        try saveValidatedData(data)
+    }
+
+    private func saveValidatedData(_ data: Data) throws {
         try validatePayloadSize(data.count)
 
         switch location {

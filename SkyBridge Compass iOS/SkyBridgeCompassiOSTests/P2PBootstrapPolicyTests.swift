@@ -5,6 +5,31 @@ import enum SkyBridgeProtocolCore.BonjourInteropProtocolContract
 import enum SkyBridgeProtocolCore.P2PProtocolIdentityBindingAdmissionPolicy
 @testable import SkyBridgeCompass_iOS
 
+@MainActor
+@available(iOS 17.0, *)
+final class USBProtocolIdentityAdmissionTests: XCTestCase {
+    func testSignedUSBDiscoveryUsesBoundedBootstrapAdmission() throws {
+        let request = AppMessage.usbPeerDiscoveryRequest(try .init())
+        let decoded = try AppMessage.decodeWireMessage(from: JSONEncoder().encode(request))
+        XCTAssertEqual(P2PConnectionManager.inboundBootstrapAdmissionStage(for: decoded), .bootstrapCrypto)
+        XCTAssertNil(P2PConnectionManager.inboundBootstrapAdmissionStage(for: .ping(.init(id: 1))))
+        XCTAssertNil(P2PConnectionManager.inboundBootstrapAdmissionStage(for: nil))
+    }
+
+    func testLocalSocketDoesNotAuthorizeSelfIdentityOrReplaceSignatureChecks() {
+        let local = "A1B2C3D4-2222-3333-4444-555555555555"
+        let remote = "B1B2C3D4-2222-3333-4444-555555555555"
+        func rejected(_ requester: String, _ fingerprint: String) -> Bool {
+            P2PConnectionManager.rejectsLocalProtocolRequester(requesterID: requester,
+                requesterFingerprint: fingerprint, localID: local,
+                localAliases: ["id:\(local.lowercased())"], localFingerprint: String(repeating: "a", count: 64))
+        }
+        XCTAssertTrue(rejected("id:\(local.lowercased())", String(repeating: "b", count: 64)))
+        XCTAssertTrue(rejected(remote, String(repeating: "a", count: 64)))
+        XCTAssertFalse(rejected(remote, String(repeating: "b", count: 64)))
+    }
+}
+
 @available(iOS 17.0, *)
 final class AppMessageStrictDecodingTests: XCTestCase {
     private let message = AppMessage.textMessage(
@@ -3938,25 +3963,25 @@ final class P2PBootstrapRekeyTargetTests: XCTestCase {
 
     func testPairingIdentityBootstrapReadinessRequiresExactObservationAndTrustMaterial() {
         XCTAssertFalse(
-            P2PConnectionManager.isPairingIdentityBootstrapReady(
+            P2PPairingIdentityBootstrapCoordinator.isPairingIdentityBootstrapReady(
                 hasCurrentSessionObservation: false,
                 hasStrictPQCTrustMaterial: false
             )
         )
         XCTAssertFalse(
-            P2PConnectionManager.isPairingIdentityBootstrapReady(
+            P2PPairingIdentityBootstrapCoordinator.isPairingIdentityBootstrapReady(
                 hasCurrentSessionObservation: true,
                 hasStrictPQCTrustMaterial: false
             )
         )
         XCTAssertFalse(
-            P2PConnectionManager.isPairingIdentityBootstrapReady(
+            P2PPairingIdentityBootstrapCoordinator.isPairingIdentityBootstrapReady(
                 hasCurrentSessionObservation: false,
                 hasStrictPQCTrustMaterial: true
             )
         )
         XCTAssertTrue(
-            P2PConnectionManager.isPairingIdentityBootstrapReady(
+            P2PPairingIdentityBootstrapCoordinator.isPairingIdentityBootstrapReady(
                 hasCurrentSessionObservation: true,
                 hasStrictPQCTrustMaterial: true
             )
@@ -4112,16 +4137,21 @@ final class P2PBootstrapRekeyTargetTests: XCTestCase {
             )
         )
         let body = String(source[start.lowerBound..<end.lowerBound])
-        let existingObservation = try XCTUnwrap(body.range(of: "since: .distantPast"))
-        let strictTrust = try XCTUnwrap(
-            body.range(of: "await hasStrictPQCTrustBootstrapMaterial(for: observation)")
+        XCTAssertTrue(body.contains("since: .distantPast"))
+        XCTAssertTrue(body.contains("expectedConnectionGeneration: current.receipt.lease.generation"))
+        XCTAssertTrue(body.contains("expectedSessionId: current.receipt.sessionId"))
+        XCTAssertTrue(body.contains("hasStrictPQCTrustBootstrapMaterial(for: $0)"))
+        XCTAssertTrue(body.contains("requireCurrentAuthenticatedConnection(current.receipt)"))
+        let coordinator = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/P2P/P2PPairingIdentityBootstrapCoordinator.swift"
         )
-        let send = try XCTUnwrap(
-            body.range(of: "let sendOutcome = try await sendPairingIdentityExchange(")
-        )
-
+        let existingObservation = try XCTUnwrap(coordinator.range(of: "let observation = operations.observe()"))
+        let strictTrust = try XCTUnwrap(coordinator.range(of: "await operations.hasStrictMaterial(observation)"))
+        let receipt = try XCTUnwrap(coordinator.range(of: "try operations.makeCurrentReceipt(observation)"))
+        let send = try XCTUnwrap(coordinator.range(of: "try await operations.sendIdentityExchange()"))
         XCTAssertLessThan(existingObservation.lowerBound, strictTrust.lowerBound)
-        XCTAssertLessThan(strictTrust.lowerBound, send.lowerBound)
+        XCTAssertLessThan(strictTrust.lowerBound, receipt.lowerBound)
+        XCTAssertLessThan(receipt.lowerBound, send.lowerBound)
         XCTAssertTrue(body.contains("case .journalBusy:"))
         XCTAssertTrue(body.contains("case .current:"))
     }
@@ -4232,6 +4262,18 @@ final class P2PBootstrapRekeyTargetTests: XCTestCase {
                 preferredTargetSuite: .mlkem768fs
             )
         )
+    }
+
+    func testQAndXWingRequireDifferentKEMIdentityMaterial() {
+        XCTAssertFalse(P2PConnectionManager.suiteSupportsTargetKEM(
+            .xwing, target: .qperiaptABI2PolicyBound
+        ))
+        XCTAssertFalse(P2PConnectionManager.suiteSupportsTargetKEM(
+            .qperiaptABI2PolicyBound, target: .xwing
+        ))
+        XCTAssertTrue(P2PConnectionManager.suiteSupportsTargetKEM(
+            .qperiaptABI2PolicyBound, target: .qperiaptABI2PolicyBound
+        ))
     }
 
     func testSuiteSupportsTargetKEMTreatsFSAndCanonicalMLKEMAsEquivalent() {

@@ -15,8 +15,9 @@ skybridge-agent = { path = "../skybridge-agent" }
 skybridge-core = { path = "../skybridge-core" }
 skybridge-crossnet-client = { path = "../skybridge-crossnet-client" }
 time.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["process"] }
 url.workspace = true
+uuid.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Pipes"] }

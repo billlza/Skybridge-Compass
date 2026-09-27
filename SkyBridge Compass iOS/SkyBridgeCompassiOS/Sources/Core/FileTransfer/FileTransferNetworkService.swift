@@ -1048,7 +1048,7 @@ public actor FileTransferNetworkService {
             return .success(header)
         case .resumeRequest:
             return .failure(.unsupportedResumeRequest)
-        case .chunk, .complete, .receipt, .resumeAck, .unknown:
+        case .chunk, .complete, .receipt, .resumeAck, .approval, .unknown:
             return .failure(.unexpectedInitialMessage)
         }
     }

@@ -126,6 +126,11 @@ final class WebRTCInboundFileTransferReceiver {
 
     @discardableResult
     func cleanupOnChannelClosed() -> Task<Void, Never> {
+        // Include finalizing transfers: cancelling a worker cannot preempt a
+        // synchronous filesystem publication already running on the I/O actor.
+        for state in transfers.values {
+            state.ioHandle.revokePublication()
+        }
         lifecycleToken = UUID()
         acceptsQueuedInboundOperations = false
         let queuedOperations = queuedInboundOperationsByTransferID.values.flatMap { $0 }
@@ -675,6 +680,28 @@ final class WebRTCInboundFileTransferReceiver {
             )
         }
 
+        let destination: InboundFileTransferDestinationCapability
+        do {
+            destination = try await ioActor.prepareDestinationDirectory(at: baseDirectory)
+        } catch is CancellationError {
+            return
+        } catch {
+            logger.error("WebRTC inbound destination selection failed: \(error.localizedDescription, privacy: .public)")
+            try await sendMessage(
+                CrossNetworkFileTransferMessage(op: .error, transferId: message.transferId,
+                                               message: "Inbound destination unavailable"),
+                "tx/webrtc-ft-error"
+            )
+            return
+        }
+        try Task.checkCancellation()
+        guard !cancelledTransportOperationIDs.contains(transportOperationID),
+              lifecycleToken == expectedLifecycleToken,
+              pendingAdmissions[message.transferId]?.token == admissionToken,
+              normalizedSenderAuthority(for: sessionID) == senderAuthority else {
+            return
+        }
+
         let approvalRequest = WebRTCInboundFileTransferApprovalRequest(
             transferId: message.transferId,
             fileName: fileName,
@@ -714,7 +741,8 @@ final class WebRTCInboundFileTransferReceiver {
         do {
             ioHandle = try await ioActor.createTemporaryFile(
                 at: tempURL,
-                declaredFileSize: fileSize
+                declaredFileSize: fileSize,
+                destination: destination
             )
         } catch is CancellationError {
             return
@@ -1311,11 +1339,10 @@ final class WebRTCInboundFileTransferReceiver {
             return
         }
 
-        let savedURL: URL
+        let durableCommit: InboundFileTransferDurableCommitObservation
         do {
-            savedURL = try await ioActor.commit(
+            durableCommit = try await ioActor.commitToPreparedDestination(
                 using: state.ioHandle,
-                destinationDirectory: state.finalURL.deletingLastPathComponent(),
                 fileName: state.fileName
             )
         } catch is CancellationError {
@@ -1400,7 +1427,7 @@ final class WebRTCInboundFileTransferReceiver {
 
         FileTransferManager.shared.completeExternalInboundTransfer(
             token: state.presentationToken,
-            savedTo: savedURL,
+            savedTo: durableCommit.destinationURL,
             receiptDeliveryStatus: receiptDeliveryStatus,
             operationalWarning: operationalWarning
         )

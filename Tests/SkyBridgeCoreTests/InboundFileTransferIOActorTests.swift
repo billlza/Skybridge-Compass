@@ -5,6 +5,390 @@ import XCTest
 
 @available(macOS 14.0, iOS 17.0, *)
 final class InboundFileTransferIOActorTests: XCTestCase {
+    func testCopiedHandleRevocationPreventsPublicationWithoutRevokingAnotherTransfer() async throws {
+        let directory = try makeDirectory()
+        defer { XCTAssertNoThrow(try FileManager.default.removeItem(at: directory)) }
+        let actor = InboundFileTransferIOActor(maxOpenTransfers: 2)
+        let payload = Data("publication ownership".utf8)
+        let revoked = try await actor.createTemporaryFile(
+            at: directory.appendingPathComponent("revoked.partial"), declaredFileSize: Int64(payload.count))
+        let surviving = try await actor.createTemporaryFile(
+            at: directory.appendingPathComponent("surviving.partial"), declaredFileSize: Int64(payload.count))
+        for handle in [revoked, surviving] {
+            _ = try await actor.write(payload, atOffset: 0, using: handle)
+            _ = try await actor.closeAndDigest(using: handle)
+        }
+        let copiedHandle = revoked
+        copiedHandle.revokePublication()
+        copiedHandle.revokePublication()
+        await XCTAssertThrowsErrorAsync(try await actor.commit(
+            using: revoked, destinationDirectory: directory, fileName: "revoked.bin")) {
+            XCTAssertTrue($0 is CancellationError)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("revoked.bin").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent("revoked.partial").path))
+        let committed = try await actor.commit(
+            using: surviving, destinationDirectory: directory, fileName: "surviving.bin")
+        XCTAssertEqual(try Data(contentsOf: committed), payload)
+        try await actor.discardUncommittedFile(revoked)
+        try await actor.releaseCommittedFile(using: surviving)
+        let count = await actor.activeTransferCount()
+        XCTAssertEqual(count, 0)
+    }
+
+    func testRevocationAfterPublicationDoesNotRollBackDurableCommit() async throws {
+        let directory = try makeDirectory()
+        defer { XCTAssertNoThrow(try FileManager.default.removeItem(at: directory)) }
+        let actor = InboundFileTransferIOActor(maxOpenTransfers: 1)
+        let payload = Data("already published".utf8)
+        let handle = try await actor.createTemporaryFile(
+            at: directory.appendingPathComponent("payload.partial"), declaredFileSize: Int64(payload.count))
+        _ = try await actor.write(payload, atOffset: 0, using: handle)
+        _ = try await actor.closeAndDigest(using: handle)
+        let committed = try await actor.commit(
+            using: handle, destinationDirectory: directory, fileName: "payload.bin")
+        handle.revokePublication()
+        try await actor.discardUncommittedFile(handle)
+        XCTAssertEqual(try Data(contentsOf: committed), payload)
+        let count = await actor.activeTransferCount()
+        XCTAssertEqual(count, 0)
+    }
+
+    func testPreparedDestinationCapacityFollowsActualTransferOwnership() async throws {
+        let root = try makeDirectory()
+        defer { XCTAssertNoThrow(try FileManager.default.removeItem(at: root)) }
+        let actor = InboundFileTransferIOActor(maxOpenTransfers: 1)
+        var target: InboundFileTransferDestinationCapability? = try await actor.prepareDestinationDirectory(at: root)
+        weak let heldTarget = target
+        let originalScope = try XCTUnwrap(target).scopeDigest
+        await XCTAssertThrowsErrorAsync(try await actor.prepareDestinationDirectory(at: root)) {
+            XCTAssertEqual($0 as? InboundFileTransferIOError, .capacityExceeded)
+        }
+        let temporary = root.appendingPathComponent("payload.partial")
+        let payload = Data("test".utf8)
+        let handle = try await actor.createTemporaryFile(
+            at: temporary, declaredFileSize: Int64(payload.count), destination: target
+        )
+        target = nil
+        XCTAssertNotNil(heldTarget)
+        let retainedCount = await actor.activeDestinationCapabilityCount()
+        XCTAssertEqual(retainedCount, 1)
+        _ = try await actor.write(payload, atOffset: 0, using: handle)
+        _ = try await actor.closeAndDigest(using: handle)
+        await XCTAssertThrowsErrorAsync(try await actor.commit(
+            using: handle, destinationDirectory: root, fileName: "payload.bin"
+        )) { XCTAssertEqual($0 as? InboundFileTransferIOError, .destinationCapabilityMismatch) }
+        XCTAssertEqual(try Data(contentsOf: temporary), payload)
+        let observation = try await actor.commitToPreparedDestination(using: handle, fileName: "payload.bin")
+        XCTAssertEqual(try Data(contentsOf: observation.destinationURL), payload)
+        try await actor.releaseCommittedFile(using: handle)
+        XCTAssertNil(heldTarget)
+        let releasedCount = await actor.activeDestinationCapabilityCount()
+        XCTAssertEqual(releasedCount, 0)
+        let replacement = try await actor.prepareDestinationDirectory(at: root)
+        XCTAssertNotEqual(replacement.scopeDigest, originalScope)
+    }
+
+    func testForeignDestinationCannotCreateFileOrSatisfyAnotherTargetScope() async throws {
+        let root = try makeDirectory()
+        defer { XCTAssertNoThrow(try FileManager.default.removeItem(at: root)) }
+        let firstActor = InboundFileTransferIOActor(maxOpenTransfers: 1)
+        let secondActor = InboundFileTransferIOActor(maxOpenTransfers: 1)
+        let firstTarget = try await firstActor.prepareDestinationDirectory(at: root.appendingPathComponent("first"))
+        let secondDirectory = root.appendingPathComponent("second")
+        let secondTarget = try await secondActor.prepareDestinationDirectory(at: secondDirectory)
+        let temporary = root.appendingPathComponent("payload.partial")
+        let payload = Data("test".utf8)
+        await XCTAssertThrowsErrorAsync(try await secondActor.createTemporaryFile(
+            at: temporary, declaredFileSize: Int64(payload.count), destination: firstTarget
+        )) { XCTAssertEqual($0 as? InboundFileTransferIOError, .destinationCapabilityMismatch) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: temporary.path))
+        let handle = try await secondActor.createTemporaryFile(at: temporary, declaredFileSize: Int64(payload.count))
+        _ = try await secondActor.write(payload, atOffset: 0, using: handle)
+        _ = try await secondActor.closeAndDigest(using: handle)
+        await XCTAssertThrowsErrorAsync(try await secondActor.bindCommit(
+            using: handle, request: commitRequest(payload, target: firstTarget),
+            destination: secondTarget, fileName: "payload.bin"
+        )) { XCTAssertEqual($0 as? InboundFileTransferIOError, .destinationCapabilityMismatch) }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: secondDirectory.path), [])
+        let binding = try await secondActor.bindCommit(
+            using: handle, request: commitRequest(payload, target: secondTarget),
+            destination: secondTarget, fileName: "payload.bin"
+        )
+        let observation = try await secondActor.commitBoundFile(binding)
+        XCTAssertEqual(try Data(contentsOf: observation.destinationURL), payload)
+        try await secondActor.releaseCommittedFile(using: handle)
+    }
+
+    func testPreparedDestinationCleanupUsesOriginalDirectoryAfterReplacement() async throws {
+        let root = try makeDirectory()
+        defer { XCTAssertNoThrow(try FileManager.default.removeItem(at: root)) }
+        for published in [false, true] {
+            let directory = root.appendingPathComponent(published ? "published" : "staged")
+            let displaced = directory.appendingPathExtension("original")
+            let actor = InboundFileTransferIOActor(
+                maxOpenTransfers: 1,
+                commitDurabilityFaultsForTesting: published ? [.installedFileSync] : []
+            )
+            let target = try await actor.prepareDestinationDirectory(at: directory)
+            let temporary = directory.appendingPathComponent("payload.partial")
+            let payload = Data("original".utf8)
+            let handle = try await actor.createTemporaryFile(
+                at: temporary, declaredFileSize: Int64(payload.count), destination: target
+            )
+            _ = try await actor.write(payload, atOffset: 0, using: handle)
+            if published {
+                _ = try await actor.closeAndDigest(using: handle)
+                await XCTAssertThrowsErrorAsync(try await actor.commitToPreparedDestination(
+                    using: handle, fileName: "payload.bin"
+                )) {
+                    guard case .moveFailed = $0 as? InboundFileTransferIOError else {
+                        return XCTFail("Expected durability fault, got \($0)")
+                    }
+                }
+            }
+            try FileManager.default.moveItem(at: directory, to: displaced)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+            let fileName = published ? "payload.bin" : "payload.partial"
+            let unrelated = directory.appendingPathComponent(fileName)
+            let unrelatedBytes = Data("replacement".utf8)
+            try unrelatedBytes.write(to: unrelated)
+            try await actor.discardUncommittedFile(handle)
+            XCTAssertEqual(try Data(contentsOf: unrelated), unrelatedBytes)
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: displaced.path), [])
+            let remaining = await actor.activeTransferCount()
+            XCTAssertEqual(remaining, 0)
+        }
+    }
+
+    func testOperationBindingRejectsRelabelingAndGenericCommit() async throws {
+        let root = try makeDirectory()
+        defer { XCTAssertNoThrow(try FileManager.default.removeItem(at: root)) }
+        let temporary = root.appendingPathComponent("payload.partial")
+        let destination = root.appendingPathComponent("destination", isDirectory: true)
+        let otherDestination = root.appendingPathComponent("other", isDirectory: true)
+        let payload = Data("bound payload".utf8)
+        let actor = InboundFileTransferIOActor(maxOpenTransfers: 3)
+        let handle = try await actor.createTemporaryFile(at: temporary, declaredFileSize: Int64(payload.count))
+        _ = try await actor.write(payload, atOffset: 0, using: handle)
+        _ = try await actor.closeAndDigest(using: handle)
+        let target = try await actor.prepareDestinationDirectory(at: destination)
+        let otherTarget = try await actor.prepareDestinationDirectory(at: otherDestination)
+        let request = commitRequest(payload, target: target)
+        let binding = try await actor.bindCommit(
+            using: handle, request: request, destination: target, fileName: "payload.bin"
+        )
+        let duplicate = try await actor.bindCommit(
+            using: handle, request: request, destination: target, fileName: "payload.bin"
+        )
+        XCTAssertEqual(binding, duplicate)
+        // A value-equal reconstruction cannot prebind/commit and then register
+        // retrospectively using a coordinator's independently owned request.
+        let copiedFields = commitRequest(payload, target: target)
+        XCTAssertNotEqual(request, copiedFields)
+        await XCTAssertThrowsErrorAsync(try await actor.bindCommit(
+            using: handle, request: copiedFields,
+            destination: target, fileName: "payload.bin"
+        )) { XCTAssertEqual($0 as? InboundFileTransferIOError, .operationBindingMismatch) }
+        for field in 0..<8 {
+            await XCTAssertThrowsErrorAsync(try await actor.bindCommit(
+                using: handle, request: commitRequest(payload, target: target, changedField: field),
+                destination: target, fileName: "payload.bin"
+            )) {
+                XCTAssertEqual($0 as? InboundFileTransferIOError,
+                               field == 4 ? .destinationCapabilityMismatch : .operationBindingMismatch)
+            }
+        }
+        for (directory, name) in [(otherTarget, "payload.bin"), (target, "other.bin")] {
+            await XCTAssertThrowsErrorAsync(try await actor.bindCommit(
+                using: handle, request: request, destination: directory, fileName: name
+            )) {
+                XCTAssertEqual($0 as? InboundFileTransferIOError,
+                               directory == otherTarget ? .destinationCapabilityMismatch : .operationBindingMismatch)
+            }
+        }
+        await XCTAssertThrowsErrorAsync(try await actor.commitWithDurabilityObservation(
+            using: handle, destinationDirectory: destination, fileName: "payload.bin"
+        )) { XCTAssertEqual($0 as? InboundFileTransferIOError, .operationBindingMismatch) }
+        let unrelatedActor = InboundFileTransferIOActor(maxOpenTransfers: 1)
+        await XCTAssertThrowsErrorAsync(try await unrelatedActor.commitBoundFile(binding)) {
+            XCTAssertEqual($0 as? InboundFileTransferIOError, .unknownHandle)
+        }
+        XCTAssertEqual(try Data(contentsOf: temporary), payload)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: destination.path), [])
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: otherDestination.path), [])
+        let committed = try await actor.commitBoundFile(binding)
+        let repeated = try await actor.commitBoundFile(binding)
+        XCTAssertEqual(committed, repeated)
+        XCTAssertEqual(committed.operationBinding, binding)
+        XCTAssertEqual(try Data(contentsOf: committed.destinationURL), payload)
+        await XCTAssertThrowsErrorAsync(try await actor.bindCommit(
+            using: handle, request: commitRequest(payload, target: target, changedField: 0),
+            destination: target, fileName: "payload.bin"
+        )) { XCTAssertEqual($0 as? InboundFileTransferIOError, .operationBindingMismatch) }
+        try await actor.releaseCommittedFile(using: handle)
+        await XCTAssertThrowsErrorAsync(try await actor.commitBoundFile(binding)) {
+            XCTAssertEqual($0 as? InboundFileTransferIOError, .unknownHandle)
+        }
+    }
+
+    func testBoundCommitRejectsReplacedDestinationBeforeRename() async throws {
+        let root = try makeDirectory()
+        defer { XCTAssertNoThrow(try FileManager.default.removeItem(at: root)) }
+        let temporary = root.appendingPathComponent("payload.partial")
+        let destination = root.appendingPathComponent("destination", isDirectory: true)
+        let displaced = root.appendingPathComponent("displaced", isDirectory: true)
+        let payload = Data("directory binding".utf8)
+        let actor = InboundFileTransferIOActor(maxOpenTransfers: 1)
+        let handle = try await actor.createTemporaryFile(at: temporary, declaredFileSize: Int64(payload.count))
+        _ = try await actor.write(payload, atOffset: 0, using: handle)
+        _ = try await actor.closeAndDigest(using: handle)
+        let target = try await actor.prepareDestinationDirectory(at: destination)
+        let binding = try await actor.bindCommit(
+            using: handle, request: commitRequest(payload, target: target),
+            destination: target, fileName: "payload.bin"
+        )
+        try FileManager.default.moveItem(at: destination, to: displaced)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
+        await XCTAssertThrowsErrorAsync(try await actor.commitBoundFile(binding)) {
+            XCTAssertEqual($0 as? InboundFileTransferIOError, .destinationCapabilityMismatch)
+        }
+        XCTAssertEqual(try Data(contentsOf: temporary), payload)
+        for directory in [destination, displaced] {
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), [])
+        }
+        try FileManager.default.removeItem(at: destination)
+        try FileManager.default.moveItem(at: displaced, to: destination)
+        let committed = try await actor.commitBoundFile(binding)
+        XCTAssertEqual(committed.operationBinding, binding)
+        XCTAssertEqual(try Data(contentsOf: committed.destinationURL), payload)
+        try await actor.releaseCommittedFile(using: handle)
+    }
+
+    func testBoundCommitRetainsBindingAcrossEveryDurabilityRetry() async throws {
+        let root = try makeDirectory()
+        defer { XCTAssertNoThrow(try FileManager.default.removeItem(at: root)) }
+        let temporary = root.appendingPathComponent("payload.partial")
+        let destination = root.appendingPathComponent("destination", isDirectory: true)
+        let payload = Data("durability binding".utf8)
+        let actor = InboundFileTransferIOActor(
+            maxOpenTransfers: 1,
+            commitDurabilityFaultsForTesting: [.installedFileReopen, .installedFileSync,
+                                              .sourceDirectorySync, .destinationDirectorySync]
+        )
+        let handle = try await actor.createTemporaryFile(at: temporary, declaredFileSize: Int64(payload.count))
+        _ = try await actor.write(payload, atOffset: 0, using: handle)
+        _ = try await actor.closeAndDigest(using: handle)
+        let target = try await actor.prepareDestinationDirectory(at: destination)
+        let request = commitRequest(payload, target: target)
+        let binding = try await actor.bindCommit(
+            using: handle, request: request, destination: target, fileName: "payload.bin"
+        )
+        try Data("existing".utf8).write(to: destination.appendingPathComponent("payload.bin"))
+        let installed = destination.appendingPathComponent("payload (1).bin")
+        for _ in 0..<4 {
+            await XCTAssertThrowsErrorAsync(try await actor.commitBoundFile(binding)) {
+                guard case .moveFailed = $0 as? InboundFileTransferIOError else {
+                    return XCTFail("Expected durability failure, got \($0)")
+                }
+            }
+            XCTAssertEqual(try Data(contentsOf: installed), payload)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: temporary.path))
+            await XCTAssertThrowsErrorAsync(try await actor.commit(
+                using: handle, destinationDirectory: destination, fileName: "other.bin"
+            )) { XCTAssertEqual($0 as? InboundFileTransferIOError, .operationBindingMismatch) }
+            let retained = try await actor.bindCommit(
+                using: handle, request: request, destination: target, fileName: "payload.bin"
+            )
+            XCTAssertEqual(retained, binding)
+        }
+        let committed = try await actor.commitBoundFile(binding)
+        XCTAssertEqual(committed.operationBinding, binding)
+        XCTAssertEqual(committed.destinationURL, installed)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: destination.path).sorted(),
+                       ["payload (1).bin", "payload.bin"])
+        try await actor.releaseCommittedFile(using: handle)
+    }
+
+    func testBindingCannotRetrofitAClassicCommitAndRejectsWrongStagedPurpose() async throws {
+        let root = try makeDirectory()
+        defer { XCTAssertNoThrow(try FileManager.default.removeItem(at: root)) }
+        let temporary = root.appendingPathComponent("payload.partial")
+        let destination = root.appendingPathComponent("destination", isDirectory: true)
+        let payload = Data("classic commit".utf8)
+        let actor = InboundFileTransferIOActor(maxOpenTransfers: 1)
+        let handle = try await actor.createTemporaryFile(at: temporary, declaredFileSize: Int64(payload.count))
+        _ = try await actor.write(payload, atOffset: 0, using: handle)
+        _ = try await actor.closeAndDigest(using: handle)
+        let target = try await actor.prepareDestinationDirectory(at: destination)
+        for field in [5, 6] {
+            await XCTAssertThrowsErrorAsync(try await actor.bindCommit(
+                using: handle, request: commitRequest(payload, target: target, changedField: field),
+                destination: target, fileName: "payload.bin"
+            )) { XCTAssertEqual($0 as? InboundFileTransferIOError, .operationBindingMismatch) }
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: destination.path), [])
+        let classic = try await actor.commitWithDurabilityObservation(
+            using: handle, destinationDirectory: destination, fileName: "payload.bin"
+        )
+        XCTAssertNil(classic.operationBinding)
+        await XCTAssertThrowsErrorAsync(try await actor.bindCommit(
+            using: handle, request: commitRequest(payload, target: target),
+            destination: target, fileName: "payload.bin"
+        )) { XCTAssertEqual($0 as? InboundFileTransferIOError, .operationBindingMismatch) }
+        XCTAssertEqual(try Data(contentsOf: classic.destinationURL), payload)
+        try await actor.releaseCommittedFile(using: handle)
+    }
+
+    func testCancelledBoundCommitKeepsStagedFileForExplicitRetry() async throws {
+        let root = try makeDirectory()
+        defer { XCTAssertNoThrow(try FileManager.default.removeItem(at: root)) }
+        let temporary = root.appendingPathComponent("payload.partial")
+        let destination = root.appendingPathComponent("destination", isDirectory: true)
+        let payload = Data("cancelled bound commit".utf8)
+        let actor = InboundFileTransferIOActor(maxOpenTransfers: 1)
+        let handle = try await actor.createTemporaryFile(at: temporary, declaredFileSize: Int64(payload.count))
+        _ = try await actor.write(payload, atOffset: 0, using: handle)
+        _ = try await actor.closeAndDigest(using: handle)
+        let target = try await actor.prepareDestinationDirectory(at: destination)
+        let binding = try await actor.bindCommit(
+            using: handle, request: commitRequest(payload, target: target),
+            destination: target, fileName: "payload.bin"
+        )
+        let gate = InboundFileTransferTestGate()
+        let task = Task {
+            await gate.wait()
+            return try await actor.commitBoundFile(binding)
+        }
+        await gate.waitUntilRegistered()
+        task.cancel()
+        await gate.open()
+        await XCTAssertThrowsErrorAsync(try await task.value) { XCTAssertTrue($0 is CancellationError) }
+        XCTAssertEqual(try Data(contentsOf: temporary), payload)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: destination.path), [])
+        let committed = try await actor.commitBoundFile(binding)
+        XCTAssertEqual(try Data(contentsOf: committed.destinationURL), payload)
+        try await actor.releaseCommittedFile(using: handle)
+    }
+
+    private func commitRequest(
+        _ payload: Data, target: InboundFileTransferDestinationCapability,
+        changedField: Int? = nil
+    ) -> InboundFileTransferCommitRequest {
+        var scope = target.scopeDigest
+        if changedField == 4 { scope[0] ^= 1 }
+        return InboundFileTransferCommitRequest(
+            operationID: Data(repeating: changedField == 0 ? 0x22 : 0x11, count: 32),
+            sequence: changedField == 1 ? 2 : 1,
+            requestDigest: Data(repeating: changedField == 2 ? 0x22 : 0x11, count: 32),
+            transferID: Data(repeating: changedField == 3 ? 0x22 : 0x11, count: 32),
+            targetScope: scope,
+            declaredBytes: UInt64(payload.count + (changedField == 5 ? 1 : 0)),
+            contentSHA256: changedField == 6 ? Data(repeating: 0x22, count: 32) : Data(SHA256.hash(data: payload)),
+            requestedFileName: changedField == 7 ? "other.bin" : "payload.bin"
+        )
+    }
+
     func testDarwinSystemRootAliasCanonicalizationPreservesDeeperSymlinkChecks() throws {
         XCTAssertEqual(
             try DarwinSecurePathPolicy
@@ -95,12 +479,20 @@ final class InboundFileTransferIOActorTests: XCTestCase {
         let fileDigest = try await actor.closeAndDigest(using: handle)
         XCTAssertEqual(fileDigest, chunkDigest)
 
-        let committedURL = try await actor.commit(
+        let durableCommit = try await actor.commitWithDurabilityObservation(
             using: handle,
             destinationDirectory: directory,
             fileName: "payload.bin"
         )
+        let committedURL = durableCommit.destinationURL
         XCTAssertEqual(committedURL.lastPathComponent, "payload (1).bin")
+        XCTAssertEqual(durableCommit.destinationRelativePath, "payload (1).bin")
+        XCTAssertEqual(durableCommit.byteCount, UInt64(payload.count))
+        XCTAssertEqual(durableCommit.sha256, Data(SHA256.hash(data: payload)))
+        XCTAssertEqual(
+            durableCommit.durabilityPrimitive,
+            .fileAndParentDirectorySync
+        )
         XCTAssertEqual(try Data(contentsOf: committedURL), payload)
         let countBeforeRelease = await actor.activeTransferCount()
         XCTAssertEqual(countBeforeRelease, 1)
@@ -109,6 +501,304 @@ final class InboundFileTransferIOActorTests: XCTestCase {
         let countAfterRelease = await actor.activeTransferCount()
         XCTAssertEqual(countAfterRelease, 0)
         XCTAssertTrue(FileManager.default.fileExists(atPath: committedURL.path))
+    }
+
+    func testPostRenameDurabilityFailuresRetryOnlyTheExactInstalledPath() async throws {
+        let rootDirectory = try makeDirectory()
+        defer { XCTAssertNoThrow(try FileManager.default.removeItem(at: rootDirectory)) }
+        let stagingDirectory = rootDirectory.appendingPathComponent("staging", isDirectory: true)
+        let destinationDirectory = rootDirectory.appendingPathComponent(
+            "destination",
+            isDirectory: true
+        )
+        let unrelatedRetryDirectory = rootDirectory.appendingPathComponent(
+            "unrelated-retry",
+            isDirectory: true
+        )
+        let temporaryURL = stagingDirectory.appendingPathComponent("payload.partial")
+        let installedURL = destinationDirectory.appendingPathComponent("payload.bin")
+        let payload = Data((0..<4096).map { UInt8($0 % 251) })
+        let actor = InboundFileTransferIOActor(
+            maxOpenTransfers: 1,
+            commitDurabilityFaultsForTesting: [
+                .installedFileReopen,
+                .installedFileSync,
+                .sourceDirectorySync,
+                .destinationDirectorySync
+            ]
+        )
+        let handle = try await actor.createTemporaryFile(
+            at: temporaryURL,
+            declaredFileSize: Int64(payload.count)
+        )
+        _ = try await actor.write(payload, atOffset: 0, using: handle)
+        _ = try await actor.closeAndDigest(using: handle)
+
+        for attempt in 0..<4 {
+            let requestedDirectory = attempt == 0
+                ? destinationDirectory
+                : unrelatedRetryDirectory
+            let requestedName = attempt == 0 ? "payload.bin" : "must-not-be-installed.bin"
+            await XCTAssertThrowsErrorAsync(
+                try await actor.commit(
+                    using: handle,
+                    destinationDirectory: requestedDirectory,
+                    fileName: requestedName
+                )
+            ) { error in
+                guard let ioError = error as? InboundFileTransferIOError,
+                      case .moveFailed = ioError else {
+                    return XCTFail("Expected injected post-rename failure, got \(error)")
+                }
+            }
+            await XCTAssertThrowsErrorAsync(
+                try await actor.releaseCommittedFile(using: handle)
+            ) { error in
+                XCTAssertEqual(
+                    error as? InboundFileTransferIOError,
+                    .releaseBeforeCommit
+                )
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: temporaryURL.path))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: installedURL.path))
+            XCTAssertEqual(try Data(contentsOf: installedURL), payload)
+            XCTAssertFalse(
+                FileManager.default.fileExists(atPath: unrelatedRetryDirectory.path)
+            )
+        }
+
+        let committedURL = try await actor.commit(
+            using: handle,
+            destinationDirectory: unrelatedRetryDirectory,
+            fileName: "must-not-be-installed.bin"
+        )
+        XCTAssertEqual(committedURL.standardizedFileURL, installedURL.standardizedFileURL)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: unrelatedRetryDirectory.path))
+
+        let idempotentURL = try await actor.commit(
+            using: handle,
+            destinationDirectory: unrelatedRetryDirectory,
+            fileName: "another-name.bin"
+        )
+        XCTAssertEqual(idempotentURL.standardizedFileURL, installedURL.standardizedFileURL)
+        XCTAssertEqual(try Data(contentsOf: installedURL), payload)
+        try await actor.releaseCommittedFile(using: handle)
+        let activeTransferCount = await actor.activeTransferCount()
+        XCTAssertEqual(activeTransferCount, 0)
+    }
+
+    func testPostRenameDigestMismatchRejectsReleaseAndCleanupRemovesPendingFile() async throws {
+        let rootDirectory = try makeDirectory()
+        defer { XCTAssertNoThrow(try FileManager.default.removeItem(at: rootDirectory)) }
+        let stagingDirectory = rootDirectory.appendingPathComponent("staging", isDirectory: true)
+        let destinationDirectory = rootDirectory.appendingPathComponent(
+            "destination",
+            isDirectory: true
+        )
+        let temporaryURL = stagingDirectory.appendingPathComponent("payload.partial")
+        let installedURL = destinationDirectory.appendingPathComponent("payload.bin")
+        let payload = Data("authenticated-payload".utf8)
+        let actor = InboundFileTransferIOActor(
+            maxOpenTransfers: 1,
+            commitDurabilityFaultsForTesting: [.installedFileReopen]
+        )
+        let handle = try await actor.createTemporaryFile(
+            at: temporaryURL,
+            declaredFileSize: Int64(payload.count)
+        )
+        _ = try await actor.write(payload, atOffset: 0, using: handle)
+        _ = try await actor.closeAndDigest(using: handle)
+
+        await XCTAssertThrowsErrorAsync(
+            try await actor.commit(
+                using: handle,
+                destinationDirectory: destinationDirectory,
+                fileName: "payload.bin"
+            )
+        ) { error in
+            guard let ioError = error as? InboundFileTransferIOError,
+                  case .moveFailed = ioError else {
+                return XCTFail("Expected injected reopen failure, got \(error)")
+            }
+        }
+        try overwriteInPlace(
+            installedURL,
+            with: Data(repeating: 0xA5, count: payload.count)
+        )
+
+        await XCTAssertThrowsErrorAsync(
+            try await actor.commit(
+                using: handle,
+                destinationDirectory: destinationDirectory,
+                fileName: "payload.bin"
+            )
+        ) { error in
+            guard let ioError = error as? InboundFileTransferIOError,
+                  case .moveFailed(let details) = ioError else {
+                return XCTFail("Expected installed digest rejection, got \(error)")
+            }
+            XCTAssertTrue(details.contains("digest changed after rename"))
+        }
+        await XCTAssertThrowsErrorAsync(
+            try await actor.releaseCommittedFile(using: handle)
+        ) { error in
+            XCTAssertEqual(error as? InboundFileTransferIOError, .releaseBeforeCommit)
+        }
+
+        let cleanupTask = Task {
+            await Task.yield()
+            try await actor.discardUncommittedFile(handle)
+        }
+        cleanupTask.cancel()
+        try await cleanupTask.value
+        XCTAssertFalse(FileManager.default.fileExists(atPath: installedURL.path))
+        let activeTransferCount = await actor.activeTransferCount()
+        XCTAssertEqual(activeTransferCount, 0)
+    }
+
+    func testPostRenameIdentitySwapCannotCommitOrDeleteReplacement() async throws {
+        let rootDirectory = try makeDirectory()
+        defer { XCTAssertNoThrow(try FileManager.default.removeItem(at: rootDirectory)) }
+        let stagingDirectory = rootDirectory.appendingPathComponent("staging", isDirectory: true)
+        let destinationDirectory = rootDirectory.appendingPathComponent(
+            "destination",
+            isDirectory: true
+        )
+        let temporaryURL = stagingDirectory.appendingPathComponent("payload.partial")
+        let installedURL = destinationDirectory.appendingPathComponent("payload.bin")
+        let displacedURL = destinationDirectory.appendingPathComponent("displaced.bin")
+        let payload = Data("identity-bound-payload".utf8)
+        let actor = InboundFileTransferIOActor(
+            maxOpenTransfers: 1,
+            commitDurabilityFaultsForTesting: [.installedFileReopen]
+        )
+        let handle = try await actor.createTemporaryFile(
+            at: temporaryURL,
+            declaredFileSize: Int64(payload.count)
+        )
+        _ = try await actor.write(payload, atOffset: 0, using: handle)
+        _ = try await actor.closeAndDigest(using: handle)
+
+        await XCTAssertThrowsErrorAsync(
+            try await actor.commit(
+                using: handle,
+                destinationDirectory: destinationDirectory,
+                fileName: "payload.bin"
+            )
+        ) { error in
+            guard let ioError = error as? InboundFileTransferIOError,
+                  case .moveFailed = ioError else {
+                return XCTFail("Expected injected reopen failure, got \(error)")
+            }
+        }
+
+        try FileManager.default.moveItem(at: installedURL, to: displacedURL)
+        try payload.write(to: installedURL, options: [.withoutOverwriting])
+        await XCTAssertThrowsErrorAsync(
+            try await actor.commit(
+                using: handle,
+                destinationDirectory: destinationDirectory,
+                fileName: "payload.bin"
+            )
+        ) { error in
+            guard let ioError = error as? InboundFileTransferIOError,
+                  case .moveFailed(let details) = ioError else {
+                return XCTFail("Expected installed identity rejection, got \(error)")
+            }
+            XCTAssertTrue(details.contains("identity changed after rename"))
+        }
+        await XCTAssertThrowsErrorAsync(
+            try await actor.releaseCommittedFile(using: handle)
+        ) { error in
+            XCTAssertEqual(error as? InboundFileTransferIOError, .releaseBeforeCommit)
+        }
+        await XCTAssertThrowsErrorAsync(
+            try await actor.discardUncommittedFile(handle)
+        ) { error in
+            guard let ioError = error as? InboundFileTransferIOError,
+                  case .cleanupFailed = ioError else {
+                return XCTFail("Expected identity-bound cleanup rejection, got \(error)")
+            }
+        }
+        XCTAssertEqual(try Data(contentsOf: installedURL), payload)
+        XCTAssertEqual(try Data(contentsOf: displacedURL), payload)
+
+        try FileManager.default.removeItem(at: installedURL)
+        try FileManager.default.moveItem(at: displacedURL, to: installedURL)
+        try await actor.discardUncommittedFile(handle)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: installedURL.path))
+        let activeTransferCount = await actor.activeTransferCount()
+        XCTAssertEqual(activeTransferCount, 0)
+    }
+
+    func testPendingCleanupRetriesAfterSourceDirectoryIdentityFailure() async throws {
+        let rootDirectory = try makeDirectory()
+        defer { XCTAssertNoThrow(try FileManager.default.removeItem(at: rootDirectory)) }
+        let stagingDirectory = rootDirectory.appendingPathComponent("staging", isDirectory: true)
+        let displacedStagingDirectory = rootDirectory.appendingPathComponent(
+            "staging-displaced",
+            isDirectory: true
+        )
+        let destinationDirectory = rootDirectory.appendingPathComponent(
+            "destination",
+            isDirectory: true
+        )
+        let temporaryURL = stagingDirectory.appendingPathComponent("payload.partial")
+        let installedURL = destinationDirectory.appendingPathComponent("payload.bin")
+        let payload = Data("cleanup-retry".utf8)
+        let actor = InboundFileTransferIOActor(
+            maxOpenTransfers: 1,
+            commitDurabilityFaultsForTesting: [.installedFileReopen]
+        )
+        let handle = try await actor.createTemporaryFile(
+            at: temporaryURL,
+            declaredFileSize: Int64(payload.count)
+        )
+        _ = try await actor.write(payload, atOffset: 0, using: handle)
+        _ = try await actor.closeAndDigest(using: handle)
+
+        await XCTAssertThrowsErrorAsync(
+            try await actor.commit(
+                using: handle,
+                destinationDirectory: destinationDirectory,
+                fileName: "payload.bin"
+            )
+        ) { error in
+            guard let ioError = error as? InboundFileTransferIOError,
+                  case .moveFailed = ioError else {
+                return XCTFail("Expected injected reopen failure, got \(error)")
+            }
+        }
+        try FileManager.default.moveItem(
+            at: stagingDirectory,
+            to: displacedStagingDirectory
+        )
+        try FileManager.default.createDirectory(
+            at: stagingDirectory,
+            withIntermediateDirectories: false
+        )
+
+        await XCTAssertThrowsErrorAsync(
+            try await actor.discardUncommittedFile(handle)
+        ) { error in
+            guard let ioError = error as? InboundFileTransferIOError,
+                  case .cleanupFailed(let details) = ioError else {
+                return XCTFail("Expected source directory cleanup rejection, got \(error)")
+            }
+            XCTAssertTrue(details.contains("source directory sync"))
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: installedURL.path))
+        let pendingTransferCount = await actor.activeTransferCount()
+        XCTAssertEqual(pendingTransferCount, 1)
+
+        try FileManager.default.removeItem(at: stagingDirectory)
+        try FileManager.default.moveItem(
+            at: displacedStagingDirectory,
+            to: stagingDirectory
+        )
+        try await actor.discardUncommittedFile(handle)
+        let activeTransferCount = await actor.activeTransferCount()
+        XCTAssertEqual(activeTransferCount, 0)
     }
 
     func testWebRTCCancellationNeverRollsBackACommittedFile() async throws {
@@ -487,6 +1177,32 @@ final class InboundFileTransferIOActorTests: XCTestCase {
             .appendingPathComponent("InboundFileTransferIOActorTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
+    }
+
+    private func overwriteInPlace(_ fileURL: URL, with data: Data) throws {
+        let writer = try FileHandle(forWritingTo: fileURL)
+        let operationResult: Result<Void, Error>
+        do {
+            try writer.seek(toOffset: 0)
+            try writer.write(contentsOf: data)
+            try writer.synchronize()
+            operationResult = .success(())
+        } catch {
+            operationResult = .failure(error)
+        }
+
+        do {
+            try writer.close()
+        } catch {
+            if case .failure(let operationError) = operationResult {
+                throw InboundFileTransferIOError.writeFailed(
+                    "\(operationError.localizedDescription); test mutation close failed: "
+                        + error.localizedDescription
+                )
+            }
+            throw error
+        }
+        try operationResult.get()
     }
 }
 

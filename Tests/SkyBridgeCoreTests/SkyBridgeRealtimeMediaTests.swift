@@ -2106,9 +2106,11 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
 
         XCTAssertTrue(
             p2pSource.contains(
-                "let audioRedirectionEnabled = settings.interactionSettings.enableAudioRedirection"
+                "let audioRedirectionEnabled = budget.audioEnabled"
             )
         )
+        XCTAssertTrue(p2pSource.contains("let budget = ControlledHostSessionPolicy.budget("))
+        XCTAssertTrue(p2pSource.contains("requestedAudio: settings.interactionSettings.enableAudioRedirection"))
         XCTAssertTrue(p2pSource.contains("let realtimeMediaAudioReady = audioRedirectionEnabled"))
         XCTAssertTrue(p2pSource.contains("&& mediaAudioEndpoint != nil"))
         XCTAssertTrue(p2pSource.contains("&& mediaSessionId != nil"))

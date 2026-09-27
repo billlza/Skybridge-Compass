@@ -36,6 +36,22 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         ).authoritativeFingerprint
     }
 
+    @MainActor
+    func testQAndXWingRequireDifferentKEMIdentityMaterial() {
+        XCTAssertFalse(P2PDiscoveryService.suiteSupportsTargetKEM(
+            .xwingMLDSA, target: .qperiaptABI2PolicyBound
+        ))
+        XCTAssertFalse(P2PDiscoveryService.suiteSupportsTargetKEM(
+            .qperiaptABI2PolicyBound, target: .xwingMLDSA
+        ))
+        XCTAssertTrue(P2PDiscoveryService.suiteSupportsTargetKEM(
+            .qperiaptABI2PolicyBound, target: .qperiaptABI2PolicyBound
+        ))
+        XCTAssertTrue(P2PDiscoveryService.suiteSupportsTargetKEM(
+            .mlkem768MLDSA65, target: .mlkem768MLDSA65FS
+        ))
+    }
+
     func testSharedInboundAdmissionPolicyDefinesAppleRoleParity() {
         XCTAssertEqual(P2PInboundAdmissionPolicy.maximumConcurrentConnections, 32)
         XCTAssertEqual(

@@ -236,6 +236,7 @@ public enum BonjourInteropProtocolContract {
     public static let fileTransferCapabilities = [
         "file",
         "file_transfer",
+        ClassicTransferApprovalContract.capability,
         classicResumeCapability
     ]
 

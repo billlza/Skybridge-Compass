@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,17 +14,35 @@ from unittest import mock
 import extract_ios_production_identity_evidence as identity_evidence
 from ios_physical_release_acceptance import expected_binding
 
-
 IDENTITY_REFERENCE = "id1:0123456789abcdef0123456789abcdef"
 SESSION_REFERENCE = "ev1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 ATTEMPT_REFERENCE = "at1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 EXECUTABLE_PATH = (
-    "/private/var/containers/Bundle/Application/release/"
+    "/private/var/containers/Bundle/Application/11111111-2222-3333-4444-555555555555/"
     "SkyBridgeCompass-iOS.app/SkyBridgeCompass-iOS"
 )
 
 
 class IOSProductionIdentityEvidenceTests(unittest.TestCase):
+    def test_formal_lifecycle_cli_is_callable_with_its_declared_contract(self) -> None:
+        script = Path(identity_evidence.__file__)
+        for command, expected_option in (
+            ("extract-lifecycle", "--private-binding"),
+            ("extract-session-proof", "--lifecycle-binding"),
+            ("validate-lifecycle-proof", "--archive-identity"),
+        ):
+            with self.subTest(command=command):
+                result = subprocess.run(
+                    [sys.executable, "-B", str(script), command, "--help"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, "")
+                self.assertIn(expected_option, result.stdout)
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -30,12 +50,8 @@ class IOSProductionIdentityEvidenceTests(unittest.TestCase):
             "identityPurpose": "detect-accidental-cross-run-mismatch",
             "archiveTreeSha256": "1" * 64,
             "releaseTestingIpaSha256": "2" * 64,
-            "appExecutableUUIDs": [
-                {"architecture": "arm64", "uuid": "a" * 36}
-            ],
-            "widgetExecutableUUIDs": [
-                {"architecture": "arm64", "uuid": "b" * 36}
-            ],
+            "appExecutableUUIDs": [{"architecture": "arm64", "uuid": "a" * 36}],
+            "widgetExecutableUUIDs": [{"architecture": "arm64", "uuid": "b" * 36}],
             "debugSymbolsVerified": True,
             "sourceInputDigest": "3" * 64,
             "releaseVersion": "1.0.2",
@@ -71,6 +87,7 @@ class IOSProductionIdentityEvidenceTests(unittest.TestCase):
                 "category": identity_evidence.CATEGORY,
                 "processID": process_id,
                 "processImagePath": EXECUTABLE_PATH,
+                "processImageUUID": self.archive["appExecutableUUIDs"][0]["uuid"],
                 "formatString": "%{public}s",
                 "eventMessage": message,
             },
@@ -158,7 +175,9 @@ class IOSProductionIdentityEvidenceTests(unittest.TestCase):
             )
         return output
 
-    def test_extracts_two_launch_lifecycle_without_public_stable_identifier(self) -> None:
+    def test_extracts_two_launch_lifecycle_without_public_stable_identifier(
+        self,
+    ) -> None:
         output = self._extract()
         proof = json.loads(output.read_text(encoding="utf-8"))
 
@@ -171,6 +190,21 @@ class IOSProductionIdentityEvidenceTests(unittest.TestCase):
         self.assertNotIn(IDENTITY_REFERENCE, public_text)
         self.assertNotIn(IDENTITY_REFERENCE[4:], public_text)
         self.assertEqual(os.stat(output).st_mode & 0o777, 0o600)
+
+    def test_identity_events_accept_native_trailer_but_reject_wrong_runtime_uuid(self) -> None:
+        first, _ = self._write_logs([self._restored()], [self._restored()])
+        with first.open("a") as handle:
+            handle.write('{"count":1,"finished":1}\n')
+        events = identity_evidence._identity_events(first, self.first_identity)
+        self.assertEqual(len(events), 1)
+        rows = first.read_text().splitlines()
+        event = json.loads(rows[0])
+        event["processImageUUID"] = "0" * 36
+        first.write_text(json.dumps(event) + "\n" + rows[1] + "\n")
+        with self.assertRaisesRegex(
+            identity_evidence.ProductionIdentityEvidenceError, "sealed executable UUID"
+        ):
+            identity_evidence._identity_events(first, self.first_identity)
 
     def test_rejects_same_process_or_start_token_as_fake_relaunch(self) -> None:
         duplicate = self._launch_identity(101, "1000:1")
@@ -197,12 +231,15 @@ class IOSProductionIdentityEvidenceTests(unittest.TestCase):
             [self._restored(), self._bound(session_reference="ev1:short")],
         )
         for index, messages in enumerate(cases):
-            with self.subTest(index=index), self.assertRaises(
-                identity_evidence.ProductionIdentityEvidenceError
+            with (
+                self.subTest(index=index),
+                self.assertRaises(identity_evidence.ProductionIdentityEvidenceError),
             ):
                 self._extract(second_messages=messages)
 
-    def test_public_proof_validator_rejects_private_reference_and_wrong_alias(self) -> None:
+    def test_public_proof_validator_rejects_private_reference_and_wrong_alias(
+        self,
+    ) -> None:
         output = self._extract()
         proof = json.loads(output.read_text(encoding="utf-8"))
         proof["deviceRef"] = IDENTITY_REFERENCE
@@ -222,9 +259,9 @@ class IOSProductionIdentityEvidenceTests(unittest.TestCase):
             / "Diagnostics"
             / "ProductReleaseEvidenceRecorder.swift"
         ).read_text(encoding="utf-8")
-        parser = (repository / "Scripts" / "extract_ios_production_identity_evidence.py").read_text(
-            encoding="utf-8"
-        )
+        parser = (
+            repository / "Scripts" / "extract_ios_production_identity_evidence.py"
+        ).read_text(encoding="utf-8")
         for forbidden in (
             "ProcessInfo.processInfo.environment",
             "SKYBRIDGE_SMOKE",

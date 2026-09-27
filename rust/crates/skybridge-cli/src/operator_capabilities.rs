@@ -32,6 +32,8 @@ impl OperatorCapabilityStatus {
 #[serde(rename_all = "snake_case")]
 enum OperatorRuntimeTarget {
     MacAppRuntime,
+    AppleDeveloperTools,
+    WindowsAppRuntime,
     NativeHeadlessStateDir,
     AgentOwnedRegistry,
     ArtifactOnly,
@@ -41,6 +43,8 @@ impl OperatorRuntimeTarget {
     fn as_str(self) -> &'static str {
         match self {
             Self::MacAppRuntime => "mac_app_runtime",
+            Self::AppleDeveloperTools => "apple_developer_tools",
+            Self::WindowsAppRuntime => "windows_app_runtime",
             Self::NativeHeadlessStateDir => "native_headless_state_dir",
             Self::AgentOwnedRegistry => "agent_owned_registry",
             Self::ArtifactOnly => "artifact_only",
@@ -56,6 +60,7 @@ enum OperatorControlEffect {
     /// The Mac app applies the change to its live runtime and reports the value
     /// it reads back afterwards.
     MacRuntimeMutation,
+    WindowsRuntimeMutation,
     /// The Mac app creates or tears down a cross-network *session* and reports
     /// the session state it reads back afterwards.
     ///
@@ -73,6 +78,7 @@ impl OperatorControlEffect {
             Self::ReadOnly => "read_only",
             Self::NativeMutation => "native_mutation",
             Self::MacRuntimeMutation => "mac_runtime_mutation",
+            Self::WindowsRuntimeMutation => "windows_runtime_mutation",
             Self::MacSessionMutation => "mac_session_mutation",
             Self::ContractOnly => "contract_only",
             Self::UnavailableFailClosed => "unavailable_fail_closed",
@@ -98,13 +104,83 @@ const OPERATOR_CAPABILITY_SCHEMA_VERSION: u32 = 1;
 fn operator_capabilities() -> &'static [OperatorCapability] {
     &[
         OperatorCapability {
+            id: "app.instances",
+            status: OperatorCapabilityStatus::ReadOnly,
+            runtime_target: OperatorRuntimeTarget::WindowsAppRuntime,
+            control_effect: OperatorControlEffect::ReadOnly,
+            command: "skybridge app instances [--json]",
+            owner_module: "app_commands + app_control_client",
+            authority_boundary: "Enumerates Skybridge.WinClient.exe process IDs only; discovery does not prove pipe readiness or runtime control.",
+            verification_gate: "protocol and readback regression tests + native Windows app-bound pipe smoke",
+        },
+        OperatorCapability {
+            id: "app.status",
+            status: OperatorCapabilityStatus::ReadOnly,
+            runtime_target: OperatorRuntimeTarget::WindowsAppRuntime,
+            control_effect: OperatorControlEffect::ReadOnly,
+            command: "skybridge app status [--pid <pid>] [--json]",
+            owner_module: "app_commands + app_control_client",
+            authority_boundary: "Reads the selected Windows app after named-pipe server PID verification; rejects inconsistent app identity, host state, and settings observations.",
+            verification_gate: "protocol and readback regression tests + native Windows app-bound pipe smoke",
+        },
+        OperatorCapability {
+            id: "app.settings",
+            status: OperatorCapabilityStatus::ReadOnly,
+            runtime_target: OperatorRuntimeTarget::WindowsAppRuntime,
+            control_effect: OperatorControlEffect::ReadOnly,
+            command: "skybridge app settings [--pid <pid>] [--json]",
+            owner_module: "app_commands + app_control_client",
+            authority_boundary: "Reads only the allowlisted appearance.mode setting from the selected running app and requires persisted/live observation consistency.",
+            verification_gate: "protocol and readback regression tests + native Windows app-bound pipe smoke",
+        },
+        OperatorCapability {
+            id: "app.settings.set",
+            status: OperatorCapabilityStatus::PendingLiveProof,
+            runtime_target: OperatorRuntimeTarget::WindowsAppRuntime,
+            control_effect: OperatorControlEffect::WindowsRuntimeMutation,
+            command: "skybridge app settings set appearance.mode <system|light|dark> [--pid <pid>] [--json]",
+            owner_module: "app_commands + app_control_client",
+            authority_boundary: "Requests the selected app to persist and apply its theme; success requires a separate app.settings readback with matching persisted and observed values. No written request is retried. Native Windows app-bound pipe smoke remains pending.",
+            verification_gate: "protocol and readback regression tests + native Windows app-bound pipe smoke",
+        },
+        OperatorCapability {
+            id: "app.remote_desktop.interfaces",
+            status: OperatorCapabilityStatus::ReadOnly,
+            runtime_target: OperatorRuntimeTarget::WindowsAppRuntime,
+            control_effect: OperatorControlEffect::ReadOnly,
+            command: "skybridge app remote-desktop interfaces [--pid <pid>] [--json]",
+            owner_module: "app_commands + app_control_client",
+            authority_boundary: "Lists app-owned interface references without changing networking or authorizing a peer.",
+            verification_gate: "protocol and readback regression tests + native Windows app-bound pipe smoke",
+        },
+        OperatorCapability {
+            id: "app.remote_desktop.start",
+            status: OperatorCapabilityStatus::PendingLiveProof,
+            runtime_target: OperatorRuntimeTarget::WindowsAppRuntime,
+            control_effect: OperatorControlEffect::WindowsRuntimeMutation,
+            command: "skybridge app remote-desktop start --interface-ref <ref> [--pid <pid>] [--json]",
+            owner_module: "app_commands + app_control_client",
+            authority_boundary: "Starts the selected app host listener and independently reads the same enabled generation. Listener state is not connected-peer, frame, or input proof. Native Windows app-bound pipe smoke remains pending.",
+            verification_gate: "protocol and readback regression tests + native Windows app-bound pipe smoke",
+        },
+        OperatorCapability {
+            id: "app.remote_desktop.stop",
+            status: OperatorCapabilityStatus::PendingLiveProof,
+            runtime_target: OperatorRuntimeTarget::WindowsAppRuntime,
+            control_effect: OperatorControlEffect::WindowsRuntimeMutation,
+            command: "skybridge app remote-desktop stop --generation <u64> [--pid <pid>] [--json]",
+            owner_module: "app_commands + app_control_client",
+            authority_boundary: "Stops only the selected app host generation and independently reads the same disabled generation; no registry or helper runtime is substituted. Native Windows app-bound pipe smoke remains pending.",
+            verification_gate: "protocol and readback regression tests + native Windows app-bound pipe smoke",
+        },
+        OperatorCapability {
             id: "crossnet.preflight",
             status: OperatorCapabilityStatus::ReadOnly,
             runtime_target: OperatorRuntimeTarget::MacAppRuntime,
             control_effect: OperatorControlEffect::ReadOnly,
             command: "app-bound/read-only: skybridge crossnet preflight [--json]",
             owner_module: "crossnet_commands + skybridge-crossnet-client + Mac OperatorControlServer",
-            authority_boundary: "Reads the running Mac app's crossnet-control/1 hello state and reports protocol/auth/tenant preconditions plus per-method mutation availability; when auth and tenant are ready, crossnet.settings.set may be enabled while host/connect/disconnect remain disabled, but the signed-app socket smoke release gate still blocks an end-to-end release claim; preflight itself does not generate codes, connect peers, mutate settings, or control iOS runtime",
+            authority_boundary: "Reads the running Mac app's crossnet-control/1 hello state and reports protocol/auth/tenant preconditions plus per-method mutation availability; when auth and tenant are ready, crossnet.settings.set may be enabled while the installed app remains authoritative for session/navigation/watch method support, but the signed-app socket smoke release gate still blocks an end-to-end release claim; preflight itself does not generate codes, connect peers, mutate settings, or control iOS runtime",
             verification_gate: "preflight_payload_reports_ready_mac_app_without_mutation_claims + crossnet_cli_json_contract_uses_fake_socket_for_preflight_status_connect_json + Mac OperatorControlServer hello round-trip + signed Mac app socket smoke",
         },
         OperatorCapability {
@@ -136,6 +212,76 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
             owner_module: "crossnet_commands + skybridge-crossnet-client + Mac OperatorControlServer",
             authority_boundary: "Reads the Mac app's unified online-device snapshot through crossnet-control/1 after auth and tenant preflight; entries carry a redacted device_ref plus display name, platform, and online state only — raw device ids, IP addresses, MAC addresses, and serial numbers never cross this surface; the list mutates nothing and does not dial any device",
             verification_gate: "Mac OperatorControlServer devices redaction tests + signed Mac app socket smoke before release readiness claims",
+        },
+        OperatorCapability {
+            id: "crossnet.desktop.devices",
+            status: OperatorCapabilityStatus::PendingLiveProof,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::MacRuntimeMutation,
+            command: "skybridge crossnet desktop devices [--json]",
+            owner_module: "Mac OperatorControlServer + ControlledHostWorkspace + native viewing window",
+            authority_boundary: "The app owns handshake, peer approval, exact session teardown, visible frames and input leases. Request acceptance is not readiness; live signed-app socket smoke and real host input proof remain pending.",
+            verification_gate: "live signed-app socket smoke + viewer first-frame, peer input effect and exact-session stop",
+        },
+        OperatorCapability {
+            id: "crossnet.desktop.start",
+            status: OperatorCapabilityStatus::PendingLiveProof,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::MacSessionMutation,
+            command: "skybridge crossnet desktop start [--json]",
+            owner_module: "Mac OperatorControlServer + ControlledHostWorkspace + native viewing window",
+            authority_boundary: "The app owns handshake, peer approval, exact session teardown, visible frames and input leases. Request acceptance is not readiness; live signed-app socket smoke and real host input proof remain pending.",
+            verification_gate: "live signed-app socket smoke + viewer first-frame, peer input effect and exact-session stop",
+        },
+        OperatorCapability {
+            id: "crossnet.desktop.status",
+            status: OperatorCapabilityStatus::PendingLiveProof,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::ReadOnly,
+            command: "skybridge crossnet desktop status [--json]",
+            owner_module: "Mac OperatorControlServer + ControlledHostWorkspace + native viewing window",
+            authority_boundary: "The app owns handshake, peer approval, exact session teardown, visible frames and input leases. Request acceptance is not readiness; live signed-app socket smoke and real host input proof remain pending.",
+            verification_gate: "live signed-app socket smoke + viewer first-frame, peer input effect and exact-session stop",
+        },
+        OperatorCapability {
+            id: "crossnet.desktop.stop",
+            status: OperatorCapabilityStatus::PendingLiveProof,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::MacSessionMutation,
+            command: "skybridge crossnet desktop stop [--json]",
+            owner_module: "Mac OperatorControlServer + ControlledHostWorkspace + native viewing window",
+            authority_boundary: "The app owns handshake, peer approval, exact session teardown, visible frames and input leases. Request acceptance is not readiness; live signed-app socket smoke and real host input proof remain pending.",
+            verification_gate: "live signed-app socket smoke + viewer first-frame, peer input effect and exact-session stop",
+        },
+        OperatorCapability {
+            id: "crossnet.nearby",
+            status: OperatorCapabilityStatus::PendingLiveProof,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::MacRuntimeMutation,
+            command: "app-bound: skybridge crossnet nearby [--scan-seconds 0..10] [--json]",
+            owner_module: "P2PDiscoveryService + Mac OperatorControlServer",
+            authority_boundary: "Lists actual app discovery records and exact-target authenticated state; positive scan duration starts app-owned scanning. A discovered record does not prove authentication or transfer readiness; live signed-app socket smoke remains pending.",
+            verification_gate: "live signed-app socket smoke + nearby physical peer discovery",
+        },
+        OperatorCapability {
+            id: "crossnet.connect_nearby",
+            status: OperatorCapabilityStatus::PendingLiveProof,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::MacSessionMutation,
+            command: "app-bound: skybridge crossnet connect-nearby <device_ref> [--json]",
+            owner_module: "P2PDiscoveryService + Mac OperatorControlServer",
+            authority_boundary: "Uses the app's existing identity and pairing policy, serializes operator session mutations, and checks the exact discovery target's authenticated connection; never equates TCP readiness with authentication; live signed-app socket smoke remains pending.",
+            verification_gate: "live signed-app socket smoke + physical authenticated peer readback",
+        },
+        OperatorCapability {
+            id: "crossnet.file.send",
+            status: OperatorCapabilityStatus::PendingLiveProof,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::MacRuntimeMutation,
+            command: "app-bound: skybridge crossnet file send <path> --to <device_ref> [--progress auto|always|never] [--json]",
+            owner_module: "FileTransferManager + Mac OperatorControlServer + transfer_progress",
+            authority_boundary: "Streams observed progress from the exact app-owned transfer. Only a validated receiver receipt, matching bytes and SHA-256 allows completed success. Waiting, full sent-byte count, timeout and stream loss never imply delivery; no automatic write retry; live signed-app socket smoke remains pending.",
+            verification_gate: "live signed-app socket smoke + physical receiver file and matching SHA-256 receipt + interrupted stream refusal",
         },
         OperatorCapability {
             id: "crossnet.connect_device",
@@ -216,6 +362,106 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
             owner_module: "device_commands::status",
             authority_boundary: "local identity and primary PQC identity read-only report; agent health is projected only when the runtime lock, schema, state directory, healthy status, and freshness checks all pass, otherwise it is explicitly unavailable",
             verification_gate: "device_status_reports_local_identity_without_auth",
+        },
+        OperatorCapability {
+            id: "crossnet.usb.devices",
+            status: OperatorCapabilityStatus::PendingLiveProof,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::ReadOnly,
+            command: "skybridge crossnet usb devices [--json]",
+            owner_module: "Mac OperatorControlServer + USBMultiplexTransport",
+            authority_boundary: "Reads USB-only OS multiplexer entries; cable presence is routing evidence and never protocol trust; network twins are excluded; live signed-app socket smoke remains required",
+            verification_gate: "native USB inventory and live signed-app socket smoke",
+        },
+        OperatorCapability {
+            id: "crossnet.trust.preview",
+            status: OperatorCapabilityStatus::PendingLiveProof,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::ReadOnly,
+            command: "skybridge crossnet trust preview --peer-id <uuid> --expected-fingerprint <sha256> [--json]",
+            owner_module: "Mac OperatorControlServer + TrustSyncService",
+            authority_boundary: "Reads exact product Keychain and mirror records, local signature results and a snapshot digest; it does not change trust or authorize automatic key replacement; live signed-app socket smoke remains required",
+            verification_gate: "signed application store inspection; recovery requires a separate explicitly authorized transaction",
+        },
+        OperatorCapability {
+            id: "crossnet.usb.inspect",
+            status: OperatorCapabilityStatus::PendingLiveProof,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::ReadOnly,
+            command: "skybridge crossnet usb inspect <udid> [--json]",
+            owner_module: "Mac OperatorControlServer + native pairing and authorization services",
+            authority_boundary: "Signed USB discovery does not grant trust. Native approval decisions bind the current request, identity and peer verification code. Initial remote delegation remains receiver-owned; live signed-app socket smoke remains pending.",
+            verification_gate: "live signed-app socket smoke + fresh USB identity, native consent, persistence and rejection tests",
+        },
+        OperatorCapability {
+            id: "crossnet.approval.pending",
+            status: OperatorCapabilityStatus::PendingLiveProof,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::ReadOnly,
+            command: "skybridge crossnet approval pending [--json]",
+            owner_module: "Mac OperatorControlServer + native pairing and authorization services",
+            authority_boundary: "Signed USB discovery does not grant trust. Native approval decisions bind the current request, identity and peer verification code. Initial remote delegation remains receiver-owned; live signed-app socket smoke remains pending.",
+            verification_gate: "live signed-app socket smoke + fresh USB identity, native consent, persistence and rejection tests",
+        },
+        OperatorCapability {
+            id: "crossnet.approval.decide",
+            status: OperatorCapabilityStatus::PendingLiveProof,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::MacRuntimeMutation,
+            command: "skybridge crossnet approval decide <approval_id> --decision <choice> [--json]",
+            owner_module: "Mac OperatorControlServer + native pairing and authorization services",
+            authority_boundary: "Signed USB discovery does not grant trust. Native approval decisions bind the current request, identity and peer verification code. Initial remote delegation remains receiver-owned; live signed-app socket smoke remains pending.",
+            verification_gate: "live signed-app socket smoke + fresh USB identity, native consent, persistence and rejection tests",
+        },
+        OperatorCapability {
+            id: "crossnet.usb.peers",
+            status: OperatorCapabilityStatus::PendingLiveProof,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::ReadOnly,
+            command: "skybridge crossnet usb peers [--json]",
+            owner_module: "Mac OperatorControlServer + TrustSyncService",
+            authority_boundary: "Lists active paired identities without LAN discovery; unreadable stores fail explicitly; selecting a row is not proof that its identity is at the physical cable; live signed-app socket smoke remains pending",
+            verification_gate: "native pairing catalog and physical USB identity handshake with no discovery dependency",
+        },
+        OperatorCapability {
+            id: "crossnet.usb.wake",
+            status: OperatorCapabilityStatus::PendingLiveProof,
+            runtime_target: OperatorRuntimeTarget::AppleDeveloperTools,
+            control_effect: OperatorControlEffect::NativeMutation,
+            command: "skybridge crossnet usb wake <udid> [--json]",
+            owner_module: "Apple devicectl normal application activation",
+            authority_boundary: "Requires current physical USB inventory and normal app activation evidence; no debugger, app replacement, XCTest, test environment overrides, authenticated-session claim or automatic retry; real-device cross-platform process activation evidence remains pending",
+            verification_gate: "real-device process activation through Apple tools followed separately by an authenticated USB handshake",
+        },
+        OperatorCapability {
+            id: "crossnet.usb.connect",
+            status: OperatorCapabilityStatus::PendingLiveProof,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::MacRuntimeMutation,
+            command: "skybridge crossnet usb connect <udid> --peer-id <uuid> --expected-fingerprint <sha256> [--json]",
+            owner_module: "Mac OperatorControlServer + P2PDiscoveryService + USBMultiplexTransport",
+            authority_boundary: "USB-only dial reuses PIB/SKR and the current paired identity with strict PQC; exact peer/fingerprint checks, no Wi-Fi fallback and no automatic file resend; live signed-app socket smoke remains required",
+            verification_gate: "live signed-app socket smoke with physical USB authenticated handshake and actual carrier/suite evidence; TCP readiness alone is insufficient",
+        },
+        OperatorCapability {
+            id: "crossnet.usb.connect_device",
+            status: OperatorCapabilityStatus::PendingLiveProof,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::MacRuntimeMutation,
+            command: "skybridge crossnet usb connect-device <udid> --to <device_ref> [--json]",
+            owner_module: "Mac OperatorControlServer + P2PDiscoveryService + USBMultiplexTransport",
+            authority_boundary: "The native owner resolves the selected app device and authenticates its stable identity and current trust over the selected physical cable; success requires the exact device reference, USB carrier, PQC suite and verified protocol fingerprint; no network fallback or implicit trust replacement; live signed-app socket smoke remains required for each candidate and physical device",
+            verification_gate: "typed request and result rejection tests plus live signed-app socket smoke with physical USB handshake and file receipt",
+        },
+        OperatorCapability {
+            id: "crossnet.trust.recover",
+            status: OperatorCapabilityStatus::PendingLiveProof,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::MacRuntimeMutation,
+            command: "skybridge crossnet trust recover <udid> --peer-id <uuid> --expected-fingerprint <sha256> --snapshot-sha256 <preview> --recovery-id <uuid> --approve-mirror-retirement [--json]",
+            owner_module: "Mac OperatorControlServer + TrustSyncService + P2PDiscoveryService",
+            authority_boundary: "Explicit scoped mirror retirement after fresh signed USB peer proof, with immutable evidence archive and unchanged existing Keychain authority; revocation, identity conflicts or a changed preview refuse; live signed-app socket smoke remains required",
+            verification_gate: "live signed-app socket smoke with exact approved peer/snapshot, preserved unrelated records and verified protocol binding; partial results never claim a connected session",
         },
         OperatorCapability {
             id: "device.discovery.nearby",
@@ -410,8 +656,21 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
     ]
 }
 
+fn capabilities_for_host(host: &str) -> Vec<&'static OperatorCapability> {
+    operator_capabilities()
+        .iter()
+        .filter(|capability| match capability.runtime_target {
+            OperatorRuntimeTarget::MacAppRuntime | OperatorRuntimeTarget::AppleDeveloperTools => {
+                host == "macos"
+            }
+            OperatorRuntimeTarget::WindowsAppRuntime => host == "windows",
+            _ => true,
+        })
+        .collect()
+}
+
 pub(crate) fn print_operator_capabilities(as_json: bool) -> Result<()> {
-    let capabilities = operator_capabilities();
+    let capabilities = capabilities_for_host(std::env::consts::OS);
     if as_json {
         println!(
             "{}",
@@ -419,7 +678,9 @@ pub(crate) fn print_operator_capabilities(as_json: bool) -> Result<()> {
                 "schema_version": OPERATOR_CAPABILITY_SCHEMA_VERSION,
                 "product_name": "SkyBridge CLI",
                 "binary_name": "skybridge",
+                "operator_profile": crate::operator_profile::operator_profile(),
                 "ios_runtime_control_supported": false,
+                "mac_gui_control_supported": cfg!(target_os = "macos"),
                 "mac_gui_control_protocol": "crossnet-control/1",
                 "mac_gui_control_release_gate": "signed_mac_app_socket_smoke_required",
                 "capabilities": capabilities,
@@ -433,7 +694,13 @@ pub(crate) fn print_operator_capabilities(as_json: bool) -> Result<()> {
         OPERATOR_CAPABILITY_SCHEMA_VERSION
     );
     println!("iOS runtime control supported: false");
-    println!("Mac GUI control protocol: crossnet-control/1 (signed Mac app socket smoke required)");
+    if cfg!(target_os = "macos") {
+        println!(
+            "Mac GUI control protocol: crossnet-control/1 (signed Mac app socket smoke required)"
+        );
+    } else {
+        println!("Mac GUI control: unsupported on this host");
+    }
     for capability in capabilities {
         println!(
             "{} [{} target={} effect={}] {}",

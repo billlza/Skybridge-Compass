@@ -360,14 +360,7 @@ final class RemoteControlTrustResolutionTests: XCTestCase {
         let mlRecordId = "\(deviceId)|mldsa"
         let edFingerprint = String(repeating: "9", count: 64)
         let mlFingerprint = String(repeating: "c", count: 64)
-        let trust = TrustSyncService.shared
-
-        trust.setInMemoryPersistenceForTesting(true)
-        try await trust.removeRecordsForTesting(deviceIds: [edRecordId, mlRecordId])
-        addTeardownBlock { @MainActor [trust] in
-            try await trust.removeRecordsForTesting(deviceIds: [edRecordId, mlRecordId])
-            trust.setInMemoryPersistenceForTesting(false)
-        }
+        let trust = TrustSyncService(initialRecordsForTesting: [])
 
         _ = try await trust.addTrustRecord(
             TrustRecord(

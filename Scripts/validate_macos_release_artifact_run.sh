@@ -258,7 +258,10 @@ for label, actual, expected in run_checks:
     if actual != expected:
         errors.append(f"{label} mismatch: expected {expected}, actual {actual or 'missing'}")
 
-if string(run.get("pull_requests")) not in ("", "[]"):
+# GitHub also lists associated PRs on same-repository workflow_dispatch runs.
+# Only the triggering event identifies PR-scoped execution; association metadata
+# does not replace the exact event, repository, branch and SHA checks above.
+if string(run.get("event")).startswith("pull_request"):
     errors.append("producer run must not be pull_request-scoped")
 
 

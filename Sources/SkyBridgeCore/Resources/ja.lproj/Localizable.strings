@@ -453,7 +453,8 @@
 "settings.advanced.performance.shadowQuality.format" = "シャドウ品質: %@";
 "settings.advanced.performance.postProcessing.format" = "後処理: %@";
 "settings.advanced.performance.showRealtimeFPS" = "リアルタイムFPSを表示";
-"settings.advanced.performance.showRealtimeFPS.help" = "トップナビにMetalレンダリングFPSを表示。未取得時は占位 — FPS";
+"settings.advanced.performance.showRealtimeFPS.help" = "天気の背景（雨・雲・もや）が実際に画面に表示されたフレーム数を1秒単位で表示します。他のUIやリモートセッションは含みません。測定できない場合は — FPS と表示します。";
+"metric.frameRate.paused" = "一時停止中";
 "settings.advanced.hardware.enableAcceleration" = "ハードウェアアクセラレーションを有効化";
 "settings.advanced.memory.optimize" = "メモリ使用を最適化";
 "settings.advanced.backgroundScanning" = "バックグラウンドスキャン";
@@ -675,7 +676,7 @@
 "remote.connectionMode.near" = "近距離";
 "remote.connectionMode.far" = "遠距離";
 "remote.connectionMode.auto.description" = "最適なモードを自動選択（同一ネットワークでは近距離を優先）";
-"remote.connectionMode.near.description" = "近距離ハードウェアミラーリング — 同一ネットワークで低遅延（ScreenCaptureKit + HEVC + QUIC）";
+"remote.connectionMode.near.description" = "同じネットワーク内のデバイスを表示・操作";
 "remote.connectionMode.far.description" = "手動 RDP（制限付きプレビュー）— FreeRDP 3.30 ソフトウェア GDI、厳密な証明書検証、チャネルリダイレクトなし";
 "common.unknown" = "不明";
 "profile.title" = "プロフィール";
@@ -1146,3 +1147,27 @@
 "dashboard.accountDevices.summary" = "%d 台 · %d 台オンライン";
 "dashboard.accountDevices.viewAll" = "すべて表示";
 "dashboard.accountDevices.empty" = "同じアカウントでサインインした他の端末がここに表示されます";
+
+"remoteControl.securityNotice.inputController" = "入力操作中";
+
+"remoteControl.securityNotice.observer" = "閲覧のみ";
+
+"remoteControl.securityNotice.transferInput" = "入力操作を引き継ぐ";
+
+"remoteControl.securityNotice.approveView" = "閲覧を許可";
+
+"info.appleSilicon" = "Appleシリコン";
+"info.optimizationEnabled" = "最適化有効";
+"info.pCore" = "高性能コア";
+"info.eCore" = "高効率コア";
+"info.multiCoreOpt" = "マルチコア最適化";
+"info.reqAppleSilicon" = "Appleシリコンが必要です";
+"info.deviceUnsupported" = "非対応のデバイス";
+"info.standardMode" = "標準モード";
+
+"remoteControl.securityNotice.localInputController" = "この Mac がキーボードとマウスの操作権を持っています。リモート閲覧は継続します。";
+
+// Saved pairing identity status
+"discovery.trustedDevices.section" = "信頼済みデバイス";
+"discovery.pendingPairings.section" = "確認が必要なペアリング記録";
+"discovery.pendingPairings.explanation" = "これらのペアリング記録は本人確認が未完了です。デバイスがオンラインかどうかは判断できません。";

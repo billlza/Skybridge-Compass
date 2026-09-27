@@ -123,6 +123,7 @@ cat > "${TMP_DIR}/bin/xcodebuild" <<'SH'
 printf '%s\n' "$@" >"${SKYBRIDGE_FAKE_XCODEBUILD_ARGS}"
 SH
 chmod +x "${TMP_DIR}/bin/xcodebuild"
+unset SKYBRIDGE_BUILD_JOBS
 
 SKYBRIDGE_FAKE_XCODEBUILD_ARGS="${TMP_DIR}/xcodebuild-args.txt" \
     PATH="${TMP_DIR}/bin:${PATH}" \
@@ -144,6 +145,46 @@ for expected_arg in \
     if ! grep -Fxq "${expected_arg}" "${TMP_DIR}/xcodebuild-args-strict.txt"; then
         fail "skybridge_run_xcodebuild strict mode should pass ${expected_arg}"
     fi
+done
+
+if grep -Fxq -- '-jobs' "${TMP_DIR}/xcodebuild-args.txt"; then
+    fail "an unset job limit must preserve Xcode's default concurrency"
+fi
+
+for jobs in 1 2 64; do
+    args_path="${TMP_DIR}/xcodebuild-jobs-${jobs}.txt"
+    SKYBRIDGE_FAKE_XCODEBUILD_ARGS="${args_path}" \
+        SKYBRIDGE_BUILD_JOBS="${jobs}" \
+        SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1 \
+        PATH="${TMP_DIR}/bin:${PATH}" \
+        skybridge_run_xcodebuild -project Test.xcodeproj archive
+    python3 - "${args_path}" "${jobs}" <<'PY'
+from pathlib import Path
+import sys
+
+arguments = Path(sys.argv[1]).read_text().splitlines()
+assert arguments.count("-jobs") == 1, arguments
+assert arguments[arguments.index("-jobs") + 1] == sys.argv[2], arguments
+assert "SWIFT_TREAT_WARNINGS_AS_ERRORS=YES" in arguments, arguments
+assert "GCC_TREAT_WARNINGS_AS_ERRORS=YES" in arguments, arguments
+assert arguments[-3:] == ["-project", "Test.xcodeproj", "archive"], arguments
+PY
+done
+
+for jobs in '' 0 -1 01 65 999999999999999999999999 1.5 '2 3' '+2' '2;exit'; do
+    args_path="${TMP_DIR}/xcodebuild-invalid-jobs.txt"
+    if invalid_jobs_output="$(
+        SKYBRIDGE_FAKE_XCODEBUILD_ARGS="${args_path}" \
+            SKYBRIDGE_BUILD_JOBS="${jobs}" \
+            PATH="${TMP_DIR}/bin:${PATH}" \
+            skybridge_run_xcodebuild build 2>&1
+    )"; then
+        fail "invalid build jobs should fail: '${jobs}'"
+    fi
+    [[ "${invalid_jobs_output}" == *'SKYBRIDGE_BUILD_JOBS'* ]] \
+        || fail "invalid build jobs should name the failed setting"
+    [[ ! -e "${args_path}" ]] \
+        || fail "invalid build jobs must fail before invoking Xcode"
 done
 
 set +e

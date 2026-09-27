@@ -188,7 +188,7 @@ WIRE_ANCHORS = [
      None),
     ("Q-Periapt capability provider type",
      r'case\s+qPeriapt\s*=\s*"([^"]+)"',
-     None),
+     ("HandshakeTypes.swift", "CryptoCapabilities.swift")),
     ("Q-Periapt application-context domain",
      r'private\s+static\s+let\s+domain\s*=\s*Data\("([^"]+)"\.utf8\)',
      "QPeriaptHandshakeApplicationContext.swift"),

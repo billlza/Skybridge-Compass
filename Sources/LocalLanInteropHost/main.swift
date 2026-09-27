@@ -11,12 +11,11 @@ import SkyBridgeUI
 private final class LocalLanInteropHostCoordinator {
     private let p2pDiscoveryService = P2PDiscoveryService.shared
     private let fileTransferManager = FileTransferManager.shared
-    private let remoteControlManager = RemoteControlManager()
     private lazy var reporter = SmokeStatusReporter(statusURL: self.statusURL())
     private var monitorTask: Task<Void, Never>?
 
     private lazy var fileTransferListener = FileTransferListenerService(manager: fileTransferManager)
-    private lazy var remoteControlServer = RemoteControlServer(manager: remoteControlManager)
+    private lazy var remoteControlServer = RemoteControlServer()
 
     private var expectsFileTransferSmoke: Bool {
         ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXPECT_FILE_TRANSFER"] == "1"
@@ -608,6 +607,8 @@ private final class LocalLanInteropHostCoordinator {
                 return "mac_smoke_reconnect_local_network_permission_denied"
             case .strictPQCTrustPreflightFailed:
                 return "mac_smoke_reconnect_strict_pqc_trust_preflight_failed"
+            case .peerPQCSuiteUnavailable:
+                return "mac_smoke_reconnect_peer_pqc_suite_unavailable"
             }
         }
 
@@ -1502,9 +1503,12 @@ private final class BonjourFileTransferRouteResolver: NSObject, @preconcurrency 
 private enum LocalLanInteropHostLifetime {
     static var coordinator: LocalLanInteropHostCoordinator?
     static var pairingTrustApprovalWindowController: PairingTrustApprovalWindowController?
+    static var inboundFileTransferApprovalWindowController: InboundFileTransferApprovalWindowController?
     static var remoteControlSecurityNoticePanelController: RemoteControlSecurityNoticePanelController?
 
     static func stopApprovalPresentation() {
+        inboundFileTransferApprovalWindowController?.stop()
+        inboundFileTransferApprovalWindowController = nil
         remoteControlSecurityNoticePanelController?.stop()
         remoteControlSecurityNoticePanelController = nil
         pairingTrustApprovalWindowController?.stop()
@@ -1598,6 +1602,10 @@ struct LocalLanInteropHostMain {
             let approvalWindowController = PairingTrustApprovalWindowController()
             approvalWindowController.start()
             LocalLanInteropHostLifetime.pairingTrustApprovalWindowController = approvalWindowController
+
+            let fileApprovalWindowController = InboundFileTransferApprovalWindowController()
+            fileApprovalWindowController.start()
+            LocalLanInteropHostLifetime.inboundFileTransferApprovalWindowController = fileApprovalWindowController
 
             let remoteControlSecurityNoticePanelController = RemoteControlSecurityNoticePanelController.shared
             remoteControlSecurityNoticePanelController.start()

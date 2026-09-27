@@ -124,7 +124,10 @@ private enum DeviceDiscoveryPresentationProjector {
 
         let representedDevices = connected + active + recent
         let displayedTrusted = input.trustedGroups
-            .filter { !hasVisibleOnlineRepresentation(for: $0, representedDevices: representedDevices, input: input) }
+            .filter {
+                $0.displayRecord.requiresIdentityVerificationForPresentation
+                    || !hasVisibleOnlineRepresentation(for: $0, representedDevices: representedDevices, input: input)
+            }
             .map { group in
                 TrustedRecordCardPresentation(
                     group: group,
@@ -1223,7 +1226,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                 connectionModeButton(mode)
             }
         }
-        .background(themeConfiguration.cardBackgroundMaterial)
+        .dashboardGlassSurface(cornerRadius: 12)
         .overlay(
             Rectangle()
                 .stroke(themeConfiguration.borderColor, lineWidth: 1)
@@ -1273,8 +1276,8 @@ public struct EnhancedDeviceDiscoveryView: View {
             .background(isSelected ? mode.accentColor.opacity(0.12) : Color.clear)
             .background(
                 Rectangle()
-                    .fill(themeConfiguration.cardBackgroundMaterial)
-                    .opacity(isHovered ? 0.35 : 0)
+                    .fill(Color.white.opacity(0.06))
+                    .opacity(isHovered ? 1 : 0)
             )
             .overlay(
                 Rectangle()
@@ -1383,7 +1386,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                 .help(LocalizationManager.shared.localizedString("discovery.refresh"))
             }
             .padding(12)
-            .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .dashboardGlassSurface(cornerRadius: 8)
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(themeConfiguration.borderColor, lineWidth: 1)
@@ -1435,37 +1438,23 @@ public struct EnhancedDeviceDiscoveryView: View {
                     }
                 }
                 .padding(16)
-                .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .dashboardGlassSurface(cornerRadius: 12)
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .stroke(Color.blue.opacity(0.6), lineWidth: 1)
                 )
             }
 
-            // 受信任设备（已配对/已允许）——来自 TrustSyncService
+            // Saved pairing hints cannot claim the reachability of a trusted identity.
             let trustedRecords = displayedTrustedRecordsForUI
-            if !trustedRecords.isEmpty {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("已信任设备")
-                        .font(.headline)
-
-                    ForEach(trustedRecords) { group in
-                        TrustedDeviceCard(
-                            record: group.group.displayRecord,
-                            subtitle: group.subtitle,
-                            status: group.status
-                        ) {
-                            selectedTrustedGroupSelection = TrustedGroupSelection(id: group.id)
-                        }
-                    }
-                }
-                .padding(16)
-                .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.green.opacity(0.5), lineWidth: 1)
-                )
-            }
+            savedDeviceSection(
+                trustedRecords.filter { !$0.group.displayRecord.requiresIdentityVerificationForPresentation },
+                requiresVerification: false
+            )
+            savedDeviceSection(
+                trustedRecords.filter { $0.group.displayRecord.requiresIdentityVerificationForPresentation },
+                requiresVerification: true
+            )
 
             // 最近连接（不等同于“信任/已配对”，但应立即可见）
             let recentlyConnected = groupedRecentlyConnectedDevices
@@ -1486,7 +1475,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                     }
                 }
                 .padding(16)
-                .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .dashboardGlassSurface(cornerRadius: 12)
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .stroke(Color.green.opacity(0.35), lineWidth: 1)
@@ -1521,7 +1510,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
-                    .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .dashboardGlassSurface(cornerRadius: 6)
                     .overlay(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
                             .stroke(themeConfiguration.borderColor, lineWidth: 1)
@@ -1552,6 +1541,41 @@ public struct EnhancedDeviceDiscoveryView: View {
     }
 
     // MARK: - Trusted Devices helpers
+
+    @ViewBuilder
+    private func savedDeviceSection(
+        _ records: [TrustedRecordCardPresentation],
+        requiresVerification: Bool
+    ) -> some View {
+        if !records.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(LocalizationManager.shared.localizedString(
+                    requiresVerification ? "discovery.pendingPairings.section" : "discovery.trustedDevices.section"
+                ))
+                .font(.headline)
+                if requiresVerification {
+                    Text(LocalizationManager.shared.localizedString("discovery.pendingPairings.explanation"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(records) { presentation in
+                    TrustedDeviceCard(
+                        record: presentation.group.displayRecord,
+                        subtitle: presentation.subtitle,
+                        status: presentation.status
+                    ) {
+                        selectedTrustedGroupSelection = TrustedGroupSelection(id: presentation.id)
+                    }
+                }
+            }
+            .padding(16)
+            .dashboardGlassSurface(cornerRadius: 12)
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke((requiresVerification ? Color.orange : Color.green).opacity(0.5), lineWidth: 1)
+            )
+        }
+    }
 
     private var trustedRecordsForUI: [TrustRecordDisplayGroup] {
         cachedTrustedRecordGroups
@@ -3495,7 +3519,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                 }
             }
             .padding(16)
-            .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .dashboardGlassSurface(cornerRadius: 12)
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(themeConfiguration.borderColor, lineWidth: 1)
@@ -3642,7 +3666,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                 }
             }
             .padding(settingsManager.compactMode ? 10 : 16)
-            .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .dashboardGlassSurface(cornerRadius: 12)
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(device.isLocalDevice ? Color.blue : themeConfiguration.borderColor, lineWidth: device.isLocalDevice ? 2 : 1)
@@ -3932,7 +3956,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                 .buttonStyle(.borderedProminent)
             }
             .padding(16)
-            .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .dashboardGlassSurface(cornerRadius: 12)
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(themeConfiguration.borderColor, lineWidth: 1)
@@ -4052,7 +4076,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             .disabled(!device.isOnline)
         }
         .padding(16)
-        .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .dashboardGlassSurface(cornerRadius: 12)
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(themeConfiguration.borderColor, lineWidth: 1)
@@ -4917,7 +4941,7 @@ struct InfoBanner: View {
             Spacer()
         }
         .padding(16)
-        .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .dashboardGlassSurface(cornerRadius: 12)
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(themeConfiguration.borderColor, lineWidth: 1)
@@ -5067,7 +5091,7 @@ struct CloudDeviceCardEnhanced: View {
             }
         }
         .padding(16)
-        .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .dashboardGlassSurface(cornerRadius: 12)
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(themeConfiguration.borderColor, lineWidth: 1)

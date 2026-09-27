@@ -23,6 +23,27 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[cfg(target_os = "macos")]
+mod desktop;
+#[cfg(target_os = "macos")]
+mod file_approval;
+#[cfg(target_os = "macos")]
+mod local_approval;
+#[cfg(target_os = "macos")]
+pub use desktop::*;
+#[cfg(target_os = "macos")]
+pub use local_approval::*;
+#[cfg(target_os = "macos")]
+mod handshake;
+#[cfg(target_os = "macos")]
+pub use file_approval::*;
+#[cfg(target_os = "macos")]
+mod nearby_file;
+#[cfg(target_os = "macos")]
+pub use handshake::*;
+#[cfg(target_os = "macos")]
+pub use nearby_file::*;
+
+#[cfg(target_os = "macos")]
 use serde_json::json;
 #[cfg(target_os = "macos")]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -31,6 +52,30 @@ use tokio::net::UnixStream;
 
 /// Wire-protocol version negotiated by the `crossnet-control/1` contract.
 pub const CONTROL_PROTOCOL_VERSION: u32 = 1;
+
+/// A closed, non-secret application refusal, retained through anyhow contexts.
+#[derive(Debug)]
+pub struct PeerPQCSuiteUnavailable;
+
+impl std::fmt::Display for PeerPQCSuiteUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("The peer does not provide the selected PQC suite. Review both devices' suite settings; no fallback was performed.")
+    }
+}
+
+impl std::error::Error for PeerPQCSuiteUnavailable {}
+
+/// The specifically selected physical USB device is absent; never a LAN retry.
+#[derive(Debug)]
+pub struct USBDeviceUnavailable;
+
+impl std::fmt::Display for USBDeviceUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("The selected device is not connected over USB. Reconnect the selected device and refresh USB inventory; no network fallback was performed.")
+    }
+}
+
+impl std::error::Error for USBDeviceUnavailable {}
 
 /// Wire-protocol version negotiated by the `crossnet-control/1` contract.
 ///
@@ -57,6 +102,33 @@ const MAX_RESPONSE_LINE_BYTES: usize = 64 * 1024;
 const SOCKET_RELATIVE_PATH: &str = "Library/Application Support/SkyBridge/crossnet-control.sock";
 
 const PUBLIC_SETTINGS_ALLOWLIST: &[&str] = &[
+    "general.auto_scan_startup",
+    "general.notifications",
+    "general.dark_mode",
+    "general.device_details",
+    "general.connection_stats",
+    "general.compact_mode",
+    "network.bonjour_discovery",
+    "network.mdns_resolution",
+    "device.auto_connect_paired",
+    "device.show_rssi",
+    "device.connectable_only",
+    "device.hide_offline",
+    "device.sort_by_signal",
+    "device.icons",
+    "file.notifications",
+    "file.keep_history",
+    "file.keep_awake",
+    "monitor.cpu_visible",
+    "monitor.memory_visible",
+    "monitor.temperature_visible",
+    "monitor.fan_visible",
+    "monitor.disk_visible",
+    "monitor.network_visible",
+    "monitor.trend_indicators",
+    "monitor.auto_refresh",
+    "advanced.realtime_weather",
+    "advanced.hardware_acceleration",
     "logging.verbose",
     "logging.level",
     "ui.show_realtime_fps",
@@ -136,7 +208,7 @@ pub struct HelloResult {
     /// than the one that introduced it, which the CLI must report as unknown
     /// rather than as an empty set.
     #[serde(default)]
-    pub enabled_mutation_methods: Vec<String>,
+    pub enabled_mutation_methods: Option<Vec<String>>,
 }
 
 /// Result of `crossnet.host` — a freshly issued connection code plus the
@@ -281,7 +353,8 @@ pub struct SettingSnapshot {
     pub value_type: String,
     /// The redacted/allowlisted value reported by the Mac app.
     pub value: Value,
-    /// Whether this key can be mutated through the current CLI surface.
+    /// Legacy v1 read-only projection marker, not mutation capability.
+    /// The app advertises mutation methods separately in `crossnet.hello`.
     pub mutable: bool,
     /// Optional caveat, for example policy preference versus runtime proof.
     #[serde(default)]
@@ -333,12 +406,41 @@ pub struct SettingsMutationResult {
 /// committed through a prepare/commit flow that can require peer re-pinning, so a
 /// one-shot control write must not claim to change them.
 const MUTABLE_SETTINGS_ALLOWLIST: &[&str] = &[
+    "general.auto_scan_startup",
+    "general.notifications",
+    "general.dark_mode",
+    "general.device_details",
+    "general.connection_stats",
+    "general.compact_mode",
+    "network.bonjour_discovery",
+    "network.mdns_resolution",
+    "device.auto_connect_paired",
+    "device.show_rssi",
+    "device.connectable_only",
+    "device.hide_offline",
+    "device.sort_by_signal",
+    "device.icons",
+    "file.notifications",
+    "file.keep_history",
+    "file.keep_awake",
+    "monitor.cpu_visible",
+    "monitor.memory_visible",
+    "monitor.temperature_visible",
+    "monitor.fan_visible",
+    "monitor.disk_visible",
+    "monitor.network_visible",
+    "monitor.trend_indicators",
+    "monitor.auto_refresh",
+    "advanced.realtime_weather",
+    "advanced.hardware_acceleration",
     "logging.verbose",
     "logging.level",
     "ui.show_realtime_fps",
     "ui.top_bar_ip_location",
     "ui.top_bar_network_speed",
     "ui.top_bar_network_latency",
+    "remote_desktop.target_fps",
+    "remote_desktop.resolution",
 ];
 
 /// Queries the app-owned control surface and auth state (`crossnet.hello`).
@@ -385,6 +487,48 @@ async fn preflight_app_session_at_path(path: &PathBuf) -> Result<HelloResult> {
     Ok(app)
 }
 
+#[cfg(target_os = "macos")]
+fn require_app_method(app: &HelloResult, method: &str) -> Result<()> {
+    if method.starts_with("crossnet.file.approval.")
+        && !app
+            .enabled_mutation_methods
+            .as_ref()
+            .is_some_and(|methods| methods.iter().any(|enabled| enabled == method))
+    {
+        return Err(FileApprovalUnavailable.into());
+    }
+
+    if method.starts_with("crossnet.handshake.")
+        && !app
+            .enabled_mutation_methods
+            .as_ref()
+            .is_some_and(|methods| methods.iter().any(|enabled| enabled == method))
+    {
+        return Err(HandshakeManagementUnavailable.into());
+    }
+    require_advertised_app_method(app, method)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn require_advertised_app_method(app: &HelloResult, method: &str) -> Result<()> {
+    let Some(methods) = &app.enabled_mutation_methods else {
+        bail!(
+            "Mac app did not report mutation capabilities; update the app before GUI mutations (code: method_capabilities_unreported)"
+        );
+    };
+    if !methods.iter().any(|enabled| enabled == method) {
+        bail!("Mac app did not enable {method} (code: method_not_enabled)");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+async fn preflight_app_method_at_path(path: &PathBuf, method: &str) -> Result<HelloResult> {
+    let app = preflight_app_session_at_path(path).await?;
+    require_app_method(&app, method)?;
+    Ok(app)
+}
+
 /// Hosts a cross-network connection code (`crossnet.host`).
 ///
 /// `lease_mode` is optional — pass `None` to let the server pick its default.
@@ -396,7 +540,7 @@ pub async fn host(lease_mode: Option<LeaseMode>) -> Result<HostResult> {
 
 #[cfg(target_os = "macos")]
 async fn host_at_path(path: &PathBuf, lease_mode: Option<LeaseMode>) -> Result<HostResult> {
-    preflight_app_session_at_path(path).await?;
+    preflight_app_method_at_path(path, "crossnet.host").await?;
     let params = match lease_mode {
         Some(mode) => json!({ "lease_mode": mode.as_wire() }),
         None => json!({}),
@@ -409,7 +553,7 @@ async fn host_at_path(path: &PathBuf, lease_mode: Option<LeaseMode>) -> Result<H
 #[cfg(target_os = "macos")]
 pub async fn connect(code: &str) -> Result<ConnectResult> {
     let path = default_socket_path()?;
-    preflight_app_session_at_path(&path).await?;
+    preflight_app_method_at_path(&path, "crossnet.connect").await?;
     let result = call_at_path(&path, "crossnet.connect", json!({ "code": code })).await?;
     validate_connect_result_projection(parse_result("crossnet.connect", result)?)
 }
@@ -418,7 +562,7 @@ pub async fn connect(code: &str) -> Result<ConnectResult> {
 #[cfg(target_os = "macos")]
 pub async fn disconnect() -> Result<DisconnectResult> {
     let path = default_socket_path()?;
-    preflight_app_session_at_path(&path).await?;
+    preflight_app_method_at_path(&path, "crossnet.disconnect").await?;
     let result = call_at_path(&path, "crossnet.disconnect", json!({})).await?;
     parse_result("crossnet.disconnect", result)
 }
@@ -460,7 +604,7 @@ pub struct ConnectDeviceResult {
 #[cfg(target_os = "macos")]
 pub async fn connect_device(device_ref: &str) -> Result<ConnectDeviceResult> {
     let path = default_socket_path()?;
-    preflight_app_session_at_path(&path).await?;
+    preflight_app_method_at_path(&path, "crossnet.connect_device").await?;
     let result = call_at_path(
         &path,
         "crossnet.connect_device",
@@ -487,7 +631,8 @@ pub async fn connect_device(device_ref: &str) -> Result<ConnectDeviceResult> {
 #[cfg(target_os = "macos")]
 pub async fn navigate(destination: &str) -> Result<NavigateResult> {
     let path = default_socket_path()?;
-    preflight_app_session_at_path(&path).await?;
+    // v1 hello advertises this operation as `crossnet.navigation`.
+    preflight_app_method_at_path(&path, "crossnet.navigation").await?;
     let result = call_at_path(
         &path,
         "crossnet.navigate",
@@ -527,14 +672,19 @@ pub async fn settings_snapshot() -> Result<SettingsSnapshotResult> {
 
 #[cfg(target_os = "macos")]
 async fn settings_snapshot_at_path(path: &PathBuf) -> Result<SettingsSnapshotResult> {
-    let result = call_at_path(path, "crossnet.settings.snapshot", json!({})).await?;
+    let result = call_at_path(
+        path,
+        "crossnet.settings.snapshot",
+        json!({"include_extended":true}),
+    )
+    .await?;
     let snapshot = parse_result("crossnet.settings.snapshot", result)?;
     validate_settings_snapshot_projection(snapshot)
 }
 
 /// Applies one allowlisted Mac app setting (`crossnet.settings.set`).
 ///
-/// `value` must already be a `bool` or `string` matching the setting's declared
+/// `value` must already be a `bool`, `string` or integer matching the setting's declared
 /// domain; the Mac app re-validates and fails closed.
 #[cfg(target_os = "macos")]
 pub async fn settings_set(id: &str, value: Value) -> Result<SettingsMutationResult> {
@@ -549,18 +699,53 @@ async fn settings_set_at_path(
     value: Value,
 ) -> Result<SettingsMutationResult> {
     preflight_mutable_setting(id)?;
-    preflight_app_session_at_path(path).await?;
+    preflight_app_method_at_path(path, "crossnet.settings.set").await?;
     let result = call_at_path(
         path,
         "crossnet.settings.set",
         json!({ "id": id, "value": value }),
     )
     .await?;
-    validate_settings_mutation_projection(
+    let applied = validate_settings_mutation_projection(
         parse_result("crossnet.settings.set", result)?,
         id,
         &value,
-    )
+    )?;
+    let snapshot = settings_snapshot_at_path(path).await?;
+    confirm_setting_readback(applied, snapshot)
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn confirm_setting_readback(
+    mut applied: SettingsMutationResult,
+    snapshot: SettingsSnapshotResult,
+) -> Result<SettingsMutationResult> {
+    let snapshot = validate_settings_snapshot_projection(snapshot)?;
+    let observed = snapshot.settings.iter().find(|setting| setting.id == applied.id)
+        .ok_or_else(|| anyhow!("setting is missing from the independent app snapshot (code: setting_runtime_apply_failed)"))?;
+    if observed.value != applied.requested_value || observed.value_type != applied.value_type {
+        bail!(
+            "independent app snapshot does not confirm the applied setting; it may have changed concurrently (code: setting_runtime_apply_failed)"
+        );
+    }
+    if let (Some(applied_note), Some(observed_note)) = (&applied.note, &observed.note)
+        && applied_note != observed_note
+    {
+        bail!(
+            "setting mutation and snapshot disagree about effect timing (code: setting_runtime_apply_failed)"
+        );
+    }
+    applied.note = observed.note.clone().or(applied.note);
+    if matches!(
+        applied.id.as_str(),
+        "remote_desktop.target_fps" | "remote_desktop.resolution"
+    ) && applied.note.as_deref() != Some("applies_at_next_capture_start")
+    {
+        bail!(
+            "capture setting lacks its deferred-effect contract (code: setting_runtime_apply_failed)"
+        );
+    }
+    Ok(applied)
 }
 
 /// Refuses ids this CLI must not mutate before any socket traffic happens.
@@ -605,6 +790,17 @@ fn validate_settings_mutation_projection(
     }
     if &result.requested_value != requested {
         bail!("crossnet.settings.set echoed a different requested value than was sent");
+    }
+    let expected_type = match requested {
+        Value::Bool(_) => "bool",
+        Value::String(_) => "string",
+        Value::Number(number) if number.is_i64() => "int",
+        _ => bail!("crossnet.settings.set requires a scalar setting value"),
+    };
+    if result.value_type != expected_type {
+        bail!(
+            "crossnet.settings.set reported a different value type (code: setting_runtime_apply_failed)"
+        );
     }
     if !result.runtime_applied {
         bail!(
@@ -706,6 +902,16 @@ impl StatusWatch {
 /// `result` object (the `ok:false` error path is already handled here).
 #[cfg(target_os = "macos")]
 async fn call_at_path(path: &PathBuf, method: &str, params: Value) -> Result<Value> {
+    call_at_path_with_timeout(path, method, params, REQUEST_TIMEOUT).await
+}
+
+#[cfg(target_os = "macos")]
+async fn call_at_path_with_timeout(
+    path: &PathBuf,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> Result<Value> {
     let stream = connect_socket(path).await?;
     let mut reader = BufReader::new(stream);
     let id = uuid::Uuid::new_v4().to_string();
@@ -717,7 +923,7 @@ async fn call_at_path(path: &PathBuf, method: &str, params: Value) -> Result<Val
     });
     write_line(reader.get_mut(), &request).await?;
 
-    let line = tokio::time::timeout(REQUEST_TIMEOUT, read_line(&mut reader))
+    let line = tokio::time::timeout(timeout, read_line(&mut reader))
         .await
         .map_err(|_| anyhow!("{method} timed out waiting for a response"))??;
     if line.is_empty() {
@@ -802,6 +1008,13 @@ fn decode_response(expected_id: &str, value: Value) -> Result<Value> {
         .get("code")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("control response error missing string `code`"))?;
+    if code == "peer_pqc_suite_unavailable" {
+        // Do not copy arbitrary server text into a machine-readable CLI error.
+        return Err(PeerPQCSuiteUnavailable.into());
+    }
+    if code == "usb_device_unavailable" {
+        return Err(USBDeviceUnavailable.into());
+    }
     Err(anyhow!("{message} (code: {code})"))
 }
 
@@ -1029,6 +1242,36 @@ mod tests {
     }
 
     #[test]
+    fn peer_suite_refusal_is_typed_and_never_echoes_remote_message() {
+        let value = json!({"v":1,"id":"abc","ok":false,
+            "error":{"code":"peer_pqc_suite_unavailable","message":"untrusted secret value"}});
+        let error = decode_response("abc", value.clone()).unwrap_err();
+        assert!(error.downcast_ref::<PeerPQCSuiteUnavailable>().is_some());
+        assert!(!error.to_string().contains("untrusted secret"));
+        let mismatched = decode_response("other", value).unwrap_err();
+        assert!(
+            mismatched
+                .downcast_ref::<PeerPQCSuiteUnavailable>()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn absent_usb_refusal_requires_matching_request_and_redacts_remote_text() {
+        let value = json!({"v":1,"id":"usb-request","ok":false,
+            "error":{"code":"usb_device_unavailable","message":"untrusted secret value"}});
+        let error = decode_response("usb-request", value.clone()).unwrap_err();
+        assert!(error.downcast_ref::<USBDeviceUnavailable>().is_some());
+        assert!(!error.to_string().contains("untrusted secret"));
+        assert!(
+            decode_response("other", value)
+                .unwrap_err()
+                .downcast_ref::<USBDeviceUnavailable>()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn decode_response_bails_with_server_message_on_error() {
         let value = json!({
             "v": 1,
@@ -1242,6 +1485,86 @@ mod tests {
                 "{id} is mutable but not readable"
             );
         }
+    }
+
+    #[test]
+    fn remote_capture_settings_reach_the_app_mutation_boundary() -> Result<()> {
+        preflight_mutable_setting("remote_desktop.target_fps")?;
+        preflight_mutable_setting("remote_desktop.resolution")?;
+        assert!(preflight_mutable_setting("pqc.signature_algorithm").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn mutation_echo_cannot_replace_an_independent_setting_readback() -> Result<()> {
+        let applied: SettingsMutationResult = serde_json::from_value(json!({
+            "runtime_target":"mac_app_runtime", "control_effect":"mac_runtime_mutation",
+            "id":"remote_desktop.target_fps", "value_type":"int",
+            "requested_value":30, "observed_value":30, "runtime_applied":true
+        }))?;
+        let stale: SettingsSnapshotResult = serde_json::from_value(json!({
+            "runtime_target":"mac_app_runtime", "control_effect":"read_only",
+            "settings":[{"id":"remote_desktop.target_fps", "value_type":"int", "value":60,
+                "mutable":false, "note":"applies_at_next_capture_start"}]
+        }))?;
+        assert!(confirm_setting_readback(applied.clone(), stale.clone()).is_err());
+        let mut observed = stale;
+        observed.settings[0].value = json!(30);
+        let confirmed = confirm_setting_readback(applied.clone(), observed.clone())?;
+        assert_eq!(
+            confirmed.note.as_deref(),
+            Some("applies_at_next_capture_start")
+        );
+        observed.settings[0].note = None;
+        assert!(confirm_setting_readback(applied, observed).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn app_methods_preserve_unknown_empty_and_exact_method_support() -> Result<()> {
+        for (methods, expected) in [
+            (None, "method_capabilities_unreported"),
+            (Some(json!([])), "method_not_enabled"),
+            (Some(json!(["crossnet.settings.set"])), "method_not_enabled"),
+        ] {
+            let mut wire = json!({"engine_version":"test", "proto":1, "auth_loaded":true, "tenant_bound":true});
+            if let Some(methods) = methods {
+                wire["enabled_mutation_methods"] = methods;
+            }
+            let app: HelloResult = serde_json::from_value(wire)?;
+            assert!(
+                require_advertised_app_method(&app, "crossnet.host")
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected)
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_sends_no_mutation_when_app_did_not_enable_it() -> Result<()> {
+        for methods in [None, Some(vec![]), Some(vec!["crossnet.settings.set"])] {
+            let socket_path = make_test_socket_path("host-disabled")?;
+            let unreported = methods.is_none();
+            let server =
+                spawn_fake_server_with_methods(&socket_path, 1, true, true, methods).await?;
+            let failure = host_at_path(&socket_path, None)
+                .await
+                .expect_err("unsupported host must fail before mutation");
+            let code = if unreported {
+                "method_capabilities_unreported"
+            } else {
+                "method_not_enabled"
+            };
+            assert!(failure.to_string().contains(code), "{failure}");
+            let requests = server.await??;
+            assert_eq!(requests.len(), 1);
+            assert_eq!(request_method(&requests[0]), Some("crossnet.hello"));
+            cleanup_socket_home(&socket_path);
+        }
+        Ok(())
     }
 
     #[test]
@@ -1609,6 +1932,31 @@ mod tests {
         auth_loaded: bool,
         tenant_bound: bool,
     ) -> Result<tokio::task::JoinHandle<Result<Vec<Value>>>> {
+        spawn_fake_server_with_methods(
+            socket_path,
+            expected_requests,
+            auth_loaded,
+            tenant_bound,
+            Some(vec![
+                "crossnet.host",
+                "crossnet.connect",
+                "crossnet.disconnect",
+                "crossnet.settings.set",
+                "crossnet.navigation",
+                "crossnet.connect_device",
+            ]),
+        )
+        .await
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn spawn_fake_server_with_methods(
+        socket_path: &std::path::Path,
+        expected_requests: usize,
+        auth_loaded: bool,
+        tenant_bound: bool,
+        methods: Option<Vec<&'static str>>,
+    ) -> Result<tokio::task::JoinHandle<Result<Vec<Value>>>> {
         let parent = socket_path
             .parent()
             .ok_or_else(|| anyhow!("default socket path missing parent"))?;
@@ -1637,7 +1985,8 @@ mod tests {
                         "engine_version": "test-app",
                         "proto": PROTOCOL_VERSION,
                         "auth_loaded": auth_loaded,
-                        "tenant_bound": tenant_bound
+                        "tenant_bound": tenant_bound,
+                        "enabled_mutation_methods": methods
                     }),
                     "crossnet.host" => json!({
                         "code": "ABCD1234",
@@ -1662,7 +2011,8 @@ mod tests {
                         "failure_code": null,
                         "failure_class": null,
                         "auth_loaded": auth_loaded,
-                        "tenant_bound": tenant_bound
+                        "tenant_bound": tenant_bound,
+                        "enabled_mutation_methods": ["crossnet.host", "crossnet.connect", "crossnet.disconnect", "crossnet.settings.set", "crossnet.navigation", "crossnet.connect_device"]
                     }),
                     "crossnet.settings.snapshot" => json!({
                         "runtime_target": "mac_app_runtime",

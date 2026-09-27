@@ -229,7 +229,7 @@ final class ExistingOnlyIdentityRuntimeTests: XCTestCase {
             testingUserDefaults: defaults,
             existingOnlyIdentityRuntime: false,
             qPeriaptRuntimeSupportPreparer: {
-                await qPeriaptProbe.prepare(result: true)
+                await qPeriaptProbe.prepare(result: .activated)
             },
             qPeriaptEnvironmentPreferenceApplier: {
                 environmentProbe.apply($0)
@@ -241,8 +241,7 @@ final class ExistingOnlyIdentityRuntimeTests: XCTestCase {
         let qPeriaptPreparationCalls = await qPeriaptProbe.callCount()
         XCTAssertEqual(qPeriaptPreparationCalls, 1)
         XCTAssertTrue(manager.qPeriaptRuntimeSupported)
-        XCTAssertFalse(environmentProbe.appliedValues.isEmpty)
-        XCTAssertTrue(environmentProbe.appliedValues.allSatisfy { !$0 })
+        XCTAssertTrue(environmentProbe.appliedValues.isEmpty)
         XCTAssertEqual(
             manager.protocolIdentityConfigurationState,
             .requiresExplicitConfirmation
@@ -359,11 +358,27 @@ final class ExistingOnlyIdentityRuntimeTests: XCTestCase {
                 "guard !self.requiresExistingOnlyIdentityRuntime else { return }"
             )
         )
-        XCTAssertTrue(
-            selfIdentity.contains(
-                "!DeviceIdentityKeyManager.requiresExistingOnlyIdentityRuntime"
-            )
+        let selfIdentityLoader = try sourceSlice(
+            selfIdentity,
+            from: "identityLoader = { allowCreate in",
+            to: "readOnlyIdentityLoader ="
         )
+        XCTAssertTrue(selfIdentityLoader.contains("return try await manager.getOrCreateIdentityKey()"))
+        XCTAssertTrue(selfIdentityLoader.contains("return try await manager.existingIdentityKeyInfoStrict()"))
+        let identityAuthority = try sourceSlice(
+            manager,
+            from: "public func getOrCreateIdentityKey()",
+            to: "public func getDeviceId()"
+        )
+        let existingOnlyGuard = try XCTUnwrap(identityAuthority.range(of: "if Self.requiresExistingOnlyIdentityRuntime")?.lowerBound)
+        let strictAuthorityRead = try XCTUnwrap(identityAuthority.range(of: "try await existingIdentityKeyInfoStrict()")?.lowerBound)
+        let existingAuthorityReturn = try XCTUnwrap(identityAuthority.range(of: "return existing")?.lowerBound)
+        let legacyAuthorityRead = try XCTUnwrap(identityAuthority.range(of: "try await loadExistingKey(")?.lowerBound)
+        let authorityCreation = try XCTUnwrap(identityAuthority.range(of: "try await createNewIdentityKey()")?.lowerBound)
+        XCTAssertLessThan(existingOnlyGuard, strictAuthorityRead)
+        XCTAssertLessThan(strictAuthorityRead, existingAuthorityReturn)
+        XCTAssertLessThan(existingAuthorityReturn, legacyAuthorityRead)
+        XCTAssertLessThan(existingAuthorityReturn, authorityCreation)
         XCTAssertTrue(callback.contains("OQSBridge.signExistingOnly("))
     }
 
@@ -412,7 +427,8 @@ final class ExistingOnlyIdentityRuntimeTests: XCTestCase {
 private actor QPeriaptRuntimePreparationProbe {
     private var calls = 0
 
-    func prepare(result: Bool = true) -> Bool {
+    func prepare(result: QPeriaptProductionPreparationResult = .activated)
+        -> QPeriaptProductionPreparationResult {
         calls += 1
         return result
     }

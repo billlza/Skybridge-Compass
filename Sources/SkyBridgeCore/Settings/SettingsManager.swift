@@ -331,10 +331,13 @@ public class SettingsManager: ObservableObject, Sendable {
  /// 量子安全：是否启用TLS混合协商（视系统支持而定）
     @Published public var enablePQCHybridTLS: Bool = false
  /// 量子安全：是否优先协商 X-Wing 混合套件（仅调整套件优先级）
+    private var applyingHandshakeProfile = false
     @Published public var preferXWingHybrid: Bool = false
  /// 量子安全（beta）：是否优先协商 Q-Periapt ABI2 PolicyBound；没有已认证策略 session 时保持禁用。
     @Published public var preferQPeriaptBeta: Bool = false
     @Published public private(set) var qPeriaptRuntimeSupported: Bool = false
+    @Published public private(set) var isPreparingQPeriaptRuntime: Bool = false
+    @Published public private(set) var qPeriaptRuntimePreparationError: String?
 
  // MARK: - 系统监控设置
     @Published public var systemMonitorRefreshInterval: Double = 1.0
@@ -404,7 +407,7 @@ public class SettingsManager: ObservableObject, Sendable {
     private let userDefaults: UserDefaults
     private let existingOnlyIdentityRuntimeOverride: Bool?
     private let qPeriaptRuntimeSupportPreparer:
-        @MainActor @Sendable () async -> Bool
+        @MainActor @Sendable () async throws -> QPeriaptProductionPreparationResult
     private let qPeriaptEnvironmentPreferenceApplier:
         @MainActor @Sendable (Bool) -> Void
     private let runtimeSideEffectsEnabled: Bool
@@ -426,7 +429,7 @@ public class SettingsManager: ObservableObject, Sendable {
             userDefaults: .standard,
             existingOnlyIdentityRuntimeOverride: nil,
             qPeriaptRuntimeSupportPreparer: {
-                await QPeriaptPlatformPolicy.prepareLocalRuntimeSupport()
+                try await QPeriaptPlatformPolicy.prepareLocalRuntimeSupport()
             },
             qPeriaptEnvironmentPreferenceApplier: {
                 Self.applyQPeriaptEnvironmentPreference($0)
@@ -440,7 +443,7 @@ public class SettingsManager: ObservableObject, Sendable {
         userDefaults: UserDefaults,
         existingOnlyIdentityRuntimeOverride: Bool?,
         qPeriaptRuntimeSupportPreparer:
-            @escaping @MainActor @Sendable () async -> Bool,
+            @escaping @MainActor @Sendable () async throws -> QPeriaptProductionPreparationResult,
         qPeriaptEnvironmentPreferenceApplier:
             @escaping @MainActor @Sendable (Bool) -> Void,
         runtimeSideEffectsEnabled: Bool,
@@ -459,9 +462,7 @@ public class SettingsManager: ObservableObject, Sendable {
         } else {
             setupPQCSignatureAlgorithmObserver()
         }
-        qPeriaptRuntimePreparationTask = Task { @MainActor [weak self] in
-            await self?.prepareQPeriaptRuntimeSupport()
-        }
+        scheduleQPeriaptRuntimePreparation()
         if startsProtocolIdentityRestoration {
             protocolIdentityRestorationTask = Task { @MainActor [weak self] in
                 await self?.restoreProtocolIdentityConfiguration()
@@ -473,8 +474,9 @@ public class SettingsManager: ObservableObject, Sendable {
     convenience init(
         testingUserDefaults: UserDefaults,
         existingOnlyIdentityRuntime: Bool,
+        startsProtocolIdentityRestoration: Bool = true,
         qPeriaptRuntimeSupportPreparer:
-            @escaping @MainActor @Sendable () async -> Bool,
+            @escaping @MainActor @Sendable () async throws -> QPeriaptProductionPreparationResult,
         qPeriaptEnvironmentPreferenceApplier:
             @escaping @MainActor @Sendable (Bool) -> Void
     ) {
@@ -485,7 +487,7 @@ public class SettingsManager: ObservableObject, Sendable {
             qPeriaptEnvironmentPreferenceApplier:
                 qPeriaptEnvironmentPreferenceApplier,
             runtimeSideEffectsEnabled: false,
-            startsProtocolIdentityRestoration: true
+            startsProtocolIdentityRestoration: startsProtocolIdentityRestoration
         )
     }
 
@@ -1134,7 +1136,21 @@ public class SettingsManager: ObservableObject, Sendable {
         }
     }
 
+    public func retryQPeriaptRuntimePreparation() {
+        scheduleQPeriaptRuntimePreparation()
+    }
+
+    private func scheduleQPeriaptRuntimePreparation() {
+        guard !isPreparingQPeriaptRuntime else { return }
+        isPreparingQPeriaptRuntime = true
+        qPeriaptRuntimePreparationTask = Task { @MainActor [weak self] in
+            await self?.prepareQPeriaptRuntimeSupport()
+        }
+    }
+
     private func prepareQPeriaptRuntimeSupport() async {
+        defer { isPreparingQPeriaptRuntime = false }
+        qPeriaptRuntimePreparationError = nil
         guard !requiresExistingOnlyIdentityRuntime else {
             // The smoke host may inspect existing local identity authorities,
             // but it is not an enrollment authority. Keep Q-Periapt dark
@@ -1145,25 +1161,26 @@ public class SettingsManager: ObservableObject, Sendable {
             return
         }
 
-        let supported = await qPeriaptRuntimeSupportPreparer()
-        guard !Task.isCancelled else { return }
-        qPeriaptRuntimeSupported = supported
-
-        guard preferQPeriaptBeta else {
-            qPeriaptEnvironmentPreferenceApplier(false)
-            clearCryptoProviderCacheForSettingsChangeIfEnabled()
-            return
+        // Preserve both a saved Q selection and an externally supplied Q request
+        // while preparation is pending or fails. Only an explicit UI change to
+        // off clears this preference; runtime failure is not a settings change.
+        if preferQPeriaptBeta {
+            qPeriaptEnvironmentPreferenceApplier(true)
         }
-        guard supported else {
-            userDefaults.set(false, forKey: SettingsStorageKeys.preferQPeriaptBeta)
-            qPeriaptEnvironmentPreferenceApplier(false)
-            clearCryptoProviderCacheForSettingsChangeIfEnabled()
-            preferQPeriaptBeta = false
-            return
+        do {
+            let result = try await qPeriaptRuntimeSupportPreparer()
+            switch result {
+            case .activated, .alreadyActive:
+                qPeriaptRuntimeSupported = true
+            case .unprovisioned:
+                qPeriaptRuntimeSupported = false
+                qPeriaptRuntimePreparationError = "未配置 Q-Periapt 生产信任根，Q 连接暂不可用。"
+            }
+        } catch {
+            qPeriaptRuntimeSupported = false
+            qPeriaptRuntimePreparationError = error.localizedDescription
+            logger.error("Q-Periapt 准备失败，保留已选套件: \(error.localizedDescription, privacy: .public)")
         }
-
-        userDefaults.set(true, forKey: SettingsStorageKeys.preferQPeriaptBeta)
-        qPeriaptEnvironmentPreferenceApplier(true)
         clearCryptoProviderCacheForSettingsChangeIfEnabled()
     }
 
@@ -2104,9 +2121,8 @@ public class SettingsManager: ObservableObject, Sendable {
         enablePQCHybridTLS = userDefaults.bool(forKey: "Settings.EnablePQCHybridTLS", defaultValue: false)
         preferXWingHybrid = userDefaults.bool(forKey: SettingsStorageKeys.preferXWingHybrid, defaultValue: false)
         preferQPeriaptBeta = userDefaults.bool(forKey: SettingsStorageKeys.preferQPeriaptBeta, defaultValue: false)
-        // The expensive KEM round-trip probe runs off the main actor. Routing
-        // remains disabled until it completes, without erasing user intent.
-        qPeriaptEnvironmentPreferenceApplier(false)
+        // Runtime admission keeps Q routing unavailable until its native probe
+        // completes. Loading preferences must preserve an external Q request.
         strictModeForSensitiveGroups = userDefaults.bool(forKey: "Settings.StrictModeForSensitiveGroups", defaultValue: false)
         aqiThresholdCautionUrban = userDefaults.integer(forKey: "Settings.AQIThresholdCautionUrban", defaultValue: 100)
         aqiThresholdSensitiveUrban = userDefaults.integer(forKey: "Settings.AQIThresholdSensitiveUrban", defaultValue: 150)
@@ -2631,17 +2647,15 @@ public class SettingsManager: ObservableObject, Sendable {
             self?.userDefaults.set(value, forKey: SettingsStorageKeys.preferXWingHybrid)
             self?.clearCryptoProviderCacheForSettingsChange()
         }.store(in: &settingsCancellables)
-        $preferQPeriaptBeta.sink { [weak self] value in
+        $preferQPeriaptBeta.dropFirst().sink { [weak self] value in
             guard let self else { return }
+            self.userDefaults.set(value, forKey: SettingsStorageKeys.preferQPeriaptBeta)
+            self.qPeriaptEnvironmentPreferenceApplier(value)
             guard value else {
-                self.userDefaults.set(false, forKey: SettingsStorageKeys.preferQPeriaptBeta)
-                self.qPeriaptEnvironmentPreferenceApplier(false)
                 self.clearCryptoProviderCacheForSettingsChange()
                 return
             }
-            Task { @MainActor [weak self] in
-                await self?.prepareQPeriaptRuntimeSupport()
-            }
+            self.scheduleQPeriaptRuntimePreparation()
         }.store(in: &settingsCancellables)
  // 系统监控设置观察者
         $systemMonitorRefreshInterval.sink { [weak self] value in
@@ -2826,5 +2840,72 @@ private extension SettingsManager {
         let b = Double((v >> 8) & 0xFF) / 255.0
         let a = Double(v & 0xFF) / 255.0
         return Color(.sRGB, red: r, green: g, blue: b, opacity: a)
+    }
+}
+
+
+extension SettingsManager {
+    public func handshakeConfigurationSnapshot(busy: Bool = false) throws -> HandshakeConfigurationSnapshot {
+        let profile: HandshakeProfile = preferQPeriaptBeta ? .qperiapt : (preferXWingHybrid ? .xwing : .mlkem)
+        let signature = activeProtocolSigningAlgorithm
+        let state = "\(profile.rawValue):\(signature.rawValue)"
+        let revision = HandshakeConfigurationWire.revision(for: state, defaults: userDefaults)
+        let capability = CryptoProviderFactory.detectCapability()
+        let qAvailable: Bool
+        if #available(macOS 26.0, *) { qAvailable = signature == .mlDSA65 } else { qAvailable = false }
+        let provider = P2PConnection.makeHandshakeCryptoProvider(policy: .requirePQC)
+        return HandshakeConfigurationSnapshot(revision: revision, configuredProfile: profile,
+            providerSuite: provider.supportsSuite(provider.activeSuite) && provider.activeSuite.isNegotiable ? provider.activeSuite.rawValue : nil, options: [
+                .init(.qperiapt, selectable: qAvailable, reason: qAvailable ? nil : "需要 macOS 26 和 ML-DSA-65 主身份"),
+                .init(.xwing, selectable: CryptoProviderFactory.isAppleXWingAvailable(), reason: CryptoProviderFactory.isAppleXWingAvailable() ? nil : "X-Wing runtime 不可用"),
+                .init(.mlkem, selectable: capability.hasApplePQC || capability.hasLiboqs, reason: nil),
+                .init(.classic, selectable: false, reason: "严格 PQC 策略已禁用 Classic")
+            ], busy: busy || applyingHandshakeProfile)
+    }
+
+    public func applyHandshakeProfile(_ profile: HandshakeProfile, expectedRevision: String,
+                                      isBusy: @MainActor () -> Bool,
+                                      revalidate: HandshakeConfigurationService.Revalidate = {}) async throws -> HandshakeConfigurationSnapshot {
+        guard !applyingHandshakeProfile else { throw HandshakeConfigurationError.busy }
+        let initial = try handshakeConfigurationSnapshot()
+        guard initial.revision == expectedRevision else { throw HandshakeConfigurationError.revisionChanged }
+        guard profile != .classic else { throw HandshakeConfigurationError.classicDisabled }
+        guard initial.options.first(where: { $0.profile == profile })?.selectable == true else {
+            throw HandshakeConfigurationError.profileUnavailable
+        }
+        guard !isBusy() else { throw HandshakeConfigurationError.transferActive }
+        applyingHandshakeProfile = true
+        defer { applyingHandshakeProfile = false }
+        if profile == .qperiapt {
+            let prepared = try await qPeriaptRuntimeSupportPreparer()
+            switch prepared {
+            case .activated, .alreadyActive: qPeriaptRuntimeSupported = true
+            case .unprovisioned: throw HandshakeConfigurationError.profileUnavailable
+            }
+        }
+        try Task.checkCancellation()
+        try await revalidate()
+        guard try handshakeConfigurationSnapshot().revision == expectedRevision else {
+            throw HandshakeConfigurationError.revisionChanged
+        }
+        guard !isBusy() else { throw HandshakeConfigurationError.transferActive }
+        let previousQ = preferQPeriaptBeta
+        let previousX = preferXWingHybrid
+        preferXWingHybrid = profile == .xwing
+        preferQPeriaptBeta = profile == .qperiapt
+        clearCryptoProviderCacheForSettingsChange()
+        let result = try handshakeConfigurationSnapshot()
+        guard profile.matches(suite: result.providerSuite) else {
+            preferXWingHybrid = previousX
+            preferQPeriaptBeta = previousQ
+            clearCryptoProviderCacheForSettingsChange()
+            let restored = try handshakeConfigurationSnapshot()
+            guard initial.configuredProfile == restored.configuredProfile,
+                  initial.providerSuite == restored.providerSuite else { throw HandshakeConfigurationError.rollbackFailed }
+            throw HandshakeConfigurationError.applyFailed
+        }
+        var completed = result
+        completed.busy = isBusy()
+        return completed
     }
 }

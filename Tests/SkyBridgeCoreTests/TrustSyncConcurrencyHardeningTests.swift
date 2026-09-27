@@ -6,6 +6,33 @@ import XCTest
 @available(macOS 14.0, iOS 17.0, *)
 @MainActor
 final class TrustSyncConcurrencyHardeningTests: XCTestCase {
+    func testRejectedAuthorityWriteThrowsBeforeChangingAnyRecord() async throws {
+        let deviceId = "id:authority-rejection-\(UUID().uuidString.lowercased())"
+        let records = ["bonjour:first", "bonjour:second"].map { alias in
+            TrustRecord(
+                deviceId: alias, pubKeyFP: "", publicKey: Data(), signature: Data(),
+                currentDeviceId: deviceId, lifecycleState: .active
+            )
+        }
+        let service = TrustSyncService(initialRecordsForTesting: records)
+        do {
+            _ = try await service.recordAuthenticatedRemoteAuthority(
+                deviceId: deviceId, preferredCurrentDeviceId: deviceId,
+                protocolSigningAlgorithm: .mlDSA65,
+                protocolPublicKeyFingerprint: String(repeating: "a", count: 64)
+            )
+            XCTFail("Ambiguous authority write must reject")
+        } catch let rejection as AuthenticatedRemoteAuthorityRejection {
+            XCTAssertEqual(rejection, .ambiguousDirectIdentity)
+        }
+        for record in records {
+            let retained = await service.rawTrustRecordForTesting(deviceId: record.deviceId)
+            XCTAssertEqual(retained, record)
+        }
+        let uncommitted = await service.rawTrustRecordForTesting(deviceId: deviceId)
+        XCTAssertNil(uncommitted)
+    }
+
     func testInitialLoadBarrierWaitsAndPropagatesFailure() async throws {
         let blocker = TrustSyncTestBlocker()
         let completion = TrustSyncTestCompletion()

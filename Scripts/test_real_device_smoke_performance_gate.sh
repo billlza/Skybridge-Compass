@@ -135,11 +135,15 @@ require_literal '"SKYBRIDGE_PACKAGING_SOURCE_REPOSITORY=${GITHUB_REPOSITORY:-${S
 require_literal '"SKYBRIDGE_PACKAGING_PRODUCT_SURFACE=testing"' "$WEBRTC_SCRIPT"
 require_literal '"SKYBRIDGE_PACKAGING_SWIFT_ACTIVE_COMPILATION_CONDITIONS=HAS_APPLE_PQC_SDK,SKYBRIDGE_TESTING"' "$WEBRTC_SCRIPT"
 require_literal '"OTHER_SWIFT_FLAGS=\$(inherited) -D SKYBRIDGE_TESTING"' "$WEBRTC_SCRIPT"
-require_literal 'REQUIRED_IDENTITY_ALGORITHM = "mldsa87"' "$RELEASE_ACCEPTANCE_VALIDATOR"
-require_literal 'REQUIRED_IDENTITY_PROTECTION = "secureEnclaveRequired"' "$RELEASE_ACCEPTANCE_VALIDATOR"
-require_literal '"handshakePersistenceVerified"' "$RELEASE_ACCEPTANCE_VALIDATOR"
-require_literal '"currentPathAuthorityVerified"' "$RELEASE_ACCEPTANCE_VALIDATOR"
-require_literal 'choices=("connectivity", "file-transfer", "p2p", "webrtc", "production-identity")' "$RELEASE_ACCEPTANCE_VALIDATOR"
+# Identity policy now belongs to the shared lifecycle verifier. Exercise that
+# boundary instead of requiring its former constants to stay in this caller.
+# The original ML-DSA-87 Secure Enclave creation contract and the separately
+# selected existing Q identity contract must both remain enforced.
+require_literal 'validate_manifest_identity_policy(' "$RELEASE_ACCEPTANCE_VALIDATOR"
+require_literal 'validate_public_proof(' "$RELEASE_ACCEPTANCE_VALIDATOR"
+python3 -W error "$ROOT_DIR/Scripts/test_extract_ios_production_identity_evidence.py"
+python3 -W error "$ROOT_DIR/Scripts/test_existing_production_identity_evidence.py"
+python3 -W error "$ROOT_DIR/Scripts/test_validate_real_device_release_acceptance_artifact.py"
 require_literal 'runs-on: [self-hosted, macOS, skybridge-real-device-release]' "$REAL_DEVICE_RELEASE_WORKFLOW"
 require_literal 'SKYBRIDGE_RELEASE_EVIDENCE_EXPECTED_REPOSITORY: ${{ github.repository }}' "$REAL_DEVICE_RELEASE_WORKFLOW"
 require_literal 'SKYBRIDGE_RELEASE_EVIDENCE_EXPECTED_SHA: ${{ github.sha }}' "$REAL_DEVICE_RELEASE_WORKFLOW"

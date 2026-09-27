@@ -36,7 +36,7 @@ public enum AccountDevicePresentationPolicy {
             let leftName = displayName(for: lhs).lowercased()
             let rightName = displayName(for: rhs).lowercased()
             if leftName != rightName { return leftName < rightName }
-            return lhs.deviceId < rhs.deviceId
+            return lhs.id < rhs.id
         }
     }
 
@@ -67,12 +67,56 @@ public enum AccountDevicePresentationPolicy {
 
     public static func displayName(for record: AccountDeviceRecord) -> String {
         if let name = record.deviceName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            if let model = modelDisplayName(for: record),
+               genericDeviceNames.contains(name.lowercased()) {
+                return model
+            }
             return name
         }
-        if let model = record.deviceModel?.trimmingCharacters(in: .whitespacesAndNewlines), !model.isEmpty {
+        if let model = modelDisplayName(for: record) {
             return model
         }
         return shortDeviceId(record.deviceId)
+    }
+
+    private static let genericDeviceNames: Set<String> = [
+        "mac", "iphone", "ipad", "ipod touch", "apple device", "ios device", "unknown device"
+    ]
+
+    public static func modelDisplayName(for record: AccountDeviceRecord) -> String? {
+        AppleHardwareModelCatalog.displayName(for: record.deviceModel)
+    }
+
+    /// Metadata can supply a missing icon, but never a registration or trust binding.
+    public static func displayPlatform(for record: AccountDeviceRecord) -> AccountDevicePlatform? {
+        record.platform ?? AppleHardwareModelCatalog.model(for: record.deviceModel)?.platform
+    }
+
+    public enum RegistrationIssue: Sendable, Equatable {
+        case identityMismatch
+        case notRegistered
+        case pending
+        case frozen
+        case unrecognizedStatus
+    }
+
+    /// An accepted heartbeat is ephemeral presence, not proof that this identity
+    /// was enrolled. Only the server's exact-binding `isCaller` establishes that.
+    public static func registrationIssue(for snapshot: AccountDeviceListSnapshot) -> RegistrationIssue? {
+        if let caller = snapshot.devices.first(where: \.isCaller) {
+            switch caller.status {
+            case "pending": return .pending
+            case "frozen": return .frozen
+            case "active": return nil
+            default: return .unrecognizedStatus
+            }
+        }
+        guard !snapshot.truncated else { return nil }
+        if snapshot.devices.contains(where: { $0.deviceId == snapshot.callerDeviceId }) {
+            return .identityMismatch
+        }
+        // A truncated response cannot establish that this device is absent.
+        return .notRegistered
     }
 
     /// 设备 ID 的短展示形式：前 8 个字符，大写。

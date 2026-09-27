@@ -1549,6 +1549,10 @@ actor SignalServerClientCompat {
         request.httpMethod = method
         request.timeoutInterval = requestTimeoutSeconds
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        // GET requests have no JSON body. Carry version identity on every request so
+        // account-device reads meet the same production version gate as heartbeats.
+        request.setValue(clientVersion(), forHTTPHeaderField: "X-SkyBridge-Client-Version")
+        request.setValue(protocolVersion(), forHTTPHeaderField: "X-SkyBridge-Protocol-Version")
         let apiKey = CrossNetworkServerConfig.clientAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         if !apiKey.isEmpty {
             request.setValue(apiKey, forHTTPHeaderField: "X-API-Key")

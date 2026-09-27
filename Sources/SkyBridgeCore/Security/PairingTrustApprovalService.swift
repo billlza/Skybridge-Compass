@@ -145,6 +145,37 @@ public final class PairingTrustApprovalService: ObservableObject {
     private static let maximumApprovedProtocolIdentityContexts = 32
     private static let approvedProtocolIdentityContextTTL: TimeInterval = 300
     private var approvedProtocolIdentityContexts: [UUID: ApprovedProtocolIdentityContext] = [:]
+
+    private enum RequesterPinFailure: Error {
+        case cancelled
+        case missingStableDeviceId
+        case authorityRejected(AuthenticatedRemoteAuthorityRejection)
+        case notPromoted
+        case storeFailure
+
+        var userNotice: String {
+            switch self {
+            case .cancelled:
+                return "协议身份授权已取消，连接已拒绝。"
+            case .missingStableDeviceId:
+                return "对端缺少有效的稳定设备身份，连接已拒绝。"
+            case .authorityRejected(.ambiguousDirectIdentity),
+                 .authorityRejected(.conflictingIdentityClaims):
+                return "现有信任记录的身份声明存在冲突，无法证明它们属于同一协议身份。已保留现有配对与身份 pin，连接已拒绝。"
+            case .authorityRejected(.authorityBindingConflict):
+                return "无法建立与现有授权一致的协议公钥绑定。已保留现有身份 pin，连接已拒绝。"
+            case .authorityRejected(.invalidDeviceId),
+                 .authorityRejected(.invalidFingerprint),
+                 .authorityRejected(.invalidPublicKey),
+                 .authorityRejected(.missingStableIdentity):
+                return "对端协议身份材料无效或不完整，连接已拒绝。"
+            case .notPromoted:
+                return "协议身份授权未提交，连接已拒绝。"
+            case .storeFailure:
+                return "协议身份授权未提交；权威信任写入失败，连接已拒绝。"
+            }
+        }
+    }
 #if DEBUG || SKYBRIDGE_TESTING
     typealias ProtocolIdentityPinOperationForTesting = @MainActor @Sendable (
         _ deviceIds: [String],
@@ -756,15 +787,16 @@ public final class PairingTrustApprovalService: ObservableObject {
 
         isPendingResolutionInFlight = true
         defer { isPendingResolutionInFlight = false }
-        guard await pinProtocolIdentityRequester(
+        let pinResult = await pinProtocolIdentityRequester(
             deviceIds: normalizedIds,
             algorithm: requesterProtocolSigningAlgorithm,
             fingerprint: normalizedFingerprint,
             publicKey: context.publicKey,
             operatorLabel: decision == .alwaysAllow ? "always-allow" : "allow-once"
-        ) else {
+        )
+        if case .failure(let failure) = pinResult {
             pendingDecision = .reject
-            pendingResolutionNotice = "协议身份授权未提交；权威信任写入失败，连接已拒绝。"
+            pendingResolutionNotice = failure.userNotice
             return .reject
         }
 
@@ -791,21 +823,22 @@ public final class PairingTrustApprovalService: ObservableObject {
         fingerprint: String,
         publicKey: Data?,
         operatorLabel: String
-    ) async -> Bool {
+    ) async -> Result<Void, RequesterPinFailure> {
 #if DEBUG || SKYBRIDGE_TESTING
         if let protocolIdentityPinOperationForTesting {
-            return await protocolIdentityPinOperationForTesting(deviceIds, algorithm, fingerprint)
+            let accepted = await protocolIdentityPinOperationForTesting(deviceIds, algorithm, fingerprint)
+            return accepted ? .success(()) : .failure(.notPromoted)
         }
         if let protocolIdentityPinResultOverrideForTesting {
-            return protocolIdentityPinResultOverrideForTesting
+            return protocolIdentityPinResultOverrideForTesting ? .success(()) : .failure(.notPromoted)
         }
 #endif
-        guard !Task.isCancelled else { return false }
+        guard !Task.isCancelled else { return .failure(.cancelled) }
         guard let stableDeviceId = stableProtocolIdentityDeviceId(from: deviceIds) else {
             let line = "⛔️ PIB-1 requester protocol identity pin failed: requester=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) reason=missing_stable_device_id lifecycle=identity-oob>requester-pin-failed"
             logger.warning("\(line, privacy: .public)")
             RemoteControlSmokeStatusWriter.append(line)
-            return false
+            return .failure(.missingStableDeviceId)
         }
         do {
 #if DEBUG || SKYBRIDGE_TESTING
@@ -826,8 +859,15 @@ public final class PairingTrustApprovalService: ObservableObject {
                 let line = "⛔️ PIB-1 requester protocol identity pin failed: requester=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) reason=authority_record_not_promoted lifecycle=identity-oob>requester-pin-failed"
                 logger.warning("\(line, privacy: .public)")
                 RemoteControlSmokeStatusWriter.append(line)
-                return false
+                return .failure(.notPromoted)
             }
+        } catch is CancellationError {
+            return .failure(.cancelled)
+        } catch let rejection as AuthenticatedRemoteAuthorityRejection {
+            let line = "⛔️ PIB-1 requester protocol identity pin failed: requester=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) reason=\(rejection.rawValue) lifecycle=identity-oob>requester-pin-failed"
+            logger.warning("\(line, privacy: .public)")
+            RemoteControlSmokeStatusWriter.append(line)
+            return .failure(.authorityRejected(rejection))
         } catch TrustSyncError.aliasCleanupFailedAfterAuthoritativeCommit(let cleanupResidue),
                 TrustSyncError.fallbackCleanupFailedAfterAuthoritativeCommit(let cleanupResidue) {
             // The authority pin is already durable; post-commit cleanup residue
@@ -839,7 +879,7 @@ public final class PairingTrustApprovalService: ObservableObject {
             let line = "⛔️ PIB-1 requester protocol identity pin failed: requester=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) reason=authority_store_error lifecycle=identity-oob>requester-pin-failed"
             logger.error("\(line, privacy: .public) errorClass=\(String(reflecting: Swift.type(of: error)), privacy: .public) detail=\(error.localizedDescription, privacy: .private)")
             RemoteControlSmokeStatusWriter.append(line)
-            return false
+            return .failure(.storeFailure)
         }
         let bootstrapCachePersisted = await PeerProtocolIdentityBootstrapStore.shared.upsert(
             deviceIds: deviceIds,
@@ -854,7 +894,7 @@ public final class PairingTrustApprovalService: ObservableObject {
         let line = "🔐 PIB-1 requester protocol identity pinned: requester=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) operator=\(operatorLabel) lifecycle=identity-oob>requester-pinned"
         logger.info("\(line, privacy: .public)")
         RemoteControlSmokeStatusWriter.append(line)
-        return true
+        return .success(())
     }
 
     private func stableProtocolIdentityDeviceId(from deviceIds: [String]) -> String? {

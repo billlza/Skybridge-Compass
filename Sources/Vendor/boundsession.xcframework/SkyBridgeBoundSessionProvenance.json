@@ -1,0 +1,730 @@
+{
+  "schema_version": 2,
+  "component": "BoundSession FFI",
+  "version": "0.1.0",
+  "abi_major": 1,
+  "additive_abi_version": 3,
+  "abi_header_sha256": "d2320167a417c3becffd87bf6d09b19977dd3d8580a03a7a3d0d459ac154a0cf",
+  "v1_normalized_surface_sha256": "078403a789b95d3aa4b9803aacbbfb45945b696788acbff9e95c44119dc9ffd0",
+  "exported_bs_ffi_symbol_count": 41,
+  "v1_exported_bs_ffi_symbol_count": 33,
+  "v2_exported_bs_ffi_symbol_count": 6,
+  "v3_exported_bs_ffi_symbol_count": 2,
+  "capabilities_v3": "0x1",
+  "capabilities_v2": "0x3f",
+  "source_revision": "999729934b0cf3c76bad814ea9d620261b46b407",
+  "source_worktree_clean": false,
+  "source_snapshot_sha256": "4934d90e8bfac510c221bdec009da044221f365886319e044bfbf9ea2f056722",
+  "source_snapshot_method": "boundsession-native-source-v1",
+  "source_snapshot": {
+    "schema": "boundsession-native-source-v1",
+    "scope": {
+      "root": "implementation",
+      "excluded_root_directories": [
+        "target"
+      ],
+      "excluded_directory_names": [
+        "__pycache__"
+      ],
+      "excluded_file_names": [
+        ".DS_Store"
+      ],
+      "symlinks": "rejected",
+      "special_files": "rejected"
+    },
+    "entries": {
+      "Cargo.lock": {
+        "sha256": "99194f56e598cdb899c0b059432872d6688929f2afdfcb9be22e27a50985965a",
+        "bytes": 19218,
+        "executable": false
+      },
+      "Cargo.toml": {
+        "sha256": "a1337c0117034291ed755ad3108e423e09b9a7309ecb97ae3cc7a8becacf6471",
+        "bytes": 1187,
+        "executable": false
+      },
+      "bound-session-authority-store-sqlite/Cargo.toml": {
+        "sha256": "089dc981b758cc7bcea01c9b62313bd8c5a0955eb61f40912f4bd016ea7fcae5",
+        "bytes": 616,
+        "executable": false
+      },
+      "bound-session-authority-store-sqlite/README.md": {
+        "sha256": "517dad975cd3349b4b9cb14d740f1a16a0358fca6e56fa4b31c686c5bbefb63d",
+        "bytes": 1768,
+        "executable": false
+      },
+      "bound-session-authority-store-sqlite/src/adapter.rs": {
+        "sha256": "02860e0ef86e8a3e674da986c010546c8112e71f62b13ac9dc7e0253fd4de949",
+        "bytes": 39012,
+        "executable": false
+      },
+      "bound-session-authority-store-sqlite/src/error.rs": {
+        "sha256": "5135fb6d69bac29d9be3c0846f62cea6e2f75b4a83604310fbba69ea26c3fc2b",
+        "bytes": 3184,
+        "executable": false
+      },
+      "bound-session-authority-store-sqlite/src/lib.rs": {
+        "sha256": "3f3300583c3d4308141fb937fe9746c0bb9885935bf231eecac6245bced5e459",
+        "bytes": 583,
+        "executable": false
+      },
+      "bound-session-authority-store-sqlite/src/schema.rs": {
+        "sha256": "6af5fc2175f264c45e73ab9af580fecf4f9b2951e02091afc6305c094a3eea8f",
+        "bytes": 16506,
+        "executable": false
+      },
+      "bound-session-authority-store-sqlite/tests/sqlite_store.rs": {
+        "sha256": "f9651111d96f192cb070d01d8fe39405826194f1fa26abb67267465de438f56e",
+        "bytes": 42912,
+        "executable": false
+      },
+      "bound-session-authority-store/Cargo.toml": {
+        "sha256": "6697ff8ec43873f4af42fc60eb164b740a0831621672c4e9328d0de48e823ca3",
+        "bytes": 509,
+        "executable": false
+      },
+      "bound-session-authority-store/README.md": {
+        "sha256": "9fde97815bed9c6efd2dcf2b1daed6e905479d4ea47fd594990735fd9e301983",
+        "bytes": 9866,
+        "executable": false
+      },
+      "bound-session-authority-store/src/adapter.rs": {
+        "sha256": "e0a3e65ccb09cbd32d0e9e5ea2541cbd17f671d3f6478dc053c7f7a02b0a29e6",
+        "bytes": 13236,
+        "executable": false
+      },
+      "bound-session-authority-store/src/authorization-test-data/authorization-audit.bin": {
+        "sha256": "76adf93e9f6f58311024432cc05803fc44403d59985668239430f3f5bc37769f",
+        "bytes": 1491,
+        "executable": false
+      },
+      "bound-session-authority-store/src/authorization-test-data/head-command-id.bin": {
+        "sha256": "46dbaa9b37d288c819b3dc32d5c0113e0ccd547c7d201deb6c3a921d68482574",
+        "bytes": 71,
+        "executable": false
+      },
+      "bound-session-authority-store/src/authorization-test-data/head-command.bin": {
+        "sha256": "bf611fc609e025da03459cd50c1d588acfd6bb99e0b44a93fade30e1d4278a12",
+        "bytes": 208,
+        "executable": false
+      },
+      "bound-session-authority-store/src/authorization-test-data/head-result.bin": {
+        "sha256": "1577d2ac98d06a00cadeb4a37891a13e37b9efac49c2f14e35da01a291f6bb05",
+        "bytes": 140,
+        "executable": false
+      },
+      "bound-session-authority-store/src/authorization.rs": {
+        "sha256": "6afb96d7f3ef127d74f6835b42e72481edb4a05447ef54bb89e391b0f3353c85",
+        "bytes": 8108,
+        "executable": false
+      },
+      "bound-session-authority-store/src/authorization_tests.rs": {
+        "sha256": "ee1c5791901642dd5c35c3482cd1cb7167451a07994c19fb6c64322eba9574c9",
+        "bytes": 12166,
+        "executable": false
+      },
+      "bound-session-authority-store/src/durable_codec.rs": {
+        "sha256": "e51a344b274c8b4efe7c1fb9fa7c4e13591061302c06b7f777b17d1c2b20cb7e",
+        "bytes": 46224,
+        "executable": false
+      },
+      "bound-session-authority-store/src/error.rs": {
+        "sha256": "7e28888550eed81b1811a7464d443b67fe610aea5f8dc6fd5f9776d9c2aef40e",
+        "bytes": 10986,
+        "executable": false
+      },
+      "bound-session-authority-store/src/lib.rs": {
+        "sha256": "a1395a2e5c4d0b0d15c3c4141b1892b62f55d5f0a4138f785749e33208afb63a",
+        "bytes": 3526,
+        "executable": false
+      },
+      "bound-session-authority-store/src/readiness-test-data/audit.bin": {
+        "sha256": "99d4b0ca76a2498d024e4b9fc28727fc8a0ca8d8b74963371bbf33d85ccabbe6",
+        "bytes": 1491,
+        "executable": false
+      },
+      "bound-session-authority-store/src/readiness-test-data/head-command.bin": {
+        "sha256": "dca1c8b1896b636dd6c346922870d6334ee82833c9a86a4bff9689764307b1ca",
+        "bytes": 208,
+        "executable": false
+      },
+      "bound-session-authority-store/src/readiness-test-data/head-id.bin": {
+        "sha256": "f83d4e729160b9482361d55835390d6b612a9582ff752f00a8ea0f4aae1be896",
+        "bytes": 71,
+        "executable": false
+      },
+      "bound-session-authority-store/src/readiness-test-data/head-result.bin": {
+        "sha256": "0478cd8de756197332237ddb5a11e5a377e85f87196d58c8ed505bb15c041b8b",
+        "bytes": 140,
+        "executable": false
+      },
+      "bound-session-authority-store/src/readiness-test-data/local-ready.bin": {
+        "sha256": "f5cf3b5944297d719d7c7363e735b24f783b2c29de2ca8ece04e4ee4c65b34a9",
+        "bytes": 193,
+        "executable": false
+      },
+      "bound-session-authority-store/src/readiness-test-data/peer-ready.bin": {
+        "sha256": "be0ea29d8a2323982a37617073a6b87e7877b305aebcc7f4adaa8b8c5a1d7364",
+        "bytes": 193,
+        "executable": false
+      },
+      "bound-session-authority-store/src/readiness.rs": {
+        "sha256": "fe035b9da4c37d71a45e65ab6faf8238d21bfc392f0998fa0ae7e8c4e658a789",
+        "bytes": 13426,
+        "executable": false
+      },
+      "bound-session-authority-store/src/readiness_tests.rs": {
+        "sha256": "3fff248c555d649a72829298fa354f3a038e8438da3129d687fb13931defd8a5",
+        "bytes": 10059,
+        "executable": false
+      },
+      "bound-session-authority-store/src/reducer.rs": {
+        "sha256": "6c34a0ea8ee8b343ec12639f688d649ee140d871e0b049ecbb7332787c1d20b9",
+        "bytes": 47636,
+        "executable": false
+      },
+      "bound-session-authority-store/src/types.rs": {
+        "sha256": "426b460e603d035dde043ca7eb9f8ff797f47a3321ec5136d29e611e5941423a",
+        "bytes": 43295,
+        "executable": false
+      },
+      "bound-session-authority-store/tests/authority_store.rs": {
+        "sha256": "31225022b8865290530a36280e7db36f6d6d2f034669ad3b310995596a75b337",
+        "bytes": 61600,
+        "executable": false
+      },
+      "bound-session-core/Cargo.toml": {
+        "sha256": "3092c9873a94b2c2669d802c972348dddc3c70fbc7c3c5474b8973d1ec0825e7",
+        "bytes": 710,
+        "executable": false
+      },
+      "bound-session-core/src/authority.rs": {
+        "sha256": "e74f6f1b0845875c56808bbba34e7dbb97628a945b3cc52c7bf478be4c32ced5",
+        "bytes": 237486,
+        "executable": false
+      },
+      "bound-session-core/src/authority_head.rs": {
+        "sha256": "cc8783b84e08c471db978bbef38d25d200d85a87d784fa60847f7c9a071e7d60",
+        "bytes": 37171,
+        "executable": false
+      },
+      "bound-session-core/src/authorization.rs": {
+        "sha256": "f3dd4f18ed04f47faa4a8d38934b442e23f3586eeb413b7af7ff8bd2d8d6fced",
+        "bytes": 28191,
+        "executable": false
+      },
+      "bound-session-core/src/authorization_audit.rs": {
+        "sha256": "22fa1890083ea1fb9c9dd3f801ab9eef003046e977465257f412b76ca181968e",
+        "bytes": 8429,
+        "executable": false
+      },
+      "bound-session-core/src/codec.rs": {
+        "sha256": "a9dc8983595a8b3cdc967261b05c2fd49252b4eb1516418136ca5ab47aa1add4",
+        "bytes": 7786,
+        "executable": false
+      },
+      "bound-session-core/src/crypto.rs": {
+        "sha256": "0f1bcd3ebf7ec020f172d3fd3d274f6c38b6fabae423e845d28b83a3ef9e20e6",
+        "bytes": 25418,
+        "executable": false
+      },
+      "bound-session-core/src/error.rs": {
+        "sha256": "b175875452e08db4da62456f21a1879c85df2e617b1057798ab1dc58bd47780f",
+        "bytes": 6082,
+        "executable": false
+      },
+      "bound-session-core/src/evidence.rs": {
+        "sha256": "77bea5a0c84a926b2f560c496a26d039768ed964b195e26ecff5acac0ebe6e84",
+        "bytes": 19680,
+        "executable": false
+      },
+      "bound-session-core/src/file_request.rs": {
+        "sha256": "b7a027e9c8277783d62f0d513cffdcbfd9b49f860e7765057fae693292fc137a",
+        "bytes": 4683,
+        "executable": false
+      },
+      "bound-session-core/src/framing.rs": {
+        "sha256": "33340cc13ff8c32faee01690b12e15a82e4d60570c9839d01b1f146ef7965d77",
+        "bytes": 2180,
+        "executable": false
+      },
+      "bound-session-core/src/handshake_crypto.rs": {
+        "sha256": "2f69e003232a4c01f9b1d13fdaf8d62556835805c4af9c4ee9f43f82ecbba668",
+        "bytes": 5683,
+        "executable": false
+      },
+      "bound-session-core/src/handshake_driver.rs": {
+        "sha256": "0d16b87ee263edcac66c1db04cf273d37118172597df848d0de730845195c453",
+        "bytes": 52569,
+        "executable": false
+      },
+      "bound-session-core/src/handshake_types.rs": {
+        "sha256": "2dd3d25f7406cea5d21536076eea660f2c046d9f2b138760e4795be48a5b04b2",
+        "bytes": 25459,
+        "executable": false
+      },
+      "bound-session-core/src/lib.rs": {
+        "sha256": "cb6ff146221d1e63deb18ba2f194b3a2ed1e1085a870d0678f4e981b99ee8484",
+        "bytes": 4223,
+        "executable": false
+      },
+      "bound-session-core/src/recovery.rs": {
+        "sha256": "2d08c737af7f9b589aea57957c98a3df233a52fd8f2735a51e5728f8c08a3c5b",
+        "bytes": 5732,
+        "executable": false
+      },
+      "bound-session-core/src/types.rs": {
+        "sha256": "48593205b2521ef1cb53ad04f8e584bdec26fc32b77b85e59cfe814a6f93b795",
+        "bytes": 28910,
+        "executable": false
+      },
+      "bound-session-core/tests/handshake_codec_vectors.rs": {
+        "sha256": "7ba98b3c738007c1b5c13d2056da85d8c317182793caca015d7ba4be6dc8fb3e",
+        "bytes": 8278,
+        "executable": false
+      },
+      "bound-session-evidence-verifier/Cargo.toml": {
+        "sha256": "0f7533d4d41482033969c465f428cb72c9065b095bc48061e2e0b3add44cd2da",
+        "bytes": 504,
+        "executable": false
+      },
+      "bound-session-evidence-verifier/examples/generate_test_fixture.rs": {
+        "sha256": "f456709a81511b1ed5556c3f9d5f6cb8211b34e6390f31cc4a842c5e15f5d69c",
+        "bytes": 7150,
+        "executable": false
+      },
+      "bound-session-evidence-verifier/src/lib.rs": {
+        "sha256": "abefbd846132d09cd79a74e5a91add382e1e5797b8e29b6d736ddd0a70d11352",
+        "bytes": 23471,
+        "executable": false
+      },
+      "bound-session-evidence-verifier/src/main.rs": {
+        "sha256": "1dff1fd2103963a0e5e354db0d9abd907ab41028c6613474f04faa52fedfca99",
+        "bytes": 11537,
+        "executable": false
+      },
+      "bound-session-evidence-verifier/tests/verification.rs": {
+        "sha256": "7de315a04d4d340e1935838a124450f5adfa093d340a776a266d088a6ea5f26e",
+        "bytes": 20055,
+        "executable": false
+      },
+      "bound-session-ffi/ABI.md": {
+        "sha256": "feaadb458b0a5c9990235099dee1dd69e7cb69e193140d1459c162ae1f6cc5b1",
+        "bytes": 16655,
+        "executable": false
+      },
+      "bound-session-ffi/Cargo.toml": {
+        "sha256": "f4c0ec578c8cb964fe5529d93feca7cd69ea9799d4212e25421d15a6dcb42f01",
+        "bytes": 1540,
+        "executable": false
+      },
+      "bound-session-ffi/README.md": {
+        "sha256": "d9cc14a933521c133ce0d999d452f546cba66c80b41404d106c1614414576db3",
+        "bytes": 6655,
+        "executable": false
+      },
+      "bound-session-ffi/cbindgen.toml": {
+        "sha256": "9de9a909dcf1d044a0a3fc130c5e733abb07bb2bb15b266bc39b5ae0b43eebf9",
+        "bytes": 617,
+        "executable": false
+      },
+      "bound-session-ffi/include/bound_session_ffi.h": {
+        "sha256": "d2320167a417c3becffd87bf6d09b19977dd3d8580a03a7a3d0d459ac154a0cf",
+        "bytes": 53523,
+        "executable": false
+      },
+      "bound-session-ffi/research-policy/policy-public.bin": {
+        "sha256": "4b7304e5a898a1a20b367b684f6a786aae5d6bd24f5846f6789333cd5992c0c6",
+        "bytes": 1952,
+        "executable": false
+      },
+      "bound-session-ffi/research-policy/policy-signature.bin": {
+        "sha256": "f7473e8ff01d6a770afd77987f95c61f1f7e2e3a22d788442a40503383f67e0b",
+        "bytes": 3309,
+        "executable": false
+      },
+      "bound-session-ffi/research-policy/policy.toml": {
+        "sha256": "2b6bce27b90a5a209c10ffea2cc9936702b6445d9258b257b06dd045e75de552",
+        "bytes": 175,
+        "executable": false
+      },
+      "bound-session-ffi/src/bin/receiver-private-worker.rs": {
+        "sha256": "45826b6f64f5efa3c78d859d68f19c3a717c4e5258add85a42db2bd14a90e551",
+        "bytes": 359,
+        "executable": false
+      },
+      "bound-session-ffi/src/lib.rs": {
+        "sha256": "b5171864f7d9ec99b8fc05a5af4557006cfc9e22c37285742231d33b91239b64",
+        "bytes": 132837,
+        "executable": false
+      },
+      "bound-session-ffi/src/outbox.rs": {
+        "sha256": "617484bc27b6f1293a1a79b83e584ea8e584a6af94a78d78654f90fa434d5fdc",
+        "bytes": 27548,
+        "executable": false
+      },
+      "bound-session-ffi/src/provider.rs": {
+        "sha256": "1aeae850976277d567c863402721c53829f45d03b54f54b65c92bc90624867c2",
+        "bytes": 20258,
+        "executable": false
+      },
+      "bound-session-ffi/src/receiver_private/account.rs": {
+        "sha256": "e037330da6d6de81a41b19491bd9255d69eb2364f0b1247ae3ff865e97fe8bb3",
+        "bytes": 11956,
+        "executable": false
+      },
+      "bound-session-ffi/src/receiver_private/admission_case.rs": {
+        "sha256": "e4a9167f0dc463d703e13184c3a68727ffd4749823a918a25f63c0512d43aac1",
+        "bytes": 8267,
+        "executable": false
+      },
+      "bound-session-ffi/src/receiver_private/fenced_file.rs": {
+        "sha256": "adbc8cba7b8a1933f16ab346b15aa8bcc868b45832b1facee9840e4b68532461",
+        "bytes": 18935,
+        "executable": false
+      },
+      "bound-session-ffi/src/receiver_private/history.rs": {
+        "sha256": "185ebce299dae410d53a00e545558af763bf9e9c8b1db58df1668198a65c57ab",
+        "bytes": 6061,
+        "executable": false
+      },
+      "bound-session-ffi/src/receiver_private/live.rs": {
+        "sha256": "8c1c3d39a0f0ddf5f1bf31eb796d5bf8631682cbb43e2938f07bb368270058e3",
+        "bytes": 31651,
+        "executable": false
+      },
+      "bound-session-ffi/src/receiver_private/mod.rs": {
+        "sha256": "4bfef7921b9c87f64ad6959d2e388cb5911cb301c9df9ac623b17c00ac888ec1",
+        "bytes": 6112,
+        "executable": false
+      },
+      "bound-session-ffi/src/receiver_private/publication.rs": {
+        "sha256": "57323c97979b6e61505e09a77b496d2f6b498f2ebec3b3e044a27c5fb8fb76be",
+        "bytes": 6183,
+        "executable": false
+      },
+      "bound-session-ffi/src/receiver_private/publication_export.rs": {
+        "sha256": "9c35dcbd585aa5af7de0658c0b593314c36c82462bfb78a5eefc4f4fb4f6c6c6",
+        "bytes": 12087,
+        "executable": false
+      },
+      "bound-session-ffi/src/receiver_private/publication_export/receipt.bin": {
+        "sha256": "a6dded818162fbe8f06b8ef2b3ce86d25734249f1a57ae284aa71f32e59a1c93",
+        "bytes": 531,
+        "executable": false
+      },
+      "bound-session-ffi/src/receiver_private/publication_export/tests.rs": {
+        "sha256": "b211c38a9e6b13fec1e555edc76a05cdfa30fd3009b48689e321b37f221a2d15",
+        "bytes": 6162,
+        "executable": false
+      },
+      "bound-session-ffi/src/receiver_private/publication_pair.rs": {
+        "sha256": "934645e0e16710258af5660803a02371cef2da9a6220d5bf6ec96086efe73657",
+        "bytes": 7405,
+        "executable": false
+      },
+      "bound-session-ffi/src/receiver_private/publish.rs": {
+        "sha256": "c61ea40995b662e4f43dbac880d4408693a74bac99de76bc1d8caa1eb736e79c",
+        "bytes": 4530,
+        "executable": false
+      },
+      "bound-session-ffi/src/runtime.rs": {
+        "sha256": "f93ae92f80bd8c1a9e504303b9dec2e03224a081a3eb00b730e9023d7b9f8dc9",
+        "bytes": 30600,
+        "executable": false
+      },
+      "bound-session-ffi/tests/ffi_flow.rs": {
+        "sha256": "4f319a06ba307855bc46e6a00391125236d1a315894b6e31a466735b8ce22347",
+        "bytes": 144857,
+        "executable": false
+      },
+      "bound-session-ffi/tests/header_compile.c": {
+        "sha256": "9286480e4327c5fd7c7371909d273a47616bffb32a94dbb7df8f969c8f892abf",
+        "bytes": 13011,
+        "executable": false
+      },
+      "bound-session-receiver-store/Cargo.toml": {
+        "sha256": "d86c7d206d3a6868eaa6e3bf8afdbf52f4cded118f0a90c515e0df6da51503bb",
+        "bytes": 484,
+        "executable": false
+      },
+      "bound-session-receiver-store/src/domain.rs": {
+        "sha256": "e6214e1463ca38fe9d0a14a0991f164bdb80fdce51ff946a48a7c2079b938083",
+        "bytes": 9252,
+        "executable": false
+      },
+      "bound-session-receiver-store/src/inbox.rs": {
+        "sha256": "0d41520a5c00075e619df1fd1bc741360e63c6bae39e9c34c6889ca8e1ef6794",
+        "bytes": 31180,
+        "executable": false
+      },
+      "bound-session-receiver-store/src/lib.rs": {
+        "sha256": "490e082c1422e7a2ce1474eeb286916b3b434988d7e3f81e3ecc9b41c9b0babe",
+        "bytes": 805,
+        "executable": false
+      },
+      "bound-session-receiver-store/src/receiver_registry.rs": {
+        "sha256": "83ab0d0dc51aecfcc5e198d854c3018ab4b80175db604a06815badb80385dbad",
+        "bytes": 8345,
+        "executable": false
+      },
+      "bound-session-receiver-store/src/release_certificate.rs": {
+        "sha256": "e76e23f4c1aee1d6e46d277cab3ef5a576fb45fd2bb2e5aa73bdd01ffd7403e5",
+        "bytes": 4217,
+        "executable": false
+      },
+      "bound-session-receiver-store/src/test-data/README.md": {
+        "sha256": "a5616bcc20b12738ae9604d8b5601d29efb84aee7cc11c3f993b84be47e33140",
+        "bytes": 739,
+        "executable": false
+      },
+      "bound-session-receiver-store/src/test-data/inbox.sqlite": {
+        "sha256": "27ace68538ae976d32085f6e0841ad10bf316cd224cecda549babc28165cb735",
+        "bytes": 24576,
+        "executable": false
+      },
+      "bound-session-receiver-store/src/test-data/receipt.bin": {
+        "sha256": "a4c0497bbba28779f0a92f6591db2f99e7cc055b52980c18b9f87c8c3f34ca6f",
+        "bytes": 531,
+        "executable": false
+      },
+      "bound-session-receiver-store/src/test-data/release-current.bin": {
+        "sha256": "dc1f29e90d1a63b3bbca4abf6e706cc3d884bc59fafdd641dd3164f0b807d07d",
+        "bytes": 3390,
+        "executable": false
+      },
+      "bound-session-receiver-store/src/test-data/slot.bin": {
+        "sha256": "a1d8d4915e38a6b6c0593f8be18f92a731dcb812541d1b0832e80250a6ca5ca7",
+        "bytes": 65,
+        "executable": false
+      },
+      "bound-session-receiver-store/src/transaction_tests.rs": {
+        "sha256": "4dfe2d77c9283f69fac4c9d83afd2e983de02c0450736ddd3389be60655ffa68",
+        "bytes": 20703,
+        "executable": false
+      },
+      "bound-session-service/Cargo.toml": {
+        "sha256": "416e560e94c3b21e905c9e92c8e7145791a78b5a0f0bc1ef32954cf3ef68d418",
+        "bytes": 1000,
+        "executable": false
+      },
+      "bound-session-service/README.md": {
+        "sha256": "c605b101d96d8ee3686d39d2c7cec918256f1e0971a985f1c86633cb14c94c80",
+        "bytes": 2551,
+        "executable": false
+      },
+      "bound-session-service/src/durable_authority.rs": {
+        "sha256": "542f1276a8470d4336a4bec891d95402fe34fa45d9f41a7415ec456acf4d7ed1",
+        "bytes": 6994,
+        "executable": false
+      },
+      "bound-session-service/src/durable_head.rs": {
+        "sha256": "939d7d5c43239e22d94e64d9453c1fea74e81c4fac7fa2f0f0fe29375a9c021c",
+        "bytes": 6753,
+        "executable": false
+      },
+      "bound-session-service/src/durable_readiness.rs": {
+        "sha256": "f76d93f6788cd471dc4e2fb73f24156294c5bca2c5246b5bf7ab9d261960d805",
+        "bytes": 8619,
+        "executable": false
+      },
+      "bound-session-service/src/lib.rs": {
+        "sha256": "1f17dc3f4b4e0266921cb433846f0906a030cb4f685054c93686991d1724d67a",
+        "bytes": 141522,
+        "executable": false
+      },
+      "bound-session-service/src/receiver_error.rs": {
+        "sha256": "abf4b16192d9d75f9074f30bb7de31d24699a66104c94779b7488e9107d54d3b",
+        "bytes": 1886,
+        "executable": false
+      },
+      "bound-session-service/tests/service_flow.rs": {
+        "sha256": "1d6d99368f46101c9605b590337085cbd802f2b57629f06d8d9052fa78f68868",
+        "bytes": 163438,
+        "executable": false
+      },
+      "check_default_api_surface.py": {
+        "sha256": "e310770cda38d31650f8471ad1eebee11ff21e5d76467659970a452c4ecc445a",
+        "bytes": 7334,
+        "executable": false
+      },
+      "check_ffi_header.py": {
+        "sha256": "dbeb7d09ea5b6f56c2d8b21436070e35be6900792dce55af2503370134a18ff7",
+        "bytes": 19226,
+        "executable": false
+      },
+      "check_ffi_symbols.py": {
+        "sha256": "0d5f640c24018d28f67c9e27fd125fa4b848a5ae0bc8495dd56e3f87b2dd0f87",
+        "bytes": 2754,
+        "executable": false
+      },
+      "experiments/Cargo.toml": {
+        "sha256": "ba8246a3bc4ab504a62abf95b8e159fcd64a854919b0dcff486185ded096fcdc",
+        "bytes": 713,
+        "executable": false
+      },
+      "experiments/src/attacks.rs": {
+        "sha256": "88591bfc4be613a98ae312fc7f14b6319695fc69e0189d3832f1d84a7ac6fc08",
+        "bytes": 38836,
+        "executable": false
+      },
+      "experiments/src/bench.rs": {
+        "sha256": "87236808a2178e8f58dafff9218aaf1b965e294f79958f58a4bafe2b3929b18d",
+        "bytes": 11386,
+        "executable": false
+      },
+      "experiments/src/json.rs": {
+        "sha256": "b48a9709f59abe40b0e87ace0fb57c78dd67bbef010f3a21f7f9d30b860b94aa",
+        "bytes": 6401,
+        "executable": false
+      },
+      "experiments/src/load.rs": {
+        "sha256": "3f1196b6371da53c27854ca67cf4b145668a10fb485644ea959eb69b25555f72",
+        "bytes": 11177,
+        "executable": false
+      },
+      "experiments/src/main.rs": {
+        "sha256": "d4a802a61a808e261b6d1386816f819b03a0378196ae0e1cf6ef2dd3cb0df6ea",
+        "bytes": 19626,
+        "executable": false
+      },
+      "experiments/src/protocol.rs": {
+        "sha256": "939ce20646c1f8f45b2370354bb8116c6a1cc076b647ff7ae13712adf2ea5005",
+        "bytes": 17706,
+        "executable": false
+      },
+      "experiments/src/purpose_scope.rs": {
+        "sha256": "1f0e209dfa7d1c5b66697d532e1d9dc91fa1ecc98c002b6b2bc5d028fa51969b",
+        "bytes": 34248,
+        "executable": false
+      },
+      "experiments/src/q_periapt_adapter.rs": {
+        "sha256": "0a86f8ffd144f66e4fe4ade107f8cea6a32ab36de7dcf170b86c02b705c14db1",
+        "bytes": 65066,
+        "executable": false
+      },
+      "native_source_snapshot.py": {
+        "sha256": "adfd2fbfa2a6b15d76aff064d993bd6a7ed114e80966a452da055f87f7d47b57",
+        "bytes": 6262,
+        "executable": false
+      },
+      "probe/Cargo.toml": {
+        "sha256": "7848875ea2fc7bb29851ebeb8dc6e3a01ff4cf879194e5c9ef939ff40b3a1c27",
+        "bytes": 918,
+        "executable": false
+      },
+      "probe/src/atomic_store.rs": {
+        "sha256": "ca04c999a214fa1afeb03fed2b3663504cc0060402b348b46a5211edee2d6e3f",
+        "bytes": 19458,
+        "executable": false
+      },
+      "probe/src/enrollment_handoff.rs": {
+        "sha256": "1db1be5e68b3de17c64d9e30dd3c532f8f8fa026c79b9bd973734dda1dae3e41",
+        "bytes": 18568,
+        "executable": false
+      },
+      "probe/src/fixture.rs": {
+        "sha256": "cd758b50477939d3fff61da298908c2fddf547a4cbd19c309fb00d4ea753cda9",
+        "bytes": 6443,
+        "executable": false
+      },
+      "probe/src/json.rs": {
+        "sha256": "b48a9709f59abe40b0e87ace0fb57c78dd67bbef010f3a21f7f9d30b860b94aa",
+        "bytes": 6401,
+        "executable": false
+      },
+      "probe/src/main.rs": {
+        "sha256": "20ffb48bd91e251ba426c9c7e73ff6a2b4a529c5c6d0dddb88773bd544eea3e2",
+        "bytes": 41849,
+        "executable": false
+      },
+      "probe/src/multi_drain.rs": {
+        "sha256": "6844dfb6d0007f793e2de6cb53cfd357c27d3fcbc33c05cb9d26e30e45718af6",
+        "bytes": 11621,
+        "executable": false
+      },
+      "probe/src/multi_peer.rs": {
+        "sha256": "b90fb3dc5cab99b769ec13366ff6b45b8ded4e493b0702150c248d147e5c195d",
+        "bytes": 15877,
+        "executable": false
+      },
+      "probe/src/peer_atomic.rs": {
+        "sha256": "3bfca5ba82059d9dffa502cbf26da11b1f97497b414066fe5d1a5b00d7c64cf5",
+        "bytes": 19691,
+        "executable": false
+      },
+      "probe/src/peer_cohort.rs": {
+        "sha256": "62236dc4f5e9a0d59a8de67ee5a0333b6b6f6746db9405eedcd814ae3265c755",
+        "bytes": 10228,
+        "executable": false
+      },
+      "probe/src/protocol.rs": {
+        "sha256": "38bbd1bd4cb6509c85d96046e1d1640279c57d8bc5e6b8314d515d776e2b53fb",
+        "bytes": 18260,
+        "executable": false
+      },
+      "probe/src/q_periapt_adapter.rs": {
+        "sha256": "b5b621b634e3d4fa3177be4db2ed03ad9cb877df49fc12ddf4d75c770163f9f5",
+        "bytes": 71178,
+        "executable": false
+      },
+      "probe/src/release_certificate.rs": {
+        "sha256": "d40a4a6b0ec32cd479e3c342713f51916044e288daac346e3cdf17f2f39635ae",
+        "bytes": 7213,
+        "executable": false
+      },
+      "probe/src/service_receiver.rs": {
+        "sha256": "6f00105c283b4cec04d10dafc52b6ddd2ae3bf0a01aea4d70582ddb376db6dbe",
+        "bytes": 5515,
+        "executable": false
+      },
+      "probe/src/xpc_gateway.rs": {
+        "sha256": "ac645c42e1533b4222368cdbeefedc640e30a6afc9ffc785593a1f8038788123",
+        "bytes": 2479,
+        "executable": false
+      },
+      "rust-toolchain.toml": {
+        "sha256": "c910997cb152c6dc8ed13b1fdf9fa28a4ed30d6776123e27dd6170e5c66067a0",
+        "bytes": 86,
+        "executable": false
+      }
+    },
+    "sha256": "4934d90e8bfac510c221bdec009da044221f365886319e044bfbf9ea2f056722"
+  },
+  "source_capture_contract": "before build and checked before local artifact installation; not ABA detection",
+  "cargo_lock_sha256": "99194f56e598cdb899c0b059432872d6688929f2afdfcb9be22e27a50985965a",
+  "rust_toolchain": {
+    "rustc": "1.98.1 (48a229cea 2026-09-01)",
+    "cargo": "1.98.1 (797e8a9bc 2026-08-05)",
+    "llvm": "22.1.8"
+  },
+  "build_contract": {
+    "profile": "release",
+    "locked": true,
+    "warnings_as_errors": true,
+    "target_directory_contract": "explicit source target directory",
+    "path_remapping": {
+      "build_home": "/__skybridge__/build-home",
+      "cargo_home": "/__skybridge__/cargo-home",
+      "rust_sysroot": "/__skybridge__/rust-sysroot",
+      "implementation_root": "/__skybridge__/boundsession-source"
+    },
+    "fake_provider_enabled": false,
+    "library_kind": "dynamic-framework",
+    "framework_layouts": {
+      "macos": "versioned-A",
+      "ios": "flat"
+    },
+    "install_name": "@rpath/BoundSessionFFI.framework/BoundSessionFFI"
+  },
+  "framework_binaries_after_adhoc_signing": {
+    "macos-arm64/BoundSessionFFI.framework/Versions/A/BoundSessionFFI": "ad9f2cf4877129c376f2f9b719bcebe35dfc4c3fd5dc8a6c6199ec48943ccb60",
+    "ios-arm64/BoundSessionFFI.framework/BoundSessionFFI": "4db3fc449f87b8f595135df5ee4ac59c956cad8f9b28dd6e54c1bf1e9328dc4f",
+    "ios-arm64-simulator/BoundSessionFFI.framework/BoundSessionFFI": "6174dfa2e9161f5ed3db97601c30c21be0ef43f7b15edadd008c65056aafeb5a"
+  },
+  "signing_contract": {
+    "source_frameworks": "ad-hoc integration integrity only",
+    "shipping_bundle": "must be re-signed with the final Apple application identity and pass codesign --verify --deep --strict"
+  },
+  "classification": "source-bound integration snapshot; not a signed or published release artifact"
+}

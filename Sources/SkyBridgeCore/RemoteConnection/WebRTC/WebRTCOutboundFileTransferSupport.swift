@@ -1,109 +1,68 @@
 import Foundation
 import CryptoKit
 import Darwin
+import SkyBridgeProtocolCore
 
 @available(macOS 14.0, iOS 17.0, *)
 actor WebRTCOutboundFileReader {
-    typealias PReadOperation = @Sendable (
-        _ descriptor: Int32,
-        _ buffer: UnsafeMutableRawPointer,
-        _ count: Int,
-        _ offset: off_t
-    ) -> Int
-
-    private struct DescriptorIdentity: Equatable, Sendable {
-        let device: dev_t
-        let inode: ino_t
-        let size: off_t
-        let owner: uid_t
-        let modificationSeconds: Int
-        let modificationNanoseconds: Int
-    }
-
+    typealias PReadOperation = PreparedOutboundFileReadSession.PReadOperation
     nonisolated let fileSize: Int64
-    private let handle: FileHandle
-    private let identity: DescriptorIdentity
-    private var hasher = SHA256()
-    private var isClosed = false
+    nonisolated let selectedContentSHA256: Data
+    private let source: PreparedOutboundFileReadSession
+    private var bytesRead: Int64 = 0
+    private var readInFlight = false
+    private var closingTask: Task<Void, Error>?
 
-    private init(descriptor: Int32, identity: DescriptorIdentity) {
-        self.handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-        self.identity = identity
-        self.fileSize = Int64(identity.size)
+    private init(source: PreparedOutboundFileReadSession) {
+        self.source = source
+        fileSize = source.metadata.fileSize
+        selectedContentSHA256 = source.metadata.contentSHA256
     }
 
-    static func open(url: URL) async throws -> WebRTCOutboundFileReader {
-        let openTask = Task.detached(priority: .utility) {
-            try Task.checkCancellation()
-            let descriptor = url.withUnsafeFileSystemRepresentation { fileSystemPath in
-                guard let fileSystemPath else { return Int32(-1) }
-                return Darwin.open(fileSystemPath, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
-            }
-            guard descriptor >= 0 else {
-                throw WebRTCFileTransferWaitError.failed(
-                    "无法安全打开本地文件（errno=\(errno)）"
-                )
-            }
-
-            do {
-                let identity = try descriptorIdentity(descriptor)
-                try Task.checkCancellation()
-                return WebRTCOutboundFileReader(
-                    descriptor: descriptor,
-                    identity: identity
-                )
-            } catch {
-                let closeResult = Darwin.close(descriptor)
-                if closeResult != 0 {
-                    throw WebRTCFileTransferWaitError.failed(
-                        "本地文件校验失败（\(error.localizedDescription)），且句柄关闭失败（errno=\(errno)）"
-                    )
-                }
-                throw error
-            }
-        }
-        return try await withTaskCancellationHandler {
-            try await openTask.value
-        } onCancel: {
-            openTask.cancel()
-        }
-    }
-
-    func read(offset: UInt64, length: Int) throws -> Data {
-        guard !isClosed, length > 0 else {
-            throw WebRTCFileTransferWaitError.failed("文件读取器状态无效")
-        }
-        try Task.checkCancellation()
-        guard offset <= UInt64(Int64.max),
-              Int64(length) <= fileSize,
-              Int64(offset) <= fileSize - Int64(length) else {
-            throw WebRTCFileTransferWaitError.failed("文件读取范围超出已验证大小")
-        }
-        try validateUnchangedDescriptor()
-        let data = try Self.readExactly(
-            descriptor: handle.fileDescriptor,
-            offset: offset,
-            length: length
+    static func open(
+        url: URL,
+        validateLifetime: @escaping @Sendable () async throws -> Void = { try Task.checkCancellation() }
+    ) async throws -> WebRTCOutboundFileReader {
+        let source = try await PreparedOutboundFileReadSession.prepare(
+            url: url, maximumSize: WebRTCInboundFileTransferSupport.maxFileSize,
+            sourcePolicy: .ownedSingleLinkStableMetadata, validateLifetime: validateLifetime
         )
-        try validateUnchangedDescriptor()
-        hasher.update(data: data)
+        return WebRTCOutboundFileReader(source: source)
+    }
+
+    func read(offset: UInt64, length: Int) async throws -> Data {
+        guard closingTask == nil, !readInFlight, offset == UInt64(bytesRead) else {
+            throw WebRTCFileTransferWaitError.failed("文件读取器状态或顺序无效")
+        }
+        readInFlight = true
+        defer { readInFlight = false }
+        let data = try await source.read(offset: offset, length: length)
+        guard closingTask == nil else {
+            throw WebRTCFileTransferWaitError.failed("文件读取器已关闭")
+        }
+        bytesRead += Int64(data.count)
         return data
     }
 
-    func finalizeAndClose() throws -> Data {
-        guard !isClosed else {
-            throw WebRTCFileTransferWaitError.failed("文件读取器已关闭")
+    func finalizeAndClose() async throws -> Data {
+        guard closingTask == nil, !readInFlight, bytesRead == fileSize else {
+            throw WebRTCFileTransferWaitError.failed("文件读取尚未完整结束")
         }
-        try validateUnchangedDescriptor()
-        try handle.close()
-        isClosed = true
-        return Data(hasher.finalize())
+        try await source.validateSourceIdentity()
+        try await close()
+        return selectedContentSHA256
     }
 
-    func close() throws {
-        guard !isClosed else { return }
-        try handle.close()
-        isClosed = true
+    func close() async throws {
+        if let closingTask { return try await closingTask.value }
+        let source = self.source
+        let task = Task { try await source.close() }
+        closingTask = task
+        do { try await task.value }
+        catch {
+            closingTask = nil // Retain the failure and allow an explicit cleanup retry.
+            throw error
+        }
     }
 
     nonisolated static func readExactly(
@@ -114,80 +73,11 @@ actor WebRTCOutboundFileReader {
             Darwin.pread(descriptor, buffer, count, offset)
         }
     ) throws -> Data {
-        guard descriptor >= 0,
-              length > 0,
-              offset <= UInt64(Int64.max),
-              UInt64(length) <= UInt64(Int64.max) - offset else {
+        guard offset <= UInt64(Int64.max) else {
             throw WebRTCFileTransferWaitError.failed("文件读取参数无效")
         }
-        var data = Data(count: length)
-        try data.withUnsafeMutableBytes { rawBuffer in
-            guard let baseAddress = rawBuffer.baseAddress else {
-                throw WebRTCFileTransferWaitError.failed("文件读取缓冲区不可用")
-            }
-            var totalRead = 0
-            while totalRead < length {
-                try Task.checkCancellation()
-                let result = readOperation(
-                    descriptor,
-                    baseAddress.advanced(by: totalRead),
-                    length - totalRead,
-                    off_t(offset) + off_t(totalRead)
-                )
-                if result > 0 {
-                    guard result <= length - totalRead else {
-                        throw WebRTCFileTransferWaitError.failed("文件读取返回了无效长度")
-                    }
-                    totalRead += result
-                    continue
-                }
-                if result < 0, errno == EINTR {
-                    continue
-                }
-                if result == 0 {
-                    throw WebRTCFileTransferWaitError.failed("文件在预期长度前结束")
-                }
-                throw WebRTCFileTransferWaitError.failed(
-                    "文件读取失败（errno=\(errno)）"
-                )
-            }
-            try Task.checkCancellation()
-        }
-        return data
-    }
-
-    private func validateUnchangedDescriptor() throws {
-        let current = try Self.descriptorIdentity(handle.fileDescriptor)
-        guard current == identity else {
-            throw WebRTCFileTransferWaitError.failed("文件在传输期间发生变化")
-        }
-    }
-
-    private nonisolated static func descriptorIdentity(
-        _ descriptor: Int32
-    ) throws -> DescriptorIdentity {
-        var metadata = stat()
-        guard fstat(descriptor, &metadata) == 0 else {
-            throw WebRTCFileTransferWaitError.failed(
-                "无法读取本地文件元数据（errno=\(errno)）"
-            )
-        }
-        guard (metadata.st_mode & S_IFMT) == S_IFREG,
-              metadata.st_uid == geteuid(),
-              metadata.st_nlink == 1,
-              metadata.st_ino > 0,
-              metadata.st_size >= 0 else {
-            throw WebRTCFileTransferWaitError.failed(
-                "本地文件必须是当前用户拥有的单链接普通文件"
-            )
-        }
-        return DescriptorIdentity(
-            device: metadata.st_dev,
-            inode: metadata.st_ino,
-            size: metadata.st_size,
-            owner: metadata.st_uid,
-            modificationSeconds: metadata.st_mtimespec.tv_sec,
-            modificationNanoseconds: metadata.st_mtimespec.tv_nsec
+        return try PreparedOutboundFileReadSession.readExactly(
+            descriptor, offset: Int64(offset), length: length, readOperation: readOperation
         )
     }
 }

@@ -1,4 +1,5 @@
 import SwiftUI
+import SkyBridgeWeatherRendering
 import SkyBridgeCore
 import Foundation
 import Darwin
@@ -60,6 +61,7 @@ struct GlassSidebar: View {
                 .foregroundColor(Color.white.opacity(0.1)),
             alignment: .trailing
         )
+        .weatherGlassSurface(cornerRadius: 0)
         .animation(.spring(response: 0.6, dampingFraction: 0.8), value: isExpanded)
         .background(
             Group {

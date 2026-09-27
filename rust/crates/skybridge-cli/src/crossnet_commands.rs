@@ -135,6 +135,316 @@ pub(crate) async fn settings(as_json: bool) -> Result<()> {
     print_settings(&result, as_json)
 }
 
+pub(crate) async fn nearby(args: crate::CrossnetNearbyArgs) -> Result<()> {
+    let result = skybridge_crossnet_client::nearby(args.scan_seconds).await?;
+    if args.output.json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else if result.devices.is_empty() {
+        println!("No nearby SkyBridge peers observed by the Mac app.");
+    } else {
+        for device in result.devices {
+            let name: String = device.name.chars().filter(|c| !c.is_control()).collect();
+            println!(
+                "{}  {}  {}",
+                device.device_ref,
+                name,
+                if device.authenticated {
+                    "authenticated"
+                } else {
+                    "discovered"
+                }
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn connect_nearby(args: crate::CrossnetConnectDeviceArgs) -> Result<()> {
+    let result = skybridge_crossnet_client::connect_nearby(&args.device_ref).await?;
+    if args.output.json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!(
+            "Authenticated nearby peer {} via {} (suite: {}).",
+            result.device_ref,
+            result
+                .transport
+                .as_deref()
+                .unwrap_or("transport not reported by this build"),
+            result
+                .negotiated_suite
+                .as_deref()
+                .unwrap_or("not reported by this build")
+        );
+    }
+    Ok(())
+}
+
+pub(crate) async fn usb_devices(as_json: bool) -> Result<()> {
+    let result = skybridge_crossnet_client::usb_devices().await?;
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else if result.devices.is_empty() {
+        println!("No Apple devices are currently attached through USB.");
+    } else {
+        for device in result.devices {
+            println!("{}  USB  device-id={}", device.udid, device.device_id);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn trust_preview(args: crate::CrossnetTrustPreviewArgs) -> Result<()> {
+    let result = skybridge_crossnet_client::trust_recovery_preview(
+        &args.peer_id,
+        &args.expected_fingerprint,
+        args.preserve_shared_peer_id.as_deref(),
+    )
+    .await?;
+    if args.output.json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!(
+            "Trust snapshot {}: {} matching stored records; writes performed: false.",
+            result.snapshot_sha256,
+            result.records.len()
+        );
+        if result.eligible_for_explicit_recovery {
+            println!("Eligible for explicitly authorized recovery after fresh peer verification.");
+        } else {
+            println!("Recovery blocked: {}", result.blockers.join(", "));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn connect_usb(args: crate::CrossnetUSBConnectArgs) -> Result<()> {
+    let operation = skybridge_crossnet_client::connect_usb(
+        &args.udid,
+        &args.peer_id,
+        &args.expected_fingerprint,
+    );
+    let result = if args.output.json {
+        operation.await?
+    } else {
+        crate::local_approval_commands::during_usb_connection(
+            operation,
+            &args.peer_id,
+            &args.expected_fingerprint,
+        )
+        .await?
+    };
+    if args.output.json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!(
+            "Authenticated USB peer {} (suite: {}).",
+            result.device_ref,
+            result.negotiated_suite.as_deref().unwrap_or("not reported")
+        );
+    }
+    Ok(())
+}
+
+pub(crate) async fn usb_peers(json_output: bool) -> Result<()> {
+    let result = skybridge_crossnet_client::usb_peers().await?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("已配对身份（连接时仍会验证线连设备的身份）：");
+        for peer in result.peers {
+            let detail = match (&peer.expected_fingerprint, &peer.unavailable_reason) {
+                (Some(fingerprint), None) => fingerprint.clone(),
+                (None, Some(reason)) => format!("不可用：{reason}"),
+                _ => bail!("USB pairing catalog omitted identity status"),
+            };
+            println!(
+                "{} · {} · {}",
+                crate::handshake_commands::safe(&peer.name),
+                peer.peer_id,
+                crate::handshake_commands::safe(&detail)
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn connect_usb_device(args: crate::CrossnetUSBDeviceConnectArgs) -> Result<()> {
+    let result = skybridge_crossnet_client::connect_usb_device(&args.udid, &args.to).await?;
+    if args.output.json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!(
+            "USB 连接已认证 · {}",
+            result.negotiated_suite.as_deref().unwrap_or("未报告套件")
+        );
+    }
+    Ok(())
+}
+
+pub(crate) async fn trust_recover(args: crate::CrossnetTrustRecoverArgs) -> Result<()> {
+    let result = skybridge_crossnet_client::recover_trust_mirror(
+        &args.target.udid,
+        &args.target.peer_id,
+        &args.target.expected_fingerprint,
+        &args.snapshot_sha256,
+        &args.recovery_id,
+        args.approve_mirror_retirement,
+        args.preserve_shared_peer_id.as_deref(),
+    )
+    .await?;
+    if args.target.output.json {
+        if result.success {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        } else {
+            crate::cli_output::write_json_failure(&result)?;
+        }
+    } else {
+        println!(
+            "Trust recovery {}: {}; mirror records retired: {}. Existing Keychain authority preserved; no authenticated connection is claimed.",
+            result.recovery_id,
+            result.status,
+            result
+                .retired_mirror_records
+                .map_or_else(|| "unconfirmed".to_owned(), |n| n.to_string())
+        );
+    }
+    if !result.success {
+        bail!(
+            "trust recovery incomplete: {}",
+            result.error_code.as_deref().unwrap_or("unconfirmed")
+        );
+    }
+    Ok(())
+}
+
+pub(crate) async fn send_file(args: crate::CrossnetFileSendArgs) -> Result<()> {
+    use crate::transfer_progress::TransferProgress;
+    use skybridge_crossnet_client::TransferPhase;
+    crate::file_approval_commands::ensure_permission(&args.to, args.approval, args.output.json)
+        .await?;
+    let mut watch =
+        skybridge_crossnet_client::send_app_file(&args.path, &args.to, args.timeout_seconds)
+            .await?;
+    let operation_id = watch.initial().operation_id.clone();
+    let mut progress = TransferProgress::new(args.progress, args.output.json);
+    // The reader owns the buffered socket across polls. Cancelling read_line in
+    // select! could discard a partial protocol frame.
+    let (tx, mut rx) = tokio::sync::watch::channel(None);
+    struct Reader(tokio::task::JoinHandle<()>);
+    impl Drop for Reader {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let _reader = Reader(tokio::spawn(async move {
+        loop {
+            let event = watch.next_event().await;
+            let terminal = event.as_ref().map_or(true, |e| e.status.is_terminal());
+            // Progress is a latest-value view. Never stop draining the app socket
+            // while the operator is reading a prompt; a bounded FIFO can fill
+            // the socket and trigger the server's write-stall deadline.
+            if tx
+                .send(Some(event.map_err(|error| error.to_string())))
+                .is_err()
+                || terminal
+            {
+                break;
+            }
+        }
+    }));
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+    let mut transfer_id: Option<String> = None;
+    let mut source: Option<(String, u64, Option<String>)> = None;
+    let mut approval_done = args.approval == crate::FileApprovalMode::Device;
+    loop {
+        let next = tokio::select! {
+            changed = rx.changed() => {
+                changed.map_err(|_| anyhow::anyhow!("file transfer stream ended without receipt"))?;
+                rx.borrow_and_update().clone().ok_or_else(|| anyhow::anyhow!("file transfer update missing"))?
+                    .map_err(anyhow::Error::msg)
+            },
+            _ = interval.tick(), if !approval_done && transfer_id.is_some() => {
+                let state = skybridge_crossnet_client::file_approval("status", &args.to, None).await?;
+                if !state.success && args.output.json {
+                    crate::cli_output::write_json_failure(&json!({"schema_version":1,"success":false,"status":"unconfirmed",
+                        "operation_id":operation_id,"automatic_retry_allowed":false,"approval_result":state}))?;
+                }
+                state.require_success()?;
+                if state.authorized != Some(true) { bail!("file_approval_not_authorized; transfer was not approved"); }
+                if let Some(prompt) = state.pending.iter().find(|p| Some(&p.binding.transfer_id) == transfer_id.as_ref()) {
+                    let (name, size, sha256) = source.as_ref().ok_or_else(|| anyhow::anyhow!("file source not bound"))?;
+                    if &prompt.binding.file_name != name || prompt.binding.file_size != *size
+                        || sha256.as_ref().is_some_and(|h| h != &prompt.binding.file_sha256) {
+                        bail!("receiver approval metadata differs from this transfer");
+                    }
+                    progress.pause()?;
+                    let allowed = crate::file_approval_commands::decide(&args.to, prompt, args.approval).await?;
+                    approval_done = true;
+                    if !args.output.json { eprintln!("{}", if allowed { "对端已确认允许；等待传输与接收回执。" } else { "对端已确认拒绝，正在结束传输。" }); }
+                }
+                continue;
+            }
+        };
+        let event = match next {
+            Ok(event) => event,
+            Err(error) => {
+                progress.finish()?;
+                if args.output.json {
+                    crate::cli_output::write_json_failure(&json!({
+                        "schema_version":1,"success":false,"status":"unconfirmed",
+                        "runtime_target":"mac_app_runtime","operation_id":operation_id,
+                        "automatic_retry_allowed":false,
+                        "error":{"code":"file_transfer_unconfirmed","message":error.to_string()}
+                    }))?;
+                }
+                return Err(error);
+            }
+        };
+        if let Some(id) = &event.transfer_id {
+            transfer_id = Some(id.clone());
+            source = Some((
+                event.file_name.clone(),
+                event.total_bytes,
+                event.sha256.clone(),
+            ));
+        }
+        if event.bytes_transferred > 0 {
+            approval_done = true;
+        }
+        let stage = match event.transport.as_deref() {
+            Some(carrier) => format!("{} · {}", event.status.label(), carrier),
+            None => event.status.label().to_owned(),
+        };
+        progress.update(&stage, event.bytes_transferred, event.total_bytes)?;
+        if !event.status.is_terminal() {
+            continue;
+        }
+        progress.finish()?;
+        if event.status == TransferPhase::Completed {
+            if args.output.json {
+                println!("{}", serde_json::to_string_pretty(&event)?);
+            } else {
+                println!(
+                    "File transfer completed: {} bytes via {}; receiver SHA-256 receipt verified. Transfer: {}",
+                    event.bytes_transferred,
+                    event.transport.as_deref().unwrap_or("unreported carrier"),
+                    event.transfer_id.as_deref().unwrap_or("unknown")
+                );
+            }
+            return Ok(());
+        }
+        if args.output.json {
+            crate::cli_output::write_json_failure(&event)?;
+        }
+        bail!(
+            "file transfer {}: {}",
+            operation_id,
+            event.error_code.as_deref().unwrap_or("transfer_failed")
+        );
+    }
+}
+
 pub(crate) async fn settings_set(args: CrossnetSettingsSetArgs) -> Result<()> {
     let value = parse_setting_value(&args.value);
     let result = skybridge_crossnet_client::settings_set(&args.id, value).await?;
@@ -214,12 +524,24 @@ const MAC_GUI_CONTROL_RELEASE_GATE: &str = "signed_mac_app_socket_smoke_required
 /// the truth is per-method: refusing to enumerate would let an operator read
 /// "enabled" and assume `crossnet connect` works.
 pub(crate) const ENABLED_MUTATION_METHODS: &[&str] = &[
+    "crossnet.approval.decide",
+    "crossnet.desktop.devices",
+    "crossnet.desktop.start",
+    "crossnet.desktop.stop",
     "crossnet.settings.set",
     "crossnet.host",
     "crossnet.connect",
     "crossnet.connect_device",
     "crossnet.disconnect",
     "crossnet.navigation",
+    "crossnet.nearby",
+    "crossnet.connect_nearby",
+    "crossnet.file.send",
+    "crossnet.usb.devices",
+    "crossnet.usb.connect",
+    "crossnet.usb.connect_device",
+    "crossnet.trust.preview",
+    "crossnet.trust.recover",
 ];
 
 /// Mutating methods that still fail closed.
@@ -261,15 +583,38 @@ fn preflight_state(result: &HelloResult) -> PreflightState {
             next_required_action: "refresh the Mac app sign-in so it can bind a tenant",
         };
     }
+    let Some(methods) = &result.enabled_mutation_methods else {
+        return PreflightState {
+            preconditions_ready: true,
+            mutation_methods_enabled: false,
+            ready_for_mutation: false,
+            failure_code: Some("method_capabilities_unreported"),
+            failure_class: Some("operator_capability"),
+            next_required_action: "update the Mac app so it reports supported mutation methods",
+        };
+    };
+    let supported = methods
+        .iter()
+        .any(|method| ENABLED_MUTATION_METHODS.contains(&method.as_str()));
     PreflightState {
         preconditions_ready: true,
-        // Some mutating methods are implemented now, so a blanket `false` would
-        // deny a live code path. The enabled/disabled lists carry the detail.
-        mutation_methods_enabled: !ENABLED_MUTATION_METHODS.is_empty(),
-        ready_for_mutation: !ENABLED_MUTATION_METHODS.is_empty(),
-        failure_code: None,
-        failure_class: None,
-        next_required_action: "settings, session, and navigation mutation methods are enabled and status watch streams; signed Mac app socket smoke is still required for release readiness",
+        mutation_methods_enabled: !methods.is_empty(),
+        ready_for_mutation: supported,
+        failure_code: if supported {
+            None
+        } else {
+            Some("no_supported_mutation_methods")
+        },
+        failure_class: if supported {
+            None
+        } else {
+            Some("operator_capability")
+        },
+        next_required_action: if supported {
+            "choose a method reported by the installed app; signed-app release evidence remains separate"
+        } else {
+            "the installed app enabled no mutation method supported by this CLI"
+        },
     }
 }
 
@@ -279,39 +624,36 @@ fn preflight_state(result: &HelloResult) -> PreflightState {
 /// When the running app reports its own method list we use that instead, so a
 /// newer CLI pointed at an older app does not advertise verbs the app will
 /// refuse.
-fn resolved_mutation_methods(result: &HelloResult) -> (Vec<String>, Vec<String>, &'static str) {
-    if result.enabled_mutation_methods.is_empty() {
-        return (
-            ENABLED_MUTATION_METHODS
-                .iter()
-                .map(|method| (*method).to_owned())
-                .collect(),
-            DISABLED_MUTATION_METHODS
-                .iter()
-                .map(|method| (*method).to_owned())
-                .collect(),
-            "cli_expectation_app_did_not_report",
-        );
-    }
-    let enabled = result.enabled_mutation_methods.clone();
-    // Anything this CLI knows about that the app did not claim is, from the
-    // operator's point of view, disabled on the machine they are driving.
-    let mut disabled = DISABLED_MUTATION_METHODS
+struct ResolvedMutationMethods {
+    enabled: Option<Vec<String>>,
+    disabled: Option<Vec<String>>,
+    source: &'static str,
+}
+
+fn resolved_mutation_methods(result: &HelloResult) -> ResolvedMutationMethods {
+    let Some(enabled) = &result.enabled_mutation_methods else {
+        return ResolvedMutationMethods {
+            enabled: None,
+            disabled: None,
+            source: "app_unreported",
+        };
+    };
+    let disabled = ENABLED_MUTATION_METHODS
         .iter()
+        .chain(DISABLED_MUTATION_METHODS.iter())
+        .filter(|method| !enabled.iter().any(|enabled| enabled == **method))
         .map(|method| (*method).to_owned())
-        .collect::<Vec<_>>();
-    for method in ENABLED_MUTATION_METHODS {
-        let method = (*method).to_owned();
-        if !enabled.contains(&method) && !disabled.contains(&method) {
-            disabled.push(method);
-        }
+        .collect();
+    ResolvedMutationMethods {
+        enabled: Some(enabled.clone()),
+        disabled: Some(disabled),
+        source: "app_reported",
     }
-    (enabled, disabled, "app_reported")
 }
 
 fn preflight_payload(result: &HelloResult) -> serde_json::Value {
     let state = preflight_state(result);
-    let (enabled_methods, disabled_methods, methods_source) = resolved_mutation_methods(result);
+    let methods = resolved_mutation_methods(result);
     json!({
         "schema_version": 1,
         "capability_id": "crossnet.preflight",
@@ -325,9 +667,9 @@ fn preflight_payload(result: &HelloResult) -> serde_json::Value {
         "tenant_bound": result.tenant_bound,
         "preconditions_ready": state.preconditions_ready,
         "mutation_methods_enabled": state.mutation_methods_enabled,
-        "enabled_mutation_methods": enabled_methods,
-        "disabled_mutation_methods": disabled_methods,
-        "mutation_methods_source": methods_source,
+        "enabled_mutation_methods": methods.enabled,
+        "disabled_mutation_methods": methods.disabled,
+        "mutation_methods_source": methods.source,
         "ready_for_mutation": state.ready_for_mutation,
         "release_gate": MAC_GUI_CONTROL_RELEASE_GATE,
         "failure_code": state.failure_code,
@@ -339,10 +681,12 @@ fn preflight_payload(result: &HelloResult) -> serde_json::Value {
 fn print_preflight(result: &HelloResult, as_json: bool) -> Result<()> {
     let state = preflight_state(result);
     if as_json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&preflight_payload(result))?
-        );
+        let payload = preflight_payload(result);
+        if state.ready_for_mutation {
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else {
+            crate::cli_output::write_json_failure(&payload)?;
+        }
     } else {
         println!(
             "Mac App Preconditions: {}",
@@ -371,6 +715,12 @@ fn print_preflight(result: &HelloResult, as_json: bool) -> Result<()> {
             println!("Failure Class: {failure_class}");
         }
         println!("Next Required Action: {}", state.next_required_action);
+    }
+    if !state.ready_for_mutation {
+        bail!(
+            "Mac app mutation preflight failed: {}",
+            state.failure_code.unwrap_or("operator_not_ready")
+        );
     }
     Ok(())
 }
@@ -555,13 +905,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn empty_and_unreported_app_methods_never_claim_ready() {
+        for methods in [Some(serde_json::json!([])), None] {
+            let mut app = serde_json::json!({
+                "engine_version": "test-app", "proto": 1,
+                "auth_loaded": true, "tenant_bound": true
+            });
+            if let Some(methods) = methods {
+                app["enabled_mutation_methods"] = methods;
+            }
+            let hello: HelloResult = serde_json::from_value(app).unwrap();
+            let payload = preflight_payload(&hello);
+            assert_eq!(payload["ready_for_mutation"], false, "{payload}");
+            assert_eq!(payload["mutation_methods_enabled"], false, "{payload}");
+            assert!(print_preflight(&hello, true).is_err());
+        }
+    }
+
+    #[test]
     fn preflight_payload_reports_ready_mac_app_without_mutation_claims() {
         let result = HelloResult {
             engine_version: "1.2.3+456".to_owned(),
             proto: CONTROL_PROTOCOL_VERSION,
             auth_loaded: true,
             tenant_bound: true,
-            enabled_mutation_methods: Vec::new(),
+            enabled_mutation_methods: Some(
+                ENABLED_MUTATION_METHODS
+                    .iter()
+                    .map(|method| (*method).to_owned())
+                    .collect(),
+            ),
         };
 
         let payload = preflight_payload(&result);
@@ -580,12 +953,24 @@ mod tests {
         assert_eq!(
             payload["enabled_mutation_methods"],
             serde_json::json!([
+                "crossnet.approval.decide",
+                "crossnet.desktop.devices",
+                "crossnet.desktop.start",
+                "crossnet.desktop.stop",
                 "crossnet.settings.set",
                 "crossnet.host",
                 "crossnet.connect",
                 "crossnet.connect_device",
                 "crossnet.disconnect",
-                "crossnet.navigation"
+                "crossnet.navigation",
+                "crossnet.nearby",
+                "crossnet.connect_nearby",
+                "crossnet.file.send",
+                "crossnet.usb.devices",
+                "crossnet.usb.connect",
+                "crossnet.usb.connect_device",
+                "crossnet.trust.preview",
+                "crossnet.trust.recover"
             ])
         );
         let disabled = payload["disabled_mutation_methods"]
@@ -594,8 +979,7 @@ mod tests {
             .iter()
             .map(|value| value.as_str().unwrap_or_default().to_owned())
             .collect::<Vec<_>>();
-        // Nothing on the crossnet surface fails closed any more; the list must
-        // stay present (and empty) so an operator sees an explicit answer.
+        // This test app explicitly advertised every supported mutation method.
         assert_eq!(disabled, Vec::<String>::new());
         let enabled = payload["enabled_mutation_methods"]
             .as_array()
@@ -651,20 +1035,16 @@ mod tests {
     /// running. When the app reports its own list, that wins.
     #[test]
     fn preflight_reports_the_installed_app_method_list_over_cli_expectations() {
-        // An older app that does not report a list at all: fall back to the
-        // CLI's expectation and say so, rather than claiming the app agreed.
+        // An older app without a method list has unknown capabilities.
         let silent_app = HelloResult {
             engine_version: "1.0.1+900".to_owned(),
             proto: CONTROL_PROTOCOL_VERSION,
             auth_loaded: true,
             tenant_bound: true,
-            enabled_mutation_methods: Vec::new(),
+            enabled_mutation_methods: None,
         };
         let payload = preflight_payload(&silent_app);
-        assert_eq!(
-            payload["mutation_methods_source"],
-            "cli_expectation_app_did_not_report"
-        );
+        assert_eq!(payload["mutation_methods_source"], "app_unreported");
 
         // An app that serves only the settings verb must not have the session
         // verbs advertised on its behalf.
@@ -673,7 +1053,7 @@ mod tests {
             proto: CONTROL_PROTOCOL_VERSION,
             auth_loaded: true,
             tenant_bound: true,
-            enabled_mutation_methods: vec!["crossnet.settings.set".to_owned()],
+            enabled_mutation_methods: Some(vec!["crossnet.settings.set".to_owned()]),
         };
         let payload = preflight_payload(&older_app);
         assert_eq!(payload["mutation_methods_source"], "app_reported");
@@ -711,7 +1091,7 @@ mod tests {
             proto: CONTROL_PROTOCOL_VERSION,
             auth_loaded: false,
             tenant_bound: true,
-            enabled_mutation_methods: Vec::new(),
+            enabled_mutation_methods: None,
         };
         let missing_auth_payload = preflight_payload(&missing_auth);
         assert_eq!(
@@ -734,7 +1114,7 @@ mod tests {
             proto: CONTROL_PROTOCOL_VERSION,
             auth_loaded: true,
             tenant_bound: false,
-            enabled_mutation_methods: Vec::new(),
+            enabled_mutation_methods: None,
         };
         let missing_tenant_payload = preflight_payload(&missing_tenant);
         assert_eq!(
@@ -755,7 +1135,7 @@ mod tests {
             proto: CONTROL_PROTOCOL_VERSION + 1,
             auth_loaded: true,
             tenant_bound: true,
-            enabled_mutation_methods: Vec::new(),
+            enabled_mutation_methods: None,
         };
 
         let payload = preflight_payload(&result);

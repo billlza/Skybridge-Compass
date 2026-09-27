@@ -3172,12 +3172,13 @@ public class DeviceDiscoveryManager: ObservableObject {
         let endpointReference = Self.diagnosticReference(endpointDescription)
 
         if isLoopbackEndpoint(connection.endpoint) {
-            SkyBridgeLogger.shared.warning("⚠️ 已忽略回环地址入站连接: endpoint_ref=\(endpointReference)")
+            // usbmuxd delivers a physical USB stream through a local socket.
+            // Loopback is not proof of a self-connection or of a trusted peer:
+            // keep the same capacity/deadline admission and cryptographic checks.
+            SkyBridgeLogger.shared.info("USB/local socket candidate requires normal peer authentication: endpoint_ref=\(endpointReference)")
             SkyBridgeDiagnosticTrace.appendStatus(
-                "p2p-listener inbound-ignored reason=loopback endpoint_ref=\(endpointReference)"
+                "p2p-listener inbound-loopback-candidate authentication_required=1 endpoint_ref=\(endpointReference)"
             )
-            connection.cancel()
-            return
         }
 
         SkyBridgeLogger.shared.info("📞 收到新连接: endpoint_ref=\(endpointReference)")

@@ -1,4 +1,5 @@
 import SwiftUI
+import SkyBridgeWeatherRendering
 import SkyBridgeCore
 import os.log
 
@@ -16,20 +17,20 @@ public struct TopNavigationBarView: View {
     @Binding var manualIP: String
     @Binding var manualPort: String
     @Binding var manualCode: String
-    @Binding var realtimeFPS: String
+    private let frameRateMonitor: WeatherFrameRateMonitor
 
     public init(
         showManualConnectSheet: Binding<Bool>,
         manualIP: Binding<String>,
         manualPort: Binding<String>,
         manualCode: Binding<String>,
-        realtimeFPS: Binding<String>
+        frameRateMonitor: WeatherFrameRateMonitor
     ) {
         self._showManualConnectSheet = showManualConnectSheet
         self._manualIP = manualIP
         self._manualPort = manualPort
         self._manualCode = manualCode
-        self._realtimeFPS = realtimeFPS
+        self.frameRateMonitor = frameRateMonitor
     }
 
     public var body: some View {
@@ -53,11 +54,8 @@ public struct TopNavigationBarView: View {
                 .foregroundColor(themeConfiguration.borderColor),
             alignment: .bottom
         )
+        .weatherGlassSurface(cornerRadius: 0)
         .zIndex(1) // 顶部导航置前，避免被顶部提示覆盖
- // 订阅Metal渲染链路的FPS通知
-        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("MetalFPSUpdated"))) { note in
-            if let fps = note.userInfo?["fps"] as? String { realtimeFPS = fps }
-        }
         .onAppear {
             updateNetworkStatusConsumerRegistration()
         }
@@ -85,7 +83,7 @@ public struct TopNavigationBarView: View {
                 HStack {
                     Spacer()
                     Button(LocalizationManager.shared.localizedString("action.cancel")) { showManualConnectSheet = false }
-                    Button(LocalizationManager.shared.localizedString("device.action.connect")) {
+                    Button(LocalizationManager.shared.localizedString("discovery.action.connect")) {
                         showManualConnectSheet = false
                         let port = UInt16(manualPort) ?? 0
                         Task { await appModel.manualConnect(ip: manualIP, port: port, pairingCode: manualCode) }
@@ -116,8 +114,8 @@ public struct TopNavigationBarView: View {
             connectionStatusIndicator
 
  // 在"未连接"和"通知中心"之间显示实时FPS（仅受设置开关控制）
-            if SettingsManager.shared.showRealtimeFPS {
-                fpsIndicator
+            if settingsManager.showRealtimeFPS {
+                WeatherFrameRateIndicator(monitor: frameRateMonitor)
             }
         }
     }
@@ -181,19 +179,6 @@ public struct TopNavigationBarView: View {
         case .disconnected:
             return .red
         }
-    }
-
- // 实时FPS展示小控件（位于顶部导航栏中间）
-    private var fpsIndicator: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "speedometer")
-                .font(.caption)
-                .foregroundColor(.orange)
-            Text(realtimeFPS.isEmpty ? "— FPS" : realtimeFPS)
-                .font(.caption)
-                .foregroundColor(themeConfiguration.secondaryTextColor)
-        }
-        .topBarGlassPill(themeConfiguration: themeConfiguration)
     }
 
     private var ipLocationIndicator: some View {
@@ -478,6 +463,35 @@ private struct TopBarGlassPillModifier: ViewModifier {
                         .stroke(themeConfiguration.borderColor, lineWidth: 1)
                 )
         }
+    }
+}
+
+@available(macOS 14.0, *)
+private struct WeatherFrameRateIndicator: View {
+    @ObservedObject var monitor: WeatherFrameRateMonitor
+    @EnvironmentObject private var themeConfiguration: ThemeConfiguration
+    @ObservedObject private var localizationManager = LocalizationManager.shared
+
+    private var text: String {
+        switch monitor.reading {
+        case .framesPerSecond(let fps): "\(fps) FPS"
+        case .paused: localizationManager.localizedString("metric.frameRate.paused")
+        case .unavailable, .measuring: "— FPS"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "speedometer")
+                .font(.caption)
+                .foregroundColor(.orange)
+            Text(text)
+                .font(.caption)
+                .monospacedDigit()
+                .foregroundColor(themeConfiguration.secondaryTextColor)
+        }
+        .topBarGlassPill(themeConfiguration: themeConfiguration)
+        .help(localizationManager.localizedString("settings.advanced.performance.showRealtimeFPS.help"))
     }
 }
 

@@ -515,7 +515,7 @@ final class KEMTrustStoreTests: XCTestCase {
         )
         XCTAssertEqual(beforeJournal[.xwing], key)
         XCTAssertTrue(
-            P2PConnectionManager.isPairingIdentityBootstrapReady(
+            P2PPairingIdentityBootstrapCoordinator.isPairingIdentityBootstrapReady(
                 hasCurrentSessionObservation: true,
                 hasStrictPQCTrustMaterial: beforeJournal[.xwing] == key
             )
@@ -528,7 +528,7 @@ final class KEMTrustStoreTests: XCTestCase {
         )
         XCTAssertTrue(quarantined.isEmpty)
         XCTAssertFalse(
-            P2PConnectionManager.isPairingIdentityBootstrapReady(
+            P2PPairingIdentityBootstrapCoordinator.isPairingIdentityBootstrapReady(
                 hasCurrentSessionObservation: true,
                 hasStrictPQCTrustMaterial: !quarantined.isEmpty
             )
@@ -541,7 +541,7 @@ final class KEMTrustStoreTests: XCTestCase {
         )
         XCTAssertEqual(afterJournal[.xwing], key)
         XCTAssertTrue(
-            P2PConnectionManager.isPairingIdentityBootstrapReady(
+            P2PPairingIdentityBootstrapCoordinator.isPairingIdentityBootstrapReady(
                 hasCurrentSessionObservation: true,
                 hasStrictPQCTrustMaterial: afterJournal[.xwing] == key
             )

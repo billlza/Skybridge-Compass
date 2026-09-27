@@ -14,6 +14,13 @@ import SkyBridgeProtocolCore
 struct RemoteMessage: Codable, Sendable {
     let type: MessageType
     let payload: Data
+    let inputControlLease: UUID?
+
+    init(type: MessageType, payload: Data, inputControlLease: UUID? = nil) {
+        self.type = type
+        self.payload = payload
+        self.inputControlLease = inputControlLease
+    }
 
     enum MessageType: String, Codable, Sendable {
         case screenData
@@ -22,6 +29,8 @@ struct RemoteMessage: Codable, Sendable {
         case clipboard
         case streamConfiguration
         case streamConfigurationAck
+        case streamConfigurationRejected
+        case controlAccess
         case framePresentationAck
         case damageReport
         case cursorUpdate
@@ -1539,10 +1548,11 @@ actor RemoteControlOutboundFramePump {
 
     func sendControlPayload<T: Encodable & Sendable>(
         _ payload: T,
-        type: RemoteMessage.MessageType
+        type: RemoteMessage.MessageType,
+        inputControlLease: UUID? = nil
     ) async throws {
         let encodedPayload = try JSONEncoder().encode(payload)
-        let message = RemoteMessage(type: type, payload: encodedPayload)
+        let message = RemoteMessage(type: type, payload: encodedPayload, inputControlLease: inputControlLease)
         let framedMessage = try JSONEncoder().encode(message)
         guard framedMessage.count <= maxFramedMessageBytes else {
             throw RemoteControlError.invalidMessageLength(framedMessage.count)

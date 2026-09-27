@@ -505,7 +505,7 @@ final class RemoteControlInputLifecycleCoordinatorTests: XCTestCase {
         }
         XCTAssertEqual(retainedMapping.displayID, replacementMapping.displayID)
         XCTAssertEqual(retainedMapping.visibleSize, replacementMapping.visibleSize)
-        guard case .ownerConflict = RemoteControlInjectionMappingStore.snapshot(for: wrongOwner) else {
+        guard case .missing = RemoteControlInjectionMappingStore.snapshot(for: wrongOwner) else {
             return XCTFail("A different owner must not access the replacement mapping")
         }
     }

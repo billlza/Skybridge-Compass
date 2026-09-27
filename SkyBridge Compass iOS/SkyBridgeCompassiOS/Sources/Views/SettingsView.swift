@@ -202,10 +202,15 @@ struct SettingsView: View {
     
     private var appearanceSettingsSection: some View {
         Section(t("settings.section.appearance")) {
-            Picker(t("settings.theme"), selection: $themeConfiguration.isDarkMode) {
-                Text(t("settings.theme.light")).tag(false)
-                Text(t("settings.theme.dark")).tag(true)
+            Picker(t("settings.background_style"), selection: $themeConfiguration.isDarkMode) {
+                Text(t("settings.background_style.classic")).tag(true)
+                Text(t("settings.background_style.light")).tag(false)
             }
+            .accessibilityIdentifier("settings.background_style")
+
+            Text(t("settings.background_style.description"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
             
             Picker(localizationManager.localized("settings.language"), selection: $localizationManager.currentLanguage) {
                 ForEach(AppLanguage.allCases, id: \.self) { language in
@@ -381,6 +386,8 @@ struct PQCSecuritySettingsView: View {
     @EnvironmentObject private var authManager: AuthenticationManager
     @StateObject private var pqcManager = PQCCryptoManager.instance
     @State private var errorMessage: String?
+    @StateObject private var managementTrust = TrustedDeviceStore.shared
+    @State private var revokedManagementDeviceIDs: Set<String> = []
     @State private var requestedProviderPreference: PQCProviderPreference = .mlkem
     @State private var isApplyingProviderPreference = false
     @State private var requestedProtocolSigningAlgorithm =
@@ -399,6 +406,19 @@ struct PQCSecuritySettingsView: View {
     
     var body: some View {
         List {
+            Section("CLI 管理授权") {
+                Text("握手配置与文件审批分别授权。首次需要本机确认；持续授权绑定完整配对身份。此处同时撤销两项授权，包括临时授权。")
+                ForEach(managementTrust.trustedDevices) { device in
+                    Button(role: .destructive) {
+                        do {
+                            try IOSHandshakeConfiguration.revokeManagement(for: device)
+                            revokedManagementDeviceIDs.insert(device.id)
+                        } catch { errorMessage = error.localizedDescription }
+                    } label: {
+                        Text(revokedManagementDeviceIDs.contains(device.id) ? "已撤销：\(device.name)" : "撤销 \(device.name) 的管理授权")
+                    }
+                }
+            }
             Section("加密算法") {
                 let pqcPolicyStatus = SettingsView.pqcPolicyStatusPresentation(
                     enforcePQCHandshake: pqcManager.enforcePQCHandshake,

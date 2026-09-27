@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import SkyBridgeProtocolCore
 
 public enum RemoteControlTransportKind: String, Codable, Sendable, Equatable {
     case p2p
@@ -242,7 +243,7 @@ public struct RemoteControlSecurityDescriptor: Identifiable, Codable, Sendable, 
         localNebulaId: String?,
         cryptoSuite: String,
         createdAt: Date = Date(),
-        approvalTimeoutSeconds: TimeInterval = 45
+        approvalTimeoutSeconds: TimeInterval = RemoteControlStartupTiming.hostApprovalTimeoutSeconds
     ) {
         self.id = id
         self.sessionId = Self.normalized(sessionId, maximumLength: 256) ?? ""
@@ -259,7 +260,7 @@ public struct RemoteControlSecurityDescriptor: Identifiable, Codable, Sendable, 
         self.localNebulaId = Self.normalized(localNebulaId, maximumLength: 256)
         self.cryptoSuite = Self.normalized(cryptoSuite, maximumLength: 64) ?? "missing"
         self.createdAt = createdAt
-        let finiteTimeout = approvalTimeoutSeconds.isFinite ? approvalTimeoutSeconds : 45
+        let finiteTimeout = approvalTimeoutSeconds.isFinite ? approvalTimeoutSeconds : RemoteControlStartupTiming.hostApprovalTimeoutSeconds
         self.approvalTimeoutSeconds = min(max(1, finiteTimeout), 120)
     }
 
@@ -902,7 +903,7 @@ enum RemoteControlSecurityAdmissionPolicy {
     ) -> Bool {
         guard !isApproved else { return true }
         switch type {
-        case .streamConfiguration, .streamConfigurationAck, .framePresentationAck,
+        case .streamConfiguration, .streamConfigurationAck, .streamConfigurationRejected, .controlAccess, .framePresentationAck,
              .screenData, .damageReport, .cursorUpdate, .overlayUpdate,
              .mouseEvent, .keyboardEvent, .clipboard:
             return false
@@ -924,12 +925,32 @@ enum RemoteControlSecurityAdmissionPolicy {
 
 @MainActor
 public final class RemoteControlSecurityNoticeCenter: ObservableObject {
-    public static let shared = RemoteControlSecurityNoticeCenter()
+    public static let shared = RemoteControlSecurityNoticeCenter(monitorsLocalInput: true)
 
     public typealias LocalIdentityProvider = @MainActor () -> RemoteControlSecurityIdentity?
     public typealias DisconnectHandler = @MainActor () -> Void
 
     @Published public private(set) var currentNotice: RemoteControlSecurityNotice?
+    @Published public private(set) var notices: [RemoteControlSecurityNotice] = []
+    @Published public private(set) var controlHandoffError: String?
+    @Published public private(set) var localInputHasControl = false
+
+    public var inputControllerNoticeID: UUID? {
+        hostAccess.controllerID ?? notices.first(where: {
+            $0.phase == .active && !hostAccess.isRegistered($0.id)
+        })?.id
+    }
+
+    public var isTransferringControl: Bool { inputHandoffOperationID != nil || localReclamationID != nil }
+    private var inputHandoffOperationID: UUID?
+    private var localReclamationID: UUID?
+#if os(macOS)
+    private let localInputMonitor: RemoteControlLocalInputMonitor?
+#endif
+    private let maximumViewers = ControlledHostSessionPolicy.defaultConcurrentHostLimit
+    private lazy var hostAccess = RemoteControlHostAccessCoordinator(limit: maximumViewers) { [weak self] in
+        self?.objectWillChange.send()
+    }
 
     private var approvalContinuations: [UUID: CheckedContinuation<RemoteControlSecurityDecision, Never>] = [:]
     private var timeoutTasks: [UUID: Task<Void, Never>] = [:]
@@ -940,8 +961,11 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
         [UUID: ProductReleaseEvidenceSessionOwner] = [:]
     private var productEvidencePanelPresentedNoticeIds = Set<UUID>()
 
-    init(productEvidenceRecorder: ProductReleaseEvidenceRecorder = .shared) {
+    init(productEvidenceRecorder: ProductReleaseEvidenceRecorder = .shared, monitorsLocalInput: Bool = false) {
         self.productEvidenceRecorder = productEvidenceRecorder
+#if os(macOS)
+        localInputMonitor = monitorsLocalInput ? RemoteControlLocalInputMonitor() : nil
+#endif
     }
 
     public func setLocalIdentityProvider(_ provider: LocalIdentityProvider?) {
@@ -963,6 +987,138 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
         handler: @escaping DisconnectHandler
     ) {
         disconnectHandlers[noticeId] = handler
+    }
+
+    func registerSharedControl(
+        for noticeID: UUID,
+        releaseInput: @escaping @MainActor () throws -> Void,
+        publishAccess: @escaping @MainActor (RemoteControlAccess) async throws -> Void
+    ) throws {
+        try hostAccess.register(id: noticeID, handlers: .init(
+            releaseInput: releaseInput, publishAccess: publishAccess
+        ))
+    }
+
+    public func controlAccess(for noticeID: UUID) -> RemoteControlAccess? {
+        hostAccess.access(for: noticeID)
+    }
+
+    public func canTransferInputControl(to noticeID: UUID) -> Bool {
+        hostAccess.isReady(noticeID) && !isTransferringControl
+            && hostAccess.controllerID != noticeID
+    }
+
+    func markControlReady(for noticeID: UUID) { hostAccess.markReady(noticeID) }
+
+    func permitsInput(noticeID: UUID?, lease: UUID?) -> Bool {
+        guard let noticeID, notices.contains(where: { $0.id == noticeID && $0.phase == .active }) else {
+            return false
+        }
+        if hostAccess.isRegistered(noticeID) {
+            return hostAccess.permitsInput(id: noticeID, lease: lease)
+        }
+        return notices.count == 1 && inputControllerNoticeID == noticeID && lease == nil
+    }
+
+    private func armLocalInputMonitor() throws {
+#if os(macOS)
+        try localInputMonitor?.arm { [weak self] in self?.reclaimInputForLocalActivity() }
+#endif
+    }
+
+    /// Called synchronously by AppKit, before any subsequent remote HID commit.
+    /// The existing observer grant keeps video alive while retiring input.
+    func reclaimInputForLocalActivity() {
+        let previousID = inputControllerNoticeID
+        guard previousID != nil || inputHandoffOperationID != nil else { return }
+        localInputHasControl = true
+        do {
+            let revokedID = try hostAccess.reclaimForLocalInput()
+            if let previousID, !hostAccess.isRegistered(previousID) {
+                // Legacy peers cannot acknowledge an observer grant.
+                disconnectNotice(id: previousID)
+            }
+            guard let revokedID else { refreshCurrentNotice(); return }
+            let reclamationID = UUID()
+            localReclamationID = reclamationID
+            refreshCurrentNotice()
+            Task { @MainActor in
+                defer {
+                    if localReclamationID == reclamationID { localReclamationID = nil }
+                    refreshCurrentNotice()
+                }
+                do {
+                    try await hostAccess.publishLocalReclamation(for: revokedID)
+                } catch {
+                    if hostAccess.isRegistered(revokedID) {
+                        controlHandoffError = error.localizedDescription
+                        disconnectNotice(id: revokedID)
+                    }
+                }
+            }
+        } catch {
+            controlHandoffError = error.localizedDescription
+            if let previousID { disconnectNotice(id: previousID) }
+            refreshCurrentNotice()
+        }
+    }
+
+    /// Only a local host action selects the next input controller. A remote
+    /// viewer cannot request or manufacture a grant through a stream refresh.
+    public func transferInputControl(to noticeID: UUID) async {
+        guard canTransferInputControl(to: noticeID),
+              notices.contains(where: { $0.id == noticeID && $0.phase == .active }) else { return }
+        let previousID = inputControllerNoticeID
+        let originalControllerAccess = previousID.flatMap { hostAccess.access(for: $0) }
+        let originalTargetAccess = hostAccess.access(for: noticeID)
+        let operationID = UUID()
+        inputHandoffOperationID = operationID
+        objectWillChange.send()
+        defer {
+            if inputHandoffOperationID == operationID { inputHandoffOperationID = nil }
+            refreshCurrentNotice()
+        }
+        do {
+            try armLocalInputMonitor()
+            try await hostAccess.transfer(to: noticeID)
+            localInputHasControl = false
+            controlHandoffError = nil
+        } catch RemoteControlHostAccessCoordinator.Failure.localInputReclaimed {
+            // Local activity already retired the grant and owns its publication.
+            localInputHasControl = true
+        } catch RemoteControlHostAccessCoordinator.Failure.handoffInProgress {
+            controlHandoffError = RemoteControlHostAccessCoordinator.Failure.handoffInProgress.localizedDescription
+        } catch {
+            controlHandoffError = error.localizedDescription
+            // Keep this operation reserved through cleanup. Removing an engine
+            // must not let a newer handoff race this old failure handler.
+            if let previousID, hostAccess.access(for: previousID) != originalControllerAccess {
+                disconnectNotice(id: previousID)
+            }
+            // An untouched observer has received no uncertain grant and can
+            // remain connected. Only a target whose grant changed is retired.
+            if hostAccess.access(for: noticeID) != originalTargetAccess {
+                disconnectNotice(id: noticeID)
+            }
+        }
+    }
+
+    public func closeAllNoticesFailClosed() {
+        for notice in notices { closeNoticeFailClosed(id: notice.id) }
+    }
+
+    private func refreshCurrentNotice() {
+#if os(macOS)
+        if !notices.contains(where: { $0.phase == .active }) { localInputMonitor?.stop() }
+#endif
+        currentNotice = notices.first(where: { $0.phase == .awaitingApproval })
+            ?? notices.first(where: { $0.id == inputControllerNoticeID })
+            ?? notices.first
+    }
+
+    public func selectNotice(id: UUID) {
+        guard let notice = notices.first(where: { $0.id == id }) else { return }
+        currentNotice = notice
     }
 
 #if DEBUG || SKYBRIDGE_TESTING
@@ -1024,9 +1180,12 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
         _ descriptor: RemoteControlSecurityDescriptor
     ) async -> RemoteControlSecurityDecision {
         bindProductEvidenceOwner(for: descriptor)
-        if let notice = currentNotice, notice.phase == .active {
-            if notice.descriptor.sessionId == descriptor.sessionId,
-               notice.descriptor.transportKind == descriptor.transportKind {
+        if let notice = notices.first(where: {
+            $0.descriptor.sessionId == descriptor.sessionId
+                && $0.descriptor.transportKind == descriptor.transportKind
+        }) {
+            if notice.phase == .active,
+               notice.descriptor.sessionEvidenceReference == descriptor.sessionEvidenceReference {
                 guard Self.securityIdentityMatches(
                     notice.descriptor,
                     descriptor
@@ -1039,7 +1198,7 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
                         id: descriptor.id,
                         preservingActiveNoticeId: notice.id
                     )
-                    disconnectCurrentNotice()
+                    disconnectNotice(id: notice.id)
                     return .rejected
                 }
                 guard !descriptor.missingRequiredNoticeMetadata.contains("crypto_suite") else {
@@ -1048,7 +1207,7 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
                         id: descriptor.id,
                         preservingActiveNoticeId: notice.id
                     )
-                    disconnectCurrentNotice()
+                    disconnectNotice(id: notice.id)
                     return .rejected
                 }
                 updateCryptoSuite(
@@ -1067,7 +1226,6 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
                 descriptor: descriptor,
                 activeDescriptor: notice.descriptor
             )
-            clearPeerIdentity(for: descriptor)
             cleanupIncomingNoticeState(
                 id: descriptor.id,
                 preservingActiveNoticeId: notice.id
@@ -1086,7 +1244,15 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
             return .rejected
         }
 
-        rejectPendingNoticeIfNeeded()
+        guard notices.count < maximumViewers,
+              notices.isEmpty || (hostAccess.isRegistered(descriptor.id)
+                && notices.allSatisfy { hostAccess.isRegistered($0.id) }) else {
+            if let active = notices.first {
+                appendConcurrentRequestRejectedEvidence(descriptor: descriptor, activeDescriptor: active.descriptor)
+            }
+            cleanupNoticeState(id: descriptor.id)
+            return .rejected
+        }
 
         let notice = RemoteControlSecurityNotice(
             descriptor: descriptor,
@@ -1114,7 +1280,8 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
                         decision: .timedOut
                     )
                 }
-                currentNotice = notice
+                notices.append(notice)
+                refreshCurrentNotice()
                 appendEvidence(event: "Shown", descriptor: descriptor)
             }
         } onCancel: {
@@ -1131,31 +1298,35 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
 
     public func approveCurrentNotice() {
         guard let notice = currentNotice, notice.phase == .awaitingApproval else { return }
-        currentNotice = notice.updatingPhase(.active, approvedAt: Date())
-        appendEvidence(event: "Approved", descriptor: notice.descriptor)
-        appendEvidence(event: "Active", descriptor: notice.descriptor)
-        resolveContinuation(id: notice.id, decision: .approved)
-    }
-
-    /// Approval entry point reserved for the real user-facing panel action.
-    ///
-    /// Programmatic smoke helpers continue to use `approveCurrentNotice()` and therefore cannot
-    /// manufacture the `HumanApproved` evidence required by release acceptance.
-    private func approveCurrentNoticeFromUserInteraction() {
-        guard let notice = currentNotice, notice.phase == .awaitingApproval else { return }
-        appendEvidence(event: "HumanApproved", descriptor: notice.descriptor)
-        approveCurrentNotice()
+        approveNotice(id: notice.id)
     }
 
     public func approveNotice(id: UUID) {
-        guard currentNotice?.id == id else { return }
-        approveCurrentNotice()
+        guard let index = notices.firstIndex(where: { $0.id == id && $0.phase == .awaitingApproval }) else { return }
+        let notice = notices[index]
+        do {
+            try armLocalInputMonitor()
+            if hostAccess.isRegistered(id) {
+                try hostAccess.approve(id: id, allowsInitialInput: !isTransferringControl)
+            }
+        } catch {
+            controlHandoffError = error.localizedDescription
+            resolvePendingNotice(id: id, decision: .rejected)
+            return
+        }
+        notices[index] = notice.updatingPhase(.active, approvedAt: Date())
+        if inputControllerNoticeID == id { localInputHasControl = false }
+        refreshCurrentNotice()
+        appendEvidence(event: "Approved", descriptor: notice.descriptor)
+        appendEvidence(event: "Active", descriptor: notice.descriptor)
+        resolveContinuation(id: id, decision: .approved)
     }
 
     @_spi(RemoteControlSecurityNoticeUI)
     public func approveNoticeFromUserInteraction(id: UUID) {
-        guard currentNotice?.id == id else { return }
-        approveCurrentNoticeFromUserInteraction()
+        guard let notice = notices.first(where: { $0.id == id && $0.phase == .awaitingApproval }) else { return }
+        appendEvidence(event: "HumanApproved", descriptor: notice.descriptor)
+        approveNotice(id: id)
     }
 
     public func rejectCurrentNotice() {
@@ -1164,8 +1335,8 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
     }
 
     public func rejectNotice(id: UUID) {
-        guard currentNotice?.id == id else { return }
-        rejectCurrentNotice()
+        guard notices.contains(where: { $0.id == id && $0.phase == .awaitingApproval }) else { return }
+        resolvePendingNotice(id: id, decision: .rejected)
     }
 
     public func closeCurrentNoticeFailClosed() {
@@ -1179,47 +1350,59 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
     }
 
     public func closeNoticeFailClosed(id: UUID) {
-        guard currentNotice?.id == id else { return }
-        closeCurrentNoticeFailClosed()
+        guard let notice = notices.first(where: { $0.id == id }) else { return }
+        if notice.phase == .awaitingApproval { rejectNotice(id: id) }
+        else { disconnectNotice(id: id) }
     }
 
     public func disconnectCurrentNotice() {
         guard let notice = currentNotice else { return }
+        disconnectNotice(id: notice.id)
+    }
+
+    public func disconnectNotice(id: UUID) {
+        guard let notice = notices.first(where: { $0.id == id }) else { return }
         let handler = notice.phase == .active ? disconnectHandlers[notice.id] : nil
         appendEvidence(event: "Disconnected", descriptor: notice.descriptor)
-        currentNotice = nil
+        notices.removeAll { $0.id == notice.id }
         clearPeerIdentity(for: notice.descriptor)
         if notice.phase == .awaitingApproval {
             resolveContinuation(id: notice.id, decision: .disconnected)
             cleanupNoticeState(id: notice.id)
+            refreshCurrentNotice()
             return
         }
         cleanupNoticeState(id: notice.id)
+        refreshCurrentNotice()
         handler?()
     }
 
-    public func disconnectNotice(id: UUID) {
-        guard currentNotice?.id == id else { return }
-        disconnectCurrentNotice()
+    public func endNotice(id: UUID) {
+        guard let notice = notices.first(where: { $0.id == id }) else {
+            cleanupNoticeState(id: id)
+            return
+        }
+        if notice.phase == .awaitingApproval {
+            resolvePendingNotice(id: id, decision: .disconnected)
+        } else {
+            appendEvidence(event: "Disconnected", descriptor: notice.descriptor)
+            notices.removeAll { $0.id == id }
+            clearPeerIdentity(for: notice.descriptor)
+            cleanupNoticeState(id: id)
+            refreshCurrentNotice()
+        }
     }
 
     public func endNotice(
         sessionId: String,
         transportKind: RemoteControlTransportKind
     ) {
-        guard let notice = currentNotice,
-              notice.descriptor.sessionId == sessionId,
-              notice.descriptor.transportKind == transportKind else {
+        guard let notice = notices.first(where: {
+            $0.descriptor.sessionId == sessionId && $0.descriptor.transportKind == transportKind
+        }) else {
             return
         }
-        if notice.phase == .awaitingApproval {
-            resolvePendingNotice(id: notice.id, decision: .disconnected)
-        } else {
-            appendEvidence(event: "Disconnected", descriptor: notice.descriptor)
-            currentNotice = nil
-            clearPeerIdentity(for: notice.descriptor)
-            cleanupNoticeState(id: notice.id)
-        }
+        endNotice(id: notice.id)
     }
 
     public func updateCryptoSuite(
@@ -1227,31 +1410,28 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
         sessionId: String,
         transportKind: RemoteControlTransportKind
     ) {
-        guard let notice = currentNotice,
-              notice.descriptor.sessionId == sessionId,
-              notice.descriptor.transportKind == transportKind else {
+        guard let index = notices.firstIndex(where: {
+            $0.descriptor.sessionId == sessionId && $0.descriptor.transportKind == transportKind
+        }) else {
             return
         }
+        let notice = notices[index]
         let descriptor = notice.descriptor.updatingCryptoSuite(cryptoSuite)
         guard !descriptor.missingRequiredNoticeMetadata.contains("crypto_suite") else {
             appendInvalidCryptoUpdateEvidence(descriptor: descriptor)
-            disconnectCurrentNotice()
+            disconnectNotice(id: notice.id)
             return
         }
-        currentNotice = notice.updatingDescriptor(descriptor)
+        notices[index] = notice.updatingDescriptor(descriptor)
+        refreshCurrentNotice()
         appendEvidence(event: "CryptoUpdated", descriptor: descriptor)
-    }
-
-    private func rejectPendingNoticeIfNeeded() {
-        guard let notice = currentNotice, notice.phase == .awaitingApproval else { return }
-        resolvePendingNotice(id: notice.id, decision: .disconnected)
     }
 
     private func resolvePendingNotice(
         id: UUID,
         decision: RemoteControlSecurityDecision
     ) {
-        guard let notice = currentNotice, notice.id == id else {
+        guard let notice = notices.first(where: { $0.id == id }) else {
             resolveContinuation(id: id, decision: decision)
             cleanupNoticeState(id: id)
             return
@@ -1259,27 +1439,27 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
 
         switch decision {
         case .approved:
-            currentNotice = notice.updatingPhase(.active, approvedAt: Date())
-            appendEvidence(event: "Approved", descriptor: notice.descriptor)
-            appendEvidence(event: "Active", descriptor: notice.descriptor)
+            approveNotice(id: id)
+            return
         case .rejected:
             appendEvidence(event: "Rejected", descriptor: notice.descriptor)
             clearPeerIdentity(for: notice.descriptor)
-            currentNotice = nil
+            notices.removeAll { $0.id == id }
         case .timedOut:
             appendEvidence(event: "TimedOut", descriptor: notice.descriptor)
             clearPeerIdentity(for: notice.descriptor)
-            currentNotice = nil
+            notices.removeAll { $0.id == id }
         case .disconnected:
             appendEvidence(event: "Disconnected", descriptor: notice.descriptor)
             clearPeerIdentity(for: notice.descriptor)
-            currentNotice = nil
+            notices.removeAll { $0.id == id }
         }
 
         resolveContinuation(id: id, decision: decision)
         if decision != .approved {
             cleanupNoticeState(id: id)
         }
+        refreshCurrentNotice()
     }
 
     private func resolveContinuation(
@@ -1294,6 +1474,7 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
         timeoutTasks.removeValue(forKey: id)?.cancel()
         approvalContinuations.removeValue(forKey: id)
         disconnectHandlers.removeValue(forKey: id)
+        hostAccess.remove(id: id)
         if !productEvidencePanelPresentedNoticeIds.contains(id) {
             productEvidenceOwnersByNoticeId.removeValue(forKey: id)
         }

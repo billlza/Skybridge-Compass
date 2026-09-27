@@ -1154,6 +1154,52 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
         await receiver.cleanupOnChannelClosed().value
     }
 
+    func testApprovalRejectsDirectoryReplacementBeforeCreatingPartial() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+
+        let transferId = UUID().uuidString
+        let displaced = fixture.directory.appendingPathExtension("approved")
+        defer { XCTAssertNoThrow(try FileManager.default.removeItem(at: displaced)) }
+        let originalIdentity = try FileManager.default.attributesOfItem(atPath: fixture.directory.path)[.systemFileNumber]
+        let receiver = WebRTCInboundFileTransferReceiver(
+            destinationBaseDirectory: { fixture.directory },
+            senderAuthorityProvider: { _ in Self.senderAuthority() },
+            approvalProvider: { request in
+                XCTAssertEqual(request.destinationDirectoryPath, fixture.directory.path)
+                do {
+                    try FileManager.default.moveItem(at: fixture.directory, to: displaced)
+                    try FileManager.default.createDirectory(at: fixture.directory, withIntermediateDirectories: false)
+                    let replacement = try FileManager.default.attributesOfItem(atPath: fixture.directory.path)[.systemFileNumber]
+                    XCTAssertNotEqual(originalIdentity as? NSNumber, replacement as? NSNumber)
+                    return .approved
+                } catch {
+                    XCTFail("Directory substitution setup failed: \(error)")
+                    return .rejected(reason: error.localizedDescription)
+                }
+            }
+        )
+        var sent: [(CrossNetworkFileTransferMessage, String)] = []
+        let keys = Self.sessionKeys()
+        let payload = Data("abcd".utf8)
+
+        try await receiver.handle(
+            metadata(transferId: transferId, fileSize: Int64(payload.count), chunkSize: payload.count, totalChunks: 1),
+            sessionID: "session",
+            endpointDescription: "peer",
+            keys: keys,
+            sendMessage: { message, label in sent.append((message, label)) },
+            failSenderWaiters: { _, _ in XCTFail("metadata must not fail outbound waiters") },
+            resumeSenderWaiter: { _ in XCTFail("metadata must not resume outbound waiters") }
+        )
+        XCTAssertEqual(sent.map(\.0.op), [.error])
+        XCTAssertEqual(sent.last?.0.message, "Partial file unavailable")
+        for directory in [fixture.directory, displaced] {
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), [])
+        }
+        await receiver.cleanupOnChannelClosed().value
+    }
+
     func testCompleteMovesFileAndSendsCompleteAck() async throws {
         let fixture = try makeFixture()
         defer { fixture.cleanup() }

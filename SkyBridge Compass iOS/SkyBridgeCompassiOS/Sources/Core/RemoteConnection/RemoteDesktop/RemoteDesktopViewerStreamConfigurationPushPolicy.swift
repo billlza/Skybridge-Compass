@@ -3,6 +3,64 @@ import SkyBridgeProtocolCore
 
 @available(iOS 17.0, *)
 enum RemoteDesktopViewerStreamConfigurationPushPolicy {
+    /// A configuration depends only on the audio resource it actually publishes.
+    /// Video-only and stop transactions must survive asynchronous receiver installation.
+    enum AudioBindingRequirement<Owner: Equatable>: Equatable {
+        enum Failure: Error, LocalizedError {
+            case missingAudioBinding
+            var errorDescription: String? { "远控音频配置缺少当前会话的接收器。" }
+        }
+        case unused
+        case exact(Owner)
+
+        init(audioEndpointPresent: Bool, installedOwner: Owner?) throws {
+            guard audioEndpointPresent else {
+                self = .unused
+                return
+            }
+            guard let installedOwner else { throw Failure.missingAudioBinding }
+            self = .exact(installedOwner)
+        }
+
+        var requiresAudioBinding: Bool {
+            if case .exact = self { return true }
+            return false
+        }
+
+        var requiredOwner: Owner? {
+            if case .exact(let owner) = self { return owner }
+            return nil
+        }
+
+        func isSatisfied(by currentOwner: Owner?) -> Bool {
+            switch self {
+            case .unused: return true
+            case .exact(let expected): return currentOwner == expected
+            }
+        }
+    }
+
+    /// Call only after the exact configuration ACK. Repeated ACKs cannot extend
+    /// first-media deadlines; a replacement audio receiver gets its own deadline.
+    struct StartupWatchdogAdmission<AudioOwner: Equatable> {
+        struct Plan: Equatable {
+            let startVideo: Bool
+            let startAudio: Bool
+        }
+        private var videoStarted = false
+        private var monitoredAudioOwner: AudioOwner?
+
+        mutating func acknowledge(audioOwner: AudioOwner?) -> Plan {
+            let startVideo = !videoStarted
+            let startAudio = audioOwner != nil && audioOwner != monitoredAudioOwner
+            videoStarted = true
+            if startAudio { monitoredAudioOwner = audioOwner }
+            return Plan(startVideo: startVideo, startAudio: startAudio)
+        }
+
+        mutating func retireAudio() { monitoredAudioOwner = nil }
+    }
+
     struct AcknowledgementExpectation: Equatable {
         let transaction: RemoteDesktopStreamConfigurationTransaction
         let streamRefreshToken: UInt64?

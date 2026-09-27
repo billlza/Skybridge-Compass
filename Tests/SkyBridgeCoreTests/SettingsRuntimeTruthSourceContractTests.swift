@@ -223,10 +223,13 @@ final class SettingsRuntimeTruthSourceContractTests: XCTestCase {
             dashboardSource.contains("guard !didSetupLifecycle else { return }"),
             "Dashboard lifecycle hooks should not stack notification observers and timers on repeated appearances."
         )
-        XCTAssertTrue(
-            dashboardSource.contains("guard fpsTimer == nil else { return }"),
-            "Realtime FPS polling must not create duplicate timers."
-        )
+        XCTAssertFalse(dashboardSource.contains("fpsTimer"),
+            "The dashboard must not restore a polling timer for renderer-owned frame samples.")
+        XCTAssertTrue(dashboardSource.contains("@State private var frameRateMonitor = WeatherFrameRateMonitor()"),
+            "A dashboard must retain one frame monitor across view updates.")
+        let topBarSource = try readSource("Sources/SkyBridgeCompassApp/Dashboard/TopBar/TopNavigationBarView.swift")
+        XCTAssertTrue(topBarSource.contains("@ObservedObject var monitor: WeatherFrameRateMonitor"),
+            "Only the small frame-rate indicator should observe frame publications.")
         XCTAssertTrue(
             dashboardSource.contains("removeNotificationObservers()\n        let center = NotificationCenter.default"),
             "Notification observer setup should clear any prior tokens before adding new observers."

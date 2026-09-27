@@ -31,6 +31,11 @@ struct AccountDevicesSectionView: View {
 
             toolbar
 
+            if let snapshot = presence.accountDevices,
+               let issue = AccountDevicePresentation.registrationIssueText(for: snapshot) {
+                noticeRow(icon: "person.crop.circle.badge.exclamationmark", color: .orange, text: issue)
+            }
+
             if let failure = presence.lastListFailure, presence.accountDevices != nil {
                 noticeRow(
                     icon: "exclamationmark.triangle.fill",

@@ -75,6 +75,12 @@ struct AccountDevicesPanelView: View {
     @ViewBuilder
     private var content: some View {
         if let snapshot = presence.accountDevices {
+            if let issue = AccountDevicePresentation.registrationIssueText(for: snapshot) {
+                Label(issue, systemImage: "person.crop.circle.badge.exclamationmark")
+                    .font(.caption)
+                    .foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             let devices = Array(
                 AccountDevicePresentationPolicy.orderedDevices(snapshot.devices).prefix(Self.previewRowLimit)
             )
@@ -175,10 +181,15 @@ private struct AccountDeviceCompactRow: View {
                 .foregroundColor(AccountDevicePresentation.statusColor(for: connectivity))
                 .frame(width: 24)
 
-            Text(AccountDevicePresentationPolicy.displayName(for: record))
-                .font(.subheadline)
-                .foregroundStyle(themeConfiguration.primaryTextColor)
-                .lineLimit(1)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(AccountDevicePresentationPolicy.displayName(for: record))
+                    .font(.subheadline)
+                    .foregroundStyle(themeConfiguration.primaryTextColor)
+                Text(AccountDevicePresentation.modelText(for: record))
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            .lineLimit(1)
 
             Circle()
                 .fill(AccountDevicePresentation.statusColor(for: connectivity))

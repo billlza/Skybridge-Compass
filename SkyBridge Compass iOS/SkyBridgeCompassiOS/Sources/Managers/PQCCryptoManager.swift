@@ -7,6 +7,7 @@
 //
 
 import Foundation
+import SkyBridgeProtocolCore
 import CryptoKit
 import Security
 
@@ -34,6 +35,7 @@ public struct PQCProviderAvailability: Sendable, Equatable {
 @MainActor
 public class PQCCryptoManager: ObservableObject {
     public static let instance = PQCCryptoManager()
+    private var applyingProviderPreference = false
     
     // MARK: - Published Properties
     
@@ -203,7 +205,17 @@ public class PQCCryptoManager: ObservableObject {
     /// Applies one exclusive provider preference and proves that it became
     /// active. Failed selection restores both the durable preference and the
     /// previous runtime so settings cannot claim a provider that is not in use.
-    public func applyProviderPreference(_ preference: PQCProviderPreference) async throws {
+    public func applyProviderPreference(_ preference: PQCProviderPreference,
+                                        expectedRevision: String? = nil,
+                                        isBusy: @MainActor () -> Bool = { false },
+                                        revalidate: HandshakeConfigurationService.Revalidate = {}) async throws {
+        guard !applyingProviderPreference else { throw HandshakeConfigurationError.busy }
+        guard !isBusy() else { throw HandshakeConfigurationError.transferActive }
+        applyingProviderPreference = true
+        defer { applyingProviderPreference = false }
+        if let expectedRevision, try handshakeConfigurationSnapshot().revision != expectedRevision {
+            throw HandshakeConfigurationError.revisionChanged
+        }
         if preference == .qPeriaptBeta {
             let identityConfiguration = try ProtocolSigningIdentityPolicy.requiredConfiguration()
             guard identityConfiguration.algorithm == .mlDSA65 else {
@@ -214,6 +226,12 @@ public class PQCCryptoManager: ObservableObject {
             }
         }
 
+        try Task.checkCancellation()
+        try await revalidate()
+        guard !isBusy() else { throw HandshakeConfigurationError.transferActive }
+        if let expectedRevision, try handshakeConfigurationSnapshot().revision != expectedRevision {
+            throw HandshakeConfigurationError.revisionChanged
+        }
         let defaults = UserDefaults.standard
         let previousXWing = defaults.bool(
             forKey: PQCProviderPreferenceStorageKeys.preferXWingHybrid
@@ -583,4 +601,88 @@ public enum PQCError: Error, LocalizedError {
         case .providerNotAvailable: return "PQC Provider 不可用"
         }
     }
+}
+
+
+extension PQCCryptoManager {
+    public func handshakeConfigurationSnapshot(busy: Bool = false) throws -> HandshakeConfigurationSnapshot {
+        let preference = Self.currentProviderPreference()
+        let signature = try ProtocolSigningIdentityPolicy.requiredConfiguration().algorithm
+        let profile: HandshakeProfile = preference == .qPeriaptBeta ? .qperiapt : (preference == .xwingHybrid ? .xwing : .mlkem)
+        let revision = HandshakeConfigurationWire.revision(for: "\(profile.rawValue):\(signature.rawValue)", defaults: .standard)
+        let options: [HandshakeProfileOption] = [(.qperiapt, PQCProviderPreference.qPeriaptBeta), (.xwing, .xwingHybrid), (.mlkem, .mlkem)].map { profile, preference in
+            let availability = providerAvailability(preference)
+            return .init(profile, selectable: availability.isAvailable, reason: availability.detail)
+        } + [.init(.classic, selectable: false, reason: "严格 PQC 策略已禁用 Classic")]
+        return .init(revision: revision, configuredProfile: profile, providerSuite: currentSuite.rawValue,
+                     options: options, busy: busy || applyingProviderPreference)
+    }
+}
+
+@MainActor
+enum IOSHandshakeConfiguration {
+    static let usbDiscoveryResponder = USBPeerDiscoveryResponder()
+    static var isBusy: Bool {
+        FileTransferManager.instance.isTransferring || InboundFileTransferApprovalService.shared.pendingRequest != nil
+            || RemoteDesktopManager.instance.currentConnection != nil
+    }
+    static func snapshot() throws -> HandshakeConfigurationSnapshot {
+        try PQCCryptoManager.instance.handshakeConfigurationSnapshot(busy: isBusy)
+    }
+    static func apply(_ profile: HandshakeProfile, revision: String, revalidate: HandshakeConfigurationService.Revalidate) async throws -> HandshakeConfigurationSnapshot {
+        guard profile != .classic else { throw HandshakeConfigurationError.classicDisabled }
+        let preference: PQCProviderPreference = profile == .qperiapt ? .qPeriaptBeta : (profile == .xwing ? .xwingHybrid : .mlkem)
+        try await PQCCryptoManager.instance.applyProviderPreference(preference, expectedRevision: revision, isBusy: { isBusy }, revalidate: revalidate)
+        return try snapshot()
+    }
+    static func trusted(_ identity: HandshakeManagementIdentity) async throws -> Bool {
+        try identity.validate()
+        return try await PairingIdentityAuthorityMutationBarrier.readAfterActiveMutation {
+            guard TrustedDeviceStore.shared.isAuthorityPersistenceAvailable else {
+                throw HandshakeConfigurationError.storageUnavailable
+            }
+            return TrustedDeviceStore.shared.uniqueCanonicalTrustedDeviceId(for: identity.deviceID) != nil
+                && TrustedDeviceStore.shared.currentPathTrustRecord(fingerprint: identity.fingerprint,
+                                                                   matchingDeviceId: identity.deviceID) != nil
+        }
+    }
+    static func revokeManagement(for device: TrustedDeviceStore.TrustedDevice) throws {
+        let ids = ([device.id] + (device.currentDeviceId.map { [$0] } ?? []) + (device.knownDeviceIds ?? []))
+            .compactMap { UUID(uuidString: $0)?.uuidString.lowercased() }
+        let pins = (device.protocolIdentityPins ?? []).map(\.fingerprint)
+            + (device.protocolPublicKeyFingerprint.map { [$0] } ?? [])
+        guard !ids.isEmpty, !pins.isEmpty else { throw HandshakeConfigurationError.identityMismatch }
+        for id in Set(ids) {
+            for fingerprint in Set(pins.map { $0.lowercased() }) {
+                let key = id + ":" + fingerprint
+                try writeGrant(key, allowed: false)
+                try service.revokeFileManagement(grantKey: key)
+                guard try !readGrant(key) else { throw HandshakeConfigurationError.storageUnavailable }
+            }
+        }
+    }
+    static func readGrant(_ key: String) throws -> Bool {
+        do { return try HandshakeManagementGrant.decode(KeychainManager.shared.exportKeyStrict(
+            service: HandshakeManagementGrant.service, account: HandshakeManagementGrant.account(key)), key: key) }
+        catch { throw HandshakeConfigurationError.storageUnavailable }
+    }
+    static func writeGrant(_ key: String, allowed: Bool) throws {
+        let data = try JSONEncoder().encode(HandshakeManagementGrant(identityKey: key, allowed: allowed))
+        guard KeychainManager.shared.importKey(data: data, service: HandshakeManagementGrant.service,
+            account: HandshakeManagementGrant.account(key)) else { throw HandshakeConfigurationError.storageUnavailable }
+    }
+    static let service = HandshakeConfigurationService(
+        identity: { try await P2PConnectionManager.instance.handshakeManagementIdentity() },
+        trusted: { try await trusted($0) },
+        verify: { data, signature, identity in
+            try identity.validate()
+            guard let algorithm = ProtocolSigningAlgorithm(rawValue: identity.algorithm) else { throw HandshakeConfigurationError.identityMismatch }
+            return try await ProtocolSignatureProviderSelector.select(for: algorithm).verify(data, signature: signature, publicKey: identity.publicKey)
+        },
+        sign: { try await P2PConnectionManager.instance.signHandshakeManagement($0) },
+        snapshot: { try snapshot() }, apply: { try await apply($0, revision: $1, revalidate: $2) },
+        readGrant: { try readGrant($0) }, writeGrant: { try writeGrant($0, allowed: $1) },
+        approve: { await HandshakeConfigurationApproval.shared.decide($0, profile: $1) },
+        approveFiles: { await HandshakeConfigurationApproval.shared.decide($0, profile: nil) },
+        fileApprovalSupported: true)
 }

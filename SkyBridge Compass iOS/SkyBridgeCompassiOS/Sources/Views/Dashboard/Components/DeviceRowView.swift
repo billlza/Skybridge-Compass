@@ -121,12 +121,7 @@ public struct DeviceRowView: View {
             }
             .padding(.vertical, 10)
             .padding(.horizontal, 12)
-            .background(.ultraThinMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(LinearGradient(colors: [.white.opacity(0.3), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
-            )
+            .liquidGlassCard(cornerRadius: 16, padding: 0)
         }
         .buttonStyle(PlainButtonStyle())
     }

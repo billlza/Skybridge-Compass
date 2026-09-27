@@ -7,10 +7,15 @@ import argparse
 import json
 import re
 import stat
+import subprocess
 from pathlib import Path
 
-from ios_release_archive_identity import ArchiveIdentityError, file_sha256
-
+from ios_release_archive_identity import (
+    BUILD_PATTERN,
+    VERSION_PATTERN,
+    ArchiveIdentityError,
+    file_sha256,
+)
 
 DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}")
 SOURCE_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
@@ -24,8 +29,26 @@ EXPECTED_TRUE_FIELDS = (
 )
 
 
-def fail(message: str) -> "None":
+def fail(message: str) -> None:
     raise SystemExit(f"[ios-app-store-upload-preflight] ERROR: {message}")
+
+
+def source_release_version() -> tuple[str, str]:
+    checker = Path(__file__).resolve().parent / "check_ios_release_version.sh"
+    try:
+        result = subprocess.run(
+            ["/bin/bash", str(checker)], capture_output=True, text=True, check=True
+        )
+    except (OSError, subprocess.CalledProcessError):
+        fail("source iOS release version transaction is invalid")
+    fields = result.stdout.rstrip("\n").split("\t")
+    if (
+        len(fields) != 2
+        or VERSION_PATTERN.fullmatch(fields[0]) is None
+        or BUILD_PATTERN.fullmatch(fields[1]) is None
+    ):
+        fail("source iOS release version checker returned malformed output")
+    return fields[0], fields[1]
 
 
 def main() -> int:
@@ -56,16 +79,20 @@ def main() -> int:
         fail("App Store verification is missing a required successful gate")
     if payload.get("binaryTestSurfaceDetected") is not False:
         fail("App Store verification detected a test surface")
-    if payload.get("productSurface") != "production" or payload.get("buildConfiguration") != "Release":
+    if (
+        payload.get("productSurface") != "production"
+        or payload.get("buildConfiguration") != "Release"
+    ):
         fail("App Store verification is not a production Release product")
     if payload.get("swiftActiveCompilationConditions") != ["HAS_APPLE_PQC_SDK"]:
         fail("App Store verification compilation conditions are not production-safe")
     if SOURCE_COMMIT_PATTERN.fullmatch(str(payload.get("sourceCommit", ""))) is None:
         fail("App Store verification source commit is malformed")
+    release_version, release_build = source_release_version()
     exact_values = {
         "archiveIdentityPurpose": "detect-accidental-cross-run-mismatch",
-        "releaseVersion": "1.0.2",
-        "releaseBuild": "2",
+        "releaseVersion": release_version,
+        "releaseBuild": release_build,
         "appBundleIdentifier": "com.skybridge.compass.ios",
         "widgetBundleIdentifier": "com.skybridge.compass.ios.widgets",
         "teamIdentifier": "YKUPL7Z869",

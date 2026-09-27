@@ -45,10 +45,21 @@ public enum P2PDiscoveryError: Error, LocalizedError {
     case targetAuthorityConflict
     case localNetworkPermissionDenied
     case strictPQCTrustPreflightFailed(String)
+    case peerPQCSuiteUnavailable
+
+    /// A missing/cancelled USB carrier is not evidence of a rejected identity.
+    /// Preserve its typed failure through the bootstrap boundary for operators.
+    static func preflightFailure(_ error: Error, refreshFailure: Error?) -> Error {
+        #if os(macOS)
+        if let transportError = error as? USBMultiplexError { return transportError }
+        #endif
+        let prefix = refreshFailure.map { "after SKR failure \($0.localizedDescription); " } ?? ""
+        return P2PDiscoveryError.strictPQCTrustPreflightFailed(prefix + error.localizedDescription)
+    }
 
     public var preventsCandidateFallback: Bool {
         switch self {
-        case .localDeviceTarget, .targetAuthorityConflict:
+        case .localDeviceTarget, .targetAuthorityConflict, .peerPQCSuiteUnavailable:
             return true
         case .deviceNotConnected, .connectionCancelled, .timeout, .scanningFailed,
              .noConnectableEndpoint, .noLiveControlRoute, .localNetworkPermissionDenied,
@@ -79,6 +90,8 @@ public enum P2PDiscoveryError: Error, LocalizedError {
             return "本地网络权限被系统拒绝，请在 macOS 系统设置的本地网络权限中允许 SkyBridge Compass Pro 后重试"
         case .strictPQCTrustPreflightFailed(let reason):
             return "strict PQC 信任预检失败：\(reason)"
+        case .peerPQCSuiteUnavailable:
+            return "对端未提供所选 PQC 套件，请核对两端的套件设置；未自动降级"
         }
     }
 }

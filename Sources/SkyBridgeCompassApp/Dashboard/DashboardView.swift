@@ -1,4 +1,5 @@
 import SwiftUI
+import SkyBridgeWeatherRendering
 import Charts
 import SkyBridgeCore
 import SkyBridgeUI
@@ -46,6 +47,9 @@ public struct DashboardView: View {
 
  // 雾霾交互管理器
     @StateObject private var hazeClearManager = InteractiveClearManager()
+    @State private var rainScene = WeatherRainScene()
+    // Only the small FPS indicator observes publications; do not invalidate the dashboard per sample.
+    @State private var frameRateMonitor = WeatherFrameRateMonitor()
 
  // ✅ 性能监控器 - 通过PerformanceModeManager获取真实的系统性能数据
     @State private var performanceModeManager: PerformanceModeManager?
@@ -72,12 +76,6 @@ public struct DashboardView: View {
     @State private var manualPort: String = "11550"
     @State private var manualCode: String = ""
 
- // FPS显示
-    @State private var realtimeFPS: String = ""
-    @State private var fpsTimer: Timer?
-    @State private var frameCount: Int = 0
-    @State private var lastFPSUpdate: CFTimeInterval = 0
-
  // 应用前后台与窗口可见性监听器
     @State private var appDidBecomeActiveObserver: Any?
     @State private var appDidResignActiveObserver: Any?
@@ -98,16 +96,6 @@ public struct DashboardView: View {
 
     public var body: some View {
         ZStack {
-            if presentationPhase.enablesAnimatedBackground {
-                DashboardBackgroundView(
-                    hazeClearManager: hazeClearManager,
-                    enableWeatherEffects: presentationPhase.enablesDeferredContent
-                )
-            } else {
-                LaunchTransitionBackground()
-                    .ignoresSafeArea(.all)
-            }
-
             NavigationSplitView {
  // 侧边栏
                 GlassSidebar(selectedTab: Binding(
@@ -164,7 +152,7 @@ public struct DashboardView: View {
                         manualIP: $manualIP,
                         manualPort: $manualPort,
                         manualCode: $manualCode,
-                        realtimeFPS: $realtimeFPS
+                        frameRateMonitor: frameRateMonitor
                     )
 
  // 主内容区域
@@ -196,6 +184,8 @@ public struct DashboardView: View {
                 }
             }
 
+            WeatherRainGlassOverlay(scene: rainScene).ignoresSafeArea()
+
  // 用户资料覆盖层
             if showingUserProfileOverlay {
                 UserProfileOverlay(isPresented: $showingUserProfileOverlay)
@@ -208,6 +198,21 @@ public struct DashboardView: View {
                     ))
                     .animation(.spring(response: 0.6, dampingFraction: 0.8), value: showingUserProfileOverlay)
             }
+        }
+        .backgroundPreferenceValue(WeatherGlassPreferenceKey.self) { anchors in
+            GeometryReader { geometry in
+                if presentationPhase.enablesAnimatedBackground {
+                    DashboardBackgroundView(
+                        hazeClearManager: hazeClearManager,
+                        enableWeatherEffects: presentationPhase.enablesDeferredContent,
+                        glassRegions: anchors.map { $0.resolve(in: geometry) }, rainScene: rainScene,
+                        frameRateMonitor: frameRateMonitor
+                    )
+                } else {
+                    LaunchTransitionBackground().ignoresSafeArea(.all)
+                }
+            }
+            .ignoresSafeArea()
         }
         .tint(themeConfiguration.accentColor)
  // ⌘⇧↑ / ⌘⇧↓：在侧边栏栏目之间上下切换焦点（窗口为 key 时即生效，不依赖鼠标）
@@ -234,7 +239,6 @@ public struct DashboardView: View {
             weatherDataService.stopWeatherUpdates()
             weatherLocationService.stopLocationUpdates()
             removeNotificationObservers()
-            stopFPSMonitor()
             didSetupLifecycle = false
         }
         .onAppear {
@@ -307,6 +311,7 @@ public struct DashboardView: View {
                     .padding(.bottom, 32)
                 }
                 .scrollIndicators(.hidden)
+                .weatherGlassClippingRegion()
             case .deviceManagement:
                 EnhancedDeviceDiscoveryView(requestedMode: $requestedDiscoveryMode)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -445,36 +450,6 @@ public struct DashboardView: View {
         signalSortTimerEnabled = true
 
         setupNotificationObservers()
-        startFPSMonitor()
-    }
-
- /// 轻量级 FPS 监控（3秒刷新一次）
-    private func startFPSMonitor() {
-        guard SettingsManager.shared.showRealtimeFPS else { return }
-        guard fpsTimer == nil else { return }
-        lastFPSUpdate = CACurrentMediaTime()
-        frameCount = 0
-
- // 每3秒更新一次 FPS 显示
-        fpsTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [self] _ in
-            Task { @MainActor in
-                let now = CACurrentMediaTime()
-                let elapsed = now - lastFPSUpdate
-                guard elapsed > 0 else { return }
-
- // 使用屏幕刷新率作为基准（macOS 通常为 60Hz 或 120Hz ProMotion）
-                let screenFPS = NSScreen.main?.maximumFramesPerSecond ?? 60
-                realtimeFPS = "\(screenFPS) FPS"
-
-                lastFPSUpdate = now
-                frameCount = 0
-            }
-        }
-    }
-
-    private func stopFPSMonitor() {
-        fpsTimer?.invalidate()
-        fpsTimer = nil
     }
 
     private func setupNotificationObservers() {

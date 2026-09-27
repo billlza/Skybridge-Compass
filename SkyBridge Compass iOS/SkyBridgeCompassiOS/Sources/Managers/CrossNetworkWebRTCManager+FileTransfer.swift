@@ -7,6 +7,7 @@ import struct SkyBridgeProtocolCore.CrossNetworkFileTransferMessage
 import enum SkyBridgeProtocolCore.CrossNetworkFileTransferWireEncoder
 import enum SkyBridgeProtocolCore.InboundFileTransferIOError
 import struct SkyBridgeProtocolCore.InboundFileTransferIOHandle
+import class SkyBridgeProtocolCore.InboundFileTransferDestinationCapability
 
 @available(iOS 17.0, *)
 extension CrossNetworkWebRTCManager {
@@ -134,6 +135,11 @@ extension CrossNetworkWebRTCManager {
     /// call it before its first suspension point. The later bounded cleanup
     /// owns joins and exact I/O disposal.
     func invalidateInboundFileTransferOperationsForTeardown() {
+        // Revoke the shared I/O handle before teardown's first suspension,
+        // including workers already inside synchronous file finalization.
+        for state in inboundFileTransfers.values {
+            state.ioHandle.revokePublication()
+        }
         inboundFileTransferLifecycleToken = UUID()
         acceptsQueuedInboundFileTransferOperations = false
         inboundFileTransferChunkOperationsInFlight.removeAll(keepingCapacity: false)
@@ -1135,11 +1141,10 @@ extension CrossNetworkWebRTCManager {
 
         let savedURL: URL
         do {
-            savedURL = try await inboundFileTransferIO.commit(
+            savedURL = try await inboundFileTransferIO.commitToPreparedDestination(
                 using: state.ioHandle,
-                destinationDirectory: state.finalURL.deletingLastPathComponent(),
                 fileName: state.fileName
-            )
+            ).destinationURL
         } catch is CancellationError {
             if let current = inboundStateSharingIOHandle(with: state) {
                 await terminateInboundFileTransfer(
@@ -1443,6 +1448,30 @@ extension CrossNetworkWebRTCManager {
                 }
             }
 
+            let baseDir = Self.downloadsDirectoryURL()
+            let destination: InboundFileTransferDestinationCapability
+            do {
+                destination = try await inboundFileTransferIO.prepareDestinationDirectory(at: baseDir)
+            } catch is CancellationError {
+                return
+            } catch {
+                SkyBridgeLogger.shared.warning(
+                    "WebRTC inbound destination selection failed: \(error.localizedDescription)"
+                )
+                await sendAck(
+                    .init(op: .error, transferId: msg.transferId, message: "Inbound destination unavailable"),
+                    label: "metaError"
+                )
+                return
+            }
+            guard !Task.isCancelled,
+                  isCurrentWebRTCFileTransferOperationOwner(owner),
+                  let selectedAdmission = inboundFileTransferPendingAdmissions[msg.transferId],
+                  selectedAdmission.token == admissionToken,
+                  Self.isSameWebRTCFileTransferOperationOwner(selectedAdmission.operationOwner, owner) else {
+                return
+            }
+
             let approvalRequest = InboundFileTransferApprovalRequest(
                 transferId: msg.transferId,
                 fileName: fileName,
@@ -1477,14 +1506,14 @@ extension CrossNetworkWebRTCManager {
                 return
             }
 
-            let baseDir = Self.downloadsDirectoryURL()
             let finalURL = baseDir.appendingPathComponent(fileName, isDirectory: false)
             let tempURL = baseDir.appendingPathComponent(".skybridge-\(msg.transferId).partial")
             let ioHandle: InboundFileTransferIOHandle
             do {
                 ioHandle = try await inboundFileTransferIO.createTemporaryFile(
                     at: tempURL,
-                    declaredFileSize: fileSize
+                    declaredFileSize: fileSize,
+                    destination: destination
                 )
             } catch is CancellationError {
                 return

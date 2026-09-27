@@ -255,6 +255,33 @@ final class P2PHandshakeOperationRegistryTests: XCTestCase {
         XCTAssertFalse(sync.contains("handshakeDriverLock.withLock"))
     }
 
+    func testAwaitedDisconnectionReleasesTheOwnedSlotBeforeAnotherHandshakeStarts() async throws {
+        let pairKey = uniquePairKey("await-disconnect")
+        let oldLease = try await commitLease(pairKey: pairKey, sessionId: "old", attemptByte: 0x71)
+        let connection = makeConnection()
+        connection.testingInstallEstablishedLeaseForDisconnection(oldLease)
+
+        connection.disconnect()
+        await connection.disconnectAndWait()
+        let replacement = try await commitLease(pairKey: pairKey, sessionId: "replacement", attemptByte: 0x72)
+        await connection.disconnectAndWait()
+        let replacementSurvived = await PeerSessionArbiter.shared.clearEstablished(replacement)
+        XCTAssertTrue(replacementSurvived, "Repeated teardown must not clear a newer connection's owner")
+    }
+
+    func testAwaitedDisconnectionCannotClearAReplacementOwner() async throws {
+        let pairKey = uniquePairKey("stale-disconnect")
+        let staleLease = try await commitLease(pairKey: pairKey, sessionId: "stale", attemptByte: 0x73)
+        _ = await PeerSessionArbiter.shared.clearEstablished(staleLease)
+        let replacement = try await commitLease(pairKey: pairKey, sessionId: "replacement", attemptByte: 0x74)
+        let connection = makeConnection()
+        connection.testingInstallEstablishedLeaseForDisconnection(staleLease)
+
+        await connection.disconnectAndWait()
+        let replacementSurvived = await PeerSessionArbiter.shared.clearEstablished(replacement)
+        XCTAssertTrue(replacementSurvived)
+    }
+
     func testPublishedNewLeaseIsClearedBeforeExactOldLeaseIsRestored() async throws {
         let pairKey = uniquePairKey("rollback-old")
         let oldLease = try await commitLease(

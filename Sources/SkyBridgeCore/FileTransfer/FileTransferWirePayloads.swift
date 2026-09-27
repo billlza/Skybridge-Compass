@@ -19,6 +19,7 @@ struct FileMetadata: Codable, Sendable {
     let senderOSVersion: String?
     let senderModelName: String?
     let senderChip: String?
+    var approvalProtocol: String? = nil
 }
 
 struct FileChunk: Codable, Sendable {
@@ -63,5 +64,6 @@ enum FileTransferWireMessageType: UInt32 {
     case receipt = 4
     case resumeRequest = 5
     case resumeAck = 6
+    case approval = 7
     case unknown = 0
 }

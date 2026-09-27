@@ -54,16 +54,16 @@ final class LocalLanInteropHostApprovalSurfaceContractTests: XCTestCase {
         XCTAssertTrue(remoteControlNoticeControllerSource.contains("self.lifecycleGeneration == subscribedGeneration"))
         XCTAssertTrue(
             remoteControlNoticeControllerSource.contains(
-                "RemoteControlSecurityNoticeCenter.shared.currentNotice == notice"
+                "self.center.currentNotice == notice"
             ),
             "Queued publisher deliveries must not render an older notice over a replacement request."
         )
         XCTAssertTrue(remoteControlNoticeControllerSource.contains("cancellable?.cancel()"))
         XCTAssertTrue(
             remoteControlNoticeControllerSource.contains(
-                "RemoteControlSecurityNoticeCenter.shared.closeCurrentNoticeFailClosed()"
+                "center.closeAllNoticesFailClosed()"
             ),
-            "Stopping the helper presenter must reject pending approval or disconnect active control."
+            "Stopping the helper presenter must reject every pending approval or disconnect every active control session."
         )
         XCTAssertTrue(
             remoteControlNoticeControllerSource.contains("recordPanelPresentedEvidence("),
@@ -110,7 +110,7 @@ final class LocalLanInteropHostApprovalSurfaceContractTests: XCTestCase {
             in: approvalServiceSource
         )
         XCTAssertEqual(
-            pinCommitSource.components(separatedBy: "guard !Task.isCancelled else { return false }").count - 1,
+            pinCommitSource.components(separatedBy: "guard !Task.isCancelled else { return .failure(.cancelled) }").count - 1,
             1,
             "Cancellation is allowed before the first durable pin write, never between authority and bootstrap stores."
         )
@@ -163,6 +163,51 @@ final class LocalLanInteropHostApprovalSurfaceContractTests: XCTestCase {
         // Re-closing the already retired window cannot resolve any later request.
         controller.closePresentedWindowForTesting()
         XCTAssertNil(service.pendingRequest)
+    }
+
+    @MainActor
+    func testRejectedAuthorityCompletionShowsTheActualFailure() async throws {
+        let service = PairingTrustApprovalService.shared
+        service.userDismissedCurrentPrompt()
+        service.setProtocolIdentityPinErrorForTesting(
+            AuthenticatedRemoteAuthorityRejection.conflictingIdentityClaims
+        )
+        defer {
+            service.setProtocolIdentityPinErrorForTesting(nil)
+            service.userDismissedCurrentPrompt()
+        }
+        let requesterID = "id:\(UUID().uuidString.lowercased())"
+        let fingerprint = String(repeating: "a", count: 64)
+        let transactionID = UUID()
+        let requestHash = String(repeating: "1", count: 64)
+        let candidateHash = String(repeating: "2", count: 64)
+        let sasHash = String(repeating: "3", count: 64)
+        let approval = Task { @MainActor in
+            await service.stageTestProtocolIdentityBindingRequesterApproval(
+                peerEndpoint: "rejected-completion-test",
+                requesterDeviceIds: [requesterID], displayName: "Test controller",
+                platform: "iOS", verificationCode: "123456",
+                requesterProtocolSigningAlgorithm: .mlDSA65,
+                requesterProtocolIdentityFingerprint: fingerprint,
+                transactionId: transactionID, requestHashHex: requestHash,
+                candidateHashHex: candidateHash, sasTranscriptHashHex: sasHash
+            )
+        }
+        let request = try await waitForPendingRequest(service: service)
+        service.resolve(request, decision: .allowOnce)
+        let decision = await approval.value
+        let committed = await service.commitProtocolIdentityBindingRequesterApproval(
+            decision: decision, transactionId: transactionID,
+            requesterDeviceIds: [requesterID], requesterProtocolSigningAlgorithm: .mlDSA65,
+            requesterProtocolIdentityFingerprint: fingerprint,
+            requestHashHex: requestHash, candidateHashHex: candidateHash,
+            sasTranscriptHashHex: sasHash
+        )
+        XCTAssertEqual(committed, .reject)
+        let notice = try XCTUnwrap(service.pendingResolutionNotice)
+        let sheet = PairingTrustApprovalSheet(request: request, onDecision: { _ in })
+        XCTAssertEqual(sheet.completionText, notice)
+        XCTAssertFalse(sheet.completionText.contains("已为本次连接完成确认"))
     }
 
     @MainActor
@@ -270,6 +315,89 @@ final class LocalLanInteropHostApprovalSurfaceContractTests: XCTestCase {
         XCTAssertEqual(controller.presentedRequestIDForTesting, request.id)
         XCTAssertEqual(service.pendingRequest?.id, request.id)
         XCTAssertTrue(service.isPendingResolutionInFlight)
+
+        await pinOperation.complete(with: true)
+        let committedDecision = await commitTask.value
+        let completionSnapshot = await completionRecorder.snapshot()
+        XCTAssertEqual(decision, .allowOnce)
+        XCTAssertEqual(committedDecision, .allowOnce)
+        XCTAssertEqual(completionSnapshot.count, 1)
+        XCTAssertEqual(completionSnapshot.decision, .allowOnce)
+        XCTAssertFalse(service.isPendingResolutionInFlight)
+        XCTAssertEqual(service.pendingDecision, .allowOnce)
+    }
+
+    @MainActor
+    func testStoppedPresenterCannotReopenFromQueuedRequestWhilePinCommits() async throws {
+        let service = PairingTrustApprovalService.shared
+        service.userDismissedCurrentPrompt()
+        let pinOperation = ControlledPinOperation()
+        let completionRecorder = DecisionCompletionRecorder()
+        service.setProtocolIdentityPinOperationForTesting { _, _, _ in
+            await pinOperation.run()
+        }
+        let controller = PairingTrustApprovalWindowController(
+            approvalService: service,
+            applicationActivator: {}
+        )
+        defer {
+            service.setProtocolIdentityPinOperationForTesting(nil)
+            controller.stop()
+            service.userDismissedCurrentPrompt()
+        }
+
+        let requesterID = "id:\(UUID().uuidString.lowercased())"
+        let fingerprint = String(repeating: "d", count: 64)
+        let transactionId = UUID()
+        let requestHash = String(repeating: "1", count: 64)
+        let candidateHash = String(repeating: "2", count: 64)
+        let sasHash = String(repeating: "3", count: 64)
+        let approvalTask = Task { @MainActor in
+            let decision = await service.stageTestProtocolIdentityBindingRequesterApproval(
+                peerEndpoint: "lan-commit-race-test",
+                requesterDeviceIds: [requesterID],
+                displayName: "Test iPad",
+                platform: "iOS",
+                verificationCode: "246810",
+                requesterProtocolSigningAlgorithm: .mlDSA65,
+                requesterProtocolIdentityFingerprint: fingerprint,
+                transactionId: transactionId,
+                requestHashHex: requestHash,
+                candidateHashHex: candidateHash,
+                sasTranscriptHashHex: sasHash
+            )
+            await completionRecorder.record(decision)
+            return decision
+        }
+
+        let request = try await waitForPendingRequest(service: service)
+        service.resolve(request, decision: .allowOnce)
+        let decision = await approvalTask.value
+        let commitTask = Task { @MainActor in
+            await service.commitProtocolIdentityBindingRequesterApproval(
+                decision: decision,
+                transactionId: transactionId,
+                requesterDeviceIds: [requesterID],
+                requesterProtocolSigningAlgorithm: .mlDSA65,
+                requesterProtocolIdentityFingerprint: fingerprint,
+                requestHashHex: requestHash,
+                candidateHashHex: candidateHash,
+                sasTranscriptHashHex: sasHash
+            )
+        }
+        try await waitForPinOperationToStart(pinOperation)
+        XCTAssertTrue(service.isPendingResolutionInFlight)
+
+        // start synchronously presents the pending request while Combine also
+        // queues its initial value. stop must invalidate that queued delivery.
+        controller.start()
+        XCTAssertEqual(controller.presentedRequestIDForTesting, request.id)
+        controller.stop()
+        XCTAssertNil(controller.presentedRequestIDForTesting)
+        XCTAssertTrue(service.isPendingResolutionInFlight)
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertNil(controller.presentedRequestIDForTesting,
+            "A stopped presenter must not recreate a window from a queued Combine delivery")
 
         await pinOperation.complete(with: true)
         let committedDecision = await commitTask.value

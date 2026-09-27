@@ -76,6 +76,7 @@ async fn command_wrappers_cover_auth_and_media_entrypoints() -> Result<()> {
             session_id: None,
             detach: false,
             timeout_seconds: 1,
+            progress: crate::transfer_progress::ProgressMode::Auto,
             output: OutputOptions { json: true },
         }),
     };

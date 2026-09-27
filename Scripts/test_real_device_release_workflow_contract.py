@@ -84,7 +84,7 @@ class ReleaseWorkflowTransactionTests(unittest.TestCase):
             "environment: release-real-device-evidence",
             "verify-evidence-environment-protection:",
             "needs: verify-evidence-environment-protection",
-            "Require Independent Evidence Approval Environment",
+            "Require Single-Maintainer Evidence Approval Environment",
             "validate_release_environment_protection.py",
             "candidate_run_id:",
             "candidate_run_attempt:",
@@ -184,7 +184,7 @@ class ReleaseWorkflowTransactionTests(unittest.TestCase):
             "environment: macos-production-release",
             "verify-publish-environment-protection:",
             "needs: verify-publish-environment-protection",
-            "Require Independent Publication Approval Environment",
+            "Require Single-Maintainer Publication Approval Environment",
             "validate_release_environment_protection.py",
             "contents: write",
             "candidate_run_id:",
@@ -207,6 +207,16 @@ class ReleaseWorkflowTransactionTests(unittest.TestCase):
             "--notarize-app",
         ):
             self.assertNotIn(forbidden, self.publish)
+
+    def test_self_approval_is_explicit_before_and_after_both_protected_jobs(self) -> None:
+        for workflow in (self.evidence, self.publish):
+            with self.subTest(workflow=workflow.splitlines()[0]):
+                self.assertEqual(workflow.count("validate_release_environment_protection.py"), 2)
+                self.assertEqual(workflow.count("--approval-policy single-maintainer"), 2)
+                for invocation in workflow.split("validate_release_environment_protection.py")[1:]:
+                    self.assertIn("--approval-policy single-maintainer", invocation.split("\n\n", 1)[0])
+        app_store = (ROOT / ".github/workflows/ios-app-store-export.yml").read_text(encoding="utf-8")
+        self.assertNotIn("--approval-policy single-maintainer", app_store)
 
     def test_formal_paths_do_not_promote_diagnostic_notice_probes(self) -> None:
         for workflow in (self.candidate, self.evidence, self.publish):
