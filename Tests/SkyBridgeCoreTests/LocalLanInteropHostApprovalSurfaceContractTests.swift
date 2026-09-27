@@ -4,6 +4,22 @@ import XCTest
 @testable import SkyBridgeUI
 
 final class LocalLanInteropHostApprovalSurfaceContractTests: XCTestCase {
+    override func record(_ issue: XCTIssue) {
+        print("APPROVAL_ISSUE type=\(issue.type.rawValue) description=\(issue.compactDescription)")
+        if let detail = issue.detailedDescription { print("APPROVAL_ISSUE_DETAIL \(detail)") }
+        if let error = issue.associatedError {
+            print("APPROVAL_ISSUE_ERROR domain=\(error.domain) code=\(error.code) description=\(error.localizedDescription)")
+        }
+        for frame in issue.sourceCodeContext.callStack {
+            if let symbol = frame.symbolInfo {
+                print("APPROVAL_ISSUE_FRAME \(symbol.imageName) \(symbol.symbolName)")
+            } else {
+                print("APPROVAL_ISSUE_FRAME address=\(frame.address)")
+            }
+        }
+        super.record(issue)
+    }
+
     func testSignedSmokeHostPresentsReusableExplicitPIBApprovalSurface() throws {
         let mainSource = try readSource("Sources/LocalLanInteropHost/main.swift")
         let controllerSource = try readSource(
@@ -205,6 +221,7 @@ final class LocalLanInteropHostApprovalSurfaceContractTests: XCTestCase {
 
     @MainActor
     func testAcceptedDecisionCannotBeRewrittenByWindowCloseWhilePinCommits() async throws {
+        print("APPROVAL_LIFECYCLE start")
         let service = PairingTrustApprovalService.shared
         service.userDismissedCurrentPrompt()
         let pinOperation = ControlledPinOperation()
@@ -218,9 +235,11 @@ final class LocalLanInteropHostApprovalSurfaceContractTests: XCTestCase {
         )
         controller.start()
         defer {
+            print("APPROVAL_LIFECYCLE teardown-start")
             service.setProtocolIdentityPinOperationForTesting(nil)
             controller.stop()
             service.userDismissedCurrentPrompt()
+            print("APPROVAL_LIFECYCLE teardown-end")
         }
 
         let requesterID = "id:\(UUID().uuidString.lowercased())"
@@ -247,8 +266,11 @@ final class LocalLanInteropHostApprovalSurfaceContractTests: XCTestCase {
             return decision
         }
 
+        print("APPROVAL_LIFECYCLE waiting-request")
         let request = try await waitForPendingRequest(service: service)
+        print("APPROVAL_LIFECYCLE waiting-window")
         try await waitForPresentedRequest(request.id, controller: controller)
+        print("APPROVAL_LIFECYCLE resolving-allow-once")
         service.resolve(request, decision: .allowOnce)
         let decision = await approvalTask.value
         let commitTask = Task { @MainActor in
@@ -263,15 +285,19 @@ final class LocalLanInteropHostApprovalSurfaceContractTests: XCTestCase {
                 sasTranscriptHashHex: sasHash
             )
         }
+        print("APPROVAL_LIFECYCLE waiting-pin")
         try await waitForPinOperationToStart(pinOperation)
         XCTAssertTrue(service.isPendingResolutionInFlight)
 
+        print("APPROVAL_LIFECYCLE attempting-close-during-pin")
         controller.closePresentedWindowForTesting()
         XCTAssertEqual(controller.presentedRequestIDForTesting, request.id)
         XCTAssertEqual(service.pendingRequest?.id, request.id)
         XCTAssertTrue(service.isPendingResolutionInFlight)
 
+        print("APPROVAL_LIFECYCLE completing-pin")
         await pinOperation.complete(with: true)
+        print("APPROVAL_LIFECYCLE awaiting-commit")
         let committedDecision = await commitTask.value
         let completionSnapshot = await completionRecorder.snapshot()
         XCTAssertEqual(decision, .allowOnce)

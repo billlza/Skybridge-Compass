@@ -1,0 +1,32 @@
+name: native-approval-diagnostics
+
+on:
+  push:
+    paths:
+      - ".github/workflows/native-approval-diagnostics.yml"
+      - "Tests/SkyBridgeCoreTests/LocalLanInteropHostApprovalSurfaceContractTests.swift"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  approval-window:
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      SKYBRIDGE_REQUIRED_XCODE_VERSION: "26.6"
+      SKYBRIDGE_REQUIRED_XCODE_BUILD: "17F113"
+      SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: "6.3.3"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Verify matching toolchain
+        run: bash Scripts/verify_xcode_toolchain.sh
+      - name: Run isolated approval window suite with diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift test -Xswiftc -warnings-as-errors --filter LocalLanInteropHostApprovalSurfaceContractTests
