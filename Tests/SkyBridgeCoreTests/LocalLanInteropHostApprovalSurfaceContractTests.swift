@@ -8,7 +8,8 @@ final class LocalLanInteropHostApprovalSurfaceContractTests: XCTestCase {
         print("APPROVAL_ISSUE type=\(issue.type.rawValue) description=\(issue.compactDescription)")
         if let detail = issue.detailedDescription { print("APPROVAL_ISSUE_DETAIL \(detail)") }
         if let error = issue.associatedError {
-            print("APPROVAL_ISSUE_ERROR domain=\(error.domain) code=\(error.code) description=\(error.localizedDescription)")
+            let nsError = error as NSError
+            print("APPROVAL_ISSUE_ERROR type=\(String(reflecting: Swift.type(of: error))) domain=\(nsError.domain) code=\(nsError.code) description=\(nsError.localizedDescription)")
         }
         for frame in issue.sourceCodeContext.callStack {
             if let symbol = frame.symbolInfo {
