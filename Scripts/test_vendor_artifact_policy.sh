@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RELEASE_READINESS_WORKFLOW="${ROOT_DIR}/.github/workflows/macos-release-readiness.yml"
 QPERIAPT_SOURCE_COMMIT="5664fd86a617f92b620ea37e7692d3417d0e307d"
+# Cargo uses the current Rust crates; the shipped XCFramework retains its
+# independently pinned producer source, header hash, and provenance below.
+QPERIAPT_CARGO_SOURCE_COMMIT="7ed1f96a7ec33732f02a989dd5a4669cdcce39ad"
 QPERIAPT_HEADER_SHA256="6e5be78c9b43fa245777eabd84dea4a137ecd6ebdb0266fa018a8aa4e3f1771f"
 QPERIAPT_PROVENANCE="VendorProvenance/QPeriapt/abi2-v0.1.0-alpha.2-r1.json"
 QPERIAPT_LIBRARY_NAME="libq_periapt_ffi_abi2.a"
@@ -255,8 +258,8 @@ fi
 
 grep -Fq "repository: billlza/q-periapt" "${RELEASE_READINESS_WORKFLOW}" \
   || fail "macos-release-readiness must checkout q-periapt explicitly for clean CI source contracts"
-grep -Fq "ref: ${QPERIAPT_SOURCE_COMMIT}" "${RELEASE_READINESS_WORKFLOW}" \
-  || fail "macos-release-readiness q-periapt checkout must be pinned to a full commit SHA"
+grep -Fq "ref: ${QPERIAPT_CARGO_SOURCE_COMMIT}" "${RELEASE_READINESS_WORKFLOW}" \
+  || fail "macos-release-readiness q-periapt checkout must match the pinned Cargo source SHA"
 grep -Fq "path: External/pqt_hybrid_suite" "${RELEASE_READINESS_WORKFLOW}" \
   || fail "macos-release-readiness q-periapt checkout must land in External/pqt_hybrid_suite"
 grep -Fq "../pqt_hybrid_suite/crates/q-periapt-backends/Cargo.toml" "${RELEASE_READINESS_WORKFLOW}" \

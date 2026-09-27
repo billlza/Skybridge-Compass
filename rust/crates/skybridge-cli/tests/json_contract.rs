@@ -55,15 +55,7 @@ fn operator_identity_is_consistent_before_any_runtime_action()
             .args(&args)
             .current_dir(std::env::temp_dir())
             .output()?;
-        assert!(
-            output.status.success(),
-            "{args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(
-            output.stderr.is_empty(),
-            "{args:?} unexpectedly wrote diagnostics"
-        );
+        assert_success_with_clean_stderr(&output, &format!("{args:?}"));
         let payload: Value = serde_json::from_slice(&output.stdout)?;
         assert_eq!(payload["operator_profile"], expected, "{args:?}");
     }
