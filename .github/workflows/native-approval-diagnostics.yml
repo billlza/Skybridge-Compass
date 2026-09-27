@@ -25,8 +25,8 @@ jobs:
           persist-credentials: false
       - name: Verify matching toolchain
         run: bash Scripts/verify_xcode_toolchain.sh
-      - name: Run isolated approval window suite with diagnostics
+      - name: Run full native suite with approval lifecycle diagnostics
         shell: bash
         run: |
           set -euo pipefail
-          swift test -Xswiftc -warnings-as-errors --filter LocalLanInteropHostApprovalSurfaceContractTests
+          swift test -Xswiftc -warnings-as-errors
