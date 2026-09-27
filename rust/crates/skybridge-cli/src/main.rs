@@ -3,6 +3,10 @@ use std::process::ExitCode;
 mod agent_runtime_guard;
 mod android_bridge;
 mod android_commands;
+#[cfg(any(windows, test))]
+mod app_commands;
+#[cfg(any(windows, test))]
+mod app_control_client;
 mod auth_commands;
 mod auth_support;
 mod check_coverage;
@@ -23,8 +27,12 @@ mod crossnet_commands;
 mod device_commands;
 mod doctor_commands;
 mod doctor_report;
+#[cfg(target_os = "macos")]
+mod file_approval_commands;
 mod file_commands;
 mod file_transfer_performance;
+#[cfg(target_os = "macos")]
+mod handshake_commands;
 mod internal_commands;
 #[cfg(test)]
 mod main_dispatch_tests;
@@ -32,6 +40,7 @@ mod main_dispatch_tests;
 mod main_tests;
 mod memory_check;
 mod operator_capabilities;
+mod operator_profile;
 mod operator_status;
 mod p2p_remote_performance;
 mod p2p_remote_performance_checks;
@@ -49,6 +58,9 @@ mod repo_paths;
 mod session_commands;
 mod smoke_suite;
 mod test_commands;
+mod transfer_progress;
+#[cfg(target_os = "macos")]
+mod tui;
 mod webrtc_media_artifacts;
 mod webrtc_media_dimensions;
 mod webrtc_media_doctor;
@@ -82,11 +94,10 @@ async fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             if json_output {
+                let (code, message) = cli_output::unhandled_error_details(&error);
                 if !cli_output::json_failure_was_written()
-                    && let Err(render_error) = cli_output::write_unhandled_json_failure(
-                        "command_failed",
-                        "SkyBridge command failed",
-                    )
+                    && let Err(render_error) =
+                        cli_output::write_unhandled_json_failure(code, message)
                 {
                     eprintln!("Error: {render_error:#}");
                 }

@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 mod android;
+#[cfg(any(windows, test))]
+mod app;
 mod check;
 mod common;
 #[cfg(target_os = "macos")]
@@ -13,6 +15,8 @@ mod smoke;
 mod test;
 
 pub(crate) use android::*;
+#[cfg(any(windows, test))]
+pub(crate) use app::*;
 pub(crate) use check::*;
 pub(crate) use common::*;
 #[cfg(target_os = "macos")]
@@ -37,6 +41,9 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Commands {
+    /// Guided terminal menus: /setting, /device, /usb, /file and /handshake.
+    #[cfg(target_os = "macos")]
+    Tui,
     Agent(AgentCommand),
     Login(LoginCommand),
     Logout,
@@ -46,6 +53,8 @@ pub(crate) enum Commands {
     #[cfg(target_os = "macos")]
     Crossnet(CrossnetCommand),
     Android(AndroidCommand),
+    #[cfg(windows)]
+    App(AppCommand),
     Session(SessionCommand),
     Disconnect(DisconnectCommand),
     RemoteDesktop(RemoteDesktopCommand),
@@ -60,12 +69,15 @@ pub(crate) enum Commands {
     Metrics(OutputOptions),
     #[command(hide = true)]
     Internal(InternalCommand),
-    Version,
+    /// CLI identity and compiled operator profile (JSON, with or without --json).
+    Version(OutputOptions),
 }
 
 impl Cli {
     pub(crate) fn json_output_requested(&self) -> bool {
         match &self.command {
+            #[cfg(target_os = "macos")]
+            Commands::Tui => false,
             Commands::Agent(_) | Commands::Login(_) | Commands::Logout => false,
             Commands::Device(device) => match &device.command {
                 DeviceSubcommand::Status(output) => output.json,
@@ -80,6 +92,12 @@ impl Cli {
             Commands::Connect(args) => args.json,
             #[cfg(target_os = "macos")]
             Commands::Crossnet(crossnet) => match &crossnet.command {
+                CrossnetSubcommand::Handshake(args) => match &args.command {
+                    CrossnetHandshakeSubcommand::List(output) => output.json,
+                    CrossnetHandshakeSubcommand::Status(args)
+                    | CrossnetHandshakeSubcommand::Revoke(args) => args.output.json,
+                    CrossnetHandshakeSubcommand::Set(args) => args.target.output.json,
+                },
                 CrossnetSubcommand::Preflight(output) => output.json,
                 CrossnetSubcommand::Host(args) => args.output.json,
                 CrossnetSubcommand::Connect(args) => args.output.json,
@@ -88,6 +106,21 @@ impl Cli {
                 CrossnetSubcommand::Navigate(args) => args.output.json,
                 CrossnetSubcommand::Devices(output) => output.json,
                 CrossnetSubcommand::ConnectDevice(args) => args.output.json,
+                CrossnetSubcommand::Nearby(args) => args.output.json,
+                CrossnetSubcommand::ConnectNearby(args) => args.output.json,
+                CrossnetSubcommand::Usb(args) => match &args.command {
+                    CrossnetUSBSubcommand::Devices(output) => output.json,
+                    CrossnetUSBSubcommand::Connect(args) => args.output.json,
+                    CrossnetUSBSubcommand::ConnectDevice(args) => args.output.json,
+                },
+                CrossnetSubcommand::Trust(args) => match &args.command {
+                    CrossnetTrustSubcommand::Preview(args) => args.output.json,
+                    CrossnetTrustSubcommand::Recover(args) => args.target.output.json,
+                },
+                CrossnetSubcommand::File(args) => match &args.command {
+                    CrossnetFileSubcommand::Send(args) => args.output.json,
+                    CrossnetFileSubcommand::Approval(args) => args.output.json,
+                },
                 CrossnetSubcommand::Settings(args) => match &args.command {
                     None => args.output.json,
                     Some(CrossnetSettingsSubcommand::Set(set_args)) => {
@@ -102,6 +135,8 @@ impl Cli {
                 | AndroidSubcommand::Lan(args)
                 | AndroidSubcommand::Code(args) => args.output.json,
             },
+            #[cfg(windows)]
+            Commands::App(app) => app.json,
             Commands::Session(session) => match &session.command {
                 SessionSubcommand::Ls(output) => output.json,
                 SessionSubcommand::Inspect(args) => args.output.json,
@@ -142,7 +177,8 @@ impl Cli {
             },
             Commands::Smoke(smoke) => smoke.json_output_requested(),
             Commands::Capabilities(output) | Commands::Metrics(output) => output.json,
-            Commands::Logs(_) | Commands::Internal(_) | Commands::Version => false,
+            Commands::Version(_) => true,
+            Commands::Logs(_) | Commands::Internal(_) => false,
         }
     }
 }

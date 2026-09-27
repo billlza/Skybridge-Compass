@@ -250,6 +250,9 @@ pub(crate) struct FileSendArgs {
         value_parser = clap::value_parser!(u64).range(1..=3600)
     )]
     pub(crate) timeout_seconds: u64,
+    /// Show observed transfer progress on stderr; never substitutes for a receipt.
+    #[arg(long, value_enum, default_value_t = crate::transfer_progress::ProgressMode::Auto, conflicts_with_all = ["json", "detach"])]
+    pub(crate) progress: crate::transfer_progress::ProgressMode,
     #[command(flatten)]
     pub(crate) output: OutputOptions,
 }

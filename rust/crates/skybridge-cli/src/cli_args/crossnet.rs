@@ -10,6 +10,8 @@ pub(crate) struct CrossnetCommand {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum CrossnetSubcommand {
+    /// Inspect or change handshake profiles through native application services.
+    Handshake(CrossnetHandshakeArgs),
     /// Check whether the running Mac app is ready for GUI-bound crossnet mutations.
     Preflight(OutputOptions),
     /// Host a cross-network connection code via the SkyBridge app control socket.
@@ -36,6 +38,173 @@ pub(crate) enum CrossnetSubcommand {
     ConnectDevice(CrossnetConnectDeviceArgs),
     /// Show the Mac app settings projection, or change one allowlisted setting.
     Settings(CrossnetSettingsArgs),
+    /// Discover nearby peers through the running Mac app's real P2P service.
+    Nearby(CrossnetNearbyArgs),
+    /// Connect and authenticate one discovery target in the Mac app.
+    ConnectNearby(CrossnetConnectDeviceArgs),
+    /// Send files through the Mac app, with progress and a verified receiver receipt.
+    File(CrossnetFileArgs),
+    /// Discover and connect Apple devices over the physical USB cable.
+    Usb(CrossnetUSBArgs),
+    /// Inspect the exact stored trust records before an explicit recovery.
+    Trust(CrossnetTrustArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CrossnetTrustArgs {
+    #[command(subcommand)]
+    pub(crate) command: CrossnetTrustSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum CrossnetTrustSubcommand {
+    /// Read real product storage and signature results; does not change trust.
+    Preview(CrossnetTrustPreviewArgs),
+    /// Verify the peer over USB and retire only approved stale mirror aliases.
+    Recover(CrossnetTrustRecoverArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CrossnetTrustRecoverArgs {
+    #[command(flatten)]
+    pub(crate) target: CrossnetUSBConnectArgs,
+    /// Exact read-only preview digest. Changed storage refuses the mutation.
+    #[arg(long)]
+    pub(crate) snapshot_sha256: String,
+    /// Unique UUID for the immutable recovery archive; never reuse after uncertainty.
+    #[arg(long)]
+    pub(crate) recovery_id: String,
+    /// Explicitly authorize stale mirror retirement while preserving the existing key.
+    #[arg(long, required = true)]
+    pub(crate) approve_mirror_retirement: bool,
+    /// Separately approved historical peer whose own records must remain unchanged.
+    #[arg(long)]
+    pub(crate) preserve_shared_peer_id: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CrossnetTrustPreviewArgs {
+    #[arg(long)]
+    pub(crate) peer_id: String,
+    #[arg(long)]
+    pub(crate) expected_fingerprint: String,
+    /// Preview shared-alias retirement while preserving this exact other peer.
+    #[arg(long)]
+    pub(crate) preserve_shared_peer_id: Option<String>,
+    #[command(flatten)]
+    pub(crate) output: OutputOptions,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CrossnetUSBArgs {
+    #[command(subcommand)]
+    pub(crate) command: CrossnetUSBSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum CrossnetUSBSubcommand {
+    /// Enumerate USB entries from the OS multiplexer; exclude network twins.
+    Devices(OutputOptions),
+    /// Authenticate the selected peer over USB, without a network fallback.
+    Connect(CrossnetUSBConnectArgs),
+    /// Connect a named app device over a selected cable, without network fallback.
+    ConnectDevice(CrossnetUSBDeviceConnectArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CrossnetUSBDeviceConnectArgs {
+    pub(crate) udid: String,
+    #[arg(long)]
+    pub(crate) to: String,
+    #[command(flatten)]
+    pub(crate) output: OutputOptions,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CrossnetUSBConnectArgs {
+    /// Physical device UDID from `crossnet usb devices`.
+    pub(crate) udid: String,
+    /// Stable protocol device UUID from the paired device/account, not a discovery reference.
+    #[arg(long)]
+    pub(crate) peer_id: String,
+    /// Full lowercase protocol fingerprint shown for the selected peer.
+    #[arg(long)]
+    pub(crate) expected_fingerprint: String,
+    #[command(flatten)]
+    pub(crate) output: OutputOptions,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CrossnetNearbyArgs {
+    /// Zero reads the current snapshot; a positive value starts app-owned scanning.
+    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u64).range(0..=10))]
+    pub(crate) scan_seconds: u64,
+    #[command(flatten)]
+    pub(crate) output: OutputOptions,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CrossnetFileArgs {
+    #[command(subcommand)]
+    pub(crate) command: CrossnetFileSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum CrossnetFileSubcommand {
+    Send(CrossnetFileSendArgs),
+    /// Inspect or decide real receiver prompts, or manage the separate CLI permission.
+    Approval(CrossnetFileApprovalArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CrossnetFileApprovalArgs {
+    #[arg(value_enum)]
+    pub(crate) action: FileApprovalAction,
+    #[arg(long)]
+    pub(crate) to: String,
+    #[arg(long, requires = "decision")]
+    pub(crate) approval_id: Option<String>,
+    #[arg(long, value_enum, requires = "approval_id")]
+    pub(crate) decision: Option<FileDecision>,
+    #[command(flatten)]
+    pub(crate) output: OutputOptions,
+}
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(crate) enum FileApprovalAction {
+    Status,
+    Authorize,
+    Decide,
+    Revoke,
+}
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(crate) enum FileDecision {
+    Allow,
+    Deny,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum FileApprovalMode {
+    Prompt,
+    Allow,
+    Deny,
+    Device,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CrossnetFileSendArgs {
+    pub(crate) path: std::path::PathBuf,
+    /// Prompt in the terminal, explicitly allow/deny this file, or handle on the device.
+    #[arg(long, value_enum, default_value = "prompt")]
+    pub(crate) approval: FileApprovalMode,
+    /// Authenticated device_ref from `crossnet nearby` / `connect-nearby`.
+    #[arg(long)]
+    pub(crate) to: String,
+    #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..=3600))]
+    pub(crate) timeout_seconds: u64,
+    /// Terminal progress on stderr. JSON mode emits only the final result.
+    #[arg(long, value_enum, default_value_t = crate::transfer_progress::ProgressMode::Auto, conflicts_with = "json")]
+    pub(crate) progress: crate::transfer_progress::ProgressMode,
+    #[command(flatten)]
+    pub(crate) output: OutputOptions,
 }
 
 #[derive(Debug, Args)]
@@ -147,4 +316,83 @@ pub(crate) struct CrossnetStatusArgs {
     pub(crate) watch: bool,
     #[command(flatten)]
     pub(crate) output: OutputOptions,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CrossnetHandshakeArgs {
+    #[command(subcommand)]
+    pub(crate) command: CrossnetHandshakeSubcommand,
+}
+#[derive(Debug, Subcommand)]
+pub(crate) enum CrossnetHandshakeSubcommand {
+    /// List profiles and local runtime availability.
+    List(OutputOptions),
+    /// Read local/remote preferences and the actual negotiated session suite.
+    Status(CrossnetHandshakeTargetArgs),
+    /// Apply a profile for subsequent connections; remote management requires peer consent.
+    Set(CrossnetHandshakeSetArgs),
+    /// Revoke this Mac's persistent management permission on the selected peer.
+    #[command(group(clap::ArgGroup::new("revoke_target").args(["to", "usb"]).required(true)))]
+    Revoke(CrossnetHandshakeTargetArgs),
+}
+#[derive(Debug, Args)]
+#[command(group(clap::ArgGroup::new("handshake_target").args(["to", "usb"]).multiple(false)))]
+pub(crate) struct CrossnetHandshakeTargetArgs {
+    #[arg(long, value_name = "DEVICE_REF", conflicts_with = "usb")]
+    pub(crate) to: Option<String>,
+    /// Direct USB route; pair with the exact protocol identity flags.
+    #[arg(long, requires_all = ["peer_id", "expected_fingerprint"])]
+    pub(crate) usb: Option<String>,
+    #[arg(long, requires = "usb")]
+    pub(crate) peer_id: Option<String>,
+    #[arg(long, requires = "usb")]
+    pub(crate) expected_fingerprint: Option<String>,
+    #[command(flatten)]
+    pub(crate) output: OutputOptions,
+}
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(crate) enum HandshakeProfileArg {
+    Qperiapt,
+    Xwing,
+    Mlkem,
+    Classic,
+}
+impl From<HandshakeProfileArg> for skybridge_crossnet_client::HandshakeProfile {
+    fn from(value: HandshakeProfileArg) -> Self {
+        match value {
+            HandshakeProfileArg::Qperiapt => Self::Qperiapt,
+            HandshakeProfileArg::Xwing => Self::Xwing,
+            HandshakeProfileArg::Mlkem => Self::Mlkem,
+            HandshakeProfileArg::Classic => Self::Classic,
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(crate) enum HandshakeScopeArg {
+    Local,
+    Both,
+}
+impl HandshakeScopeArg {
+    pub(crate) fn wire(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Both => "both",
+        }
+    }
+}
+#[derive(Debug, Args)]
+pub(crate) struct CrossnetHandshakeSetArgs {
+    #[arg(value_enum)]
+    pub(crate) profile: HandshakeProfileArg,
+    #[arg(
+        long,
+        value_enum,
+        default_value = "local",
+        requires_if("both", "handshake_target")
+    )]
+    pub(crate) scope: HandshakeScopeArg,
+    #[arg(long, requires = "handshake_target")]
+    pub(crate) reconnect: bool,
+    #[command(flatten)]
+    pub(crate) target: CrossnetHandshakeTargetArgs,
 }

@@ -21,6 +21,44 @@ permissions:
   contents: read
 
 jobs:
+  macos-cli-check:
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      RUSTFLAGS: -Dwarnings
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Checkout pinned Q-Periapt source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: billlza/q-periapt
+          ref: 7ed1f96a7ec33732f02a989dd5a4669cdcce39ad
+          path: External/pqt_hybrid_suite
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal --component clippy --component rustfmt --component llvm-tools-preview
+          rustup override set 1.94.0
+          [[ "$(rustc --version)" == "rustc 1.94.0 "* ]]
+
+      # The native operator client and guided menus are macOS-only modules.
+      # The Linux packaging job cannot compile or test these code paths.
+      - name: Compile macOS CLI and operator tests
+        run: cargo test --locked --manifest-path rust/Cargo.toml -p skybridge -p skybridge-crossnet-client --all-targets --no-run
+
+      - name: Test macOS CLI and operator contracts
+        run: cargo test --locked --manifest-path rust/Cargo.toml -p skybridge -p skybridge-crossnet-client --all-targets
+
+      - name: Lint macOS CLI and operator contracts
+        run: cargo clippy --locked --manifest-path rust/Cargo.toml -p skybridge -p skybridge-crossnet-client --all-targets -- -D warnings
+
   packaging-check:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -35,7 +73,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: billlza/q-periapt
-          ref: 5664fd86a617f92b620ea37e7692d3417d0e307d
+          ref: 7ed1f96a7ec33732f02a989dd5a4669cdcce39ad
           path: External/pqt_hybrid_suite
           persist-credentials: false
 
@@ -46,7 +84,7 @@ jobs:
           dependency_path="$PWD/External/pqt_hybrid_suite"
           [[ -f "$dependency_path/Cargo.toml" ]]
           [[ -f "$dependency_path/crates/q-periapt-backends/Cargo.toml" ]]
-          [[ "$(git -C "$dependency_path" rev-parse HEAD)" == "5664fd86a617f92b620ea37e7692d3417d0e307d" ]]
+          [[ "$(git -C "$dependency_path" rev-parse HEAD)" == "7ed1f96a7ec33732f02a989dd5a4669cdcce39ad" ]]
 
       - name: Install the pinned Rust toolchain
         run: |

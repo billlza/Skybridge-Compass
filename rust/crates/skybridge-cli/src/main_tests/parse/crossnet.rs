@@ -3,6 +3,90 @@ use clap::Parser;
 use crate::{Cli, Commands, CrossnetLeaseMode, CrossnetSubcommand};
 
 #[test]
+fn trust_recovery_requires_a_concrete_preview_and_explicit_retirement_flag() {
+    let hash = "b".repeat(64);
+    let mut args = vec![
+        "skybridge",
+        "crossnet",
+        "trust",
+        "recover",
+        "00008140-000E788401C0801C",
+        "--peer-id",
+        "11111111-2222-3333-4444-555555555555",
+        "--expected-fingerprint",
+        &hash,
+        "--snapshot-sha256",
+        &hash,
+        "--recovery-id",
+        "11111111-2222-3333-4444-555555555556",
+        "--json",
+    ];
+    assert!(Cli::try_parse_from(&args).is_err());
+    args.push("--approve-mirror-retirement");
+    assert!(Cli::try_parse_from(args).is_ok());
+}
+
+#[test]
+fn usb_commands_keep_physical_and_protocol_identity_separate() {
+    let fingerprint = "b".repeat(64);
+    let peer = "11111111-2222-3333-4444-555555555555";
+    let udid = "00008140-000E788401C0801C";
+    assert!(Cli::try_parse_from(["skybridge", "crossnet", "usb", "devices", "--json"]).is_ok());
+    let parsed = Cli::try_parse_from([
+        "skybridge",
+        "crossnet",
+        "usb",
+        "connect",
+        udid,
+        "--peer-id",
+        peer,
+        "--expected-fingerprint",
+        &fingerprint,
+        "--json",
+    ])
+    .unwrap();
+    let Commands::Crossnet(command) = parsed.command else {
+        panic!("expected app runtime");
+    };
+    let CrossnetSubcommand::Usb(command) = command.command else {
+        panic!("expected USB");
+    };
+    let crate::CrossnetUSBSubcommand::Connect(args) = command.command else {
+        panic!("expected connect");
+    };
+    assert_eq!(args.udid, udid);
+    assert_eq!(args.peer_id, peer);
+    assert_eq!(args.expected_fingerprint, fingerprint);
+    assert!(args.output.json);
+    assert!(
+        Cli::try_parse_from([
+            "skybridge",
+            "crossnet",
+            "usb",
+            "connect",
+            udid,
+            "--peer-id",
+            peer
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "skybridge",
+            "crossnet",
+            "trust",
+            "preview",
+            "--peer-id",
+            peer,
+            "--expected-fingerprint",
+            &fingerprint,
+            "--json"
+        ])
+        .is_ok()
+    );
+}
+
+#[test]
 fn crossnet_subcommands_parse_app_bound_surface() {
     let preflight = Cli::try_parse_from(["skybridge", "crossnet", "preflight", "--json"])
         .expect("crossnet preflight should parse");
