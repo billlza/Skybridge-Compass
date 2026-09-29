@@ -41,6 +41,8 @@ Linux extension builds install ICU development headers required by PostgreSQL. D
 
 The optional live check requires `SUPABASE_ACCESS_TOKEN` and compares migration history, actual catalog invariants, routine fingerprints, exposed schemas, Auth expiry and Advisors. Update the routine contract only after a reviewed deployment and regression verification. It is not a blanket permission to accept unexpected drift.
 
+The migration hash ledger freezes all 23 published migration files, including this rollout. The replay baseline still records the 18 versions present before remediation so regression runs continue to apply and exercise all five corrective migrations. Subsequent schema changes must use a new migration rather than rewriting deployed history.
+
 `supabase/config.toml` retains each function's deployed gateway authentication mode. Deploy the two functions individually using `supabase functions deploy <name> --project-ref hloqytmhjludmuhwyyzb --use-api`; the maintenance handler requires `SKYBRIDGE_MAINTENANCE_TOKEN` to match the named Vault secret. Do not deploy with `--prune`, which would remove unrelated hosted functions absent from this source subset. Function configuration follows the [official configuration format](https://supabase.com/docs/guides/functions/function-configuration).
 
 ## Remaining findings

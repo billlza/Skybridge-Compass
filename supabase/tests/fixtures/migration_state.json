@@ -39,6 +39,11 @@
     "20260722041138_device_identity_rotation_v6.sql": "e35531f34b796b769c1b8548b69a116614eebae69e454d75819a9c6bac4bcc44",
     "20260905120000_device_presence_metadata_v7.sql": "db9965ef9fc9ac59688918510b337788828b75329b214afbb676170fb6fbf879",
     "20260905130000_lock_down_tenant_policy_and_enrollment_invites_v8.sql": "2cb62a0f445c84e622b9ea85352208b4f20cf8ff7f12973c538a2a7e4c60b5c1",
-    "20260910071500_retain_legacy_revoked_device_identities_v9.sql": "bde9b4f5d22dafd21827271e2eb8e6453dadf74a561445788ef2f2c21a48fcd0"
+    "20260910071500_retain_legacy_revoked_device_identities_v9.sql": "bde9b4f5d22dafd21827271e2eb8e6453dadf74a561445788ef2f2c21a48fcd0",
+    "20260802000000_harden_auth_privilege_boundaries.sql": "2cd174c2f1e22f81b5477072b7c2195a61397a71d834b0dbcb323dfee92460fa",
+    "20260901120000_harden_cli_sessions_and_pin_search_path.sql": "a36b95702887220a92eb5eb3065cc73183817df2b7a0c20be8152b1cefabb2a0",
+    "20260929165934_remediate_advisor_privileges_and_rls.sql": "9cc39504d0ced794f987dddbbdab51b5dab14ced3fdb3e9a85a62b69308afa9e",
+    "20260929173918_harden_legacy_auth_and_settings.sql": "531fedb088aa786822ce56e6a9b60e991360be59cb13df4f125b46c8111b3d58",
+    "20260929173954_relocate_pg_net_and_authenticate_maintenance.sql": "549df7ae52f54cb7c6cfff7574a591e3bf312bb5ec20b3107e25a658c615e0e0"
   }
 }
