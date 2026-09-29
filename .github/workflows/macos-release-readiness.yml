@@ -8,6 +8,8 @@ on:
       - ".github/workflows/macos-release-publish.yml"
       - ".github/workflows/real-device-release-gate.yml"
       - ".github/workflows/ios-app-store-export.yml"
+      - "supabase/**"
+      - ".github/workflows/supabase-security.yml"
       - "Package.swift"
       - "Packages/**"
       - "project.yml"
@@ -27,6 +29,8 @@ on:
       - ".github/workflows/macos-release-publish.yml"
       - ".github/workflows/real-device-release-gate.yml"
       - ".github/workflows/ios-app-store-export.yml"
+      - "supabase/**"
+      - ".github/workflows/supabase-security.yml"
       - "Package.swift"
       - "Packages/**"
       - "project.yml"
@@ -54,7 +58,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  supabase-security:
+    uses: ./.github/workflows/supabase-security.yml
+
   macos-preflight:
+    needs: supabase-security
     runs-on: macos-26
     timeout-minutes: 90
     env:

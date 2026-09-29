@@ -1,0 +1,112 @@
+name: supabase-security
+
+on:
+  pull_request:
+    paths:
+      - 'supabase/**'
+      - 'Scripts/*supabase*'
+      - 'Scripts/build_pg_net_test_extension.sh'
+      - '.github/workflows/supabase-security.yml'
+  push:
+    branches: [main, master, 'release/**', 'lza/supabase-*']
+    paths:
+      - 'supabase/**'
+      - 'Scripts/*supabase*'
+      - 'Scripts/build_pg_net_test_extension.sh'
+      - '.github/workflows/supabase-security.yml'
+  workflow_call:
+  workflow_dispatch:
+    inputs:
+      check_live:
+        description: 'Read-only hosted Advisor and deployment drift check'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  database-regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ['17.11', '18.6']
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_PASSWORD: local-test-only
+          POSTGRES_DB: supabase_advisor_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build the real pg_net extension for the database service
+        env:
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+          PGPASSWORD: local-test-only
+        run: |
+          set -euo pipefail
+          docker cp Scripts/build_pg_net_test_extension.sh "$PG_CONTAINER:/tmp/build_pg_net.sh"
+          docker exec --user root "$PG_CONTAINER" bash -c '
+            set -euo pipefail
+            apt-get update -qq
+            apt-get install -y --no-install-recommends build-essential git ca-certificates libcurl4-openssl-dev "postgresql-server-dev-$PG_MAJOR"
+            bash /tmp/build_pg_net.sh /usr/lib/postgresql/$PG_MAJOR/bin/pg_config /tmp/pg_net
+            make -C /tmp/pg_net PG_CONFIG=/usr/lib/postgresql/$PG_MAJOR/bin/pg_config install
+          '
+          psql -h 127.0.0.1 -U postgres -d supabase_advisor_test -v ON_ERROR_STOP=1 -c "ALTER SYSTEM SET shared_preload_libraries='pg_net'"
+          docker restart "$PG_CONTAINER"
+          for attempt in $(seq 1 30); do
+            if pg_isready -h 127.0.0.1 -U postgres -d supabase_advisor_test; then break; fi
+            echo "Waiting for PostgreSQL after extension installation (attempt $attempt/30)"
+            sleep 1
+          done
+          pg_isready -h 127.0.0.1 -U postgres -d supabase_advisor_test
+      - name: Check Advisor response handling
+        run: python3 -m unittest discover -s Scripts -p test_check_supabase_advisors.py
+      - name: Replay migrations and test real PostgreSQL authorization
+        env:
+          PGPASSWORD: local-test-only
+        run: python3 Scripts/test_supabase_advisor_migrations.py
+
+  edge-security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.7.5
+      - name: Check and test the deployed authentication boundaries
+        run: |
+          deno check --config supabase/functions/deno.json supabase/functions/settings-management/index.ts supabase/functions/scheduled-maintenance/index.ts
+          deno test --config supabase/functions/deno.json supabase/functions/tests
+          deno fmt --check supabase/functions/_shared/http.ts supabase/functions/settings-management supabase/functions/scheduled-maintenance supabase/functions/tests
+
+  live-read-only:
+    if: github.event_name == 'workflow_dispatch' && inputs.check_live
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check deployed schema, migrations, Auth settings, and Advisors
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: >-
+          python3 Scripts/check_supabase_advisors.py
+          --project-ref hloqytmhjludmuhwyyzb
+          --output supabase-advisors.json
+      - name: Retain the live report, including unresolved findings
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: supabase-advisors
+          path: supabase-advisors.json
+          if-no-files-found: error

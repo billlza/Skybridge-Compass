@@ -28,6 +28,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  supabase-security:
+    uses: ./.github/workflows/supabase-security.yml
+
   verify-environment-protection:
     runs-on: macos-26
     timeout-minutes: 10
@@ -56,7 +59,7 @@ jobs:
             --expected-name "$RELEASE_ENVIRONMENT_NAME"
 
   export-accepted-archive:
-    needs: verify-environment-protection
+    needs: [verify-environment-protection, supabase-security]
     runs-on: [self-hosted, macOS, skybridge-real-device-release]
     environment: release-ios-app-store-export
     timeout-minutes: 60

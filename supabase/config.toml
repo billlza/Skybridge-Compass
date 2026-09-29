@@ -1,0 +1,12 @@
+project_id = "skybridge-compass"
+
+[functions.settings-management]
+enabled = true
+verify_jwt = true
+entrypoint = "./functions/settings-management/index.ts"
+
+[functions.scheduled-maintenance]
+enabled = true
+# The handler verifies a dedicated Vault/Edge credential, not a user JWT.
+verify_jwt = false
+entrypoint = "./functions/scheduled-maintenance/index.ts"
