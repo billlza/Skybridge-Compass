@@ -37,6 +37,8 @@ The published migration applies object ACLs only when the executing role owns th
 
 The reusable `supabase-security.yml` workflow runs real PostgreSQL **17.11 and 18.6** migration tests and the Edge Function security tests. It builds pg_net from the pinned upstream commit `698fb055f666366a78c112b0578b0a5652ddbcfa`; no mocks replace extension DDL. macOS readiness, iOS export, CLI packaging and CLI release builds depend on this gate. No cloud credentials are required for those build tests.
 
+Linux extension builds install ICU development headers required by PostgreSQL. Disposable database containers use SCRAM authentication, and health checks select the existing database role explicitly. Server logs retain the two expected negative-test errors (the vulnerable baseline and nonempty queue guard); those are asserted failures, not unexplained production errors.
+
 The optional live check requires `SUPABASE_ACCESS_TOKEN` and compares migration history, actual catalog invariants, routine fingerprints, exposed schemas, Auth expiry and Advisors. Update the routine contract only after a reviewed deployment and regression verification. It is not a blanket permission to accept unexpected drift.
 
 `supabase/config.toml` retains each function's deployed gateway authentication mode. Deploy the two functions individually using `supabase functions deploy <name> --project-ref hloqytmhjludmuhwyyzb --use-api`; the maintenance handler requires `SKYBRIDGE_MAINTENANCE_TOKEN` to match the named Vault secret. Do not deploy with `--prune`, which would remove unrelated hosted functions absent from this source subset. Function configuration follows the [official configuration format](https://supabase.com/docs/guides/functions/function-configuration).

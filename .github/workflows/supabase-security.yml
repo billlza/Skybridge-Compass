@@ -39,10 +39,12 @@ jobs:
         env:
           POSTGRES_PASSWORD: local-test-only
           POSTGRES_DB: supabase_advisor_test
+          POSTGRES_INITDB_ARGS: '--auth-local=scram-sha-256 --auth-host=scram-sha-256'
+          PGPASSWORD: local-test-only
         ports:
           - 5432:5432
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U postgres -d supabase_advisor_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
