@@ -1,4 +1,6 @@
-# Supabase support request draft — not sent
+# Supabase support request — submitted
+
+Submitted through the signed-in Supabase support form on 2026-09-29 after explicit user authorization. The dashboard confirmed **Support request sent** and stated that the ticket had been logged for SkyBridge Compass Pro. No ticket number was displayed. Category: Other; affected service: Database; severity: Low. The project-access switch was **off**, no attachments were included, and the Free plan was retained.
 
 Subject: PostgreSQL 17.11 GA upgrade unavailable for an existing project
 
@@ -43,4 +45,4 @@ Thank you.
 
 ---
 
-This draft contains project identifiers and version/eligibility metadata only. It does not include database contents, backups, passwords, API tokens, or secret values. It has not been submitted.
+The submitted body matched the approved draft exactly. It contains project identifiers and version/eligibility metadata only; no database contents, backups, passwords, API tokens, or secret values were submitted. The local receipt and confirmation screenshot are retained under `Docs/ops/.state/supabase-latest-review-20260929/`. Submission does not mean that the requested PostgreSQL upgrade has been enabled or completed.
