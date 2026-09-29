@@ -57,8 +57,9 @@ jobs:
           docker cp Scripts/build_pg_net_test_extension.sh "$PG_CONTAINER:/tmp/build_pg_net.sh"
           docker exec --user root "$PG_CONTAINER" bash -c '
             set -euo pipefail
+            export DEBIAN_FRONTEND=noninteractive
             apt-get update -qq
-            apt-get install -y --no-install-recommends build-essential git ca-certificates libcurl4-openssl-dev "postgresql-server-dev-$PG_MAJOR"
+            apt-get install -y --no-install-recommends build-essential git ca-certificates libcurl4-openssl-dev libicu-dev "postgresql-server-dev-$PG_MAJOR"
             bash /tmp/build_pg_net.sh /usr/lib/postgresql/$PG_MAJOR/bin/pg_config /tmp/pg_net
             make -C /tmp/pg_net PG_CONFIG=/usr/lib/postgresql/$PG_MAJOR/bin/pg_config install
           '
