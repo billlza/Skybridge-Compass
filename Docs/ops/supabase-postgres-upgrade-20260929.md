@@ -47,6 +47,20 @@ The migration hash ledger freezes all 23 published migration files, including th
 
 ## Remaining findings
 
+### Version recheck after the request to update all database components
+
+The local Supabase CLI was upgraded from **2.67.1 to 2.118.0**, matching the latest stable vendor release. The official Homebrew tap was fast-forwarded before installation and the package checksum was verified by Homebrew. The new CLI successfully read the project and ran `db push --dry-run --include-all --skip-vault`, reporting no pending migrations. Local PostgreSQL and psql remain **18.6**, the latest stable upstream release.
+
+The hosted kernel is still **17.6**. A fresh eligibility response reports `eligible=false`, `latest_app_version=supabase-postgres-17.6.1.171`, and an empty `target_upgrade_versions` array. This is a real outstanding version gap: [Supabase's September 25 announcement](https://supabase.com/changelog/postgres-15-19-17-11-breaking-changes) says 17.11 upgrades became available to existing projects on September 28. The project-specific response does not expose that release. No assertion is made that 17.6.1.171 contains all upstream 17.11 fixes. Dashboard verification currently requires a separate browser login; the API/plugin session does not authenticate that browser. A managed kernel cannot be replaced by upgrading local psql or rebuilding the app.
+
+All eight enabled extensions match the highest versions installed on the hosted platform: `pg_cron 1.6.4`, `pg_graphql 1.6.1`, `pg_net 0.20.4`, `pg_stat_statements 1.11`, `pgcrypto 1.3`, `plpgsql 1.0`, `supabase_vault 0.3.1`, and `uuid-ossp 1.1`. Extension version numbers do not establish that the older server binary has every upstream security fix.
+
+The 17.11 compatibility preflight found no ltree indexes, GiST float indexes, or custom operator estimators covered by the announcement. No PGP legacy-cipher calls were found in public routine definitions or the inspected application/database source. This does not claim a complete audit of every external caller or stored ciphertext.
+
+These database and deployed Edge Function repairs are enforced on the server and take effect for existing clients using the same project. RPC signatures were preserved, and the inspected macOS/iOS source already handles audit tickets. A new App Store package is not required just to activate the server fixes. Installed older binaries have not received a complete physical-device compatibility test in this task.
+
+### Advisor findings
+
 The only unresolved actionable platform warning is **leaked-password protection**, which requires Pro. It remains disabled because the user selected Free. The checker continues to report it and returns nonzero; it does not label the whole hosted audit green.
 
 Thirty-one existing findings describe deliberate public/reference-data or authenticated ownership-protected RPC/table exposure. Thirty-three INFO findings describe default-deny internal tables without client policies, and unused-index INFO counts changed after the platform upgrade. These are retained with their rationale; indexes and needed client permissions were not deleted merely to clear the dashboard.
