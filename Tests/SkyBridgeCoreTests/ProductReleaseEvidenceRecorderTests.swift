@@ -941,11 +941,22 @@ final class ProductReleaseEvidenceRecorderTests: XCTestCase {
             "Sources/SkyBridgeCore/FileTransfer/FileTransferManager.swift"
         )
         XCTAssertTrue(fileManagerSource.contains("material = try connection.classicTransferKeyMaterial("))
-        XCTAssertTrue(fileManagerSource.contains("transferKey: material.transferKey"))
+        XCTAssertTrue(fileManagerSource.contains("keyMaterial: material"))
+        XCTAssertTrue(fileManagerSource.contains("var transferKey: SymmetricKey { keyMaterial.transferKey }"))
         XCTAssertTrue(fileManagerSource.contains("let routeClass = ProductReleaseEvidenceRouteClass.current(for: connection)"))
         XCTAssertTrue(fileManagerSource.contains("context.integrityReceiptVerified"))
         let liveKeySource = try source("Sources/SkyBridgeCore/P2P/P2PModels.swift")
-        XCTAssertTrue(liveKeySource.contains("ClassicTransferKeyMaterial(sessionKeys: keys, transferId: transferId, capabilityEvidence: acceptedClassicCapabilitiesLock.withLock { $0 })"))
+        let keyMaterialStart = try XCTUnwrap(liveKeySource.range(of: "func classicTransferKeyMaterial("))
+        let keyMaterialEnd = try XCTUnwrap(liveKeySource.range(
+            of: "private func sendEncryptedAppMessage(",
+            range: keyMaterialStart.upperBound..<liveKeySource.endIndex
+        ))
+        let keyMaterialSource = liveKeySource[keyMaterialStart.lowerBound..<keyMaterialEnd.lowerBound]
+        XCTAssertTrue(keyMaterialSource.contains("try handshakeOperationLock.withLock"))
+        XCTAssertTrue(keyMaterialSource.contains("guard let keys = sessionKeysLock.withLock"))
+        XCTAssertTrue(keyMaterialSource.contains("ClassicTransferKeyMaterial(sessionKeys: keys, transferId: transferId,"))
+        XCTAssertTrue(keyMaterialSource.contains("capabilityEvidence: acceptedClassicCapabilitiesLock.withLock { $0 }"))
+        XCTAssertTrue(keyMaterialSource.contains("peerAuthority: authenticatedRemoteAuthorityLock.withLock { $0 }"))
         XCTAssertTrue(fileManagerSource.contains("recordProductFileTransferCompletionVisible("))
         let fileViewSource = try source(
             "Sources/SkyBridgeUI/FileTransfer/FileTransferView.swift"

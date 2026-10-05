@@ -102,7 +102,8 @@ final class LocalLanInteropHostApprovalSurfaceContractTests: XCTestCase {
         XCTAssertTrue(approvalViewSource.contains("service.pendingVerificationCode"))
         XCTAssertTrue(approvalViewSource.contains("request.protocolIdentityAlgorithm"))
         XCTAssertTrue(approvalViewSource.contains("request.protocolIdentityFingerprint"))
-        XCTAssertTrue(approvalViewSource.contains("请确认 Mac 与 iPhone/iPad 显示的 6 位验证码完全一致"))
+        XCTAssertTrue(approvalViewSource.contains("请确认两台设备显示的 6 位验证码完全一致"))
+        XCTAssertFalse(approvalViewSource.contains("Mac 与 iPhone/iPad"))
 
         let pinCommitSource = try sourceSlice(
             from: "private func pinProtocolIdentityRequester(",
