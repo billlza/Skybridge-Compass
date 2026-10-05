@@ -278,6 +278,41 @@ jobs:
       - name: Build macOS Release Product
         run: swift build -c release --product SkyBridgeCompassApp -Xswiftc -warnings-as-errors
 
+  macos-native-app:
+    runs-on: macos-26
+    timeout-minutes: 75
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      SKYBRIDGE_REQUIRED_XCODE_VERSION: "26.6"
+      SKYBRIDGE_REQUIRED_XCODE_BUILD: "17F113"
+      SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: "6.3.3"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Verify Stable Xcode Toolchain
+        run: bash Scripts/verify_xcode_toolchain.sh
+      - name: Build Native macOS App and Compiled Resources
+        run: |
+          xcodebuild \
+            -project SkyBridgeWidgets.xcodeproj \
+            -scheme SkyBridgeCompassMac \
+            -configuration Release \
+            -destination "generic/platform=macOS" \
+            -derivedDataPath "${RUNNER_TEMP}/skybridge-mac-native" \
+            -clonedSourcePackagesDirPath "${RUNNER_TEMP}/skybridge-mac-native-packages" \
+            -jobs 2 \
+            -onlyUsePackageVersionsFromResolvedFile \
+            CODE_SIGNING_ALLOWED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=YES \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            GCC_TREAT_WARNINGS_AS_ERRORS=YES \
+            SWIFT_SUPPRESS_WARNINGS=NO \
+            GCC_WARN_INHIBIT_ALL_WARNINGS=NO \
+            build
+
   os27-source-contracts:
     runs-on: macos-26
     timeout-minutes: 45

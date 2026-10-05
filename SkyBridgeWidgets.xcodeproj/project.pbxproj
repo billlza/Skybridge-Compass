@@ -110,6 +110,9 @@
 		D8C1E54A3EADF9776DC9B6DF /* OperatorControlServerBootstrap.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16358727B11FEF5CD6D7B6C6 /* OperatorControlServerBootstrap.swift */; };
 		DABEA837C02F24603DAE0260 /* SupabaseConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3445ED6C3F4CBF4F08CDBEB5 /* SupabaseConfiguration.swift */; };
 		DC7368391182B2C07B26A81A /* OperatorControlRuntimeFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D81418181B2577092A7AD30 /* OperatorControlRuntimeFactory.swift */; };
+		3AE55C7D8F01F8D4C0F12D49 /* OperatorDesktopRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 803B8D485E13C2D0E07C0C70 /* OperatorDesktopRuntime.swift */; };
+		E9FFDA53813D387DB5D8852C /* OperatorFileApprovalRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3205641818378CA554092694 /* OperatorFileApprovalRuntime.swift */; };
+		B1246CD0CC3321D109BE8E0C /* OperatorHandshakeRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F53AEAEBE53407ED7DDAB28 /* OperatorHandshakeRuntime.swift */; };
 		52ABC743082F4A19B0615D31 /* OperatorNearbyFileRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7530FB72E734B36B029CDB3 /* OperatorNearbyFileRuntime.swift */; };
 		DF057D8E9931418687E6EAAF /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = F4D58C1923FEAD79BD120C04 /* Localizable.strings */; };
 		E02FFD8F6509AEAC92FAC3D7 /* ConcurrentSystemMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31A02FDE90C72D12CAF98806 /* ConcurrentSystemMonitor.swift */; };
@@ -164,6 +167,9 @@
 		16358727B11FEF5CD6D7B6C6 /* OperatorControlServerBootstrap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperatorControlServerBootstrap.swift; sourceTree = "<group>"; };
 		1B2691D9D9A0E7E40DAC0794 /* SkyBridgeCompassWidgetsExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = SkyBridgeCompassWidgetsExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		1D81418181B2577092A7AD30 /* OperatorControlRuntimeFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperatorControlRuntimeFactory.swift; sourceTree = "<group>"; };
+		803B8D485E13C2D0E07C0C70 /* OperatorDesktopRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperatorDesktopRuntime.swift; sourceTree = "<group>"; };
+		3205641818378CA554092694 /* OperatorFileApprovalRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperatorFileApprovalRuntime.swift; sourceTree = "<group>"; };
+		9F53AEAEBE53407ED7DDAB28 /* OperatorHandshakeRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperatorHandshakeRuntime.swift; sourceTree = "<group>"; };
 		E7530FB72E734B36B029CDB3 /* OperatorNearbyFileRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperatorNearbyFileRuntime.swift; sourceTree = "<group>"; };
 		271098ACD4DC0594546D9468 /* EventMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventMonitor.swift; sourceTree = "<group>"; };
 		27F1FDDA6E8134F99044B055 /* QuickActionButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionButton.swift; sourceTree = "<group>"; };
@@ -438,6 +444,9 @@
 				D22DC77505406627AA516040 /* DashboardDataService.swift */,
 				61B6C5B59BA95D28F13245A6 /* OnlineDeviceConnectionCoordinator.swift */,
 				1D81418181B2577092A7AD30 /* OperatorControlRuntimeFactory.swift */,
+				803B8D485E13C2D0E07C0C70 /* OperatorDesktopRuntime.swift */,
+				3205641818378CA554092694 /* OperatorFileApprovalRuntime.swift */,
+				9F53AEAEBE53407ED7DDAB28 /* OperatorHandshakeRuntime.swift */,
 				E7530FB72E734B36B029CDB3 /* OperatorNearbyFileRuntime.swift */,
 				16358727B11FEF5CD6D7B6C6 /* OperatorControlServerBootstrap.swift */,
 				F0BFA79F007535E0ADD84BC2 /* Weather */,
@@ -799,6 +808,9 @@
 				47408F11F55E2E3497CF25CF /* OnlineDeviceConnectionCoordinator.swift in Sources */,
 				56B242EDEDEF0D41AA48BB57 /* OnlineDeviceRow.swift in Sources */,
 				DC7368391182B2C07B26A81A /* OperatorControlRuntimeFactory.swift in Sources */,
+				3AE55C7D8F01F8D4C0F12D49 /* OperatorDesktopRuntime.swift in Sources */,
+				E9FFDA53813D387DB5D8852C /* OperatorFileApprovalRuntime.swift in Sources */,
+				B1246CD0CC3321D109BE8E0C /* OperatorHandshakeRuntime.swift in Sources */,
 				52ABC743082F4A19B0615D31 /* OperatorNearbyFileRuntime.swift in Sources */,
 				D8C1E54A3EADF9776DC9B6DF /* OperatorControlServerBootstrap.swift in Sources */,
 				732868A8F7E1C04A5E32E73C /* OrderedCollectionsFallback.swift in Sources */,
