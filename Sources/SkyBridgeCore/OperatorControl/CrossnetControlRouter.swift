@@ -323,7 +323,7 @@ public struct CrossnetControlRouter: Sendable {
 
         do {
             switch request.method {
-            case "crossnet.desktop.devices", "crossnet.desktop.start", "crossnet.desktop.status", "crossnet.desktop.stop":
+            case "crossnet.desktop.devices", "crossnet.desktop.start", "crossnet.desktop.start_at", "crossnet.desktop.status", "crossnet.desktop.stop":
                 try Self.requireAuthenticatedOperatorContext(await runtime.hello())
                 guard let desktop = runtime.desktop,
                       let action = OperatorDesktopRequest.Action(rawValue: String(request.method.split(separator: ".").last ?? "")) else {

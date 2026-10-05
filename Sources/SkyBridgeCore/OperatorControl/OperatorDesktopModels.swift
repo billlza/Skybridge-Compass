@@ -1,18 +1,21 @@
 import Foundation
+import Network
 #if canImport(AppKit)
 import AppKit
 #endif
 
 public struct OperatorDesktopRequest: Sendable {
-    public enum Action: String, Sendable { case devices, start, status, stop }
+    public enum Action: String, Sendable { case devices, start, startAt = "start_at", status, stop }
     public let action: Action
     public let reference: String?
+    public let endpoint: OperatorDesktopEndpoint?
 
     public init(action: Action, params: CrossnetControlParams) throws {
         self.action = action
-        let key = action == .start ? "device_ref" : "session_ref"
+        let starts = action == .start || action == .startAt
+        let key = starts ? "device_ref" : "session_ref"
         let value = params.string(key)
-        guard (action != .start && action != .stop) || value != nil,
+        guard (!starts && action != .stop) || value != nil,
               value == nil || value.flatMap(UUID.init(uuidString:)) != nil else {
             throw CrossnetControlFailure.malformedRequest("desktop operation requires its exact UUID reference")
         }
@@ -20,6 +23,63 @@ public struct OperatorDesktopRequest: Sendable {
             throw CrossnetControlFailure.malformedRequest("desktop reference must be a UUID string")
         }
         reference = value.flatMap(UUID.init(uuidString:))?.uuidString
+        if action == .startAt || params.contains("host") || params.contains("port") {
+            guard action == .startAt, let host = params.string("host"), let port = params.int("port") else {
+                throw CrossnetControlFailure.malformedRequest("desktop start requires both host and port")
+            }
+            endpoint = try OperatorDesktopEndpoint(host: host, port: port)
+        } else { endpoint = nil }
+    }
+}
+
+/// A user-supplied route to an already paired host. It never creates trust or
+/// counts as a reachable listener, authenticated session, or presented frame.
+public struct OperatorDesktopEndpoint: Sendable, Equatable {
+    public let host: String
+    public let port: UInt16
+
+    public init(host: String, port: Int) throws {
+        guard let address = IPv4Address(host), let port = UInt16(exactly: port), port > 0 else {
+            throw CrossnetControlFailure.malformedRequest("desktop endpoint requires a unicast IPv4 address and port 1...65535")
+        }
+        let bytes = Array(address.rawValue)
+        guard bytes.count == 4, bytes[0] != 0, bytes[0] != 127, bytes[0] < 224,
+              bytes.map(String.init).joined(separator: ".") == host else {
+            throw CrossnetControlFailure.malformedRequest("desktop endpoint must be a canonical unicast IPv4 address")
+        }
+        self.host = host; self.port = port
+    }
+}
+
+public enum OperatorDesktopRoute {
+    @MainActor
+    public static func directTarget(_ device: DiscoveredDevice, endpoint: OperatorDesktopEndpoint) async throws -> DiscoveredDevice {
+        guard let deviceID = device.deviceId, UUID(uuidString: deviceID) != nil else {
+            throw CrossnetControlFailure.sessionMutationRejected("desktop_direct_requires_trusted_host_identity")
+        }
+        let fingerprints = await DefaultHandshakeTrustProvider().currentPathTrustedFingerprints(for: deviceID)
+        return try directTarget(device, endpoint: endpoint, trustedFingerprints: fingerprints)
+    }
+
+    /// Keeps the discovery identity while replacing only the selected route.
+    /// The normal remote-control handshake still authenticates the listener.
+    static func directTarget(_ device: DiscoveredDevice, endpoint: OperatorDesktopEndpoint,
+                                    trustedFingerprints: Set<String>) throws -> DiscoveredDevice {
+        guard !device.isLocalDevice, let deviceID = device.deviceId, UUID(uuidString: deviceID) != nil,
+              let fingerprint = device.pubKeyFP?.lowercased(), fingerprint.count == 64,
+              trustedFingerprints.contains(fingerprint),
+              ["macos", "windows", "linux"].contains(device.platformName?.lowercased() ?? "") else {
+            throw CrossnetControlFailure.sessionMutationRejected("desktop_direct_requires_trusted_host_identity")
+        }
+        return DiscoveredDevice(
+            id: device.id, name: device.name, ipv4: endpoint.host, ipv6: nil,
+            platformName: device.platformName, osVersion: device.osVersion,
+            modelName: device.modelName, chip: device.chip,
+            services: [], portMap: [BonjourInteropContract.remoteControlServiceType: Int(endpoint.port)],
+            remoteVideoFormats: device.remoteVideoFormats, connectionTypes: device.connectionTypes,
+            uniqueIdentifier: device.uniqueIdentifier, routeIdentifiers: [], source: device.source,
+            deviceId: deviceID, pubKeyFP: fingerprint, macSet: device.macSet
+        )
     }
 }
 

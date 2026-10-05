@@ -17,7 +17,13 @@ pub(crate) async fn command(args: CrossnetDesktopArgs) -> Result<()> {
         ),
         CrossnetDesktopSubcommand::Stop(args) => stop(&args.session_ref, args.output.json).await,
         CrossnetDesktopSubcommand::Start(args) => {
-            start(&args.device_ref, args.detach, args.output.json).await
+            start(
+                &args.device_ref,
+                args.host.zip(args.port),
+                args.detach,
+                args.output.json,
+            )
+            .await
         }
     }
 }
@@ -35,7 +41,7 @@ fn show(result: &DesktopResult, json: bool) -> Result<()> {
             if device.available {
                 "可请求画面与输入权限"
             } else {
-                "当前设备未提供被控主机能力"
+                "未自动发现画面服务，可用 IP／端口连接已配对主机"
             }
         );
     }
@@ -86,8 +92,17 @@ async fn stop(reference: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn start(target: &str, detach: bool, json: bool) -> Result<()> {
-    let mut result = skybridge_crossnet_client::desktop("start", Some(target)).await?;
+async fn start(
+    target: &str,
+    endpoint: Option<(std::net::Ipv4Addr, u16)>,
+    detach: bool,
+    json: bool,
+) -> Result<()> {
+    let mut result = if let Some((host, port)) = endpoint {
+        skybridge_crossnet_client::desktop_start_at(target, host, port).await?
+    } else {
+        skybridge_crossnet_client::desktop("start", Some(target)).await?
+    };
     let reference = result
         .sessions
         .first()
@@ -155,7 +170,9 @@ fn input(prompt: &str) -> Result<String> {
 }
 
 pub(crate) async fn menu(target: Option<&NearbyDevice>) -> Result<()> {
-    println!("远程桌面：1 打开画面并请求键鼠；2 会话状态；3 结束会话（回车返回）");
+    println!(
+        "远程桌面：1 自动发现连接；2 会话状态；3 结束会话；4 用 IP／端口连接已配对主机（回车返回）"
+    );
     match input("选择：")?.as_str() {
         "1" => {
             let result = skybridge_crossnet_client::desktop("devices", None).await?;
@@ -192,7 +209,34 @@ pub(crate) async fn menu(target: Option<&NearbyDevice>) -> Result<()> {
                 .checked_sub(1)
                 .and_then(|i| choices.get(i))
                 .ok_or_else(|| anyhow!("设备编号无效"))?;
-            start(&choice.device_ref, false, false).await
+            start(&choice.device_ref, None, false, false).await
+        }
+        "4" => {
+            let result = skybridge_crossnet_client::desktop("devices", None).await?;
+            let choices: Vec<_> = result
+                .devices
+                .iter()
+                .filter(|d| matches!(d.platform.as_deref(), Some("macos" | "windows" | "linux")))
+                .collect();
+            for (index, device) in choices.iter().enumerate() {
+                println!("{}. {}", index + 1, safe(&device.name));
+            }
+            if choices.is_empty() {
+                println!("未发现电脑身份，请先通过 /device 发现并配对。");
+                return Ok(());
+            }
+            let selected = input("选择已配对电脑（回车返回）：")?;
+            if selected.is_empty() {
+                return Ok(());
+            }
+            let choice = selected
+                .parse::<usize>()?
+                .checked_sub(1)
+                .and_then(|i| choices.get(i))
+                .ok_or_else(|| anyhow!("设备编号无效"))?;
+            let host = input("电脑 IPv4 地址：")?.parse::<std::net::Ipv4Addr>()?;
+            let port = input("SkyBridge 画面服务端口：")?.parse::<u16>()?;
+            start(&choice.device_ref, Some((host, port)), false, false).await
         }
         "2" => show(
             &skybridge_crossnet_client::desktop("status", None).await?,

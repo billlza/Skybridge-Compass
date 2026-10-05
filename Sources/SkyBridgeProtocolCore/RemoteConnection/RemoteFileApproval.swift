@@ -82,7 +82,7 @@ public struct RemoteFileApprovalState: Codable, Equatable, Sendable {
 @MainActor
 public final class RemoteFileApprovalRegistry {
     public static let shared = RemoteFileApprovalRegistry()
-    public typealias Revalidate = @MainActor @Sendable () throws -> Void
+    public typealias Revalidate = @MainActor @Sendable () async throws -> Void
     public typealias Authorize = @MainActor @Sendable () async throws -> Void
     /// Return false when the native request has already ended; it is never success.
     public typealias Resolve = @MainActor @Sendable (Bool) -> Bool
@@ -133,10 +133,10 @@ public final class RemoteFileApprovalRegistry {
         entry.deciding = true; entries[entry.prompt.id] = entry
         do {
             try Task.checkCancellation()
-            try entry.revalidate()
+            try await entry.revalidate()
             try await authorize()
             // The authorization check may suspend; validate the exact transfer owner again.
-            try entry.revalidate()
+            try await entry.revalidate()
             try Task.checkCancellation()
             guard let current = entries[entry.prompt.id], current.prompt == entry.prompt,
                   entry.prompt.expiresAtMilliseconds > Int64(Date().timeIntervalSince1970 * 1000) else {

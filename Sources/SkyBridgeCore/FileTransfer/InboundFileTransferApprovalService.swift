@@ -1,6 +1,7 @@
 import Combine
 import Foundation
 import OSLog
+import SkyBridgeProtocolCore
 
 @available(macOS 14.0, iOS 17.0, *)
 @MainActor
@@ -63,15 +64,34 @@ public final class InboundFileTransferApprovalService: ObservableObject {
         let timeoutTask: Task<Void, Never>
     }
     private static let maximumCoalescedWaiters = 8
-    private let decisionTimeout: Duration = .seconds(60)
+    private let decisionTimeout: Duration
+    private let remoteRegistry: RemoteFileApprovalRegistry
+    private var remoteBinding: RemoteFileApprovalBinding?
     private var waitersByRequestId: [UUID: [UUID: Waiter]] = [:]
     private var earlyDecisionByRequestId: [UUID: Decision] = [:]
 
-    private init() {}
+    init(decisionTimeout: Duration = .seconds(60), remoteRegistry: RemoteFileApprovalRegistry = .shared) {
+        self.decisionTimeout = decisionTimeout
+        self.remoteRegistry = remoteRegistry
+    }
 
-    public func decide(for request: Request) async -> Decision {
+    public func decide(for request: Request, remoteApproval: RemoteFileApprovalContext? = nil) async -> Decision {
+        guard !Task.isCancelled else { return .reject }
+        if let binding = remoteApproval?.binding {
+            do { try binding.validate() }
+            catch {
+                logger.error("Inbound CLI file approval binding is invalid")
+                return .reject
+            }
+            guard binding.transferID == request.transferId,
+                  binding.senderDeviceID == request.senderDeviceId.lowercased(),
+                  binding.fileName == request.fileName, binding.fileSize == request.fileSize else {
+                logger.error("Inbound CLI file approval does not match the native request")
+                return .reject
+            }
+        }
         if let pendingRequest {
-            if isSameTransferRequest(pendingRequest, request) {
+            if isSameTransferRequest(pendingRequest, request), remoteBinding == remoteApproval?.binding {
                 guard (waitersByRequestId[pendingRequest.id]?.count ?? 0)
                         < Self.maximumCoalescedWaiters else {
                     logger.warning("Inbound file transfer approval waiter limit reached")
@@ -85,6 +105,28 @@ public final class InboundFileTransferApprovalService: ObservableObject {
         }
 
         pendingRequest = request
+        remoteBinding = remoteApproval?.binding
+        if let remoteApproval {
+            do {
+                let components = decisionTimeout.components
+                let seconds = Double(components.seconds) + Double(components.attoseconds) / 1e18
+                _ = try remoteRegistry.register(
+                    binding: remoteApproval.binding, nativeRequestID: request.id,
+                    expiresAt: Date().addingTimeInterval(seconds),
+                    revalidate: remoteApproval.revalidate,
+                    resolve: { [weak self] allowed in
+                        guard let self, self.pendingRequest?.id == request.id else { return false }
+                        self.resolve(request, decision: allowed ? .allowOnce : .reject)
+                        return true
+                    }
+                )
+            } catch {
+                logger.error("Inbound CLI file approval registration failed: \(error.localizedDescription, privacy: .public)")
+                pendingRequest = nil
+                remoteBinding = nil
+                return .reject
+            }
+        }
         logger.info(
             "Inbound file transfer approval required transferId=\(request.transferId, privacy: .private) fileName=\(request.fileName, privacy: .private) sender=\(request.senderDeviceId, privacy: .private)"
         )
@@ -94,6 +136,8 @@ public final class InboundFileTransferApprovalService: ObservableObject {
 
     public func resolve(_ request: Request, decision: Decision) {
         guard pendingRequest?.id == request.id else { return }
+        remoteRegistry.remove(nativeRequestID: request.id)
+        remoteBinding = nil
         let waiters = waitersByRequestId
             .removeValue(forKey: request.id)
             .map { Array($0.values) }
@@ -169,6 +213,8 @@ public final class InboundFileTransferApprovalService: ObservableObject {
         if waiters.isEmpty {
             waitersByRequestId.removeValue(forKey: requestId)
             if pendingRequest?.id == requestId {
+                remoteRegistry.remove(nativeRequestID: requestId)
+                remoteBinding = nil
                 pendingRequest = nil
             }
         } else {

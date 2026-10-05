@@ -56,7 +56,8 @@ public enum NativeHandshakeConfiguration {
         snapshot: { try snapshot() }, apply: { try await apply($0, revision: $1, revalidate: $2) },
         readGrant: { try readGrant($0) }, writeGrant: { try writeGrant($0, allowed: $1) },
         approve: { await approve($0, profile: $1) },
-        approveFiles: { await approve($0, profile: nil) })
+        approveFiles: { await approve($0, profile: nil) },
+        fileApprovalSupported: true)
 
     private static func approve(_ identity: HandshakeManagementIdentity, profile: HandshakeProfile?) async -> HandshakeConfigurationService.Decision {
             let request = HandshakeConfigurationApproval.shared

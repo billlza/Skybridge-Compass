@@ -1988,7 +1988,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         service: NetService,
         timeoutSeconds: TimeInterval
     ) async throws -> ResolvedBonjourService {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ResolvedBonjourService, Error>) in
+        // Browsing already includes Apple peer-to-peer interfaces. Resolution
+        // must use the same scope or an AWDL-only result loses its SRV/address.
+        service.includesPeerToPeer = true
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ResolvedBonjourService, Error>) in
             let context = BonjourServiceResolveContext(
                 service: service,
                 timeoutSeconds: timeoutSeconds,
@@ -2888,7 +2891,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 endpointHostOrIP: endpointHostOrIP,
                 capabilities: latestPeerCapabilities,
                 sessionKeys: keys,
-                capabilityEvidence: acceptedClassicCapabilities
+                capabilityEvidence: acceptedClassicCapabilities,
+                peerAuthority: authenticatedRemoteAuthority
             )
             if let activeLease = classicTransferSessionLease {
                 guard await ClassicTransferSessionRegistry.shared

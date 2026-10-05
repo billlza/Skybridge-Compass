@@ -6490,7 +6490,8 @@ public class P2PDiscoveryService: BaseManager {
                 endpointHostOrIP: endpointHostOrIPForClassicTransfer,
                 capabilities: latestPeerCapabilities,
                 sessionKeys: keys,
-                capabilityEvidence: acceptedClassicCapabilities
+                capabilityEvidence: acceptedClassicCapabilities,
+                peerAuthority: authenticatedRemoteAuthority
             )
             if let activeLease = classicTransferSessionLease {
                 guard await ClassicTransferSessionRegistry.shared

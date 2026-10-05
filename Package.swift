@@ -93,9 +93,16 @@ func metalResource(_ path: String) -> Resource {
 }
 
 func webRTCTestLinkerSettings() -> [LinkerSetting] {
+    // Swift 6.4's default Swift Build engine supplies the test bundle's product
+    // root rpath. Adding it again produces duplicate-rpath linker diagnostics.
+    // Older SwiftPM runners still need the explicit path for WebRTC.framework.
+    #if compiler(>=6.4)
+    return []
+    #else
     [
         .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", swiftPMProductRootRPath], .when(platforms: [.macOS]))
     ]
+    #endif
 }
 
 let package = Package(

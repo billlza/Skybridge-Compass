@@ -48,7 +48,7 @@ public struct PairingTrustApprovalSheet: View {
                     }
 
                     if shouldShowVerificationStage {
-                        Section("验证码（用于 iOS PQC 身份验证）") {
+                        Section("配对验证码") {
                             if let code = service.pendingVerificationCode, !code.isEmpty {
                                 LabeledContent("6 位验证码") {
                                     Text(code)
@@ -212,7 +212,7 @@ public struct PairingTrustApprovalSheet: View {
 
     private var promptText: String {
         if isProtocolIdentityBindingPrompt {
-            return "请确认 Mac 与 iPhone/iPad 显示的 6 位验证码完全一致；一致后才允许建立协议身份 pin。"
+            return "请确认两台设备显示的 6 位验证码完全一致；一致后才允许信任此设备。"
         }
         return "该申请用于建立/更新 PQC 引导所需的 KEM 身份公钥信任信息。选择“始终允许”会记住该设备。"
     }
@@ -230,7 +230,7 @@ public struct PairingTrustApprovalSheet: View {
         if isProtocolIdentityBindingPrompt {
             return "协议身份确认已处理。另一端现在可以继续 SKR-1 signed KEM refresh。"
         }
-        return "请将上方 6 位验证码输入到 iPhone/iPad 的“PQC 身份验证”界面，以完成论文叙事中的 OOB pairing ceremony。"
+        return "请在另一台设备的配对界面核对或输入上方 6 位验证码，完成身份验证。"
     }
 
     private func resolve(_ decision: PairingTrustApprovalService.Decision) {

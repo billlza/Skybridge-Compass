@@ -1,5 +1,6 @@
 import XCTest
 import CryptoKit
+import SkyBridgeProtocolCore
 @testable import SkyBridgeCore
 
 final class ClassicTransferKeyMaterialTests: XCTestCase {
@@ -69,5 +70,34 @@ final class ClassicTransferKeyMaterialTests: XCTestCase {
         )
         let material = ClassicTransferKeyMaterial(sessionKeys: incomplete, transferId: transferID)
         XCTAssertNil(material.sessionReference)
+    }
+
+    func testAuthorityReplacementInvalidatesApprovalEvenIfWireKeysAreUnchanged() {
+        let first = ClassicTransferKeyMaterial(sessionKeys: keys(), transferId: transferID,
+            peerAuthority: .init(protocolSigningAlgorithm: .mlDSA65, protocolPublicKeyFingerprint: String(repeating: "a", count: 64)))
+        let replacement = ClassicTransferKeyMaterial(sessionKeys: keys(), transferId: transferID,
+            peerAuthority: .init(protocolSigningAlgorithm: .mlDSA65, protocolPublicKeyFingerprint: String(repeating: "b", count: 64)))
+        XCTAssertEqual(hex(first.transferKey), hex(replacement.transferKey))
+        XCTAssertFalse(first.matches(replacement))
+    }
+
+    func testApprovalBindingUsesAuthorityAndTranscriptFromTheFileSession() throws {
+        let fingerprint = String(repeating: "a", count: 64)
+        let material = ClassicTransferKeyMaterial(sessionKeys: keys(), transferId: transferID,
+            peerAuthority: .init(protocolSigningAlgorithm: .mlDSA65, protocolPublicKeyFingerprint: fingerprint))
+        let binding = try material.remoteFileApprovalBinding(transferID: transferID,
+            senderDeviceID: "00000000-0000-0000-0000-000000000002",
+            metadataTranscript: Data("authenticated metadata".utf8), fileName: "payload.bin", fileSize: 4,
+            fileSHA256: String(repeating: "b", count: 64))
+        XCTAssertEqual(binding.senderFingerprint, fingerprint)
+        XCTAssertEqual(binding.sessionReference, material.sessionReference)
+        XCTAssertEqual(binding.transferID, transferID)
+        XCTAssertEqual(binding.metadataDigest, "f9650574d87d4c6573baeb951dda3544020fe648822655b0cabb86cac421070c")
+        let unsupported = ClassicTransferKeyMaterial(sessionKeys: keys(), transferId: transferID)
+        XCTAssertThrowsError(try unsupported.remoteFileApprovalBinding(transferID: transferID,
+            senderDeviceID: binding.senderDeviceID, metadataTranscript: Data(),
+            fileName: binding.fileName, fileSize: binding.fileSize, fileSHA256: binding.fileSHA256)) { error in
+                XCTAssertEqual(error as? RemoteFileApprovalError, .unavailable)
+            }
     }
 }

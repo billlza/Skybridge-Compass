@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import SkyBridgeProtocolCore
 import struct SkyBridgeProtocolCore.ClassicTransferPeerCapabilities
 
 /// One immutable read of the keys that actually protect this file transfer.
@@ -11,10 +12,12 @@ struct ClassicTransferKeyMaterial: Sendable {
     let role: HandshakeRole
     let negotiatedSuite: CryptoSuite
     let approvalCapability: Bool?
+    let peerAuthority: AuthenticatedRemoteAuthority?
 
     func matches(_ other: Self) -> Bool {
         guard sessionReference == other.sessionReference, role == other.role,
-              negotiatedSuite == other.negotiatedSuite else { return false }
+               negotiatedSuite == other.negotiatedSuite,
+               peerAuthority == other.peerAuthority else { return false }
         return transferKey.withUnsafeBytes { lhs in
             other.transferKey.withUnsafeBytes { rhs in
                 guard lhs.count == rhs.count else { return false }
@@ -25,7 +28,9 @@ struct ClassicTransferKeyMaterial: Sendable {
         }
     }
 
-    init(sessionKeys: SessionKeys, transferId: String, capabilityEvidence: ClassicTransferPeerCapabilities? = nil) {
+    init(sessionKeys: SessionKeys, transferId: String, capabilityEvidence: ClassicTransferPeerCapabilities? = nil,
+         peerAuthority: AuthenticatedRemoteAuthority? = nil) {
+        self.peerAuthority = peerAuthority
         transferKey = sessionKeys.deriveClassicFileTransferKey(transferId: transferId)
         sessionReference = P2PEvidenceReference.sessionIncarnation(
             sessionID: sessionKeys.sessionId,
@@ -34,6 +39,19 @@ struct ClassicTransferKeyMaterial: Sendable {
         role = sessionKeys.role
         negotiatedSuite = sessionKeys.negotiatedSuite
         approvalCapability = capabilityEvidence?.approvalSupport(sessionID: sessionKeys.sessionId, transcriptHash: sessionKeys.transcriptHash)
+    }
+
+    func remoteFileApprovalBinding(transferID: String, senderDeviceID: String,
+                                   metadataTranscript: Data, fileName: String,
+                                   fileSize: Int64, fileSHA256: String) throws -> RemoteFileApprovalBinding {
+        guard let peerAuthority, let sessionReference else { throw RemoteFileApprovalError.unavailable }
+        return try RemoteFileApprovalBinding(
+            transferID: transferID, senderDeviceID: senderDeviceID,
+            senderFingerprint: peerAuthority.protocolPublicKeyFingerprint,
+            sessionReference: sessionReference,
+            metadataDigest: SHA256.hash(data: metadataTranscript).map { String(format: "%02x", $0) }.joined(),
+            fileName: fileName, fileSize: fileSize, fileSHA256: fileSHA256
+        )
     }
 }
 
@@ -46,6 +64,7 @@ struct ClassicTransferSessionSnapshot: Sendable {
     let endpointHostOrIP: String?
     let capabilities: [String]
     let capabilityEvidence: ClassicTransferPeerCapabilities?
+    let peerAuthority: AuthenticatedRemoteAuthority?
     let sessionKeys: SessionKeys
     let lastSeenAt: Date
 
@@ -58,6 +77,7 @@ struct ClassicTransferSessionSnapshot: Sendable {
         capabilities: [String],
         sessionKeys: SessionKeys,
         capabilityEvidence: ClassicTransferPeerCapabilities? = nil,
+        peerAuthority: AuthenticatedRemoteAuthority? = nil,
         lastSeenAt: Date = Date()
     ) {
         self.sessionId = sessionId
@@ -67,6 +87,7 @@ struct ClassicTransferSessionSnapshot: Sendable {
         self.endpointHostOrIP = endpointHostOrIP
         self.capabilities = capabilities
         self.capabilityEvidence = capabilityEvidence
+        self.peerAuthority = peerAuthority
         self.sessionKeys = sessionKeys
         self.lastSeenAt = lastSeenAt
     }
@@ -284,6 +305,7 @@ actor ClassicTransferSessionRegistry {
             ),
             sessionKeys: current.sessionKeys,
             capabilityEvidence: current.capabilityEvidence,
+            peerAuthority: current.peerAuthority,
             lastSeenAt: now
         )
         sessionsById[lease.sessionId] = SessionRegistration(
@@ -321,7 +343,8 @@ actor ClassicTransferSessionRegistry {
         pruneExpiredSessions(now: now)
         guard let registration = sessionsById[handle.snapshot.sessionId],
               registration.generation == handle.generation else { return nil }
-        return ClassicTransferKeyMaterial(sessionKeys: registration.snapshot.sessionKeys, transferId: transferId, capabilityEvidence: registration.snapshot.capabilityEvidence)
+        return ClassicTransferKeyMaterial(sessionKeys: registration.snapshot.sessionKeys, transferId: transferId,
+            capabilityEvidence: registration.snapshot.capabilityEvidence, peerAuthority: registration.snapshot.peerAuthority)
     }
 
     func activeSessions(now: Date = Date()) -> [ClassicTransferSessionSnapshot] {

@@ -1068,7 +1068,12 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             endpointHostOrIP: endpoint,
             capabilities: classicTransferCapabilities(remoteIdentityPayload: payload),
             sessionKeys: keys,
-            capabilityEvidence: acceptedClassicCapabilitiesLock.withLock { $0 }
+            capabilityEvidence: acceptedClassicCapabilitiesLock.withLock { $0 },
+            peerAuthority: handshakeOperationLock.withLock { _ in
+                guard let current = sessionKeysLock.withLock({ $0 }),
+                      current.sessionId == keys.sessionId, current.transcriptHash == keys.transcriptHash else { return nil }
+                return authenticatedRemoteAuthorityLock.withLock { $0 }
+            }
         )
 
         let activeSessionLease: ClassicTransferSessionRegistry.SessionLease
@@ -2964,10 +2969,14 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
     @available(macOS 14.0, iOS 17.0, *)
     func classicTransferKeyMaterial(transferId: String) throws -> ClassicTransferKeyMaterial {
-        guard let keys = sessionKeysLock.withLock({ $0 }) else {
-            throw P2PConnectionError.noSessionKeys
+        try handshakeOperationLock.withLock { _ in
+            guard let keys = sessionKeysLock.withLock({ $0 }) else {
+                throw P2PConnectionError.noSessionKeys
+            }
+            return ClassicTransferKeyMaterial(sessionKeys: keys, transferId: transferId,
+                capabilityEvidence: acceptedClassicCapabilitiesLock.withLock { $0 },
+                peerAuthority: authenticatedRemoteAuthorityLock.withLock { $0 })
         }
-        return ClassicTransferKeyMaterial(sessionKeys: keys, transferId: transferId, capabilityEvidence: acceptedClassicCapabilitiesLock.withLock { $0 })
     }
 
     @available(macOS 14.0, iOS 17.0, *)

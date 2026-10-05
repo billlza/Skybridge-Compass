@@ -75,6 +75,11 @@ pub(crate) enum CrossnetDesktopSubcommand {
 #[derive(Debug, Args)]
 pub(crate) struct CrossnetDesktopStartArgs {
     pub(crate) device_ref: String,
+    /// Explicit IPv4 route to this already paired host when Bonjour is unavailable.
+    #[arg(long, requires = "port")]
+    pub(crate) host: Option<std::net::Ipv4Addr>,
+    #[arg(long, requires = "host", value_parser = clap::value_parser!(u16).range(1..))]
+    pub(crate) port: Option<u16>,
     /// Report only request acceptance; does not claim first-frame or input readiness.
     #[arg(long)]
     pub(crate) detach: bool,
@@ -93,6 +98,54 @@ pub(crate) struct CrossnetDesktopStopArgs {
     pub(crate) session_ref: String,
     #[command(flatten)]
     pub(crate) output: OutputOptions,
+}
+
+#[cfg(test)]
+mod desktop_endpoint_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Fixture {
+        #[command(subcommand)]
+        command: CrossnetDesktopSubcommand,
+    }
+
+    #[test]
+    fn manual_endpoint_requires_both_fields_and_a_valid_port() {
+        let reference = "00000000-0000-0000-0000-000000000002";
+        assert!(
+            Fixture::try_parse_from(["test", "start", reference, "--host", "192.0.2.23"]).is_err()
+        );
+        assert!(Fixture::try_parse_from(["test", "start", reference, "--port", "59100"]).is_err());
+        assert!(
+            Fixture::try_parse_from([
+                "test",
+                "start",
+                reference,
+                "--host",
+                "192.0.2.23",
+                "--port",
+                "0"
+            ])
+            .is_err()
+        );
+        let parsed = Fixture::try_parse_from([
+            "test",
+            "start",
+            reference,
+            "--host",
+            "192.0.2.23",
+            "--port",
+            "59100",
+        ])
+        .unwrap();
+        let CrossnetDesktopSubcommand::Start(args) = parsed.command else {
+            panic!("unexpected command")
+        };
+        assert_eq!(args.host.unwrap().to_string(), "192.0.2.23");
+        assert_eq!(args.port, Some(59100));
+    }
 }
 
 #[derive(Debug, Args)]

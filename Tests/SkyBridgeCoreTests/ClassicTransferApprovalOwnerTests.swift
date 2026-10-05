@@ -6,7 +6,9 @@ import XCTest
 
 @MainActor
 final class ClassicTransferApprovalOwnerTests: XCTestCase {
-    private func snapshot(_ id: String, keyByte: UInt8 = 0x11, now: Date, capabilityEvidence: ClassicTransferPeerCapabilities? = nil) -> ClassicTransferSessionSnapshot {
+    private func snapshot(_ id: String, keyByte: UInt8 = 0x11, now: Date,
+                          capabilityEvidence: ClassicTransferPeerCapabilities? = nil,
+                          peerAuthority: AuthenticatedRemoteAuthority? = nil) -> ClassicTransferSessionSnapshot {
         ClassicTransferSessionSnapshot(
             sessionId: id, matchDeviceId: id, resolvedPeerDeviceId: id,
             aliases: [id], endpointHostOrIP: "127.0.0.1", capabilities: ["classic_approval_v1"],
@@ -14,7 +16,7 @@ final class ClassicTransferApprovalOwnerTests: XCTestCase {
                 sendKey: Data(repeating: keyByte, count: 32), receiveKey: Data(repeating: 0x22, count: 32),
                 negotiatedSuite: .x25519Ed25519, role: .initiator,
                 transcriptHash: Data(repeating: 0x33, count: 32), sessionId: id, createdAt: now
-            ), capabilityEvidence: capabilityEvidence, lastSeenAt: now
+            ), capabilityEvidence: capabilityEvidence, peerAuthority: peerAuthority, lastSeenAt: now
         )
     }
 
@@ -87,5 +89,33 @@ final class ClassicTransferApprovalOwnerTests: XCTestCase {
         XCTAssertNil(expired)
         let revived = await registry.refreshIfOwned(lease, now: now.addingTimeInterval(1))
         XCTAssertFalse(revived)
+    }
+
+    func testHeartbeatPreservesTheFileIdentityAndAuthenticatedReplacementInvalidatesIt() async throws {
+        let registry = ClassicTransferSessionRegistry.shared, now = Date()
+        let id = "approval-authority-\(UUID().uuidString)"
+        let authority = AuthenticatedRemoteAuthority(
+            protocolSigningAlgorithm: .mlDSA65, protocolPublicKeyFingerprint: String(repeating: "a", count: 64)
+        )
+        let lease = await registry.upsertOwned(session: snapshot(id, now: now, peerAuthority: authority))
+        let handles = await registry.activeSessionHandles(now: now)
+        let handle = try XCTUnwrap(handles.first { $0.snapshot.sessionId == id })
+        let initialValue = await registry.currentKeyMaterial(for: handle, transferId: "t", now: now)
+        let initial = try XCTUnwrap(initialValue)
+        let refreshed = await registry.refreshIfOwned(lease, capabilities: [], now: now.addingTimeInterval(1))
+        XCTAssertTrue(refreshed)
+        let refreshedMaterial = await registry.currentKeyMaterial(for: handle, transferId: "t", now: now.addingTimeInterval(1))
+        XCTAssertEqual(refreshedMaterial?.peerAuthority, authority)
+        let replacement = AuthenticatedRemoteAuthority(
+            protocolSigningAlgorithm: .mlDSA65, protocolPublicKeyFingerprint: String(repeating: "b", count: 64)
+        )
+        let updated = await registry.updateAuthenticatedSessionIfOwned(
+            lease, snapshot: snapshot(id, now: now, peerAuthority: replacement), now: now
+        )
+        XCTAssertTrue(updated)
+        let current = await registry.currentKeyMaterial(for: handle, transferId: "t", now: now)
+        XCTAssertFalse(initial.matches(try XCTUnwrap(current)))
+        let removed = await registry.remove(ifOwned: lease)
+        XCTAssertTrue(removed)
     }
 }

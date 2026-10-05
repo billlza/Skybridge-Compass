@@ -2063,14 +2063,15 @@ public class FileTransferManager: BaseManager {
     }
 
     @available(macOS 14.0, iOS 17.0, *)
-    private struct ClassicTransferSecurityContext {
-        struct ProductEvidenceBinding {
+    private struct ClassicTransferSecurityContext: Sendable {
+        struct ProductEvidenceBinding: Sendable {
             let sessionReference: String
             let handshakeRole: ProductReleaseEvidenceHandshakeRole
             let negotiatedSuite: CryptoSuite
         }
 
-        let transferKey: SymmetricKey
+        let keyMaterial: ClassicTransferKeyMaterial
+        var transferKey: SymmetricKey { keyMaterial.transferKey }
         let matchDeviceId: String
         let resolvedPeerDeviceId: String
         let matchedBy: ClassicTransferPeerResolutionBranch
@@ -2078,7 +2079,7 @@ public class FileTransferManager: BaseManager {
         let endpointCandidates: [String]
         let supportsClassicResume: Bool
         let approvalCapability: Bool?
-        let validateCurrentSession: @MainActor () async throws -> Void
+        let validateCurrentSession: @MainActor @Sendable () async throws -> Void
         let productEvidenceBinding: ProductEvidenceBinding?
     }
 
@@ -2367,7 +2368,7 @@ public class FileTransferManager: BaseManager {
         }
 
         let material: ClassicTransferKeyMaterial
-        let currentMaterial: @MainActor () async throws -> ClassicTransferKeyMaterial
+        let currentMaterial: @MainActor @Sendable () async throws -> ClassicTransferKeyMaterial
         switch selectedSource.keyOrigin {
         case .live(let connection):
             material = try connection.classicTransferKeyMaterial(
@@ -2406,7 +2407,7 @@ public class FileTransferManager: BaseManager {
         )
 
         return ClassicTransferSecurityContext(
-            transferKey: material.transferKey,
+            keyMaterial: material,
             matchDeviceId: resolution.matchDeviceId,
             resolvedPeerDeviceId: resolution.resolvedPeerDeviceId,
             matchedBy: resolution.matchedBy,
@@ -2423,6 +2424,29 @@ public class FileTransferManager: BaseManager {
             },
             productEvidenceBinding: productEvidenceBinding
         )
+    }
+
+    private func remoteFileApprovalContext(
+        for metadata: FileMetadata, securityContext: ClassicTransferSecurityContext,
+        lifecycleGeneration: UUID
+    ) async throws -> RemoteFileApprovalContext {
+        let binding = try securityContext.keyMaterial.remoteFileApprovalBinding(
+            transferID: metadata.transferId, senderDeviceID: securityContext.resolvedPeerDeviceId,
+            metadataTranscript: metadataAuthenticationInput(metadata),
+            fileName: sanitizeIncomingFileName(metadata.fileName),
+            fileSize: metadata.fileSize, fileSHA256: metadata.fileHash
+        )
+        let revalidate: RemoteFileApprovalRegistry.Revalidate = { [weak self] in
+            guard let self else { throw RemoteFileApprovalError.bindingChanged }
+            try self.ensureCurrentLifecycle(lifecycleGeneration)
+            try await securityContext.validateCurrentSession()
+            guard await DefaultHandshakeTrustProvider().currentPathTrustedFingerprints(for: binding.senderDeviceID)
+                .contains(binding.senderFingerprint) else { throw RemoteFileApprovalError.bindingChanged }
+            try self.ensureCurrentLifecycle(lifecycleGeneration)
+            try await securityContext.validateCurrentSession()
+        }
+        try await revalidate()
+        return RemoteFileApprovalContext(binding: binding, revalidate: revalidate)
     }
 
     private func beginProductFileTransferEvidenceIfPossible(
@@ -3738,7 +3762,23 @@ public class FileTransferManager: BaseManager {
                 sanitizeIncomingFileName(metadata.fileName)
             ).path
         )
-        let decision = await InboundFileTransferApprovalService.shared.decide(for: approvalRequest)
+        let remoteApproval: RemoteFileApprovalContext
+        do {
+            remoteApproval = try await remoteFileApprovalContext(
+                for: metadata, securityContext: resolvedSecurityContext, lifecycleGeneration: lifecycleGeneration
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            if metadata.approvalProtocol != nil {
+                try await sendFileApproval(metadata, refusal: .unavailable,
+                    securityContext: resolvedSecurityContext, to: connection)
+            }
+            throw error
+        }
+        let decision = await InboundFileTransferApprovalService.shared.decide(
+            for: approvalRequest, remoteApproval: remoteApproval
+        )
         guard decision == .allowOnce else {
             let error = FileTransferError.transferCancelled
             if metadata.approvalProtocol != nil {

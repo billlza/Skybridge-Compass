@@ -92,6 +92,22 @@ fn validate(
 }
 
 pub async fn desktop(operation: &str, reference: Option<&str>) -> Result<DesktopResult> {
+    desktop_at(operation, reference, None).await
+}
+
+pub async fn desktop_start_at(
+    reference: &str,
+    host: std::net::Ipv4Addr,
+    port: u16,
+) -> Result<DesktopResult> {
+    desktop_at("start", Some(reference), Some((host, port))).await
+}
+
+fn request_params(
+    operation: &str,
+    reference: Option<&str>,
+    endpoint: Option<(std::net::Ipv4Addr, u16)>,
+) -> Result<(String, Value)> {
     if !["devices", "start", "status", "stop"].contains(&operation) {
         bail!("unknown desktop operation");
     }
@@ -107,8 +123,28 @@ pub async fn desktop(operation: &str, reference: Option<&str>) -> Result<Desktop
             "session_ref"
         }] = json!(reference);
     }
+    if let (Some((host, port)), "start") = (endpoint, operation) {
+        let first = host.octets()[0];
+        if port == 0 || first == 0 || first == 127 || first >= 224 {
+            bail!("desktop endpoint requires a unicast IPv4 address and nonzero port");
+        }
+        params["host"] = json!(host.to_string());
+        params["port"] = json!(port);
+        return Ok(("crossnet.desktop.start_at".to_owned(), params));
+    }
+    if endpoint.is_some() {
+        bail!("desktop endpoint is only valid for start");
+    }
+    Ok((format!("crossnet.desktop.{operation}"), params))
+}
+
+async fn desktop_at(
+    operation: &str,
+    reference: Option<&str>,
+    endpoint: Option<(std::net::Ipv4Addr, u16)>,
+) -> Result<DesktopResult> {
+    let (method, params) = request_params(operation, reference, endpoint)?;
     let path = default_socket_path()?;
-    let method = format!("crossnet.desktop.{operation}");
     preflight_app_method_at_path(&path, &method).await?;
     validate(
         parse_result(&method, call_at_path(&path, &method, params).await?)?,
@@ -120,6 +156,33 @@ pub async fn desktop(operation: &str, reference: Option<&str>) -> Result<Desktop
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn direct_start_has_a_distinct_capability_and_complete_endpoint() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let host = "192.0.2.23".parse().unwrap();
+        let (method, params) = request_params("start", Some(&id), Some((host, 59100))).unwrap();
+        assert_eq!(method, "crossnet.desktop.start_at");
+        assert_eq!(params["device_ref"], id);
+        assert_eq!(params["host"], "192.0.2.23");
+        assert_eq!(params["port"], 59100);
+        assert!(request_params("status", Some(&id), Some((host, 59100))).is_err());
+        assert!(request_params("start", None, Some((host, 59100))).is_err());
+    }
+
+    #[test]
+    fn direct_start_rejects_invalid_routes_before_ipc() {
+        let id = uuid::Uuid::new_v4().to_string();
+        for address in ["0.0.0.0", "127.0.0.1", "224.0.0.1", "255.255.255.255"] {
+            assert!(
+                request_params("start", Some(&id), Some((address.parse().unwrap(), 59100)))
+                    .is_err()
+            );
+        }
+        assert!(
+            request_params("start", Some(&id), Some(("192.0.2.23".parse().unwrap(), 0))).is_err()
+        );
+    }
+
     fn response() -> DesktopResult {
         DesktopResult {
             runtime_target: "mac_app_runtime".into(),

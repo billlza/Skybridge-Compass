@@ -5,7 +5,7 @@ import SkyBridgeCore
 /// Request acceptance, authenticated stream setup and visible frames are separate.
 @MainActor
 final class OperatorDesktopRuntime {
-    static let methods = ["devices", "start", "status", "stop"].map { "crossnet.desktop." + $0 }
+    static let methods = ["devices", "start", "start_at", "status", "stop"].map { "crossnet.desktop." + $0 }
     @MainActor private final class Entry {
         let reference = UUID().uuidString
         let device: DiscoveredDevice
@@ -42,10 +42,14 @@ final class OperatorDesktopRuntime {
                     platform: target.platformName, available: supported,
                     reason: supported ? nil : "remote_host_not_advertised")
             })
-        case .start:
+        case .start, .startAt:
             guard let reference = request.reference,
-                  let target = targets().first(where: { $0.id.uuidString == reference }),
-                  discovery.supportsRemoteControl(target) else {
+                  var target = targets().first(where: { $0.id.uuidString == reference }) else {
+                throw CrossnetControlFailure.sessionMutationRejected("desktop_target_unavailable")
+            }
+            if let endpoint = request.endpoint {
+                target = try await OperatorDesktopRoute.directTarget(target, endpoint: endpoint)
+            } else if !discovery.supportsRemoteControl(target) {
                 throw CrossnetControlFailure.sessionMutationRejected("desktop_target_unavailable")
             }
             let key = RemoteControlManager.controlPeerIdentifier(for: target)
