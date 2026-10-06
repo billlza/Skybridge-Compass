@@ -182,4 +182,17 @@ final class NearFieldWorkspacePresentationTests: XCTestCase {
         XCTAssertEqual(dashboard.controlledHostSessions(matching: "").first?.error, "Receiver denied this session")
         XCTAssertFalse(workspace.canSendInput(to: "acceptance-mac"))
     }
+
+    func testDashboardDoesNotConstructUnusedDiscoveryManagersBeforeMounting() {
+        var constructions = 0
+        let workspace = ControlledHostWorkspace(concurrentHostLimit: 2) { PresentationEngine() }
+        func makeDiscovery() -> DeviceDiscoveryManagerOptimized {
+            constructions += 1
+            let discovery = DeviceDiscoveryManagerOptimized()
+            discovery.enableBonjourDiscovery = false
+            return discovery
+        }
+        for _ in 0..<3 { _ = RemoteDesktopView(workspace: workspace, discovery: makeDiscovery()) }
+        XCTAssertEqual(constructions, 0, "Only the StateObject retained by a mounted dashboard may construct discovery")
+    }
 }

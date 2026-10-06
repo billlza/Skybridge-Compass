@@ -32,9 +32,9 @@ struct RemoteDesktopView: View {
     @Environment(\.openWindow) private var openWindow  // macOS 14+ 标准窗口打开方式
 
     init(workspace: ControlledHostWorkspace = .shared,
-         discovery: DeviceDiscoveryManagerOptimized = DeviceDiscoveryManagerOptimized()) {
+         discovery: @autoclosure @escaping () -> DeviceDiscoveryManagerOptimized = DeviceDiscoveryManagerOptimized()) {
         _controlledHosts = ObservedObject(wrappedValue: workspace)
-        _nearFieldModel = StateObject(wrappedValue: NearFieldWorkspaceViewModel(discoveryManager: discovery, workspace: workspace))
+        _nearFieldModel = StateObject(wrappedValue: NearFieldWorkspaceViewModel(discoveryManager: discovery(), workspace: workspace))
     }
 
     var body: some View {
