@@ -9,6 +9,8 @@ final class NearFieldWorkspaceViewModel: ObservableObject {
     let workspace: ControlledHostWorkspace
     @Published var showsDevicePicker = true
     @Published var errorMessage: String?
+    @Published private(set) var desktopTargets: [OperatorDesktopRoute.Target] = []
+    private var catalogTask: Task<Void, Never>?
     private struct Action {
         let id: UUID
         let task: Task<Void, Never>
@@ -24,7 +26,32 @@ final class NearFieldWorkspaceViewModel: ObservableObject {
         self.workspace = workspace
     }
 
-    func startDiscovery() { discoveryManager.startScanning() }
+    func startDiscovery() {
+        discoveryManager.startScanning()
+        guard catalogTask == nil else { return }
+        let generation = lifetime
+        catalogTask = Task { @MainActor [weak self] in
+            while let self, self.lifetime == generation, !Task.isCancelled {
+                let targets = await OperatorDesktopRoute.targets(discovery: self.discoveryManager)
+                guard self.lifetime == generation, !Task.isCancelled else { return }
+                self.desktopTargets = targets
+                do { try await Task.sleep(for: .seconds(3)) }
+                catch is CancellationError { return }
+                catch {
+                    self.errorMessage = error.localizedDescription
+                    return
+                }
+            }
+        }
+    }
+
+    /// Leaving the dashboard stops only this observation. The native control
+    /// window retains ownership of live sessions.
+    func stopDiscovery() {
+        catalogTask?.cancel()
+        catalogTask = nil
+        discoveryManager.stopScanning()
+    }
 
     func refreshDiscovery() {
         discoveryManager.stopScanning()
@@ -85,7 +112,7 @@ final class NearFieldWorkspaceViewModel: ObservableObject {
         for action in actions.values { action.task.cancel() }
         actions.removeAll()
         workspace.stopAll()
-        discoveryManager.stopScanning()
+        stopDiscovery()
         showsDevicePicker = true
     }
 

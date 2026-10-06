@@ -36,15 +36,16 @@ final class OperatorDesktopRuntime {
         case .devices:
             discovery.startScanning()
             try await Task.sleep(for: .seconds(2))
-            return OperatorDesktopResult(operation: "devices", devices: targets().map { target in
-                let supported = discovery.supportsRemoteControl(target)
-                return OperatorDesktopDevice(deviceRef: target.id.uuidString, name: target.name,
-                    platform: target.platformName, available: supported,
-                    reason: supported ? nil : "remote_host_not_advertised")
+            return OperatorDesktopResult(operation: "devices", devices: await targets().map { target in
+                let supported = discovery.supportsRemoteControl(target.device)
+                let device = target.device
+                return OperatorDesktopDevice(deviceRef: device.id.uuidString, name: device.name,
+                    platform: device.platformName, available: supported,
+                    reason: supported ? nil : "remote_host_not_advertised", remoteControlPort: target.authenticatedPort)
             })
         case .start, .startAt:
             guard let reference = request.reference,
-                  var target = targets().first(where: { $0.id.uuidString == reference }) else {
+                  var target = await targets().first(where: { $0.device.id.uuidString == reference })?.device else {
                 throw CrossnetControlFailure.sessionMutationRejected("desktop_target_unavailable")
             }
             if let endpoint = request.endpoint {
@@ -128,7 +129,13 @@ final class OperatorDesktopRuntime {
             // not subsequently replace that state with a failure or close a new host.
             guard entry.phase != .closed && entry.phase != .stopping else { return }
             entry.error = error is CancellationError ? "desktop_start_cancelled" : failureCode(error)
-            do { if entry.ownsHost { try await retire(entry) } }
+            // The workspace has already stopped a failed engine. Preserve its
+            // bounded, reviewable failure row for every native desktop surface.
+            do {
+                if entry.ownsHost, workspace.sessions.first(where: { $0.id == entry.hostKey })?.state != .failed {
+                    try await retire(entry)
+                }
+            }
             catch { entry.error = "desktop_cleanup_failed" }
             entry.phase = .failed
         }
@@ -146,7 +153,7 @@ final class OperatorDesktopRuntime {
         var error = entry.error
         if !isTerminal(phase), phase != .stopping, entry.incarnation != nil, manager == nil {
             phase = .closed
-        } else if manager?.controllingSessionError != nil {
+        } else if !isTerminal(phase), manager?.controllingSessionError != nil {
             phase = .failed; error = "desktop_stream_failed"
         }
         let active = !isTerminal(phase)
@@ -160,18 +167,29 @@ final class OperatorDesktopRuntime {
                 && workspace.canSendInput(to: entry.hostKey), errorCode: error)
     }
 
-    private func targets() -> [DiscoveredDevice] {
-        var seen = Set<String>()
-        let account = UnifiedOnlineDeviceManager.shared.onlineDevices.flatMap {
-            UnifiedOnlineDeviceManager.shared.resolvedConnectableDiscoveredCandidates(for: $0, limit: 3)
-        }
-        return (discovery.discoveredDevices + account + P2PDiscoveryService.shared.connectedUSBControlDevices
-            + P2PDiscoveryService.shared.discoveredDevices)
-            .filter { !$0.isLocalDevice && seen.insert(RemoteControlManager.controlPeerIdentifier(for: $0)).inserted }
+    private func targets() async -> [OperatorDesktopRoute.Target] {
+        await OperatorDesktopRoute.targets(discovery: discovery)
     }
 
     private func isTerminal(_ phase: OperatorDesktopSession.Phase) -> Bool { phase == .closed || phase == .failed }
     private func failureCode(_ error: Error) -> String {
+        if let discovery = error as? DeviceDiscoveryError {
+            switch discovery {
+            case .connectionTimeout: return "desktop_connection_timeout"
+            case .connectionCancelled: return "desktop_connection_cancelled"
+            case .deviceNotConnected: return "desktop_target_unavailable"
+            case .scanningFailed: return "desktop_discovery_failed"
+            }
+        }
+        if let handshake = error as? HandshakeError, case .failed(let reason) = handshake {
+            switch reason {
+            case .suiteNegotiationFailed: return "desktop_suite_negotiation_failed"
+            case .signatureVerificationFailed: return "desktop_signature_verification_failed"
+            case .identityMismatch: return "desktop_identity_mismatch"
+            case .timeout: return "desktop_handshake_timeout"
+            default: return "desktop_handshake_failed"
+            }
+        }
         if case CrossnetControlFailure.sessionMutationRejected(let reason) = error,
            ["desktop_session_replaced", "desktop_stream_ended", "desktop_first_frame_timeout"].contains(reason) { return reason }
         return "desktop_start_failed"

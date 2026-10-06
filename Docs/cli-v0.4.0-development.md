@@ -37,6 +37,34 @@ separate claims.
 
 ## Validation ledger
 
+### Current Mac desktop contract (0.4.0-dev.11)
+
+`/desktop` and `crossnet desktop devices|start|status|stop` manage the native
+workspace. The main desktop page, control window, and terminal read the same
+nearby host catalog and workspace reservations, connected sessions, and failures.
+The main page previews the same received frame feed; keyboard and mouse events
+remain owned by the focused control window. A dashboard page change does not stop
+that window's sessions.
+
+`crossnet desktop devices --json` may include `remote_control_port`. This optional
+route hint comes from a fresh control-session snapshot for the exact stable
+device identity, authenticated protocol fingerprint, and current durable pin.
+Expired, unbound, conflicting, and out-of-range hints are omitted. It does not
+prove that a listener is reachable or that desktop access was approved. The
+manual IP/port menu offers this port as its default; no default is invented when
+the hint is absent. Older native runtimes may omit the field.
+
+Strict-PQC desktop startup refreshes expired public KEM material using the
+existing signed refresh protocol. It must not replace an active file connection,
+create a new pairing, or silently select a classical suite. A missing or changed
+protocol pin remains an explicit identity-verification boundary.
+
+Desktop request acceptance, actual first frame, input authorization, and usable
+input remain distinct result fields. `--detach` returns request acceptance only.
+The receiver owns session approval and system screen-recording/accessibility
+permissions. Physical frame/input acceptance and CI must name the exact deployed
+candidate; successful tests of an earlier candidate do not complete those gates.
+
 Evidence is retained in `Artifacts/cli-040-development-20260926/`.
 
 - Observed: Xcode 27.0 (27A266a), devicectl 642.16; physical iPhone and iPad

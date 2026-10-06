@@ -54,4 +54,67 @@ final class OperatorDesktopRouteTests: XCTestCase {
         XCTAssertThrowsError(try OperatorDesktopRequest(action: .startAt, params: .init(["device_ref": .string(id)])))
         XCTAssertThrowsError(try OperatorDesktopRequest(action: .startAt, params: .init(["device_ref": .string(id), "host": .string("192.0.2.23"), "port": .bool(true)])))
     }
+
+    private func session(capabilities: [String], identity: String? = nil, authority: String? = nil,
+                         age: TimeInterval = 0, now: Date) -> ClassicTransferSessionSnapshot {
+        ClassicTransferSessionSnapshot(sessionId: UUID().uuidString, matchDeviceId: "route-alias",
+            resolvedPeerDeviceId: identity ?? "id:" + deviceID, aliases: [deviceID], endpointHostOrIP: "192.0.2.23",
+            capabilities: capabilities,
+            sessionKeys: SessionKeys(sendKey: Data(repeating: 1, count: 32), receiveKey: Data(repeating: 2, count: 32),
+                negotiatedSuite: .qperiaptABI2PolicyBound, role: .initiator, transcriptHash: Data(repeating: 3, count: 32)),
+            peerAuthority: authority.map { .init(protocolSigningAlgorithm: .mlDSA65, protocolPublicKeyFingerprint: $0) },
+            lastSeenAt: now.addingTimeInterval(-age))
+    }
+
+    func testCurrentControlConnectionSuppliesPortAndNewerMetadataRetiresOldPort() {
+        let now = Date()
+        let old = session(capabilities: ["remoteControlPort=61609"], authority: fingerprint, age: 20, now: now)
+        let current = session(capabilities: ["remoteControlPort=58503"], authority: fingerprint, now: now)
+        XCTAssertEqual(OperatorDesktopRoute.authenticatedRemoteControlPort(for: device(), sessions: [old, current],
+            trustedFingerprints: [fingerprint], now: now), 58503)
+        let retired = session(capabilities: [], authority: fingerprint, now: now)
+        XCTAssertNil(OperatorDesktopRoute.authenticatedRemoteControlPort(for: device(), sessions: [old, retired],
+            trustedFingerprints: [fingerprint], now: now))
+    }
+
+    func testPortRequiresCurrentPinExactIdentityAndAuthenticatedAuthority() {
+        let now = Date()
+        let bound = session(capabilities: ["remoteControlPort=58503"], authority: fingerprint, now: now)
+        XCTAssertNil(OperatorDesktopRoute.authenticatedRemoteControlPort(for: device(), sessions: [bound],
+            trustedFingerprints: [], now: now))
+        for candidate in [
+            session(capabilities: ["remoteControlPort=58503"], now: now),
+            session(capabilities: ["remoteControlPort=58503"], authority: String(repeating: "b", count: 64), now: now),
+            session(capabilities: ["remoteControlPort=58503"], identity: UUID().uuidString, authority: fingerprint, now: now),
+            session(capabilities: ["remoteControlPort=58503"], identity: "host:192.0.2.23", authority: fingerprint, now: now)
+        ] {
+            XCTAssertNil(OperatorDesktopRoute.authenticatedRemoteControlPort(for: device(), sessions: [candidate],
+                trustedFingerprints: [fingerprint], now: now))
+        }
+        XCTAssertNil(OperatorDesktopRoute.authenticatedRemoteControlPort(for: device(platform: "ios"), sessions: [bound],
+            trustedFingerprints: [fingerprint], now: now))
+        XCTAssertNil(OperatorDesktopRoute.authenticatedRemoteControlPort(for: device(local: true), sessions: [bound],
+            trustedFingerprints: [fingerprint], now: now))
+    }
+
+    func testExpiredAndFutureDatedSessionsCannotSupplyPorts() {
+        let now = Date()
+        for age in [ClassicTransferSessionRegistry.sessionSnapshotTimeToLive + 0.01, -1] {
+            let stale = session(capabilities: ["remoteControlPort=58503"], authority: fingerprint, age: age, now: now)
+            XCTAssertNil(OperatorDesktopRoute.authenticatedRemoteControlPort(for: device(), sessions: [stale],
+                trustedFingerprints: [fingerprint], now: now))
+        }
+    }
+
+    func testRemotePortParserRejectsConflictingOrInvalidHints() {
+        for hints in [[], ["remoteControlPort=0"], ["remoteControlPort=65536"],
+            ["remoteControlPort=58503", "remote_control_port=58509"],
+            ["remoteControlPort=58503", "remoteControlPort=broken"]] {
+            XCTAssertNil(ClassicTransferPeerResolutionPolicy.advertisedRemoteControlPort(in: hints))
+        }
+        XCTAssertEqual(ClassicTransferPeerResolutionPolicy.advertisedRemoteControlPort(
+            in: ["fileTransferPort=8080", "remote-control-port=58503", "remoteControlPort=58503"]), 58503)
+        XCTAssertEqual(ClassicTransferPeerResolutionPolicy.advertisedClassicTransferPort(
+            in: ["fileTransferPort=broken", "fileTransferPort=8080", "fileTransferPort=8081"]), 8080)
+    }
 }

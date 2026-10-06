@@ -5,6 +5,9 @@ import CoreGraphics
 /// 远程桌面连接管理界面
 struct RemoteDesktopView: View {
     @StateObject private var remoteDesktopManager = RemoteDesktopManager.shared
+    @ObservedObject private var controlledHosts: ControlledHostWorkspace
+    @StateObject private var nearFieldModel: NearFieldWorkspaceViewModel
+    @State private var selectedControlledHostID: String?
     @State private var selectedSession: RemoteSessionSummary?
     @State private var isFullScreen = false
     @State private var showingConnectionSheet = false
@@ -27,6 +30,12 @@ struct RemoteDesktopView: View {
 
  // MARK: - macOS 15/26 窗口管理
     @Environment(\.openWindow) private var openWindow  // macOS 14+ 标准窗口打开方式
+
+    init(workspace: ControlledHostWorkspace = .shared,
+         discovery: DeviceDiscoveryManagerOptimized = DeviceDiscoveryManagerOptimized()) {
+        _controlledHosts = ObservedObject(wrappedValue: workspace)
+        _nearFieldModel = StateObject(wrappedValue: NearFieldWorkspaceViewModel(discoveryManager: discovery, workspace: workspace))
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -62,6 +71,16 @@ struct RemoteDesktopView: View {
             Text(settingsApplyError ?? "")
         }
         .onAppear(perform: bootstrapRemoteDesktopManagerIfNeeded)
+        .onAppear { nearFieldModel.startDiscovery() }
+        .onDisappear { nearFieldModel.stopDiscovery() }
+        .onReceive(controlledHosts.$sessions) { sessions in
+            if !sessions.contains(where: { $0.id == selectedControlledHostID }) {
+                selectedControlledHostID = sessions.first?.id
+            }
+        }
+        .onChange(of: selectedSession?.id) { _, id in
+            if id != nil { selectedControlledHostID = nil }
+        }
 // 订阅远程桌面管理器的会话发布，实时更新侧边栏列表
         .onReceive(remoteDesktopManager.sessions) { sessions in
 // 说明：该订阅仅更新会话快照，不改变连接状态
@@ -183,6 +202,16 @@ struct RemoteDesktopView: View {
     private var sessionList: some View {
         List(selection: $selectedSession) {
             Section(LocalizationManager.shared.localizedString("remote.activeSessions")) {
+                ForEach(controlledHostSessions) { session in
+                    Button { selectControlledHost(session) } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(session.name).font(.subheadline.weight(.medium))
+                            Text(controlledHostStatus(session)).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("remote.controlled-host." + session.id)
+                }
                 ForEach(filteredActiveSessions) { session in
                     SessionRowView(session: session, isSelected: selectedSession?.id == session.id)
                         .tag(session)
@@ -253,9 +282,12 @@ struct RemoteDesktopView: View {
     private var trustedActiveSessionsPanel: some View {
         remoteSurfacePanel(
             title: "Active Sessions",
-            trailing: filteredActiveSessions.isEmpty ? "No active session" : "\(filteredActiveSessions.count) active"
+            trailing: filteredActiveSessions.isEmpty && controlledHostSessions.isEmpty ? "No active session" : "\(filteredActiveSessions.count + controlledHostSessions.count) sessions"
         ) {
-            if filteredActiveSessions.isEmpty {
+            ForEach(controlledHostSessions) { session in
+                controlledHostCard(session)
+            }
+            if filteredActiveSessions.isEmpty && controlledHostSessions.isEmpty {
                 VStack(alignment: .leading, spacing: 14) {
                     Text("Remote desktops and validated local camera stream endpoints will appear here after connection.")
                         .font(.subheadline)
@@ -275,7 +307,7 @@ struct RemoteDesktopView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
+            } else if !filteredActiveSessions.isEmpty {
                 LazyVGrid(
                     columns: [
                         GridItem(.flexible(), spacing: 12),
@@ -289,15 +321,39 @@ struct RemoteDesktopView: View {
                     }
                 }
             }
+            ForEach(nearbyDesktopTargets, id: \.device.id) { target in
+                let device = target.device
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(device.name).font(.headline)
+                        Text(target.authenticatedPort == nil ? "已发现设备，等待画面服务信息" : "当前设备连接已报告画面服务")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("连接画面") {
+                        openWindow(id: "near-field-mirror")
+                        nearFieldModel.connect(to: device)
+                    }
+                    .disabled(!nearFieldModel.discoveryManager.supportsRemoteControl(device))
+                }
+                .padding(12)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
+            }
+            if let error = nearFieldModel.errorMessage ?? controlledHosts.lastError {
+                Text(error).font(.callout).foregroundStyle(.red)
+            }
         }
     }
 
     private var previewPanel: some View {
         remoteSurfacePanel(
             title: "Preview",
-            trailing: previewSession.map { "\(String(format: "%.0f", $0.frameLatencyMilliseconds)) ms" } ?? "Idle"
+            trailing: selectedControlledHost.map(controlledHostStatus)
+                ?? previewSession.map { "\(String(format: "%.0f", $0.frameLatencyMilliseconds)) ms" } ?? "Idle"
         ) {
-            if let session = previewSession {
+            if let session = selectedControlledHost {
+                controlledHostPreview(session)
+            } else if let session = previewSession {
                 VStack(spacing: 14) {
                     remoteDesktopToolbar(for: session)
                     remoteDisplayArea(for: session)
@@ -311,6 +367,92 @@ struct RemoteDesktopView: View {
                         RoundedRectangle(cornerRadius: 22, style: .continuous)
                             .fill(Color.black.opacity(0.22))
                     )
+            }
+        }
+    }
+
+    /// This is a projection of the shared workspace, including reservations and
+    /// reviewable failures. It never invents an RDP session or another decoder.
+    private var controlledHostSessions: [ControlledHostSessionSnapshot] {
+        controlledHostSessions(matching: searchText)
+    }
+
+    func controlledHostSessions(matching search: String) -> [ControlledHostSessionSnapshot] {
+        let keyword = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        return controlledHosts.sessions.filter { keyword.isEmpty || $0.name.localizedCaseInsensitiveContains(keyword) }
+    }
+
+    private var nearbyDesktopTargets: [OperatorDesktopRoute.Target] {
+        let activeIDs = Set(controlledHosts.sessions.map(\.id))
+        return nearFieldModel.desktopTargets.filter {
+            ["macos", "windows", "linux"].contains($0.device.platformName?.lowercased() ?? "")
+                && !activeIDs.contains(RemoteControlManager.controlPeerIdentifier(for: $0.device))
+                && (searchText.isEmpty || $0.device.name.localizedCaseInsensitiveContains(searchText))
+        }
+    }
+
+    private var selectedControlledHost: ControlledHostSessionSnapshot? {
+        controlledHosts.sessions.first { $0.id == selectedControlledHostID }
+    }
+
+    private func controlledHostStatus(_ session: ControlledHostSessionSnapshot) -> String {
+        switch session.state {
+        case .connecting: return "正在连接／等待主机授权"
+        case .connected: return "安全会话已建立"
+        case .disconnecting: return "正在断开"
+        case .failed: return "连接失败"
+        }
+    }
+
+    private func selectControlledHost(_ session: ControlledHostSessionSnapshot) {
+        selectedSession = nil
+        selectedControlledHostID = session.id
+    }
+
+    private func controlledHostCard(_ session: ControlledHostSessionSnapshot) -> some View {
+        HStack(spacing: 12) {
+            Button { selectControlledHost(session) } label: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(session.name).font(.headline)
+                    Text(controlledHostStatus(session)).font(.caption).foregroundStyle(.secondary)
+                    if let error = session.error { Text(error).font(.caption).foregroundStyle(.red) }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            Button(session.state == .connecting ? "取消连接" : "结束会话") {
+                nearFieldModel.disconnect(session.id)
+            }
+        }
+        .padding(12)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    @ViewBuilder
+    private func controlledHostPreview(_ session: ControlledHostSessionSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(session.name).font(.headline)
+                Spacer()
+                Button("打开画面与键鼠窗口") {
+                    openWindow(id: "near-field-mirror")
+                    if session.state == .connected { nearFieldModel.focus(on: session.id) }
+                }
+            }
+            if let incarnation = controlledHosts.sessionIncarnation(session.id),
+               let manager = controlledHosts.manager(for: session.id, incarnation: incarnation),
+               session.state == .connected {
+                // Preview reads the same frame feed. The control window owns
+                // focus and input; this second surface cannot duplicate events.
+                NearFieldControlCanvas(manager: manager, inputEnabled: false, onMouse: { _ in }, onKeyboard: { _ in })
+                    .frame(maxWidth: .infinity, minHeight: 420)
+                    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            } else {
+                VStack(spacing: 12) {
+                    if session.state == .connecting { ProgressView() }
+                    Text(session.error ?? controlledHostStatus(session))
+                }
+                .frame(maxWidth: .infinity, minHeight: 420)
             }
         }
     }

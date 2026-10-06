@@ -7,6 +7,8 @@ pub struct DesktopDevice {
     pub platform: Option<String>,
     pub available: bool,
     pub reason: Option<String>,
+    #[serde(default)]
+    pub remote_control_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -45,7 +47,10 @@ fn validate(
     let mut devices = std::collections::HashSet::new();
     for device in &result.devices {
         uuid::Uuid::parse_str(&device.device_ref)?;
-        if !devices.insert(&device.device_ref) || (device.available && device.reason.is_some()) {
+        if !devices.insert(&device.device_ref)
+            || (device.available && device.reason.is_some())
+            || device.remote_control_port == Some(0)
+        {
             bail!("contradictory desktop device capability");
         }
     }
@@ -181,6 +186,24 @@ mod tests {
         assert!(
             request_params("start", Some(&id), Some(("192.0.2.23".parse().unwrap(), 0))).is_err()
         );
+    }
+
+    #[test]
+    fn desktop_devices_accept_old_runtime_and_reject_a_zero_service_port() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let legacy = json!({"device_ref": id, "name": "paired host", "platform": "macos", "available": false, "reason": "remote_host_not_advertised"});
+        let mut device: DesktopDevice = serde_json::from_value(legacy).unwrap();
+        assert_eq!(device.remote_control_port, None);
+        let result = |device| DesktopResult {
+            runtime_target: "mac_app_runtime".into(),
+            operation: "devices".into(),
+            devices: vec![device],
+            sessions: vec![],
+        };
+        device.remote_control_port = Some(58503);
+        assert!(validate(result(device.clone()), "devices", None).is_ok());
+        device.remote_control_port = Some(0);
+        assert!(validate(result(device), "devices", None).is_err());
     }
 
     fn response() -> DesktopResult {

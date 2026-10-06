@@ -44,6 +44,9 @@ fn show(result: &DesktopResult, json: bool) -> Result<()> {
                 "未自动发现画面服务，可用 IP／端口连接已配对主机"
             }
         );
+        if let Some(port) = device.remote_control_port {
+            println!("  当前已认证连接报告的画面服务端口：{port}");
+        }
     }
     for session in &result.sessions {
         let state = match session.phase.as_str() {
@@ -235,7 +238,11 @@ pub(crate) async fn menu(target: Option<&NearbyDevice>) -> Result<()> {
                 .and_then(|i| choices.get(i))
                 .ok_or_else(|| anyhow!("设备编号无效"))?;
             let host = input("电脑 IPv4 地址：")?.parse::<std::net::Ipv4Addr>()?;
-            let port = input("SkyBridge 画面服务端口：")?.parse::<u16>()?;
+            let prompt = match choice.remote_control_port {
+                Some(port) => format!("SkyBridge 画面服务端口（回车使用当前连接报告的 {port}）："),
+                None => "SkyBridge 画面服务端口：".into(),
+            };
+            let port = selected_port(&input(&prompt)?, choice.remote_control_port)?;
             start(&choice.device_ref, Some((host, port)), false, false).await
         }
         "2" => show(
@@ -274,5 +281,30 @@ pub(crate) async fn menu(target: Option<&NearbyDevice>) -> Result<()> {
         }
         "" => Ok(()),
         _ => bail!("操作编号无效"),
+    }
+}
+
+fn selected_port(value: &str, current: Option<u16>) -> Result<u16> {
+    let port = if value.is_empty() {
+        current.ok_or_else(|| anyhow!("当前没有已认证的服务端口，请输入端口"))?
+    } else {
+        value.parse::<u16>()?
+    };
+    if port == 0 {
+        bail!("服务端口必须在 1...65535 之间");
+    }
+    Ok(port)
+}
+
+#[cfg(test)]
+mod port_tests {
+    use super::*;
+    #[test]
+    fn current_route_is_optional_and_manual_selection_stays_explicit() {
+        assert_eq!(selected_port("", Some(58503)).unwrap(), 58503);
+        assert_eq!(selected_port("58509", Some(58503)).unwrap(), 58509);
+        assert!(selected_port("", None).is_err());
+        assert!(selected_port("0", Some(58503)).is_err());
+        assert!(selected_port("65536", None).is_err());
     }
 }

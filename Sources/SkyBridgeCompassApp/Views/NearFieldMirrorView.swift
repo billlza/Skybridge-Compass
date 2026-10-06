@@ -231,7 +231,7 @@ struct NearFieldMirrorContent: View {
 
     private var availableDevices: [DiscoveredDevice] {
         var seen: Set<String> = []
-        return discovery.discoveredDevices.filter { device in
+        return model.desktopTargets.map(\.device).filter { device in
             discovery.supportsRemoteControl(device)
                 && (searchText.isEmpty || device.name.localizedCaseInsensitiveContains(searchText))
                 && seen.insert(RemoteControlManager.controlPeerIdentifier(for: device)).inserted

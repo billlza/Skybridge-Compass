@@ -28,6 +28,46 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
     }
 
     private let now = Date(timeIntervalSince1970: 1_700_000_000)
+
+    @MainActor
+    func testExpiredRefreshDoesNotTurnAnExistingProtocolPinIntoANewPairing() {
+        let action = P2PDiscoveryService.strictPQCOutboundPreflightAction(
+            trustedPeerKEMSuites: [], signedRefreshEvidence: nil,
+            pinnedProtocolFingerprints: [String(repeating: "a", count: 64)],
+            preferredTargetSuite: .qperiaptABI2PolicyBound)
+        XCTAssertEqual(action, .attemptSignedLANRefresh)
+    }
+
+    @MainActor
+    func testMissingProtocolPinStillRequiresExplicitIdentityBinding() {
+        let action = P2PDiscoveryService.strictPQCOutboundPreflightAction(
+            trustedPeerKEMSuites: [.qperiaptABI2PolicyBound], signedRefreshEvidence: nil,
+            pinnedProtocolFingerprints: [], preferredTargetSuite: .qperiaptABI2PolicyBound)
+        XCTAssertEqual(action, .attemptOOBProtocolIdentityBindingThenRefresh)
+    }
+
+    @MainActor
+    func testCurrentKEMRefreshMustMatchPinsExpiryAndRequestedSuite() {
+        let pin = String(repeating: "a", count: 64)
+        let changedPin = String(repeating: "b", count: 64)
+        func evidence(fingerprint: String = String(repeating: "a", count: 64), age: TimeInterval = 60,
+                      suites: [UInt16] = [CryptoSuite.qperiaptABI2PolicyBound.wireId]) -> PeerKEMBootstrapStore.SignedRefreshEvidence {
+            .init(deviceId: "paired-host", suiteWireIds: suites, source: "signed_lan_kem_refresh", keyId: "key",
+                  generation: 1, expiresAt: now.addingTimeInterval(age), protocolIdentityFingerprint: fingerprint,
+                  signingFingerprint: fingerprint, payloadHashHex: String(repeating: "c", count: 64), updatedAt: now)
+        }
+        func action(_ evidence: PeerKEMBootstrapStore.SignedRefreshEvidence, keys: Set<CryptoSuite> = [.qperiaptABI2PolicyBound])
+            -> P2PDiscoveryService.StrictPQCOutboundPreflightAction {
+            P2PDiscoveryService.strictPQCOutboundPreflightAction(trustedPeerKEMSuites: keys,
+                signedRefreshEvidence: evidence, pinnedProtocolFingerprints: [pin],
+                preferredTargetSuite: .qperiaptABI2PolicyBound, now: now)
+        }
+        XCTAssertEqual(action(evidence()), .proceed)
+        XCTAssertEqual(action(evidence(age: -1)), .attemptSignedLANRefresh)
+        XCTAssertEqual(action(evidence(fingerprint: changedPin)), .attemptSignedLANRefresh)
+        XCTAssertEqual(action(evidence(suites: [CryptoSuite.mlkem768MLDSA65.wireId])), .attemptSignedLANRefresh)
+        XCTAssertEqual(action(evidence(), keys: []), .attemptSignedLANRefresh)
+    }
     private let protocolPublicKey = Data(repeating: 0x33, count: 1184)
     private var fingerprint: String {
         ProtocolIdentityPublicKeys(

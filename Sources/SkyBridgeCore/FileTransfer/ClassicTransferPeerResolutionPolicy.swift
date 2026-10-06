@@ -230,6 +230,18 @@ enum ClassicTransferPeerResolutionPolicy {
     }
 
     nonisolated static func advertisedClassicTransferPort(in capabilities: [String]) -> Int? {
+        advertisedServicePort(in: capabilities, keys: ["filetransferport", "file_transfer_port", "transferport", "transfer_port"], requireUnambiguous: false)
+    }
+
+    nonisolated static func advertisedRemoteControlPort(in capabilities: [String]) -> UInt16? {
+        advertisedServicePort(in: capabilities, keys: ["remotecontrolport", "remote_control_port"], requireUnambiguous: true)
+            .flatMap(UInt16.init(exactly:))
+    }
+
+    private nonisolated static func advertisedServicePort(
+        in capabilities: [String], keys: Set<String>, requireUnambiguous: Bool
+    ) -> Int? {
+        var selected: Int?
         for capability in capabilities {
             let parts = capability.split(separator: "=", maxSplits: 1).map(String.init)
             guard parts.count == 2 else { continue }
@@ -237,17 +249,17 @@ enum ClassicTransferPeerResolutionPolicy {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .lowercased()
                 .replacingOccurrences(of: "-", with: "_")
-            guard key == "filetransferport" ||
-                    key == "file_transfer_port" ||
-                    key == "transferport" ||
-                    key == "transfer_port" else {
+            guard keys.contains(key) else { continue }
+            let rawPort = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let port = Int(rawPort), (1...65535).contains(port) else {
+                if requireUnambiguous { return nil }
                 continue
             }
-            let rawPort = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let port = Int(rawPort), (1...65535).contains(port) else { continue }
-            return port
+            if !requireUnambiguous { return port }
+            if let selected, selected != port { return nil }
+            selected = port
         }
-        return nil
+        return selected
     }
 
     nonisolated static func isInboundPreMetadataDisconnect(_ error: Error) -> Bool {

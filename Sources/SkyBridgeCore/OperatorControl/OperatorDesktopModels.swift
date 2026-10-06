@@ -52,6 +52,60 @@ public struct OperatorDesktopEndpoint: Sendable, Equatable {
 }
 
 public enum OperatorDesktopRoute {
+    public struct Target {
+        public let device: DiscoveredDevice
+        public let authenticatedPort: UInt16?
+    }
+
+    #if os(macOS)
+    /// Both the terminal and native desktop surfaces resolve the same devices.
+    @MainActor
+    public static func targets(discovery: DeviceDiscoveryManagerOptimized) async -> [Target] {
+        var seen = Set<String>()
+        let account = UnifiedOnlineDeviceManager.shared.onlineDevices.flatMap {
+            UnifiedOnlineDeviceManager.shared.resolvedConnectableDiscoveredCandidates(for: $0, limit: 3)
+        }
+        let devices = (discovery.discoveredDevices + account + P2PDiscoveryService.shared.connectedUSBControlDevices
+            + P2PDiscoveryService.shared.discoveredDevices)
+            .filter { !$0.isLocalDevice && seen.insert(RemoteControlManager.controlPeerIdentifier(for: $0)).inserted }
+        var result: [Target] = []
+        for var device in devices {
+            let port = await authenticatedRemoteControlPort(for: device)
+            if let port { device.portMap[BonjourInteropContract.remoteControlServiceType] = Int(port) }
+            result.append(Target(device: device, authenticatedPort: port))
+        }
+        return result
+    }
+    #endif
+
+    /// A route hint from a live, identity-authenticated control connection.
+    /// The desktop handshake and host permissions still establish actual access.
+    @MainActor
+    public static func authenticatedRemoteControlPort(for device: DiscoveredDevice) async -> UInt16? {
+        guard let deviceID = device.deviceId else { return nil }
+        let fingerprints = await DefaultHandshakeTrustProvider().currentPathTrustedFingerprints(for: deviceID)
+        let sessions = await ClassicTransferSessionRegistry.shared.activeSessions()
+        return authenticatedRemoteControlPort(for: device, sessions: sessions, trustedFingerprints: fingerprints)
+    }
+
+    static func authenticatedRemoteControlPort(
+        for device: DiscoveredDevice, sessions: [ClassicTransferSessionSnapshot],
+        trustedFingerprints: Set<String>, now: Date = Date()
+    ) -> UInt16? {
+        guard !device.isLocalDevice, let deviceID = device.deviceId.flatMap(UUID.init(uuidString:)),
+              let fingerprint = device.pubKeyFP?.lowercased(), trustedFingerprints.contains(fingerprint),
+              ["macos", "windows", "linux"].contains(device.platformName?.lowercased() ?? "") else { return nil }
+        // A newer authenticated snapshot with no port retires the old hint.
+        let newest = sessions.filter {
+            let canonical = PeerSessionArbiter.canonicalSOAIdentifier($0.resolvedPeerDeviceId)
+            return UUID(uuidString: canonical) == deviceID
+        }.max { $0.lastSeenAt < $1.lastSeenAt }
+        guard let newest, let authority = newest.peerAuthority,
+              authority.protocolPublicKeyFingerprint.lowercased() == fingerprint,
+              (0...ClassicTransferSessionRegistry.sessionSnapshotTimeToLive).contains(now.timeIntervalSince(newest.lastSeenAt)) else { return nil }
+        return ClassicTransferPeerResolutionPolicy.advertisedRemoteControlPort(in: newest.capabilities)
+    }
+
     @MainActor
     public static func directTarget(_ device: DiscoveredDevice, endpoint: OperatorDesktopEndpoint) async throws -> DiscoveredDevice {
         guard let deviceID = device.deviceId, UUID(uuidString: deviceID) != nil else {
@@ -89,10 +143,12 @@ public struct OperatorDesktopDevice: Codable, Sendable {
     public let platform: String?
     public let available: Bool
     public let reason: String?
+    public let remote_control_port: UInt16?
 
-    public init(deviceRef: String, name: String, platform: String?, available: Bool, reason: String?) {
+    public init(deviceRef: String, name: String, platform: String?, available: Bool, reason: String?, remoteControlPort: UInt16? = nil) {
         device_ref = deviceRef; self.name = name; self.platform = platform
         self.available = available; self.reason = reason
+        remote_control_port = remoteControlPort
     }
 }
 

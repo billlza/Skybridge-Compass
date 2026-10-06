@@ -3089,7 +3089,7 @@ public class P2PDiscoveryService: BaseManager {
         }
     }
 
-    private enum StrictPQCOutboundPreflightAction: Equatable {
+    enum StrictPQCOutboundPreflightAction: Equatable {
         case proceed
         case attemptSignedLANRefresh
         case attemptOOBProtocolIdentityBindingThenRefresh
@@ -3114,6 +3114,48 @@ public class P2PDiscoveryService: BaseManager {
         let fingerprint: String
         let endpoint: NWEndpoint
         let transactionReference: String
+    }
+
+    /// Refreshes expired public KEM material for an already paired desktop host.
+    /// Uses the existing signed refresh protocol without replacing an active P2P
+    /// connection, creating trust, or attempting a classical bootstrap.
+    public func prepareRemoteControlHandshakeMaterial(for candidate: DiscoveredDevice) async throws {
+        let compatibility = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
+        let policy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibility)
+        guard policy.requirePQC else { return }
+        let device = resolveLatestConnectableDevice(from: candidate)
+        let identities = Self.stableProtocolIdentityCandidates(for: device)
+        guard let deviceID = Self.uniqueStableProtocolIdentityCandidate(from: identities) else {
+            throw P2PDiscoveryError.strictPQCTrustPreflightFailed("desktop host requires a stable paired identity")
+        }
+        let provider = DefaultHandshakeTrustProvider()
+        let pins = await provider.currentPathTrustedFingerprints(for: deviceID)
+        guard !pins.isEmpty,
+              device.pubKeyFP.map({ pins.contains($0.lowercased()) }) ?? true else {
+            throw P2PDiscoveryError.strictPQCTrustPreflightFailed("desktop host has no matching current protocol pin")
+        }
+        guard let preferred = await Self.preferredStrictPQCOutboundTargetSuite() else {
+            throw P2PDiscoveryError.strictPQCTrustPreflightFailed("local PQC provider unavailable")
+        }
+        let candidates = Self.outboundStrictPQCTrustCandidates(for: device, stableTarget: deviceID)
+        let keys = await provider.trustedKEMPublicKeys(for: deviceID)
+        let evidence = await PeerKEMBootstrapStore.shared.signedRefreshEvidence(forCandidates: candidates)
+        if Self.strictPQCOutboundPreflightAction(trustedPeerKEMSuites: Set(keys.keys),
+            signedRefreshEvidence: evidence, pinnedProtocolFingerprints: pins,
+            preferredTargetSuite: preferred) == .proceed { return }
+        let endpoints = try await liveBonjourEndpointAttemptsAwaitingHydration(
+            for: device, serviceTypes: [BonjourInteropContract.controlServiceType])
+        guard !endpoints.isEmpty else {
+            throw P2PDiscoveryError.strictPQCTrustPreflightFailed("current signed KEM refresh requires a live control route")
+        }
+        try Task.checkCancellation()
+        _ = try await attemptOutboundSignedLANKEMRefresh(
+            for: device, targetDeviceId: deviceID, candidates: candidates, endpoints: endpoints,
+            pinnedProtocolFingerprints: pins, preferredTargetSuite: preferred)
+        try Task.checkCancellation()
+        guard await provider.currentPathTrustedFingerprints(for: deviceID) == pins else {
+            throw P2PDiscoveryError.strictPQCTrustPreflightFailed("desktop host protocol pins changed during refresh")
+        }
     }
 
     private func ensureStrictPQCOutboundPreflightReady(
@@ -3924,31 +3966,35 @@ public class P2PDiscoveryService: BaseManager {
         return unique.isEmpty ? [.mlkem768MLDSA65] : unique
     }
 
-    private static func strictPQCOutboundPreflightAction(
+    static func strictPQCOutboundPreflightAction(
         trustedPeerKEMSuites: Set<CryptoSuite>,
         signedRefreshEvidence: PeerKEMBootstrapStore.SignedRefreshEvidence?,
         pinnedProtocolFingerprints: Set<String>,
-        preferredTargetSuite: CryptoSuite?
+        preferredTargetSuite: CryptoSuite?,
+        now: Date = Date()
     ) -> StrictPQCOutboundPreflightAction {
         let normalizedPins = Set(pinnedProtocolFingerprints.compactMap(normalizedFingerprint))
         guard !normalizedPins.isEmpty else {
             return .attemptOOBProtocolIdentityBindingThenRefresh
         }
-        if signedRefreshEvidenceSatisfiesStrictPQC(
+        if let evidence = signedRefreshEvidence,
+           evidence.source == "signed_lan_kem_refresh",
+           let authority = evidence.protocolIdentityFingerprint.flatMap(normalizedFingerprint),
+           let signing = evidence.signingFingerprint.flatMap(normalizedFingerprint),
+           normalizedPins.contains(authority), normalizedPins.contains(signing),
+           evidence.expiresAt.map({ $0 > now }) == true,
+           signedRefreshEvidenceSatisfiesStrictPQC(
             signedRefreshEvidence,
+            preferredTargetSuite: preferredTargetSuite
+        ), canSatisfyStrictPQCWithTrustedKEM(
+            trustedPeerKEMSuites: trustedPeerKEMSuites,
             preferredTargetSuite: preferredTargetSuite
         ) {
             return .proceed
         }
-        if signedRefreshEvidence == nil {
-            return .attemptOOBProtocolIdentityBindingThenRefresh
-        }
-        if canSatisfyStrictPQCWithTrustedKEM(
-            trustedPeerKEMSuites: trustedPeerKEMSuites,
-            preferredTargetSuite: preferredTargetSuite
-        ) {
-            return .attemptSignedLANRefresh
-        }
+        // Public KEM expiry does not revoke durable pairing. Authenticate the
+        // refresh with the existing protocol pins before considering any OOB
+        // repair; the signed refresh path retains its exact rejection checks.
         return .attemptSignedLANRefresh
     }
 

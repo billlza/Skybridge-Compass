@@ -752,6 +752,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         guard supportsRemoteControl(device) else {
             throw DeviceDiscoveryError.deviceNotConnected
         }
+        try await P2PDiscoveryService.shared.prepareRemoteControlHandshakeMaterial(for: device)
+        try Task.checkCancellation()
         // The primary P2P port also exists on viewer-only devices. A control
         // session must never fall through to that unrelated file/signaling port.
         var remoteHost = device

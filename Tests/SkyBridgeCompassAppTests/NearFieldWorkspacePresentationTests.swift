@@ -120,12 +120,11 @@ final class NearFieldWorkspacePresentationTests: XCTestCase {
         try await connect("a", named: "办公 Mac · MacBook Pro", to: workspace)
         try await connect("b", named: "测试 Mac · Mac mini", to: workspace)
         let model = NearFieldWorkspaceViewModel(workspace: workspace)
+        let content = NearFieldMirrorContent(model: model)
+            .environment(\.colorScheme, .dark)
+        let host = NSHostingView(rootView: content)
 
         for size in [CGSize(width: 800, height: 600), CGSize(width: 1000, height: 700)] {
-            let content = NearFieldMirrorContent(model: model).workspaceContent
-                .environment(\.colorScheme, .dark)
-                .frame(width: size.width, height: size.height)
-            let host = NSHostingView(rootView: content)
             host.frame = CGRect(origin: .zero, size: size)
             host.layoutSubtreeIfNeeded()
             let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
@@ -151,5 +150,36 @@ final class NearFieldWorkspacePresentationTests: XCTestCase {
             let connection = NWConnection(host: "127.0.0.1", port: 9, using: .tcp)
             return ControlledHostConnection(connection: connection, onAbandon: { connection.cancel() })
         }
+    }
+
+    func testDesktopDashboardProjectsTheSameConnectingAndFailedWorkspaceRows() async throws {
+        let engine = PresentationEngine()
+        let workspace = ControlledHostWorkspace(concurrentHostLimit: 2) { engine }
+        let discovery = DeviceDiscoveryManagerOptimized()
+        discovery.enableBonjourDiscovery = false
+        let dashboard = RemoteDesktopView(workspace: workspace, discovery: discovery)
+        defer { workspace.stopAll() }
+        let device = DiscoveredDevice(id: UUID(), name: "Acceptance Mac", ipv4: nil, ipv6: nil,
+                                      services: [], portMap: [:], deviceId: "acceptance-mac")
+        var release: CheckedContinuation<Void, Never>?
+        let pending = Task { @MainActor in
+            try await workspace.connect(to: device) {
+                await withCheckedContinuation { release = $0 }
+                let connection = NWConnection(host: "127.0.0.1", port: 9, using: .tcp)
+                return ControlledHostConnection(connection: connection, onAbandon: { connection.cancel() })
+            }
+        }
+        for _ in 0..<100 where release == nil { await Task.yield() }
+        XCTAssertNotNil(release)
+        XCTAssertEqual(dashboard.controlledHostSessions(matching: "").map(\.name), [device.name])
+        XCTAssertEqual(dashboard.controlledHostSessions(matching: "").first?.state, .connecting)
+        XCTAssertTrue(dashboard.controlledHostSessions(matching: "Another Mac").isEmpty)
+        release?.resume()
+        try await pending.value
+        XCTAssertEqual(dashboard.controlledHostSessions(matching: "Acceptance").first?.state, .connected)
+        engine.errors.send("Receiver denied this session")
+        XCTAssertEqual(dashboard.controlledHostSessions(matching: "").first?.state, .failed)
+        XCTAssertEqual(dashboard.controlledHostSessions(matching: "").first?.error, "Receiver denied this session")
+        XCTAssertFalse(workspace.canSendInput(to: "acceptance-mac"))
     }
 }
