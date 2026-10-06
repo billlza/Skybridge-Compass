@@ -62,6 +62,8 @@ final class NearFieldWorkspaceViewModel: ObservableObject {
         let key = RemoteControlManager.controlPeerIdentifier(for: device)
         runAction(key: key) { [self] in
             try await workspace.connect(to: device) { [discoveryManager] in
+                try await P2PDiscoveryService.shared.prepareRemoteControlHandshakeMaterial(for: device)
+                try Task.checkCancellation()
                 let connection = try await discoveryManager.makeRemoteControlConnection(to: device)
                 return ControlledHostConnection(connection: connection, onAbandon: { connection.cancel() })
             }

@@ -101,6 +101,8 @@ final class OperatorDesktopRuntime {
                 try Task.checkCancellation()
                 entry.incarnation = workspace.sessionIncarnation(entry.hostKey)
                 entry.ownsHost = true
+                try await P2PDiscoveryService.shared.prepareRemoteControlHandshakeMaterial(for: entry.device)
+                try Task.checkCancellation()
                 let connection = try await discovery.makeRemoteControlConnection(to: entry.device)
                 return ControlledHostConnection(connection: connection, onAbandon: { connection.cancel() })
             }
