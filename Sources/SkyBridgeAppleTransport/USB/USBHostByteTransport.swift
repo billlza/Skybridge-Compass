@@ -167,7 +167,7 @@ public final class USBHostByteTransport: Sendable {
 
 /// Non-Sendable Foundation handles remain private. Only start and the documented finished
 /// getter are used under this lock. Worker bodies do not retain their own lifetime handle.
-private final class USBHostThread: Sendable {
+final class USBHostThread: Sendable {
     private let storage = OSAllocatedUnfairLock<Thread?>(uncheckedState: nil)
     func start(name: String, body: @escaping @Sendable () -> Void) {
         storage.withLock { value in

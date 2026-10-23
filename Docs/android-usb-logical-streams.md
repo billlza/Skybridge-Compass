@@ -307,3 +307,83 @@ bootstrap-route wiring, Android accessory/application adoption, current physical
 AOA interchange/driver coexistence, native PQC over USB, account/offline grants,
 the separate file service and strict audio output remain open. No app or device
 was installed or reconfigured by this stage; Q-Periapt is unchanged.
+
+## Selected Android accessory startup
+
+`USBHostAccessoryPreparation` owns a separate device-control worker before any
+native acquisition. Query sends AOA request 51 only. Start validates a fresh
+nonzero canonical UUID, queries version 1/2, sends the six fixed product strings
+with request 52, then sends request 53 once. The metadata matches the Android
+product handler (`SkyBridge`, `SkyBridge USB Link`, version `1`); URI and serial
+contain the same attachment nonce. This selects a handler and physical generation,
+not a trusted peer. The existing signed MAIN handshake and account/effect
+permissions are still required.
+
+The selected IORegistry generation is checked before acquiring the public
+IOUSBLib device-control interface. This path never opens or seizes a USB
+interface, resets a device, stops ADB, disables a driver or creates an IP route.
+An already-active AOA attachment is rejected before its metadata is overwritten.
+Each native request has at most two seconds; one 18-second elapsed budget covers
+acquisition plus requests and is never renewed by a partial response. Exact known
+byte counts are required. Acquisition and release themselves have no universal
+OS hard deadline, so cancellation retires only the in-memory attempt; a bounded
+cleanup observer cannot abandon a live worker or assert reference release.
+
+The receipt keeps identification attempts/completions, request-53 submission,
+request-53 completion, operation failure and cleanup failure separately. A
+cancelled attempt may still have completed its mode change, which the receipt
+must preserve. The driver stays owned after unconfirmed release. Completed
+release with an error remains an error. A closed preparation cannot start a
+worker later. No ambiguous mode change is automatically retried.
+
+`USBCConnectionManager.prepareAndroidUSB` uses the selected device's actual
+registry and location IDs and a fresh nonce. Its application-level owner remains
+admitted through worker cleanup and caller completion. A parallel cleanup
+observer cannot admit a replacement while that caller is still completing, nor
+clear a newer owner. Missing routing metadata, revocation and unconfirmed cleanup
+fail explicitly. This is an app integration API; the Mac UI and native Android
+bootstrap-route wiring are not completed by adding it.
+
+The 53 C boundary cases pass under Address/UndefinedBehaviorSanitizer and
+ThreadSanitizer. Eight Swift ownership groups pass using the instrumented actual
+module. The first Swift run exposed retirement-before-run admitting a new worker;
+its source snapshot and failing result are retained beside the passing revision.
+These are boundary/ownership checks, not physical data-transfer or playback proof.
+Source-bound receipts are under the Android worktree's
+`artifacts/apple-android-usb-startup-20261023/`.
+
+Protocol and platform references:
+[Android Open Accessory 1.0](https://source.android.com/docs/core/interaction/accessories/aoa),
+[Apple DeviceRequestTO](https://developer.apple.com/documentation/iokit/iousbdeviceinterface182/1559217-devicerequestto).
+The local SDK declaration and actual native calls determine the implementation;
+accessory negotiation alone never qualifies the later bulk/authentication/audio path.
+
+On the connected SM-S948U1, the compiled public preparation owner queried version
+2, completed all six metadata writes and completed request 53 once, with worker
+exit and native reference release confirmed. IORegistry then showed a new
+`18d1:2d01` device at the same location. Android reported the exact product
+manufacturer/model/version and matching URI/serial nonce, with USB permission
+assigned to the installed product application's UID. The installed APK hash
+matches the Android product-entry revision. The app's Devices page was observed,
+then its listener reported a socket timeout while no Mac MAIN peer was running.
+This is not secure-session acceptance or observed playback.
+
+The public byte owner then failed ordinary `USBInterfaceOpen` with
+`kIOReturnExclusiveAccess` (`0xe00002c5`, phase OPEN). Its workers exited and its
+native references were released. The selected interface 0 had SamsungAOA attached;
+ADB clients were under interface 1. This locates the blocking native boundary and
+shows a competing driver on the selected interface; no driver-removal comparison
+was performed, so sole causation is not asserted. No interface was seized and no
+driver was disabled. An attempted Android UI retry is excluded from evidence
+because the foreground changed between observations. No ready-state screenshot
+or stop/replay acceptance is claimed. Unrelated UI captures were discarded with
+an invalid-observation record retained. The phone was returned to
+`sec_charging,adb`; the initial restore command lost its transport, and a fresh
+read via the other existing ADB server confirmed the restored mode.
+
+The strict normal build and 15 selected Core preparation/discovery tests pass,
+with no source drift, compiler warnings treated as errors and linker warnings
+fatal. Current physical bulk data, native MAIN bootstrap/cryptography, account
+grants and audio remain unverified. Mac UI startup wiring is still open. The
+original authentication and strict-output requirements and Q-Periapt version
+are unchanged.

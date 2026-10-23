@@ -35,14 +35,13 @@ final class USBInterfaceDescriptorTests: XCTestCase {
 
     func testUSBCManagerInitializerDoesNotImplicitlyScanUSB() throws {
         let source = try readSource("Sources/SkyBridgeCore/Connection/USBCConnectionManager.swift")
-        let initializer = try extractBody(
-            named: "public init()",
-            from: source
-        )
-        XCTAssertFalse(
-            initializer.contains("scanForUSBDevices"),
-            "USBCConnectionManager construction must stay cheap; USB enumeration is only allowed from explicit scan call sites."
-        )
+        for signature in ["public convenience init()", "init(androidPreparationFactory:"] {
+            let initializer = try extractBody(named: signature, from: source)
+            XCTAssertFalse(
+                initializer.contains("scanForUSBDevices"),
+                "USBCConnectionManager construction must stay cheap; USB enumeration is only allowed from explicit scan call sites."
+            )
+        }
         XCTAssertTrue(
             source.contains("connectionQueue.async {\n                let snapshot = Self.enumerateUSBDevicesSnapshot()"),
             "USB enumeration should run on the dedicated USB queue and publish results back to MainActor only after enumeration completes."
@@ -91,7 +90,8 @@ final class USBInterfaceDescriptorTests: XCTestCase {
     private func extractBody(named signature: String, from source: String) throws -> String {
         guard let signatureRange = source.range(of: signature),
               let openingBrace = source[signatureRange.upperBound...].firstIndex(of: "{") else {
-            throw XCTSkip("Signature not found: \(signature)")
+            XCTFail("Signature not found: \(signature)")
+            throw NSError(domain: "USBInterfaceDescriptorTests", code: 1)
         }
 
         var depth = 0

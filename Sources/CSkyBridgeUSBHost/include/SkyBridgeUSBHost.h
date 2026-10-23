@@ -15,14 +15,17 @@ typedef struct SBUSBHandle SBUSBHandle;
 typedef enum {
     SB_USB_OK = 0, SB_USB_INVALID_ARGUMENT, SB_USB_UNAVAILABLE, SB_USB_NOT_ACCESSORY,
     SB_USB_NATIVE_FAILURE, SB_USB_CANCELLED, SB_USB_BUSY, SB_USB_NOT_READY,
-    SB_USB_ALREADY_STARTED, SB_USB_CLEANUP_UNCONFIRMED
+    SB_USB_ALREADY_STARTED, SB_USB_CLEANUP_UNCONFIRMED,
+    SB_USB_TIMED_OUT, SB_USB_BAD_RESPONSE, SB_USB_UNSUPPORTED_PROTOCOL
 } SBUSBStatus;
 typedef enum {
     SB_USB_PHASE_NONE = 0, SB_USB_PHASE_ALLOCATE, SB_USB_PHASE_SELECT_DEVICE,
     SB_USB_PHASE_SELECT_INTERFACE, SB_USB_PHASE_PLUGIN, SB_USB_PHASE_QUERY_INTERFACE,
     SB_USB_PHASE_DESCRIPTOR, SB_USB_PHASE_OPEN, SB_USB_PHASE_PIPES,
     SB_USB_PHASE_READ, SB_USB_PHASE_WRITE, SB_USB_PHASE_ABORT,
-    SB_USB_PHASE_CLOSE, SB_USB_PHASE_RELEASE
+    SB_USB_PHASE_CLOSE, SB_USB_PHASE_RELEASE,
+    SB_USB_PHASE_ACCESSORY_QUERY, SB_USB_PHASE_ACCESSORY_IDENTIFICATION,
+    SB_USB_PHASE_ACCESSORY_START
 } SBUSBPhase;
 typedef enum { SB_USB_DOMAIN_NONE = 0, SB_USB_DOMAIN_IORETURN, SB_USB_DOMAIN_HRESULT, SB_USB_DOMAIN_POSIX } SBUSBDomain;
 typedef struct {
@@ -69,6 +72,36 @@ SBUSBSnapshot SBUSBGetSnapshot(SBUSBHandle *handle);
 /// After confirmed reference release, destruction nulls the handle even if it returns the
 /// retained native close error. Do not retry destruction or release through the old pointer.
 SBUSBResult SBUSBDestroy(SBUSBHandle **handle);
+
+typedef struct SBAOAHandle SBAOAHandle;
+typedef struct {
+    bool started, running, closing, retired, ownedReferencesReleased;
+    uint64_t deviceRegistryID;
+    uint16_t protocolVersion;
+    uint8_t identificationAttempted, identificationCompleted;
+    bool startRequested, startCompletionConfirmed;
+    SBUSBResult operationResult, closeResult;
+} SBAOASnapshot;
+
+/// Device-control-only owner. Does not open/seize any device/interface, touch ADB,
+/// reset USB, or establish a product session. Own before Run and retain until cleanup.
+SBAOAHandle *SBAOACreate(SBUSBResult *result);
+/// Single-use synchronous worker operation. Query sends only request 51. Start sends
+/// 51, six fixed product-identification strings, then 53 ONCE. Start requires exactly
+/// 36 canonical lowercase nonzero UUID bytes; query requires no nonce. A bounded,
+/// thread-safe callback supplies the captured attempt authority/cancellation state.
+/// The caller retains callback context through return. An overall 18-second budget
+/// includes acquisition and at most two seconds per native request. Acquisition/release
+/// have no OS hard timeout: observers must not abandon a still-running worker.
+SBUSBResult SBAOARun(SBAOAHandle *handle, uint64_t deviceRegistryID,
+                    const char *nonce, uint32_t nonceLength, bool startAccessory,
+                    bool (*shouldContinue)(void *), void *context);
+/// Stop facts remain available even on failure/cancellation after request 53. A
+/// completed start request is not proof of re-enumeration, native I/O or authentication.
+SBAOASnapshot SBAOAGetSnapshot(SBAOAHandle *handle);
+SBUSBResult SBAOATryClose(SBAOAHandle *handle);
+/// Only after every caller is joined. Unconfirmed release retains the same handle.
+SBUSBResult SBAOADestroy(SBAOAHandle **handle);
 
 #ifdef __cplusplus
 }

@@ -9,6 +9,7 @@ import OSLog
 import ExternalAccessory
 import IOKit
 import IOKit.usb
+import SkyBridgeAppleTransport
 
 /// USB-C设备类型枚举
 public enum USBCDeviceType: String, CaseIterable, Sendable {
@@ -49,8 +50,11 @@ public struct USBDeviceInfo: Sendable {
     public let isMFiCertified: Bool
     public let connectionInterface: String
     public let capabilities: [String]
+    /// Current physical routing only; neither field authenticates a product peer.
+    public let registryEntryID: UInt64?
+    public let locationID: UInt32?
 
-    public init(deviceID: String, name: String, deviceType: USBCDeviceType, vendorID: UInt16, productID: UInt16, serialNumber: String?, isMFiCertified: Bool, connectionInterface: String, capabilities: [String]) {
+    public init(deviceID: String, name: String, deviceType: USBCDeviceType, vendorID: UInt16, productID: UInt16, serialNumber: String?, isMFiCertified: Bool, connectionInterface: String, capabilities: [String], registryEntryID: UInt64? = nil, locationID: UInt32? = nil) {
         self.deviceID = deviceID
         self.name = name
         self.deviceType = deviceType
@@ -60,6 +64,8 @@ public struct USBDeviceInfo: Sendable {
         self.isMFiCertified = isMFiCertified
         self.connectionInterface = connectionInterface
         self.capabilities = capabilities
+        self.registryEntryID = registryEntryID
+        self.locationID = locationID
     }
 }
 
@@ -79,6 +85,12 @@ public final class USBCConnectionManager: ObservableObject {
 
     @Published public var discoveredUSBDevices: [USBDeviceInfo] = []
     @Published public private(set) var lastScanCompletedAt: Date?
+    @Published public private(set) var isPreparingAndroidUSB = false
+    @Published public private(set) var androidUSBPreparationReceipt: USBHostAccessoryReceipt?
+    @Published private var androidUSBPreparation: USBHostAccessoryPreparation?
+    typealias AndroidPreparationFactory = (UInt64, UUID, @escaping @Sendable () throws -> Void) throws -> USBHostAccessoryPreparation
+    private let androidPreparationFactory: AndroidPreparationFactory
+    public var androidUSBCleanupBlocked: Bool { androidUSBPreparation != nil && !isPreparingAndroidUSB }
 
  // MARK: - 私有属性
 
@@ -133,7 +145,15 @@ public final class USBCConnectionManager: ObservableObject {
 
  // MARK: - 初始化
 
-    public init() {
+    public convenience init() {
+        self.init(androidPreparationFactory: { registryID, nonce, authority in
+            try USBHostAccessoryPreparation(deviceRegistryID: registryID,
+                mode: .start(attachmentNonce: nonce), requireAttemptCurrent: authority)
+        })
+    }
+
+    init(androidPreparationFactory: @escaping AndroidPreparationFactory) {
+        self.androidPreparationFactory = androidPreparationFactory
         self.accessoryManager = nil
         logger.info("USB-C连接管理器已初始化（USB/MFi 扫描均按需启用）")
     }
@@ -295,6 +315,66 @@ public final class USBCConnectionManager: ObservableObject {
  /// 获取已连接的USB设备列表
     public func getConnectedUSBDevices() -> [USBDeviceInfo] {
         return Array(connectedUSBDevices.values)
+    }
+
+    /// App-owned Android startup, using the actual selected registry generation.
+    /// A completed receipt still needs re-enumeration and the ordinary authenticated
+    /// MAIN connection. Never replace this path with a network endpoint or infer
+    /// identity from the vendor, hardware serial, location or attachment nonce.
+    public func prepareAndroidUSB(_ device: USBDeviceInfo,
+                                  requireAttemptCurrent: @escaping @Sendable () throws -> Void) async throws -> AndroidUSBPreparedAttachment {
+        guard androidUSBPreparation == nil else { throw USBHostByteError.alreadyStarted }
+        guard device.deviceType == .androidDevice,
+              let registryID = device.registryEntryID, registryID != 0,
+              let locationID = device.locationID, locationID != 0 else {
+            throw USBHostByteError.invalidRegistryEntry
+        }
+        try requireAttemptCurrent()
+        let nonce = UUID()
+        let preparation = try androidPreparationFactory(registryID, nonce, requireAttemptCurrent)
+        androidUSBPreparation = preparation
+        androidUSBPreparationReceipt = nil
+        isPreparingAndroidUSB = true
+        defer {
+            // A cleanup observer must not release admission while this caller
+            // still owns completion. An older caller must never clear a successor.
+            if androidUSBPreparation === preparation {
+                isPreparingAndroidUSB = false
+                releaseAndroidPreparationIfComplete(preparation)
+            }
+        }
+        let result: Result<USBHostAccessoryReceipt, any Error>
+        do { result = .success(try await preparation.run()) }
+        catch { result = .failure(error) }
+        androidUSBPreparationReceipt = preparation.receipt
+        let cleanupFailure: (any Error)?
+        do { try await preparation.closeAndAwait(); cleanupFailure = nil }
+        catch { cleanupFailure = error }
+        if let cleanupFailure {
+            if case .failure(let primary) = result {
+                throw AndroidUSBPreparationCleanupFailure(primary: primary, cleanup: cleanupFailure)
+            }
+            throw cleanupFailure
+        }
+        let receipt = try result.get()
+        guard receipt.startCompletionConfirmed else { throw USBHostByteError.notReady }
+        return AndroidUSBPreparedAttachment(source: device, locationID: locationID, attachmentNonce: nonce, receipt: receipt)
+    }
+
+    public func cancelAndroidUSBPreparation() { androidUSBPreparation?.cancel() }
+
+    public func awaitAndroidUSBCleanup() async throws {
+        guard let preparation = androidUSBPreparation else { return }
+        defer { releaseAndroidPreparationIfComplete(preparation) }
+        try await preparation.closeAndAwait()
+    }
+
+    private func releaseAndroidPreparationIfComplete(_ preparation: USBHostAccessoryPreparation) {
+        // Worker exit and reference release remain separate from operation success.
+        // A never-started, retired owner has no native resources to release.
+        guard !isPreparingAndroidUSB, androidUSBPreparation === preparation,
+              preparation.workerExited, preparation.receipt?.referencesReleased != false else { return }
+        androidUSBPreparation = nil
     }
 
  /// 检查设备是否为MFi认证
@@ -579,6 +659,9 @@ public final class USBCConnectionManager: ObservableObject {
         capabilities.append(contentsOf: extractAudioInterfaceDetails(service: service, properties: properties))
 
         let deviceID = "\(vendorID):\(productID):\(serialNumber ?? "unknown")"
+        var registryID: UInt64 = 0
+        let registryStatus = IORegistryEntryGetRegistryEntryID(service, &registryID)
+        let nativeRegistryID = registryStatus == KERN_SUCCESS && registryID != 0 ? registryID : nil
 
         return USBDeviceInfo(
             deviceID: deviceID,
@@ -589,7 +672,9 @@ public final class USBCConnectionManager: ObservableObject {
             serialNumber: serialNumber,
             isMFiCertified: isMFiCertified,
             connectionInterface: "USB-C/USB-A",
-            capabilities: capabilities
+            capabilities: capabilities,
+            registryEntryID: nativeRegistryID,
+            locationID: properties["locationID"] as? UInt32
         )
     }
 
