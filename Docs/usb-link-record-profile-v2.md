@@ -1,9 +1,10 @@
 # USB link record profile v2
 
 Status: candidate record codec, 2026-10-23. Kotlin and shared Swift implementations
-exist. Native producers/consumers still use the previous raw-Yamux route. This
-record codec is **not** a completed epoch exchange, native recovery mechanism,
-security handshake, or audio capability. Do not activate v2 without the gates
+exist, alongside the [candidate epoch state engine](usb-link-epoch-profile-v2.md).
+Native producers/consumers still use the previous raw-Yamux route. The record
+codec alone is **not** an epoch exchange, native recovery mechanism, security
+handshake, or audio capability. Do not activate v2 without the gates
 at the end of this document.
 
 ## Why a physical record boundary is necessary
