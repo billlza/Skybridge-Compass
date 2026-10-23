@@ -130,6 +130,44 @@ private final class Fixture: USBHostDriver {
         try check(fixture.state.withLock { $0.written } == [Data([2, 3, 4, 5])] && checks.withLock { $0 } == 2, "Write/authority scope changed")
         try await transport.closeAndAwait()
     }
+    static func ownedWriteCancellationWaitsForNativeReturn() async throws {
+        let fixture = Fixture { $0.blocked = [Fixture.Call.write.rawValue] }, transport = fixture.transport()
+        _ = try await transport.open(timeout: .seconds(1))
+        let finished = OSAllocatedUnfairLock(initialState: false)
+        let writing = Task {
+            defer { finished.withLock { $0 = true } }
+            try await transport.writeBytesAndAwaitNativeCompletion(Data([1, 2]), timeout: .seconds(2), requireEffectAuthorization: {})
+        }
+        defer { fixture.permit(.write) }
+        try await eventually { fixture.count(.write) == 1 }
+        writing.cancel(); try await eventually { transport.terminalFailure != nil }
+        try check(!finished.withLock { $0 }, "Owned write returned before native execution ended")
+        try await expect(USBHostByteError.cleanupUnconfirmed) { try await transport.closeAndAwait(timeout: .milliseconds(30)) }
+        try check(!finished.withLock { $0 } && fixture.count(.close) == 0, "Failure response was used as native completion")
+        fixture.permit(.write)
+        try await expect(CancellationError()) { try await writing.value }
+        try await transport.closeAndAwait()
+        try check(finished.withLock { $0 } && !fixture.state.withLock { $0.cleanupWhileActive }, "Owned completion or cleanup missing")
+    }
+    static func ownedWriteRejectedBeforeAdmissionDoesNotWaitForAnotherRequest() async throws {
+        let fixture = Fixture { $0.blocked = [Fixture.Call.write.rawValue] }, transport = fixture.transport()
+        try await expect(USBHostByteError.invalidByteCount) {
+            try await transport.writeBytesAndAwaitNativeCompletion(Data(), timeout: .seconds(1), requireEffectAuthorization: {})
+        }
+        try await expect(USBHostByteError.notReady) {
+            try await transport.writeBytesAndAwaitNativeCompletion(Data([1]), timeout: .seconds(1), requireEffectAuthorization: {})
+        }
+        _ = try await transport.open(timeout: .seconds(1))
+        let first = Task { try await transport.writeBytesAndAwaitNativeCompletion(Data([2]), timeout: .seconds(2), requireEffectAuthorization: {}) }
+        defer { fixture.permit(.write) }
+        try await eventually { fixture.count(.write) == 1 }
+        try await expect(USBHostByteError.writeInProgress) {
+            try await transport.writeBytesAndAwaitNativeCompletion(Data([3]), timeout: .seconds(1), requireEffectAuthorization: {})
+        }
+        try check(transport.terminalFailure == nil && fixture.count(.write) == 1, "Foreign admission altered the active writer")
+        fixture.permit(.write); try await first.value; try await transport.closeAndAwait()
+        try check(fixture.state.withLock { $0.written } == [Data([2])], "Rejected write reached the device")
+    }
     static func cancelBlockedRead() async throws {
         let fixture = Fixture { $0.blocked = [Fixture.Call.read.rawValue]; $0.chunks = [Data([1])] }
         let transport = fixture.transport(); _ = try await transport.open(timeout: .seconds(1))
@@ -268,6 +306,8 @@ private final class Fixture: USBHostDriver {
         let tests: [(String, () async throws -> Void)] = [
             ("idle_close", idleClose), ("limits_and_single_use", limits), ("packet_tails_and_zlp", packetTails),
             ("sliced_write_and_effect", sliceWrite), ("cancel_blocked_native_read", cancelBlockedRead),
+            ("owned_write_waits_for_native_return", ownedWriteCancellationWaitsForNativeReturn),
+            ("owned_rejection_does_not_wait_for_foreign_write", ownedWriteRejectedBeforeAdmissionDoesNotWaitForAnotherRequest),
             ("late_open_deadline", openDeadline), ("zero_packets_whole_deadline", zeroDeadline),
             ("completed_deadline_does_not_cancel_successor", replacedDeadline), ("attachment_revocation", attachmentRevoked),
             ("cancel_in_authorization_callback", cancelDuringAuthorization), ("post_write_revocation", revokeAfterWrite),

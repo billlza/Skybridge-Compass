@@ -7,6 +7,7 @@ public enum USBHostMultiplexError: Error, Equatable, Sendable {
     case readInProgress, writeInProgress, acceptInProgress, cleanupInProgress
     case timedOut, unexpectedEnd, cleanupUnconfirmed, ownerRetired, invalidByteCount
     case concurrentWakeWaiter, missingWriteLease, invalidPingAcknowledgement
+    case randomUnavailable(Int32)
 }
 
 /// One coalesced notification and one cancellable waiter. Cancellation removes only its

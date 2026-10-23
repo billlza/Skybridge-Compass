@@ -110,7 +110,7 @@ private final class SocketDriver: USBHostDriver {
     static let implementation = "skybridge-swift-usb-owner"
     static let command = Data("skybridge-usb-control-1".utf8)
     static func payload(_ size: Int) -> Data { Data((0..<size).map { UInt8(truncatingIfNeeded: $0 * 31 + 17) }) }
-    static func acceptLoopback() throws -> Int32 {
+    static func acceptLoopback(profile: String) throws -> Int32 {
         let listener = Darwin.socket(AF_INET, SOCK_STREAM, 0)
         try checkSocket(listener, "socket")
         var accepted: Int32?
@@ -127,7 +127,7 @@ private final class SocketDriver: USBHostDriver {
                 pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.getsockname(listener, $0, &size) }
             }
             try checkSocket(named, "getsockname")
-            try emit(["event": "listening", "port": UInt16(bigEndian: address.sin_port), "implementation": implementation])
+            try emit(["event": "listening", "port": UInt16(bigEndian: address.sin_port), "implementation": implementation, "linkProfile": profile])
             try waitFor(listener, event: Int16(POLLIN), until: .now.advanced(by: .seconds(10)))
             let fd = Darwin.accept(listener, nil, nil); try checkSocket(fd, "accept"); accepted = fd
             return fd
@@ -163,11 +163,15 @@ private final class SocketDriver: USBHostDriver {
         try await stream.writeBytes(bytes, timeout: .seconds(5), requireEffectAuthorization: {})
     }
     static func run() async throws {
-        guard CommandLine.arguments.count == 2, ["flow", "reverse", "reset"].contains(CommandLine.arguments[1]) else { throw NativePeerError.arguments }
+        guard (2...3).contains(CommandLine.arguments.count), ["flow", "reverse", "reset"].contains(CommandLine.arguments[1]),
+              CommandLine.arguments.count == 2 || CommandLine.arguments[2] == "epoch-v2" else { throw NativePeerError.arguments }
         let mode = CommandLine.arguments[1]
-        let driver = try SocketDriver(fd: acceptLoopback())
+        let profile: USBHostMultiplexConnection.LinkProfile = CommandLine.arguments.count == 3 ? .epochV2 : .rawYamuxV1
+        let profileLabel = profile == .epochV2 ? "epoch-v2" : "raw-yamux-v1"
+        let driver = try SocketDriver(fd: acceptLoopback(profile: profileLabel))
         let carrier = USBHostByteTransport(deviceRegistryID: 1, driver: driver, requireAttachmentCurrent: {})
-        let owner = try USBHostMultiplexConnection(carrier: carrier, role: mode == "flow" ? .server : .client)
+        let owner = try USBHostMultiplexConnection(carrier: carrier, role: mode == "flow" ? .server : .client,
+            configuration: .init(linkProfile: profile))
         do {
             try await owner.start()
             let bytes: Data
@@ -213,7 +217,8 @@ private final class SocketDriver: USBHostDriver {
             guard owner.protocolSnapshot.owners == 0 else { throw NativePeerError.cleanupUnconfirmed }
             let hash = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
             var receipt: [String: Any] = ["event": "verified", "implementation": implementation, "case": mode,
-                      "bytes": bytes.count, "sha256": hash, "resetObserved": resetStage != nil]
+                      "bytes": bytes.count, "sha256": hash, "resetObserved": resetStage != nil,
+                      "linkProfile": profileLabel, "epochReady": owner.epochSnapshot?.phase == .ready]
             if let resetStage { receipt["resetStage"] = resetStage }
             try emit(receipt)
             // Data/FIN receipts were verified first. Physical EOF is only the parent's shutdown.
@@ -229,7 +234,9 @@ private final class SocketDriver: USBHostDriver {
             guard state.nativeWorkersExited && state.referencesReleased && state.pumpsJoined && state.logicalOwnersReleased else { throw NativePeerError.cleanupUnconfirmed }
             try emit(["event": "closed", "readerExited": true, "nativeWorkersExited": state.nativeWorkersExited,
                       "referencesReleased": state.referencesReleased, "pumpsJoined": state.pumpsJoined,
-                      "logicalOwnersReleased": state.logicalOwnersReleased, "owners": owner.protocolSnapshot.owners])
+                      "logicalOwnersReleased": state.logicalOwnersReleased, "owners": owner.protocolSnapshot.owners,
+                      "linkProfile": profileLabel, "epochDispatchPending": owner.epochSnapshot?.dispatchPending == true,
+                      "epochRetired": owner.epochSnapshot?.phase == .failed])
         } catch {
             do { try await owner.closeAndAwait() }
             catch let cleanup { throw PeerCleanupFailure(original: error, cleanup: cleanup) }

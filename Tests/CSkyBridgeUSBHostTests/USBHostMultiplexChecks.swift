@@ -140,6 +140,7 @@ import os
         try await usbEventually { gate.entered.withLock { $0 } }; f.a.close()
         try await usbExpect(USBHostMultiplexError.closed) { try await starting.value }
         try await usbExpect(USBHostMultiplexError.cleanupUnconfirmed) { try await f.a.closeAndAwait(timeout: .milliseconds(30)) }
+        try usbCheck(f.a.protocolSnapshot.owners == 0, "Canceled acquisition published a logical stream")
         gate.release(); try await f.close()
     }
     static func parentAndStreamCleanup() async throws {
@@ -188,6 +189,142 @@ import os
                      "Native close error was confused with unresolved owners")
         try usbCheck(state.cleanupFailure as? MultiplexFixtureError == .closeFailed, "Native close failure disappeared")
     }
+    static func epochLargeAndNativeFragments() async throws {
+        let f = try USBMultiplexFixture(configuration: .init(linkProfile: .epochV2)); try await f.start()
+        let (a, b) = try await f.open()
+        let expected = Data((0..<900_003).map { $0 % 2 == 0 ? UInt8(0x7d) : 0x7e })
+        let sending = Task { try await a.writeFrame(expected, timeout: .seconds(10), requireEffectAuthorization: {}) }
+        let received = try await b.readFrame(timeout: .seconds(10)); try await sending.value
+        try usbCheck(received == expected, "Epoch changed escaped payload")
+        try usbCheck(f.a.epochSnapshot?.phase == .ready && f.b.epochSnapshot?.phase == .ready, "Epoch did not establish")
+        try usbCheck(f.nativeA.state.withLock { $0.linkRecords > 50 && $0.maximumWrite <= 16_384 }, "Epoch transfer bounds not exercised")
+        try await a.closeAndAwait(); try await b.closeAndAwait(); try await f.sibling(); try await f.close()
+    }
+    static func epochBlockedBulkKeepsControlLive() async throws {
+        let f = try USBMultiplexFixture(configuration: .init(linkProfile: .epochV2)); try await f.start()
+        let (a, b) = try await f.open(priority: .bulk), expected = usbPattern(700_011)
+        let done = OSAllocatedUnfairLock(initialState: false)
+        let sending = Task { try await a.writeFrame(expected, timeout: .seconds(8), requireEffectAuthorization: {}); done.withLock { $0 = true } }
+        try await usbEventually { f.b.protocolSnapshot.bufferedReceiveBytes == 262_144 && f.a.protocolSnapshot.pendingWriteBytes > 0 }
+        try await f.sibling(); try usbCheck(!done.withLock { $0 }, "Epoch bulk bypassed receive credit")
+        let received = try await b.readFrame(timeout: .seconds(6)); try await sending.value
+        try usbCheck(received == expected, "Epoch credit replenishment lost data"); try await f.close()
+    }
+    static func epochEarlyDataWaitsForWriteCallback() async throws {
+        let f = try USBMultiplexFixture(configuration: .init(linkProfile: .epochV2)), gate = USBFixtureGate()
+        let accessoryDone = OSAllocatedUnfairLock(initialState: false)
+        f.nativeB.state.withLock { $0.afterLink = { record in if record.kind == .ready { try gate.wait() } } }
+        defer { gate.release() }
+        let host = Task { try await f.a.start() }
+        let accessory = Task { try await f.b.start(); accessoryDone.withLock { $0 = true } }
+        try await usbEventually { gate.entered.withLock { $0 } }; try await host.value
+        try usbCheck(!accessoryDone.withLock { $0 } && f.b.epochSnapshot?.phase == .starting, "Readiness preceded native callback")
+        try await usbExpect(USBHostMultiplexError.notStarted) { _ = try await f.b.acceptStream(timeout: .milliseconds(100)) }
+        let opening = Task { try await f.a.openStream(timeout: .seconds(3)) }
+        try await usbEventually { (f.b.epochSnapshot?.bufferedBytes ?? 0) >= 12 }
+        try usbCheck(f.b.protocolSnapshot.owners == 0, "Provisional payload entered logical parser")
+        gate.release(); try await accessory.value
+        let peer = try await f.b.acceptStream(timeout: .seconds(2)), source = try await opening.value
+        try await source.writeFrame(Data([37]), timeout: .seconds(1), requireEffectAuthorization: {})
+        try usbCheck(try await peer.readFrame(timeout: .seconds(1)) == Data([37]), "Early data needed an unrelated extra packet")
+        try await f.close()
+    }
+    static func epochSilentPeerCannotPublishStart() async throws {
+        let f = try USBMultiplexFixture(configuration: .init(linkProfile: .epochV2))
+        try await usbExpect(USBHostMultiplexError.timedOut) { try await f.a.start(timeout: .milliseconds(250)) }
+        try usbCheck(f.a.epochSnapshot?.phase == .failed, "Silent peer became usable")
+        try usbCheck(f.nativeA.state.withLock { $0.linkRecords > 0 && $0.headers.isEmpty }, "Startup fell back to raw logical streams")
+        try await f.close()
+    }
+    static func epochDeadlineIncludesNativeAcquisition() async throws {
+        let f = try USBMultiplexFixture(configuration: .init(linkProfile: .epochV2,
+            epochLimits: .init(startupMillis: 500))), gate = USBFixtureGate()
+        f.nativeA.state.withLock { $0.openGate = gate }; defer { gate.release() }
+        let starting = Task { try await f.a.start(timeout: .seconds(3)) }
+        try await usbEventually { gate.entered.withLock { $0 } }
+        try await usbExpect(USBLinkEpochProtocol.Failure.timeout) { try await starting.value }
+        try await usbExpect(USBHostMultiplexError.cleanupUnconfirmed) { try await f.a.closeAndAwait(timeout: .milliseconds(30)) }
+        try usbCheck(!f.a.shutdownState.nativeWorkersExited && !f.a.shutdownState.referencesReleased, "Native acquisition was abandoned")
+        try usbCheck(f.nativeA.state.withLock { $0.linkRecords == 0 }, "Native write preceded acquisition")
+        gate.release(); try await f.close()
+    }
+    static func epochDeadlineRetainsNativeWriteFlight() async throws {
+        let f = try USBMultiplexFixture(configuration: .init(linkProfile: .epochV2,
+            epochLimits: .init(startupMillis: 500))), gate = USBFixtureGate()
+        f.nativeA.state.withLock { $0.afterLink = { record in if record.kind == .offer { try gate.wait() } } }
+        defer { gate.release() }
+        let starting = Task { try await f.a.start(timeout: .seconds(3)) }
+        try await usbEventually { gate.entered.withLock { $0 } }
+        try await usbExpect(USBLinkEpochProtocol.Failure.timeout) { try await starting.value }
+        try usbCheck(f.a.epochSnapshot?.dispatchPending == true, "Early API failure released native write ownership")
+        try await usbExpect(USBHostMultiplexError.cleanupUnconfirmed) { try await f.a.closeAndAwait(timeout: .milliseconds(30)) }
+        try usbCheck(!f.a.shutdownState.nativeWorkersExited && !f.a.shutdownState.pumpsJoined, "Active native write was certified closed")
+        gate.release(); try await f.close()
+        try usbCheck(f.a.epochSnapshot?.dispatchPending == false && f.a.terminalFailure as? USBLinkEpochProtocol.Failure == .timeout,
+                     "Late native completion revived or replaced the original timeout")
+    }
+    private static func oldRecord() throws -> Data {
+        USBLinkWire.encode(try USBLinkWire.Record(kind: .data,
+            sender: USBLinkWire.Nonce(Data(repeating: 7, count: 32)), recipient: USBLinkWire.Nonce(Data(repeating: 8, count: 32)),
+            body: Data(repeating: 99, count: 512)))
+    }
+    static func epochQueuedOldRecordsAndInterruptedWrite() async throws {
+        let f = try USBMultiplexFixture(configuration: .init(linkProfile: .epochV2), readLimit: 31)
+        let old = try oldRecord(); try f.nativeA.inject(old + old.prefix(90)); try f.nativeB.inject(old + old.prefix(90))
+        try await f.start()
+        for owner in [f.a, f.b] {
+            try usbCheck(owner.epochSnapshot?.discardedRecords == 1 && owner.epochSnapshot?.quarantinedRecords == 1,
+                         "Old queued record/prefix was not explicitly isolated")
+        }
+        try await f.sibling(); try await f.close()
+    }
+    static func epochQueuedRevocationKeepsSibling() async throws {
+        let f = try USBMultiplexFixture(configuration: .init(linkProfile: .epochV2)); try await f.start()
+        let (a, b) = try await f.open(), allowed = OSAllocatedUnfairLock(initialState: true)
+        try await a.writeBytes(Data(count: 262_144), timeout: .seconds(4), requireEffectAuthorization: {})
+        let sending = Task {
+            try await a.writeBytes(Data([7]), timeout: .seconds(3), requireEffectAuthorization: {
+                guard allowed.withLock({ $0 }) else { throw MultiplexFixtureError.revoked }
+            })
+        }
+        try await usbEventually { f.a.protocolSnapshot.pendingWriteBytes > 0 }
+        allowed.withLock { $0 = false }
+        _ = try await b.readBytes(maximumBytes: 1, timeout: .seconds(1))
+        try await usbExpect(MultiplexFixtureError.revoked) { try await sending.value }
+        let emitted = f.nativeA.state.withLock { $0.headers.filter { $0.type == .data && $0.streamID == a.id }.reduce(UInt64(0)) { $0 + UInt64($1.value) } }
+        try usbCheck(emitted == 262_144, "Revoked queued bytes entered epoch writer")
+        try await a.closeAndAwait(); try await b.closeAndAwait(); try await f.sibling(); try await f.close()
+    }
+    static func epochActiveDamageIsTerminalAfterStaleQuarantine() async throws {
+        let f = try USBMultiplexFixture(configuration: .init(linkProfile: .epochV2)); try await f.start()
+        try f.nativeB.inject(oldRecord()); try await usbEventually { f.a.epochSnapshot?.quarantinedRecords == 1 }
+        try await f.sibling()
+        guard let sender = f.a.epochSnapshot?.peer, let recipient = f.b.epochSnapshot?.peer else { throw MultiplexFixtureError.check("Missing epoch") }
+        let record = try USBLinkWire.Record(kind: .data, sender: sender, recipient: recipient,
+            body: Data([0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 0, 99]))
+        var raw = USBLinkWire.encodeRaw(record); raw[USBLinkWire.headerBytes] = 1
+        var damaged = Data([0x7e])
+        for byte in raw {
+            if byte == 0x7e || byte == 0x7d { damaged.append(contentsOf: [0x7d, byte ^ 0x20]) } else { damaged.append(byte) }
+        }
+        damaged.append(0x7e)
+        try f.nativeB.inject(damaged + USBLinkWire.encode(record))
+        try await usbEventually { f.a.terminalFailure != nil }
+        try usbCheck(f.a.terminalFailure as? USBLinkWire.Failure == .checksum, "Active damage was silently recovered or misclassified")
+        try await f.close()
+    }
+    static func epochParentCloseRetainsCommittedPayloadUntilNativeReturn() async throws {
+        let f = try USBMultiplexFixture(configuration: .init(linkProfile: .epochV2)); try await f.start()
+        let (a, b) = try await f.open(), gate = USBFixtureGate()
+        f.nativeA.state.withLock { $0.afterLink = { record in if record.kind == .data { try gate.wait() } } }
+        defer { gate.release() }
+        let sending = Task { try await a.writeBytes(Data([1, 3, 5]), timeout: .seconds(3), requireEffectAuthorization: {}) }
+        try await usbEventually { gate.entered.withLock { $0 } }; f.a.close()
+        try await usbExpect(USBHostMultiplexError.closed) { try await sending.value }
+        try usbCheck(f.a.epochSnapshot?.dispatchPending == true && f.a.protocolSnapshot.dispatchPending, "Committed write owner was discarded")
+        try await usbExpect(USBHostMultiplexError.cleanupUnconfirmed) { try await f.a.closeAndAwait(timeout: .milliseconds(30)) }
+        gate.release(); try await f.close(); try await b.closeAndAwait()
+    }
     static func main() async {
         let tests: [(String, () async throws -> Void)] = [
             ("large_frame_across_credit_windows", framedLarge), ("blocked_bulk_keeps_control_live", blockedBulkControl),
@@ -197,11 +334,21 @@ import os
             ("half_close_deadline_is_local", halfCloseDeadline), ("pending_accept_expires", pendingAcceptExpires),
             ("dropped_views_release_owners", droppedViewsRelease), ("partial_frame_fin_is_failure", partialFrameFIN),
             ("silent_peer_expires", silentPeer), ("matching_pings_keep_transport_live", livePings),
-            ("cancelled_open_never_publishes_pumps", cancelledOpen), ("parent_and_stream_cleanup_waiters", parentAndStreamCleanup),
+            ("cancelled_open_never_publishes_ready", cancelledOpen), ("parent_and_stream_cleanup_waiters", parentAndStreamCleanup),
             ("cancelled_accept_releases_waiter", cancelledAcceptDoesNotConsumeIncomingOwner),
             ("notification_cancellation_and_deadline_reuse", wakeCancellationAndDeadlineReuse),
             ("oversized_header_before_allocation", oversizedHeaderFailsBeforeBodyRead),
-            ("native_close_error_preserves_release_facts", closeErrorRetainsReleaseFacts)
+            ("native_close_error_preserves_release_facts", closeErrorRetainsReleaseFacts),
+            ("epoch_escaped_large_frame_native_fragments", epochLargeAndNativeFragments),
+            ("epoch_blocked_bulk_keeps_control_live", epochBlockedBulkKeepsControlLive),
+            ("epoch_early_data_waits_for_native_callback", epochEarlyDataWaitsForWriteCallback),
+            ("epoch_silent_peer_never_publishes_start", epochSilentPeerCannotPublishStart),
+            ("epoch_deadline_covers_native_acquisition", epochDeadlineIncludesNativeAcquisition),
+            ("epoch_deadline_retains_native_write_flight", epochDeadlineRetainsNativeWriteFlight),
+            ("epoch_isolates_old_queued_records", epochQueuedOldRecordsAndInterruptedWrite),
+            ("epoch_queued_revocation_keeps_sibling", epochQueuedRevocationKeepsSibling),
+            ("epoch_active_damage_is_terminal", epochActiveDamageIsTerminalAfterStaleQuarantine),
+            ("epoch_parent_close_waits_for_native_return", epochParentCloseRetainsCommittedPayloadUntilNativeReturn)
         ]
         for (name, test) in tests {
             do { try await test(); print("PASS \(name)") }

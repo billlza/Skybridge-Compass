@@ -19,6 +19,9 @@ func usbExpect(_ expected: any Error, _ operation: () async throws -> Void) asyn
     catch {
         if let a = error as? USBHostMultiplexError, let b = expected as? USBHostMultiplexError { try usbCheck(a == b, "Wrong multiplex error: \(a), expected \(b)"); return }
         if let a = error as? USBLogicalStreamError, let b = expected as? USBLogicalStreamError { try usbCheck(a == b, "Wrong protocol error: \(a), expected \(b)"); return }
+        if let a = error as? USBLinkEpochProtocol.Failure, let b = expected as? USBLinkEpochProtocol.Failure { try usbCheck(a == b, "Wrong epoch error: \(a), expected \(b)"); return }
+        if let a = error as? USBLinkWire.Failure, let b = expected as? USBLinkWire.Failure { try usbCheck(a == b, "Wrong record error: \(a), expected \(b)"); return }
+        if let a = error as? USBHostByteError, let b = expected as? USBHostByteError { try usbCheck(a == b, "Wrong native error: \(a), expected \(b)"); return }
         if let a = error as? MultiplexFixtureError, let b = expected as? MultiplexFixtureError { try usbCheck(a == b, "Wrong fixture error: \(a), expected \(b)"); return }
         if error is CancellationError && expected is CancellationError { return }
         throw MultiplexFixtureError.check("Wrong failure: \(error), expected \(expected)")
@@ -79,20 +82,23 @@ final class USBMultiplexNativeFixture: USBHostDriver {
     struct State: Sendable {
         var beforeWrite: (@Sendable (Data) throws -> Void)?
         var afterWrite: (@Sendable (Data) throws -> Void)?
+        var afterLink: (@Sendable (USBLinkWire.Record) throws -> Void)?
         var openGate: USBFixtureGate?, closeGate: USBFixtureGate?
         var closeFailure = false
         var retired = false, closes = 0
         var headers: [USBLogicalStreamWire.Header] = []
+        var linkDecoder = USBLinkWire.Decoder(), linkRecords = 0, maximumWrite = 0
     }
     let state = OSAllocatedUnfairLock(initialState: State())
     private let input: USBFixturePipe, output: USBFixturePipe
     private let readLimit: Int
-    private init(input: USBFixturePipe, output: USBFixturePipe, readLimit: Int) {
-        self.input = input; self.output = output; self.readLimit = readLimit
+    private let profile: USBHostMultiplexConnection.LinkProfile
+    private init(input: USBFixturePipe, output: USBFixturePipe, readLimit: Int, profile: USBHostMultiplexConnection.LinkProfile) {
+        self.input = input; self.output = output; self.readLimit = readLimit; self.profile = profile
     }
-    static func pair(readLimit: Int = 4093) -> (USBMultiplexNativeFixture, USBMultiplexNativeFixture) {
+    static func pair(readLimit: Int = 4093, profile: USBHostMultiplexConnection.LinkProfile = .rawYamuxV1) -> (USBMultiplexNativeFixture, USBMultiplexNativeFixture) {
         let a = USBFixturePipe(), b = USBFixturePipe()
-        return (.init(input: a, output: b, readLimit: readLimit), .init(input: b, output: a, readLimit: readLimit))
+        return (.init(input: a, output: b, readLimit: readLimit, profile: profile), .init(input: b, output: a, readLimit: readLimit, profile: profile))
     }
     func open(registryID: UInt64) throws -> USBHostDevice {
         let gate = state.withLock { $0.openGate }; try gate?.wait()
@@ -102,13 +108,33 @@ final class USBMultiplexNativeFixture: USBHostDriver {
     func read(timeoutMilliseconds: UInt32) throws -> Data { try input.receive(limit: readLimit, timeoutMilliseconds: timeoutMilliseconds) }
     func write(_ bytes: Data, timeoutMilliseconds: UInt32) throws {
         try state.withLock { if $0.retired { throw MultiplexFixtureError.disconnected } }
-        let callbacks = state.withLock { ($0.beforeWrite, $0.afterWrite) }
+        let callbacks = state.withLock { ($0.beforeWrite, $0.afterWrite, $0.afterLink) }
         try callbacks.0?(bytes)
         try output.send(bytes, timeoutMilliseconds: timeoutMilliseconds)
-        if bytes.count >= 12 {
-            let header = try USBLogicalStreamWire.decodeHeader(Data(bytes.prefix(12)))
-            state.withLock { $0.headers.append(header) }
+        let records = try state.withLock { value -> [USBLinkWire.Record] in
+            value.maximumWrite = max(value.maximumWrite, bytes.count)
+            if profile == .rawYamuxV1 {
+                if bytes.count >= 12 { value.headers.append(try USBLogicalStreamWire.decodeHeader(Data(bytes.prefix(12)))) }
+                return []
+            }
+            var records: [USBLinkWire.Record] = []
+            for byte in bytes {
+                if let event = try value.linkDecoder.accept(byte) {
+                    switch event {
+                    case .record(let record):
+                        records.append(record); value.linkRecords += 1
+                        if record.kind == .data {
+                            let header = try USBLogicalStreamWire.decodeHeader(Data(record.body.prefix(12)))
+                            try usbCheck(record.body.count == 12 + (header.type == .data ? Int(header.value) : 0), "Outer DATA changed logical frame boundaries")
+                            value.headers.append(header)
+                        }
+                    case .discarded: throw MultiplexFixtureError.check("Outgoing record was damaged")
+                    }
+                }
+            }
+            return records
         }
+        for record in records { try callbacks.2?(record) }
         try callbacks.1?(bytes)
     }
     func retire() { state.withLock { $0.retired = true } }
@@ -127,13 +153,13 @@ final class USBMultiplexFixture: Sendable {
     let a: USBHostMultiplexConnection, b: USBHostMultiplexConnection
     let nativeA: USBMultiplexNativeFixture, nativeB: USBMultiplexNativeFixture
     init(configuration: USBHostMultiplexConnection.Configuration = .init(), readLimit: Int = 4093) throws {
-        (nativeA, nativeB) = USBMultiplexNativeFixture.pair(readLimit: readLimit)
+        (nativeA, nativeB) = USBMultiplexNativeFixture.pair(readLimit: readLimit, profile: configuration.linkProfile)
         let carrierA = USBHostByteTransport(deviceRegistryID: 11, driver: nativeA, requireAttachmentCurrent: {})
         let carrierB = USBHostByteTransport(deviceRegistryID: 22, driver: nativeB, requireAttachmentCurrent: {})
         a = try USBHostMultiplexConnection(carrier: carrierA, role: .client, configuration: configuration)
         b = try USBHostMultiplexConnection(carrier: carrierB, role: .server, configuration: configuration)
     }
-    func start() async throws { try await a.start(); try await b.start() }
+    func start() async throws { async let left: Void = a.start(); try await b.start(); try await left }
     func open(priority: USBLogicalStreamProtocol.Priority = .control) async throws -> (USBHostMultiplexConnection.Stream, USBHostMultiplexConnection.Stream) {
         let opening = Task { try await a.openStream(priority: priority) }
         let peer = try await b.acceptStream(priority: priority)

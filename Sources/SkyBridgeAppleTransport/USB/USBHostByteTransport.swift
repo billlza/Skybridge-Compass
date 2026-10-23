@@ -125,16 +125,39 @@ public final class USBHostByteTransport: Sendable {
     /// completion. Cancellation/failure never retries a possibly partially emitted write.
     public func writeBytes(_ bytes: Data, timeout: Duration,
                            requireEffectAuthorization: @escaping @Sendable () throws -> Void) async throws {
+        try await write(bytes, timeout: timeout, effect: requireEffectAuthorization, completion: nil)
+    }
+
+    /// Internal pump ownership: an error may retire admission immediately, but
+    /// this call does not return until the request's native execution actually
+    /// ends (or is known never to have started). Cancellation still retires the
+    /// carrier. Parent cleanup has a bounded observer and retains unresolved I/O;
+    /// this owned continuation is not polling or claiming a universal native bound.
+    func writeBytesAndAwaitNativeCompletion(_ bytes: Data, timeout: Duration,
+                                           requireEffectAuthorization: @escaping @Sendable () throws -> Void) async throws {
+        let completion = USBHostWriteCompletion()
+        let result: Result<Void, any Error>
+        do { try await write(bytes, timeout: timeout, effect: requireEffectAuthorization, completion: completion); result = .success(()) }
+        catch { result = .failure(error) }
+        await completion.wait()
+        try result.get()
+    }
+
+    private func write(_ bytes: Data, timeout: Duration, effect: @escaping @Sendable () throws -> Void,
+                       completion: USBHostWriteCompletion?) async throws {
         defer { withExtendedLifetime(self) {} }
-        guard (1...Self.transferBytes).contains(bytes.count) else { throw USBHostByteError.invalidByteCount }
-        let operation = try USBHostOperation<Void>(timeout: timeout)
+        let operation: USBHostOperation<Void>
+        do {
+            guard (1...Self.transferBytes).contains(bytes.count) else { throw USBHostByteError.invalidByteCount }
+            operation = try USBHostOperation<Void>(timeout: timeout)
+        } catch { completion?.finish(); throw error }
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 operation.install(continuation)
                 do {
                     try Task.checkCancellation()
-                    try worker.enqueueWrite(operation, bytes: Data(bytes), effect: requireEffectAuthorization)
-                } catch { operation.finish(.failure(error)) }
+                    try worker.enqueueWrite(operation, bytes: Data(bytes), effect: effect, completion: completion)
+                } catch { completion?.finish(); operation.finish(.failure(error)) }
             }
         } onCancel: { [worker] in worker.retire(CancellationError()) }
     }
@@ -162,6 +185,33 @@ public final class USBHostByteTransport: Sendable {
             }
         }
         try await observer.value
+    }
+}
+
+/// Exactly one owned waiter, independent from the operation's early error result.
+/// finish is idempotent because a failed request is also observed at worker exit.
+private final class USBHostWriteCompletion: Sendable {
+    private struct State: Sendable {
+        var finished = false
+        var continuation: CheckedContinuation<Void, Never>?
+    }
+    private let state = OSAllocatedUnfairLock(initialState: State())
+    func finish() {
+        let continuation = state.withLock { value -> CheckedContinuation<Void, Never>? in
+            guard !value.finished else { return nil }
+            value.finished = true; let result = value.continuation; value.continuation = nil; return result
+        }
+        continuation?.resume()
+    }
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let immediate = state.withLock { value in
+                if value.finished { return true }
+                precondition(value.continuation == nil, "One pump owns native write completion")
+                value.continuation = continuation; return false
+            }
+            if immediate { continuation.resume() }
+        }
     }
 }
 
@@ -229,6 +279,7 @@ private struct USBHostWriteRequest: Sendable {
     let operation: USBHostOperation<Void>
     let bytes: Data
     let effect: @Sendable () throws -> Void
+    let completion: USBHostWriteCompletion?
 }
 
 private final class USBHostWorker: Sendable {
@@ -266,12 +317,13 @@ private final class USBHostWorker: Sendable {
         }
         readWake.signal(); supervisorWake.signal()
     }
-    func enqueueWrite(_ operation: USBHostOperation<Void>, bytes: Data, effect: @escaping @Sendable () throws -> Void) throws {
+    func enqueueWrite(_ operation: USBHostOperation<Void>, bytes: Data, effect: @escaping @Sendable () throws -> Void,
+                      completion: USBHostWriteCompletion?) throws {
         try state.withLock { value in
             if let error = value.failure { throw error }
             guard value.ready else { throw USBHostByteError.notReady }
             guard value.write == nil else { throw USBHostByteError.writeInProgress }
-            value.write = USBHostWriteRequest(operation: operation, bytes: bytes, effect: effect)
+            value.write = USBHostWriteRequest(operation: operation, bytes: bytes, effect: effect, completion: completion)
         }
         writeWake.signal(); supervisorWake.signal()
     }
@@ -341,6 +393,9 @@ private final class USBHostWorker: Sendable {
         }
     }
     func runWriter() {
+        // A request canceled while still queued is never entered by the worker.
+        // At exit no native writer can subsequently start it.
+        defer { state.withLock { $0.write?.completion }?.finish() }
         while failure == nil {
             writeWake.wait()
             if failure != nil { break }
@@ -353,8 +408,13 @@ private final class USBHostWorker: Sendable {
                     if let error = value.failure { throw error }; value.write = nil
                 }
                 supervisorWake.signal()
+                request.completion?.finish()
                 request.operation.finish(.success(()))
-            } catch { retire(error); request.operation.finish(.failure(failure ?? error)); break }
+            } catch {
+                retire(error)
+                request.completion?.finish()
+                request.operation.finish(.failure(failure ?? error)); break
+            }
         }
     }
     func runSupervisor(readFinished: @Sendable () -> Bool, writeFinished: @Sendable () -> Bool) {

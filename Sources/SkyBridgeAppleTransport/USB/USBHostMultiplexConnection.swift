@@ -1,21 +1,29 @@
 #if os(macOS)
 import Foundation
+import Security
 import SkyBridgeProtocolCore
 import os
 
 /// A physical AOA generation and its bounded logical streams. Stream ACKs/pings are transport
 /// facts only. Product identity, same-account grants and operation authority remain mandatory.
 public final class USBHostMultiplexConnection: Sendable {
+    /// Explicit wire choice; product migration requires both native owners and
+    /// the AOA application marker. There is no downgrade or IP fallback.
+    public enum LinkProfile: Sendable { case rawYamuxV1, epochV2 }
     public struct Configuration: Sendable {
         public let limits: USBLogicalStreamProtocol.Limits
         public let frameRead, nativeWrite, pingInterval, pingReply, pendingAccept, halfClose: Duration
+        public let linkProfile: LinkProfile
+        public let epochLimits: USBLinkEpochProtocol.Limits
         public init(limits: USBLogicalStreamProtocol.Limits = .init(), frameRead: Duration = .seconds(35),
                     nativeWrite: Duration = .seconds(5), pingInterval: Duration = .seconds(15),
                     pingReply: Duration = .seconds(10), pendingAccept: Duration = .seconds(15),
-                    halfClose: Duration = .seconds(30)) {
+                    halfClose: Duration = .seconds(30), linkProfile: LinkProfile = .rawYamuxV1,
+                    epochLimits: USBLinkEpochProtocol.Limits = .init()) {
             self.limits = limits; self.frameRead = frameRead; self.nativeWrite = nativeWrite
             self.pingInterval = pingInterval; self.pingReply = pingReply
             self.pendingAccept = pendingAccept; self.halfClose = halfClose
+            self.linkProfile = linkProfile; self.epochLimits = epochLimits
         }
         fileprivate func validate() throws {
             guard [frameRead, nativeWrite, pingInterval, pingReply, pendingAccept, halfClose]
@@ -37,20 +45,21 @@ public final class USBHostMultiplexConnection: Sendable {
         try configuration.validate()
         let wire = try USBLogicalStreamProtocol(role: role, limits: configuration.limits)
         let carrier = try USBHostByteTransport(deviceRegistryID: deviceRegistryID, requireAttachmentCurrent: requireAttachmentCurrent)
-        self.init(carrier: carrier, wire: wire, configuration: configuration)
+        self.init(carrier: carrier, wire: wire, role: role, configuration: configuration)
     }
     /// Isolated tests replace OS acquisition beneath the real native-byte owner, never the pumps.
     convenience init(carrier: USBHostByteTransport, role: USBLogicalStreamProtocol.Role,
                      configuration: Configuration = Configuration()) throws {
         try configuration.validate()
-        self.init(carrier: carrier, wire: try USBLogicalStreamProtocol(role: role, limits: configuration.limits), configuration: configuration)
+        self.init(carrier: carrier, wire: try USBLogicalStreamProtocol(role: role, limits: configuration.limits), role: role, configuration: configuration)
     }
-    private init(carrier: USBHostByteTransport, wire: USBLogicalStreamProtocol, configuration: Configuration) {
-        core = USBHostMultiplexCore(carrier: carrier, wire: wire, configuration: configuration)
+    private init(carrier: USBHostByteTransport, wire: USBLogicalStreamProtocol, role: USBLogicalStreamProtocol.Role, configuration: Configuration) {
+        core = USBHostMultiplexCore(carrier: carrier, wire: wire, role: role, configuration: configuration)
     }
     deinit { core.retire(USBHostMultiplexError.closed) }
     public var terminalFailure: (any Error)? { core.failure }
     public var protocolSnapshot: USBLogicalStreamProtocol.Snapshot { core.snapshot }
+    public var epochSnapshot: USBLinkEpochProtocol.Snapshot? { core.epochSnapshot }
     public var shutdownState: ShutdownState {
         let native = core.carrier.shutdownState
         return ShutdownState(retired: core.failure != nil, nativeWorkersExited: native.workersExited,
@@ -60,16 +69,19 @@ public final class USBHostMultiplexConnection: Sendable {
     public func start(timeout: Duration = .seconds(5)) async throws {
         defer { withExtendedLifetime(self) {} }
         guard timeout > .zero && timeout <= .seconds(60) else { throw USBHostMultiplexError.invalidTimeout }
+        let budget = try USBMultiplexBudget(timeout)
         try core.beginStart()
         defer { core.endStart() }
         try await withTaskCancellationHandler {
             do {
                 try Task.checkCancellation()
-                _ = try await core.carrier.open(timeout: timeout)
-                try core.publishStart {
+                try core.launchPumps(budget: budget) {
                     let core = core
                     tasks.start([{ await core.readLoop() }, { await core.writeLoop() }, { await core.deadlineLoop() }])
                 }
+                _ = try await core.carrier.open(timeout: budget.remaining())
+                try core.publishNativeOpen()
+                try await core.awaitReady(budget)
             } catch { core.retire(error); throw core.failure ?? error }
         } onCancel: { [core] in core.retire(CancellationError()) }
     }
@@ -173,6 +185,10 @@ public final class USBHostMultiplexConnection: Sendable {
 private final class USBHostMultiplexCore: Sendable {
     typealias Wire = USBLogicalStreamWire
     typealias Stream = USBHostMultiplexConnection.Stream
+    private struct Epoch: Sendable {
+        let protocolState: USBLinkEpochProtocol
+        let origin: ContinuousClock.Instant, deadline: ContinuousClock.Instant
+    }
     private struct Handle: Sendable {
         let token: UUID
         var published = false
@@ -185,6 +201,8 @@ private final class USBHostMultiplexCore: Sendable {
     }
     private struct State: Sendable {
         var started = false, starting = false, ready = false, cleanupObserver = false, cleanupConfirmed = false
+        var nativeOpened = false
+        var startup: USBMultiplexBudget?, epoch: Epoch?
         var terminal: (any Error)?
         var handles: [UInt32: Handle] = [:]
         var released: Set<UInt32> = []
@@ -198,13 +216,17 @@ private final class USBHostMultiplexCore: Sendable {
     let carrier: USBHostByteTransport
     private let wire: USBLogicalStreamProtocol
     private let configuration: USBHostMultiplexConnection.Configuration
+    private let role: USBLogicalStreamProtocol.Role
     private let state = OSAllocatedUnfairLock(initialState: State())
     private let writerWake = USBMultiplexWake(), timerWake = USBMultiplexWake(), cleanupWake = USBMultiplexWake()
-    init(carrier: USBHostByteTransport, wire: USBLogicalStreamProtocol, configuration: USBHostMultiplexConnection.Configuration) {
-        self.carrier = carrier; self.wire = wire; self.configuration = configuration
+    private let readerWake = USBMultiplexWake(), startupWake = USBMultiplexWake()
+    init(carrier: USBHostByteTransport, wire: USBLogicalStreamProtocol, role: USBLogicalStreamProtocol.Role,
+         configuration: USBHostMultiplexConnection.Configuration) {
+        self.carrier = carrier; self.wire = wire; self.role = role; self.configuration = configuration
     }
     var failure: (any Error)? { state.withLock { $0.terminal } }
     var snapshot: USBLogicalStreamProtocol.Snapshot { wire.snapshot }
+    var epochSnapshot: USBLinkEpochProtocol.Snapshot? { state.withLock { $0.epoch?.protocolState.snapshot } }
     var cleanupConfirmed: Bool { state.withLock { $0.cleanupConfirmed } }
     private func requireReady(_ value: State) throws {
         if let failure = value.terminal { throw failure }
@@ -228,7 +250,7 @@ private final class USBHostMultiplexCore: Sendable {
                 + [value.accepting?.wake].compactMap { $0 } + removed
         }
         for wake in wakes { wake.signal() }
-        writerWake.signal(); cleanupWake.signal()
+        writerWake.signal(); readerWake.signal(); startupWake.signal(); cleanupWake.signal()
         if timer { timerWake.signal() }
     }
     func beginStart() throws {
@@ -238,13 +260,70 @@ private final class USBHostMultiplexCore: Sendable {
             value.started = true; value.starting = true
         }
     }
-    func publishStart(_ publish: @Sendable () -> Void) throws {
+    func launchPumps(budget: USBMultiplexBudget, _ publish: @Sendable () -> Void) throws {
+        let epoch: Epoch?
+        if configuration.linkProfile == .epochV2 {
+            let origin = ContinuousClock.now
+            var bytes = [UInt8](repeating: 0, count: USBLinkWire.nonceBytes)
+            let status = SecRandomCopyBytes(kSecRandomDefault, USBLinkWire.nonceBytes, &bytes)
+            guard status == errSecSuccess else { throw USBHostMultiplexError.randomUnavailable(status) }
+            let protocolState = try USBLinkEpochProtocol(role: role == .client ? .client : .server,
+                local: USBLinkWire.Nonce(Data(bytes)), limits: configuration.epochLimits, elapsedMillis: {
+                    let parts = origin.duration(to: .now).components
+                    let seconds = parts.seconds.multipliedReportingOverflow(by: 1000)
+                    let millis = seconds.partialValue.addingReportingOverflow(parts.attoseconds / 1_000_000_000_000_000)
+                    guard !seconds.overflow && !millis.overflow else { throw USBLinkEpochProtocol.Failure.clock }
+                    return millis.partialValue
+                })
+            epoch = Epoch(protocolState: protocolState, origin: origin,
+                          deadline: origin.advanced(by: .milliseconds(configuration.epochLimits.startupMillis)))
+        } else { epoch = nil }
         try state.withLock { value in
             if let failure = value.terminal { throw failure }
-            value.ready = true; value.lastPongAt = .now
+            guard value.starting && value.startup == nil else { throw USBHostMultiplexError.alreadyStarted }
+            try budget.check(); try epoch?.protocolState.tick()
+            value.startup = budget; value.epoch = epoch
+            // The timer owns the whole startup, including native acquisition.
+            // Reader/writer tasks wait for publishNativeOpen before doing I/O.
             publish() // Internal task publication only; no I/O or caller-supplied callback.
         }
         notify(timer: true)
+    }
+    func publishNativeOpen() throws {
+        try state.withLock { value in
+            if let failure = value.terminal { throw failure }
+            guard let startup = value.startup, !value.nativeOpened else { throw USBHostMultiplexError.notStarted }
+            try startup.check(); try value.epoch?.protocolState.tick(); value.nativeOpened = true
+            if value.epoch == nil { value.ready = true; value.lastPongAt = .now }
+        }
+        notify(timer: true)
+    }
+    func awaitReady(_ budget: USBMultiplexBudget) async throws {
+        while true {
+            let ready = try state.withLock { value in
+                if let failure = value.terminal { throw failure }
+                return value.ready
+            }
+            try budget.check(); if ready { return }
+            guard try await startupWake.wait(until: budget.deadline) else { throw USBHostMultiplexError.timedOut }
+        }
+    }
+    private func awaitNativeOpen(_ wake: USBMultiplexWake) async throws {
+        while true {
+            let opened = try state.withLock { value in
+                if let failure = value.terminal { throw failure }
+                return value.nativeOpened
+            }
+            if opened { return }; try await wake.wait()
+        }
+    }
+    private func epochProgress(_ value: inout State) throws {
+        guard let epoch = value.epoch else { return }
+        if let failure = epoch.protocolState.failure { throw failure }
+        if !value.ready && epoch.protocolState.snapshot.phase == .ready {
+            guard value.nativeOpened else { throw USBHostMultiplexError.notStarted }
+            value.ready = true; value.lastPongAt = .now
+        }
     }
     func endStart() { state.withLock { $0.starting = false }; cleanupWake.signal() }
     func openStream(timeout: Duration, priority: USBLogicalStreamProtocol.Priority) async throws -> Stream {
@@ -442,11 +521,20 @@ private final class USBHostMultiplexCore: Sendable {
 
     func readLoop() async {
         do {
+            try await awaitNativeOpen(readerWake)
+            var cursor = EpochReadCursor()
+            let framed = state.withLock { $0.epoch != nil }
             while true {
-                try state.withLock { try requireReady($0) }
+                try state.withLock { if let failure = $0.terminal { throw failure } }
                 let budget = try USBMultiplexBudget(configuration.frameRead)
-                let header = try Wire.decodeHeader(await readNativeExactly(Wire.headerBytes, budget: budget))
-                let body = header.type == .data ? try await readNativeExactly(Int(header.value), budget: budget) : Data()
+                let headerBytes = framed ? try await readEpochExactly(Wire.headerBytes, budget: budget, cursor: &cursor)
+                    : try await readNativeExactly(Wire.headerBytes, budget: budget)
+                let header = try Wire.decodeHeader(headerBytes)
+                let body: Data
+                if header.type == .data {
+                    body = framed ? try await readEpochExactly(Int(header.value), budget: budget, cursor: &cursor)
+                        : try await readNativeExactly(Int(header.value), budget: budget)
+                } else { body = Data() }
                 let frame = try Wire.Frame(header: header, body: body)
                 let timer = try state.withLock { value in
                     try requireReady(value); try wire.receive(frame)
@@ -467,6 +555,86 @@ private final class USBHostMultiplexCore: Sendable {
             }
         } catch { retire(error) }
     }
+    /// Confined to the single reader task. Native packet tails survive logical
+    /// frame boundaries; no parser or provisional bytes escape to another owner.
+    private struct EpochReadCursor: Sendable {
+        var decoder = USBLinkWire.Decoder(mode: .startup)
+        var packet: [UInt8] = [], position = 0
+        var pending: USBLinkEpochProtocol.Inbound?
+    }
+    private func readEpochExactly(_ count: Int, budget: USBMultiplexBudget, cursor: inout EpochReadCursor) async throws -> Data {
+        var result = Data(); result.reserveCapacity(count)
+        while result.count < count {
+            let bytes = try await readEpochBytes(maximum: min(USBLinkWire.maximumBodyBytes, count - result.count), budget: budget, cursor: &cursor)
+            try budget.check(); result.append(bytes)
+        }
+        return result
+    }
+    private func readEpochBytes(maximum: Int, budget: USBMultiplexBudget, cursor: inout EpochReadCursor) async throws -> Data {
+        let link = try state.withLock { value in
+            guard let epoch = value.epoch else { throw USBHostMultiplexError.notStarted }
+            return epoch.protocolState
+        }
+        while true {
+            try budget.check()
+            let available = try state.withLock { value -> (Data?, Bool) in
+                if let failure = value.terminal { throw failure }
+                try epochProgress(&value)
+                if value.ready { return (try link.readPayload(maximumBytes: maximum), false) }
+                return (nil, link.snapshot.bufferedBytes > 0)
+            }
+            if let bytes = available.0 { return bytes }
+            if available.1 {
+                // Peer DATA can precede local READY/ACCEPT write completion. No
+                // further packet is required to wake this provisional buffer.
+                guard try await readerWake.wait(until: budget.deadline) else { throw USBHostMultiplexError.timedOut }
+                continue
+            }
+            if let pending = cursor.pending {
+                let result = try receiveEpoch(pending, link: link)
+                if result != .backpressure { cursor.pending = nil }
+                continue
+            }
+            if cursor.position == cursor.packet.count {
+                let bytes = try await carrier.readBytes(maximumBytes: USBHostByteTransport.transferBytes, timeout: budget.remaining())
+                try budget.check()
+                try state.withLock { value in
+                    if let failure = value.terminal { throw failure }
+                    try link.observeInboundBytes(bytes.count)
+                }
+                cursor.packet = Array(bytes); cursor.position = 0
+            }
+            while cursor.position < cursor.packet.count {
+                if cursor.decoder.isAtRecordBoundary {
+                    let ready = try state.withLock { value in
+                        if let failure = value.terminal { throw failure }; return value.ready
+                    }
+                    if ready { try cursor.decoder.seal() }
+                }
+                let byte = cursor.packet[cursor.position]; cursor.position += 1
+                guard let event = try cursor.decoder.accept(byte) else { continue }
+                switch event {
+                case .record(let record):
+                    let inbound = USBLinkEpochProtocol.Inbound(record)
+                    if try receiveEpoch(inbound, link: link) == .backpressure { cursor.pending = inbound }
+                case .discarded(let reason, let count):
+                    try state.withLock { value in
+                        if let failure = value.terminal { throw failure }
+                        try link.observeDiscard(reason: reason, encodedBodyBytes: count)
+                    }
+                }
+                break // Drain admitted payload before decoding another record.
+            }
+        }
+    }
+    private func receiveEpoch(_ inbound: USBLinkEpochProtocol.Inbound, link: USBLinkEpochProtocol) throws -> USBLinkEpochProtocol.Receive {
+        let result = try state.withLock { value in
+            if let failure = value.terminal { throw failure }
+            let before = value.ready, received = try link.receive(inbound)
+            try epochProgress(&value); return (received, before != value.ready)
+        }
+        notify(timer: result.1); return result.0
+    }
     private func readNativeExactly(_ count: Int, budget: USBMultiplexBudget) async throws -> Data {
         var result = Data(); result.reserveCapacity(count)
         while result.count < count {
@@ -475,57 +643,158 @@ private final class USBHostMultiplexCore: Sendable {
         }
         return result
     }
+    private enum Dispatch: Sendable {
+        case link(USBLinkEpochProtocol.Outbound)
+        case logical(USBLogicalStreamProtocol.Outbound)
+    }
+    private func nextWrite() throws -> (Dispatch?, ContinuousClock.Instant?) {
+        try state.withLock { value in
+            if let failure = value.terminal { throw failure }
+            guard value.nativeOpened else { throw USBHostMultiplexError.notStarted }
+            if let epoch = value.epoch {
+                if let outgoing = try epoch.protocolState.pollOutbound() { return (.link(outgoing), nil) }
+                try epochProgress(&value)
+            }
+            if value.ready { return (try wire.pollOutbound().map(Dispatch.logical), nil) }
+            guard let epoch = value.epoch, let next = epoch.protocolState.snapshot.nextWakeMillis else {
+                throw USBHostMultiplexError.notStarted
+            }
+            return (nil, epoch.origin.advanced(by: .milliseconds(next)))
+        }
+    }
     func writeLoop() async {
         do {
+            try await awaitNativeOpen(writerWake)
             while true {
-                let frame = try state.withLock { value in try requireReady(value); return try wire.pollOutbound() }
-                guard let frame else { try await writerWake.wait(); continue }
-                let lease = frame.header.type == .data ? state.withLock { $0.handles[frame.header.streamID]?.write } : nil
-                if frame.header.type == .data {
-                    do {
-                        guard let lease else { throw USBHostMultiplexError.missingWriteLease }
-                        try lease.authorize()
-                        try state.withLock { value in
-                            guard let owner = value.handles[frame.header.streamID] else { throw USBHostMultiplexError.ownerRetired }
-                            try ensure(frame.header.streamID, owner.token, value); try lease.check()
-                        }
-                    } catch {
-                        try state.withLock { value in
-                            try abortLocked(frame.header.streamID, cause: error, &value)
-                            try wire.discardUnsentData(frame); try reap(&value)
-                        }
-                        notify(timer: true); continue
-                    }
+                let next = try nextWrite()
+                guard let dispatch = next.0 else {
+                    if let deadline = next.1 { _ = try await writerWake.wait(until: deadline) }
+                    else { try await writerWake.wait() }
+                    continue
                 }
+                let frame: USBLogicalStreamProtocol.Outbound
+                switch dispatch {
+                case .link(let outgoing): try await writeEpoch(outgoing); continue
+                case .logical(let outgoing): frame = outgoing
+                }
+                let lease = frame.header.type == .data ? state.withLock { $0.handles[frame.header.streamID]?.write } : nil
+                let written: Bool
                 do {
-                    let timeout = try min(configuration.nativeWrite, lease?.budget.remaining() ?? configuration.nativeWrite)
-                    try await carrier.writeBytes(frame.wireBytes(), timeout: timeout, requireEffectAuthorization: {
-                        if let lease {
-                            do { try lease.authorize() }
-                            catch {
-                                // Preserve originating denial before raw cleanup or the reader can
-                                // publish a secondary disconnect. Native entry makes failure physical.
-                                do { try self.state.withLock { value in try self.abortLocked(frame.header.streamID, cause: error, &value) } }
-                                catch { self.retire(error) }
-                                self.notify(timer: true)
-                                throw error
-                            }
-                        }
-                    })
-                    try state.withLock { value in try wire.reportWritten(frame); try reap(&value) }
-                    notify()
+                    if state.withLock({ $0.epoch != nil }) { written = try await writeEpochLogical(frame, lease: lease) }
+                    else if try authorizeLogicalBeforeDispatch(frame, lease: lease) {
+                        let timeout = try min(configuration.nativeWrite, lease?.budget.remaining() ?? configuration.nativeWrite)
+                        try await carrier.writeBytesAndAwaitNativeCompletion(frame.wireBytes(), timeout: timeout, requireEffectAuthorization: {
+                            try self.authorizeLogicalEffect(frame, lease: lease)
+                        })
+                        written = true
+                    } else { written = false }
                 } catch {
                     try state.withLock { _ in try wire.reportWriteFailure(frame, cause: error) }
                     throw error
                 }
+                if written {
+                    // This consumes the dispatch even if an earlier terminal
+                    // cause is rethrown. Never account it a second time as failure.
+                    try state.withLock { value in try wire.reportWritten(frame); try reap(&value) }
+                    notify()
+                }
             }
         } catch { retire(error) }
+    }
+    private func authorizeLogicalBeforeDispatch(_ frame: USBLogicalStreamProtocol.Outbound, lease: USBMultiplexLease?) throws -> Bool {
+        guard frame.header.type == .data else { return true }
+        do {
+            guard let lease else { throw USBHostMultiplexError.missingWriteLease }
+            try lease.authorize()
+            try state.withLock { value in
+                guard let owner = value.handles[frame.header.streamID] else { throw USBHostMultiplexError.ownerRetired }
+                try ensure(frame.header.streamID, owner.token, value); try lease.check()
+            }
+            return true
+        } catch {
+            try state.withLock { value in
+                try abortLocked(frame.header.streamID, cause: error, &value)
+                try wire.discardUnsentData(frame); try reap(&value)
+            }
+            notify(timer: true); return false
+        }
+    }
+    private func authorizeLogicalEffect(_ frame: USBLogicalStreamProtocol.Outbound, lease: USBMultiplexLease?) throws {
+        guard let lease else { return }
+        do { try lease.authorize() }
+        catch {
+            // Keep the originating denial before native cleanup can block or
+            // another reader can publish a secondary disconnect.
+            do { try state.withLock { value in try abortLocked(frame.header.streamID, cause: error, &value) } }
+            catch { retire(error) }
+            notify(timer: true); throw error
+        }
+    }
+    private func writeEpochLogical(_ frame: USBLogicalStreamProtocol.Outbound, lease: USBMultiplexLease?) async throws -> Bool {
+        while true {
+            if try !authorizeLogicalBeforeDispatch(frame, lease: lease) { return false }
+            let next = try state.withLock { value -> (USBLinkEpochProtocol.Outbound, USBLinkEpochProtocol.WriteTicket?) in
+                try requireReady(value)
+                guard let epoch = value.epoch else { throw USBHostMultiplexError.notStarted }
+                if let control = try epoch.protocolState.pollOutbound() {
+                    guard control.record.kind != .data else { throw USBLinkEpochProtocol.Failure.wrongDispatch }
+                    return (control, nil)
+                }
+                let ticket = try epoch.protocolState.queueData(frame.wireBytes())
+                guard let outgoing = try epoch.protocolState.pollOutbound() else { throw USBLinkEpochProtocol.Failure.wrongDispatch }
+                return (outgoing, ticket)
+            }
+            try await writeEpoch(next.0, frame: next.1 == nil ? nil : frame, lease: next.1 == nil ? nil : lease)
+            if let ticket = next.1 {
+                switch ticket.result {
+                case .written: return true
+                case .failed(let error): throw error
+                case .waiting: throw USBLinkEpochProtocol.Failure.wrongDispatch
+                }
+            }
+        }
+    }
+    private func writeEpoch(_ outgoing: USBLinkEpochProtocol.Outbound,
+                            frame: USBLogicalStreamProtocol.Outbound? = nil, lease: USBMultiplexLease? = nil) async throws {
+        let link = try state.withLock { value in
+            guard let epoch = value.epoch else { throw USBHostMultiplexError.notStarted }
+            return epoch.protocolState
+        }
+        do {
+            let budget = try USBMultiplexBudget(min(configuration.nativeWrite, lease?.budget.remaining() ?? configuration.nativeWrite))
+            let bytes = outgoing.wireBytes(); var position = 0
+            while position < bytes.count {
+                let end = min(bytes.count, position + USBHostByteTransport.transferBytes)
+                try await carrier.writeBytesAndAwaitNativeCompletion(bytes.subdata(in: position..<end), timeout: budget.remaining(),
+                    requireEffectAuthorization: {
+                        if let frame { try self.authorizeLogicalEffect(frame, lease: lease) }
+                        try self.state.withLock { value in
+                            if let failure = value.terminal { throw failure }
+                            try link.authorizeOutbound(outgoing)
+                        }
+                    })
+                position = end
+            }
+        } catch {
+            try state.withLock { _ in try link.reportWriteFailure(outgoing, cause: error) }
+            notify(); throw error
+        }
+        let changed = try state.withLock { value in
+            let before = value.ready
+            try link.reportWritten(outgoing); try epochProgress(&value); return before != value.ready
+        }
+        notify(timer: changed)
     }
     func deadlineLoop() async {
         do {
             while true {
                 let next = try state.withLock { value -> ContinuousClock.Instant in
-                    try requireReady(value)
+                    if let failure = value.terminal { throw failure }
+                    if !value.ready {
+                        guard let startup = value.startup else { throw USBHostMultiplexError.notStarted }
+                        try value.epoch?.protocolState.tick(); try startup.check()
+                        return min(startup.deadline, value.epoch?.deadline ?? startup.deadline)
+                    }
                     let now = ContinuousClock.now
                     if let sent = value.pingSentAt, now >= sent.advanced(by: configuration.pingReply) { throw USBHostMultiplexError.timedOut }
                     for (id, since) in value.pendingSince where now >= since.advanced(by: configuration.pendingAccept) {
@@ -559,7 +828,7 @@ private final class USBHostMultiplexCore: Sendable {
     func retire(_ cause: any Error) {
         let first = state.withLock { value in
             guard value.terminal == nil else { return false }
-            value.terminal = cause; value.ready = false; wire.failCarrier(cause)
+            value.terminal = cause; value.ready = false; value.epoch?.protocolState.failCarrier(cause); wire.failCarrier(cause)
             for owner in value.handles.values { owner.opening?.retire(); owner.read?.retire(); owner.write?.retire() }
             value.accepting?.retire(cause); return true
         }
@@ -582,7 +851,8 @@ private final class USBHostMultiplexCore: Sendable {
             let released = try state.withLock { value in
                 guard value.accepting == nil && !value.starting && value.handles.values.allSatisfy(\.idle) else { return false }
                 for id in Array(value.handles.keys) { try release(id, &value) }
-                guard !wire.snapshot.dispatchPending && wire.snapshot.owners == 0 else { throw USBHostMultiplexError.cleanupUnconfirmed }
+                guard !wire.snapshot.dispatchPending && wire.snapshot.owners == 0 &&
+                      value.epoch?.protocolState.snapshot.dispatchPending != true else { throw USBHostMultiplexError.cleanupUnconfirmed }
                 value.cleanupConfirmed = true; return true
             }
             if released { notify(timer: true); return }
