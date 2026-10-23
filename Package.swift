@@ -84,18 +84,10 @@ let smokeIdentityRuntimeProductionSwiftSettings: [SwiftSetting] =
         ? [.define("SKYBRIDGE_RELEASE_EXCLUDES_SMOKE_IDENTITY_RUNTIME")]
         : []
 
-let swiftPMProductRootRPath = "@loader_path/../../.."
-
 func metalResource(_ path: String) -> Resource {
     // Xcode 27 SwiftPM emits missing-creator warnings when processing .metal resources.
     // The app runtime validates copied shader sources through SkyBridgeMetalShaderLibrary.
     .copy(path)
-}
-
-func webRTCTestLinkerSettings() -> [LinkerSetting] {
-    [
-        .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", swiftPMProductRootRPath], .when(platforms: [.macOS]))
-    ]
 }
 
 let package = Package(
@@ -548,7 +540,6 @@ let package = Package(
                 // 与 SkyBridgeCore 保持一致：否则测试中的 `#if HAS_APPLE_PQC_SDK` 分支会与被测模块不一致
                 .define("HAS_APPLE_PQC_SDK")
             ] : [])),
-            linkerSettings: webRTCTestLinkerSettings()
         ),
         .testTarget(
             name: "SkyBridgeMessagePersistenceTests",

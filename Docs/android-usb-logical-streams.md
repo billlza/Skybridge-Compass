@@ -288,14 +288,20 @@ working-tree files, rather than importing unrelated pre-existing modifications
 into the carrier commit. The strict Mac core build and 138 selected session,
 audio-publication, inbound-audio and file-route tests pass. The test command also
 builds the app/test targets; it does not launch or qualify the installed app.
+An existing duplicate product-root rpath in the test target was removed from
+the manifest. The resulting Mach-O has the same ordered runtime search paths,
+including exactly one product-root entry supplied by SwiftPM. The same 138
+cases pass with compiler warnings treated as errors and linker warnings fatal;
+no warning was suppressed.
 The initial compiler rejected the nested non-escaping preparation callback; its
 lifetime is now explicit and the existing closed-preparation fence is tested
 against late submission. No unsafe escaping conversion or diagnostic suppression
 is used. Input hashes and failed/current receipts are in the Android worktree's
 `artifacts/apple-main-control-carrier-20261023/`.
 
-The carrier branch contains only the frame owner, its focused tests/script and
-this documentation; the product patch remains in the existing Apple worktree.
+The carrier branch contains the frame owner, its focused tests/script, the
+scoped test-linker configuration fix and this documentation. The product patch
+remains in the existing Apple worktree.
 A fresh checkout build of that branch is not asserted. Product USB discovery and
 bootstrap-route wiring, Android accessory/application adoption, current physical
 AOA interchange/driver coexistence, native PQC over USB, account/offline grants,
