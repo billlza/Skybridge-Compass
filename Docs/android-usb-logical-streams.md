@@ -1,10 +1,10 @@
 # Android USB logical streams: Apple integration
 
 Status, 2026-10-23: shared Swift wire/state implementation and Kotlin/Swift
-process interoperability verified. A native Mac AOA byte owner now has focused
-lifecycle checks; its current physical data transfer, the Swift multiplex pump,
-product admission and audio integration remain open. No new USB capability is
-advertised.
+process interoperability verified. Native Mac byte and multiplex owners now have
+focused lifecycle checks and Kotlin process interoperability. Their current
+physical data transfer, authenticated product admission and audio integration
+remain open. No new USB capability is advertised.
 
 The existing `SkyBridgeCore.USBMultiplexTransport` speaks Apple's usbmuxd
 protocol. It stays the Apple-device route; it is not an Android AOA implementation.
@@ -35,9 +35,9 @@ Late frames remain bounded by both count and outstanding credit. Current ping
 replies must match a dispatched, strictly increasing challenge; they grant no
 identity, account validity or playback permission.
 
-The native byte owner described below supplies reader/writer lifetime and bounded
-raw operations. Its future multiplex integration must own whole-frame deadlines,
-attachment replacement, silent-peer expiry and purpose admission. The protocol object has no timer and
+The native byte and multiplex owners described below supply reader/writer lifetime,
+whole-frame deadlines, attachment checks and silent-peer expiry. Authenticated
+purpose admission remains an explicit integration gate. The protocol object has no timer and
 cannot certify a driver or worker has stopped. It must feed the existing
 PIB/SKR, MAIN/Finished and authenticated file/audio paths, without a local TCP
 forwarder, fake IP endpoint, new trust store or crypto fallback. Strict original
@@ -159,5 +159,80 @@ confirmed worker exit/reference release. No USB mode, permission, driver, app
 installation or playback setting was changed. SamsungAOA remains enabled; the
 earlier physical ordinary-open conflict is still an open integration gate.
 The earlier successful experimental AOA transfers are not proof for this new
-carrier. An actual current-carrier round trip, Swift Yamux pump integration,
-PIB/SKR/MAIN consumers, launch without ADB and authenticated audio remain pending.
+carrier. An actual current-carrier round trip, PIB/SKR/MAIN consumers, launch
+without ADB and authenticated audio remain pending.
+
+## Native multiplex lifecycle
+
+`USBHostMultiplexConnection` connects the shared protocol to the actual
+`USBHostByteTransport`. A single reader pump keeps one whole-frame deadline
+across header/body reads and validates the header before allocating its body.
+A single writer pump binds each committed DATA dispatch to its captured write
+lease. One event-driven deadline task owns pending-accept, half-close and current
+ping expiry; audio data does not renew the liveness challenge. Matching pings
+prove only transport progress, not identity or account validity.
+
+Public stream operations allow one reader and one writer. The existing four-byte
+big-endian control framing and 1 MiB policy ceiling are reused. One read lease
+covers both prefix and body, so a second caller cannot interleave frame parsing.
+Large writes split into bounded wire frames and wait for credit and their exact
+dispatch completion within the original deadline. They preserve the supplied
+bytes; `written` remains local dispatch evidence, not a peer file/audio receipt.
+
+Revocation before native dispatch discards only that exact retired DATA frame
+and resets its logical stream. Once raw writing is entered, a failure retires
+the physical connection because bytes may already have left. The original
+authority failure is published before native cleanup can block or another
+reader reports a secondary disconnect. FIN preserves the reverse direction;
+physical EOF is never synthesized as a successful logical FIN. Cancelled reads,
+credit timeouts and pending/half-close expiry do not implicitly cancel siblings.
+
+Dropping a public stream view resets it and transfers cleanup to the connection;
+the handle table does not keep the view alive in an ARC cycle. Removed owners
+still wake their registered cleanup observers. Connection cleanup waits for
+native reference/worker evidence, actual pump task completion and logical
+operations, with one cleanup observer at a time. A timed-out observer retains
+unresolved ownership. The lifetime helper coalesces notifications, removes only
+the exact cancelled waiter and joins the losing timeout/notification task.
+
+```sh
+python3 Scripts/check_usb_multiplex.py --sanitize --output /absolute/new/multiplex-evidence-directory
+```
+
+Twenty cases pass against the actual thread-sanitized native-byte, multiplex and
+protocol modules. They include a 600,007-byte framed body, a blocked 700,011-byte
+bulk write while a sibling control stream remains usable, scoped read/write
+timeouts, queued/native revocation, reverse FIN, pending/half-close expiry,
+dropped views, partial-frame EOF, ping expiry, cancellation during open/accept,
+concurrent parent/stream cleanup, notification reuse, oversize headers and close
+errors after confirmed release. Native I/O in these cases is a bounded synthetic
+pipe; they are not physical USB or audio acceptance.
+
+The same check script builds `swift-yamux-native-peer`, an isolated loopback
+fixture that substitutes only native acquisition/I/O beneath the real byte owner
+and pumps. Select it in Android with the additional argument
+`-PusbYamuxSwiftNativePeer=/absolute/evidence/swift-yamux-native-peer` and run
+`UsbYamuxAppleNativeInteropTest`. Its executable is a Gradle test input; there is
+no fallback to a different peer. Six native-owner cases and six official Go
+reference cases pass. The 262,145-byte and 65,579-byte echoes and 23-byte control
+receipt agree with independent SHA-256 recomputation. Native-owner cleanup must
+report worker exit, reference release, pump completion and zero logical owners.
+Reverse tests prove data/FIN exchange; the native owner's public open waits for
+ACK, so those cases do not add an early-DATA-before-ACK claim.
+
+The first cross-language attempt failed its two reset cases. Kotlin's immediate
+reset can clear a pending ACK and send RST directly; the old state-only fixture
+returned a stream ID immediately, whereas the native owner's open waits for ACK.
+The new fixture originally caught RST only in the later read. It now requires
+an explicit RST during open or read, confirms the old owner is released, and
+verifies the next stream's bytes/FINs. Both final reset receipts identify `open`.
+No product admission, protocol validation or failure assertion was relaxed.
+The failed receipts and matching candidate are retained separately.
+
+Evidence is under `artifacts/apple-usb-multiplex-lifecycle-20261023/` in Android.
+The expanded Android test-source lint run retains the same 125 errors and two
+hints, compared by issue ID, message and source location; no new issue was added.
+That existing lint debt, fresh published-branch/full-app builds, current physical
+AOA data and the product authentication/file/audio consumers are not qualified
+by these focused checks. Existing worktree changes and strict output policy
+remain intact; Q-Periapt is unchanged.
