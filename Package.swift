@@ -327,9 +327,20 @@ let package = Package(
             ]
         ),
         .target(
+            name: "CSkyBridgeUSBHost",
+            path: "Sources/CSkyBridgeUSBHost",
+            publicHeadersPath: "include",
+            cSettings: [.unsafeFlags(latestCStandardFlags + ["-Wall", "-Wextra", "-Werror"])],
+            linkerSettings: [
+                .linkedFramework("IOKit", .when(platforms: [.macOS])),
+                .linkedFramework("CoreFoundation", .when(platforms: [.macOS]))
+            ]
+        ),
+        .target(
             name: "SkyBridgeAppleTransport",
             dependencies: [
-                "SkyBridgeProtocolCore"
+                "SkyBridgeProtocolCore",
+                .target(name: "CSkyBridgeUSBHost", condition: .when(platforms: [.macOS]))
             ],
             path: "Sources/SkyBridgeAppleTransport",
             swiftSettings: [

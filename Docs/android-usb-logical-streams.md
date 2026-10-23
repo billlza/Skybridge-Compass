@@ -1,8 +1,10 @@
 # Android USB logical streams: Apple integration
 
 Status, 2026-10-23: shared Swift wire/state implementation and Kotlin/Swift
-process interoperability verified. Native AOA ownership, product admission and
-audio integration remain open. No new USB capability is advertised.
+process interoperability verified. A native Mac AOA byte owner now has focused
+lifecycle checks; its current physical data transfer, the Swift multiplex pump,
+product admission and audio integration remain open. No new USB capability is
+advertised.
 
 The existing `SkyBridgeCore.USBMultiplexTransport` speaks Apple's usbmuxd
 protocol. It stays the Apple-device route; it is not an Android AOA implementation.
@@ -33,9 +35,9 @@ Late frames remain bounded by both count and outstanding credit. Current ping
 replies must match a dispatched, strictly increasing challenge; they grant no
 identity, account validity or playback permission.
 
-The future `SkyBridgeAppleTransport` AOA owner must own the real reader/writer,
-whole-frame and operation deadlines, attachment replacement, silent-peer expiry,
-purpose admission and native cleanup. The protocol object has no timer and
+The native byte owner described below supplies reader/writer lifetime and bounded
+raw operations. Its future multiplex integration must own whole-frame deadlines,
+attachment replacement, silent-peer expiry and purpose admission. The protocol object has no timer and
 cannot certify a driver or worker has stopped. It must feed the existing
 PIB/SKR, MAIN/Finished and authenticated file/audio paths, without a local TCP
 forwarder, fake IP endpoint, new trust store or crypto fallback. Strict original
@@ -100,3 +102,62 @@ Local evidence is under the Android workspace's
 `artifacts/apple-usb-logical-streams-20261023/`. Existing Apple working-tree
 changes were preserved; only the new protocol, focused test, peer, check script
 and this integration record belong to this addition.
+
+## Native Mac byte owner
+
+`SkyBridgeAppleTransport.USBHostByteTransport` owns one reader, one writer and a
+cleanup supervisor. `CSkyBridgeUSBHost` is a narrow macOS-only IOKit dependency;
+it is not introduced into `SkyBridgeProtocolCore` or the iOS dependency graph.
+The C boundary opens only the selected current registry entry in AOA accessory
+mode (`18d1:2d00` or `18d1:2d01`), interface zero, with one bulk endpoint in each
+direction. It uses ordinary public IOUSBLib190 operations. It does not seize,
+switch USB modes, reset the device, stop a service, disable another driver or
+fall back to a network endpoint. Registry IDs and descriptors are not identity.
+
+Raw reads always provide a 16 KiB native buffer and retain its unused tail.
+Successful zero-length USB transfers are packet boundaries, not EOF; they do
+not extend the operation deadline. Writes are bounded to 16 KiB, preserve the
+exact supplied bytes and check captured effect authority before and after the
+native operation. A failed `WritePipeTO` has no known partial byte count and is
+never retried as an unwritten packet. Attachment/authority callbacks must be
+bounded, thread-safe and non-reentrant.
+
+Cancellation retires C admission before waking the supervisor. The caller is
+not blocked on native abort/close. The supervisor waits for the actual reader
+and writer `Thread.isFinished` states before release. Opening that completes
+after cancellation never becomes ready. The observer's bounded cleanup wait
+does not terminate or abandon an unresolved native call. `shutdownState`
+exposes retirement, actual worker exit, reference release and cleanup error as
+separate facts. A native close error remains visible after COM reference release;
+an unconfirmed `IOObjectRelease` leaves the owner unresolved. No automatic
+release retry guesses whether the reference is still valid. Idle ownership has
+no fixed polling timer; active deadlines are checked against the current request
+under the same lock as completion/admission, so an old snapshot cannot expire a
+new request.
+
+Run focused checks serially:
+
+```sh
+python3 Scripts/check_usb_host.py --output /absolute/new/native-evidence-directory
+```
+
+The script builds the real C and Swift targets. Fourteen C cases run separately
+with address/undefined-behaviour and thread sanitizers. Sixteen Swift cases run
+against the actual thread-sanitized `SkyBridgeAppleTransport`, protocol and C
+objects; the script verifies instrumentation, input hashes and exit statuses.
+They exercise cancellation during acquisition and I/O, simultaneous directions,
+bounded admission, sliced writes, packet tails/ZLP, attachment and effect
+revocation, replaced deadlines, close errors, unresolved cleanup and deinit.
+Native registry-absence checks use the real IOKit boundary. These tests inject
+native outcomes and do not establish physical device data behaviour.
+
+Local evidence is in the Android workspace's
+`artifacts/apple-usb-native-carrier-20261023/`. A separate negative check selected
+the actual USB-connected Samsung phone while it remained in normal
+charging/ADB mode: it was rejected as not an accessory, and the Swift owner
+confirmed worker exit/reference release. No USB mode, permission, driver, app
+installation or playback setting was changed. SamsungAOA remains enabled; the
+earlier physical ordinary-open conflict is still an open integration gate.
+The earlier successful experimental AOA transfers are not proof for this new
+carrier. An actual current-carrier round trip, Swift Yamux pump integration,
+PIB/SKR/MAIN consumers, launch without ADB and authenticated audio remain pending.
