@@ -15,6 +15,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--sanitize', action='store_true', help='Instrument the actual modules and tests with ThreadSanitizer')
     parser.add_argument('--control-frames', action='store_true', help='Also check the ordered native MAIN frame carrier')
+    parser.add_argument('--bootstrap', action='store_true', help='Also check native MAIN bootstrap exchanges')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     out = args.output.resolve(); out.mkdir(parents=True, exist_ok=False)
@@ -23,6 +24,8 @@ def main():
     paths = [root / 'Package.swift', Path(__file__).resolve(), *tests, peer]
     control_tests = root / 'Tests/CSkyBridgeUSBHostTests/USBHostControlFrameChecks.swift'
     if args.control_frames: paths.append(control_tests)
+    bootstrap_tests = root / 'Tests/CSkyBridgeUSBHostTests/USBHostBootstrapChecks.swift'
+    if args.bootstrap: paths.append(bootstrap_tests)
     for directory in ('SkyBridgeAppleTransport', 'SkyBridgeProtocolCore', 'CSkyBridgeUSBHost'):
         paths += [p for p in (root / 'Sources' / directory).rglob('*') if p.is_file()]
     digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
@@ -77,6 +80,12 @@ def main():
             result['controlBinarySha256'] = digest(control_binary)
             run('control-test-run', [str(control_binary)], timeout=120)
             result['controlFramesChecked'] = True
+        if args.bootstrap:
+            bootstrap_binary = out / 'usb-bootstrap-checks'
+            run('bootstrap-test-build', [*common, str(tests[0]), str(bootstrap_tests), '-o', str(bootstrap_binary)])
+            result['bootstrapBinarySha256'] = digest(bootstrap_binary)
+            run('bootstrap-test-run', [str(bootstrap_binary)], timeout=120)
+            result['bootstrapChecked'] = True
         peer_binary = out / 'swift-yamux-native-peer'
         run('peer-build', [*common, str(peer), '-o', str(peer_binary)])
         result['peerBinarySha256'] = digest(peer_binary)

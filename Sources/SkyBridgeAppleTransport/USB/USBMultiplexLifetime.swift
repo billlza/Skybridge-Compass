@@ -87,8 +87,10 @@ final class USBMultiplexWake: Sendable {
 
 struct USBMultiplexBudget: Sendable {
     let deadline: ContinuousClock.Instant
+    // Covers the existing MAIN pairing-confirmation maximum (300s approval + 15s response).
+    // Native operations and physical cleanup retain their separate shorter limits.
     init(_ timeout: Duration) throws {
-        guard timeout > .zero && timeout <= .seconds(300) else { throw USBHostMultiplexError.invalidTimeout }
+        guard timeout > .zero && timeout <= .seconds(315) else { throw USBHostMultiplexError.invalidTimeout }
         deadline = ContinuousClock.now.advanced(by: timeout)
     }
     func check() throws { _ = try remaining() }

@@ -387,3 +387,80 @@ fatal. Current physical bulk data, native MAIN bootstrap/cryptography, account
 grants and audio remain unverified. Mac UI startup wiring is still open. The
 original authentication and strict-output requirements and Q-Periapt version
 are unchanged.
+
+## Native Android MAIN bootstrap integration
+
+`USBHostBootstrapChannel` exchanges the existing MAIN JSON messages over a
+fresh logical stream per request on an already-started, externally owned native
+multiplexer. It bounds each request/response at 64 KiB, admits one exchange per
+channel, and has one elapsed deadline across stream ACK, write, response and FIN.
+It does not finish the requester's half while the responder may be waiting for
+consent. After reading the complete response, it sends FIN and requires peer EOF;
+extra trailing bytes fail. Cancellation closes the exact stream. Unconfirmed
+cleanup retains that stream, retires further channel admission and exposes an
+explicit cleanup-only retry. No request is automatically replayed by this class.
+
+The current Core worktree routes native Android PIB and SKR through this channel
+using `P2PUSBControlRoute`. The established signing, request/response validation,
+pin checks, SAS confirmation, final acknowledgement and KEM-store signature
+verification remain in their existing code paths. The route digest includes the
+attachment nonce and MAIN purpose; it is not a new identity proof. Apple usbmuxd
+keeps its existing digest bytes. A native Android exchange rejects network
+endpoint candidates and has no `NWEndpoint`; a missing endpoint in this result
+is an explicit route fact, not a network failure disguised as success. Opening
+latency is measured by the actual logical-stream opening, not set to a guessed
+network latency. `prepareAndroidUSBHandshake` is a preflight integration API;
+it does not by itself publish an authenticated connection or audio capability.
+
+The prior physical enabled/disabled/restored driver experiment is retained at
+`artifacts/android-usb-coexistence-native-20261023`. Its results establish that
+SamsungAOA blocks ordinary IOUSBLib opening in that tested environment. The newer
+product-native owner has not yet been qualified with that driver condition
+removed. No additional phone or driver mutation is part of this bootstrap stage.
+Apple's local SDK documents `IOUSBHostObjectInitOptionsDeviceCapture` as requiring
+`com.apple.vm.device-access` and IOServiceAuthorize (or root), terminating other
+device clients/drivers and resetting/rematching on destroy. It is not adopted as
+a silent fallback. Cooperative seize had already been refused by the isolated
+probe; repeating that attempt is not new verification.
+
+Sources: [IOUSBHost device capture](https://developer.apple.com/documentation/iousbhost/iousbhostobjectinitoptions/devicecapture),
+[IOUSB interface cooperative opening](https://developer.apple.com/de/documentation/iokit/iousbinterfaceinterface183/1559513-usbinterfaceopenseize).
+
+The bounded logical deadline now permits 315 seconds to match the existing MAIN
+confirmation policy (up to 300 seconds of approval plus response allowance).
+The native operation deadlines, physical keepalive and cleanup limits are not
+extended. The legacy wire `routeScope = "lan"` remains the existing control
+protocol scope, not evidence of an IP route or a grant to the LAN file service.
+The actual transport route remains native USB and the separate non-IP file/audio
+admission gates remain closed until their integration is verified.
+
+Twenty multiplex checks, eight ordered MAIN frame groups and ten bootstrap
+groups pass with the actual modules instrumented by ThreadSanitizer. The native
+I/O boundary is synthetic in these checks. They cover a full 64-KiB response,
+fresh streams, consent-time half-close behavior, cancellation, response deadlines,
+trailing bytes, revocation, the 315-second admission bound and retained cleanup
+without request replay. The first new check compilation used OptionSet syntax
+for an integer wire bitfield; that test-only failure and source are preserved.
+An initial Core run executed 68 cases and failed four pre-existing source-text
+contract assertions whose markers no longer matched the saved pre-turn code.
+Their current fixes preserve ordering, authority and deadline checks; results of
+the final Core run are recorded separately, never substituted into the failed run.
+
+This work does not establish current physical bulk transfer, native-device PQC
+exchange, account/offline grant acceptance or audio playback. Mac user-interface
+startup, re-enumeration ownership and MAIN session publication still need to be
+connected to this preflight API and verified. No installed application, driver,
+phone setting, account identity or Q-Periapt dependency was changed in this stage.
+
+The final strict normal build and all 76 selected Core cases pass, including
+three new native-route cases and the existing USB reconnect checks. The four
+stale markers and one newly stale visibility marker were updated without
+removing their ordering/diagnostic assertions. Compiler warnings are errors and
+linker warnings are fatal; no test is skipped. Final source-bound results and
+both failed Core source snapshots remain under
+`artifacts/apple-android-usb-bootstrap-20261023/` in the Android worktree.
+The native bootstrap channel, logical deadline adjustment, focused checker and
+this documentation are published as a separate native-component branch. The
+four-file Core integration is preserved in the current Apple worktree plus a
+hash-bound, round-trip-verified patch relative to the original worktree snapshot.
+It is not represented as a fresh-checkout Core build or hosted CI result.
