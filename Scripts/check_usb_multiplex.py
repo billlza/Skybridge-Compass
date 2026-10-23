@@ -14,12 +14,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--sanitize', action='store_true', help='Instrument the actual modules and tests with ThreadSanitizer')
+    parser.add_argument('--control-frames', action='store_true', help='Also check the ordered native MAIN frame carrier')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     out = args.output.resolve(); out.mkdir(parents=True, exist_ok=False)
     tests = [root / 'Tests/CSkyBridgeUSBHostTests' / name for name in ('USBMultiplexFixture.swift', 'USBHostMultiplexChecks.swift')]
     peer = root / 'Scripts/USBHostMultiplexInteropPeer.swift'
     paths = [root / 'Package.swift', Path(__file__).resolve(), *tests, peer]
+    control_tests = root / 'Tests/CSkyBridgeUSBHostTests/USBHostControlFrameChecks.swift'
+    if args.control_frames: paths.append(control_tests)
     for directory in ('SkyBridgeAppleTransport', 'SkyBridgeProtocolCore', 'CSkyBridgeUSBHost'):
         paths += [p for p in (root / 'Sources' / directory).rglob('*') if p.is_file()]
     digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
@@ -68,6 +71,12 @@ def main():
         run('test-build', [*common, *[str(p) for p in tests], '-o', str(binary)])
         result['binarySha256'] = digest(binary)
         run('test-run', [str(binary)], timeout=120)
+        if args.control_frames:
+            control_binary = out / 'usb-control-frame-checks'
+            run('control-test-build', [*common, str(tests[0]), str(control_tests), '-o', str(control_binary)])
+            result['controlBinarySha256'] = digest(control_binary)
+            run('control-test-run', [str(control_binary)], timeout=120)
+            result['controlFramesChecked'] = True
         peer_binary = out / 'swift-yamux-native-peer'
         run('peer-build', [*common, str(peer), '-o', str(peer_binary)])
         result['peerBinarySha256'] = digest(peer_binary)

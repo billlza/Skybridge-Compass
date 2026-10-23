@@ -236,3 +236,68 @@ That existing lint debt, fresh published-branch/full-app builds, current physica
 AOA data and the product authentication/file/audio consumers are not qualified
 by these focused checks. Existing worktree changes and strict output policy
 remain intact; Q-Periapt is unchanged.
+
+## Owned MAIN frame carrier and session integration
+
+`USBHostControlFrameTransport` owns one already-open logical MAIN stream. Its
+FIFO defaults to eight frames and 2,097,160 retained wire bytes, counting the
+active write. It validates the existing four-byte prefix/1 MiB ceiling before
+admission. One writer and one deadline pump service the queue; there is no
+unbounded task per frame. Queued cancellation/expiry removes that request.
+Each frame retains its original deadline and effect authority, checked again
+before dispatch and by the native owner for each chunk. Completion means local
+write completion, not remote acceptance or audible playback.
+
+An authorization failure before entering logical/native writing cannot submit
+the stale frame. Cancelling an active partial MAIN frame retires that stream.
+If cancellation races an already-entered raw write, the underlying carrier may
+have an incomplete Yamux frame and must retire the physical link. Cleanup joins
+the actual writer/deadline tasks, any reader and the native stream release;
+an observer timeout does not discard the unresolved owner. Async public methods
+retain the owning view for their whole operation.
+
+```sh
+python3 Scripts/check_usb_multiplex.py --sanitize --control-frames --output /absolute/new/main-frame-evidence
+```
+
+The actual thread-sanitized modules pass the existing 20 multiplex cases and
+eight additional frame-carrier groups: FIFO bytes/completions, frame/byte bounds,
+queued expiry, queued revocation/cancellation, active deadline/cancellation,
+committed-write cleanup, single-reader cancellation and malformed input.
+Cancellation during a credit wait is distinguished from cancellation inside a
+raw write. The initial cleanup fixture incorrectly demanded a working sibling
+after native-entry cancellation; the retained failure reports `disconnected`.
+The final fixture instead requires physical retirement, preservation of its
+original failure and complete release. It does not relax the carrier's safety
+policy. The first failing harness aborted at top-level error; the second wrote
+the failure and ended with SIGKILL, whose source was not established. Final
+checks exit normally with zero and no sanitizer diagnostic.
+
+The current Apple worktree also connects this carrier to `P2PConnection`'s
+existing handshake, framing, pairing and encrypted sends. USB has no fabricated
+`NWConnection`; the legacy network-only file engine rejects an unsupported route.
+Handshake operation tokens, captured keys, message authority and audio effect
+leases are checked at deferred dispatch. A positive audio capability publication
+captures the receiver and peer generations so removing/replacing a receiver
+cannot leave an old queued capability announcement valid. Network enqueue keeps
+its existing synchronous preparation boundary. The native attachment runtime
+must retain its frame carrier until `closeAndAwait` confirms release.
+
+Those product changes are preserved as a patch relative to this task's original
+working-tree files, rather than importing unrelated pre-existing modifications
+into the carrier commit. The strict Mac core build and 138 selected session,
+audio-publication, inbound-audio and file-route tests pass. The test command also
+builds the app/test targets; it does not launch or qualify the installed app.
+The initial compiler rejected the nested non-escaping preparation callback; its
+lifetime is now explicit and the existing closed-preparation fence is tested
+against late submission. No unsafe escaping conversion or diagnostic suppression
+is used. Input hashes and failed/current receipts are in the Android worktree's
+`artifacts/apple-main-control-carrier-20261023/`.
+
+The carrier branch contains only the frame owner, its focused tests/script and
+this documentation; the product patch remains in the existing Apple worktree.
+A fresh checkout build of that branch is not asserted. Product USB discovery and
+bootstrap-route wiring, Android accessory/application adoption, current physical
+AOA interchange/driver coexistence, native PQC over USB, account/offline grants,
+the separate file service and strict audio output remain open. No app or device
+was installed or reconfigured by this stage; Q-Periapt is unchanged.
