@@ -80,26 +80,43 @@ private enum QualificationError: Error { case arguments, attachment, deadline, p
             try authority()
             let link = try USBHostMultiplexConnection(deviceRegistryID: registry, configuration: .init(linkProfile: .epochV2), requireAttachmentCurrent: authority)
             var ready = false, verified = false
+            var phase = "native-open", failurePhase: String?
             var failure: (any Error)?, cleanupFailure: (any Error)?
             var epoch: USBLinkEpochProtocol.Snapshot?
             let bytes = payload(attempt)
             let digest = Data(SHA256.hash(data: bytes))
             do {
                 try emit(["event": "starting", "attemptId": args[5], "attachmentId": attachment.uuidString.lowercased(), "registryId": registry, "profile": "epoch-v2"])
+                phase = "epoch-start"; try emit(["event": "phase", "phase": phase, "attemptId": args[5]])
                 try await link.start(timeout: .seconds(10))
                 epoch = link.epochSnapshot
                 guard epoch?.phase == .ready else { throw QualificationError.epoch }; ready = true
                 try emit(["event": "ready", "attemptId": args[5], "registryId": registry])
+                phase = "payload-open"; try emit(["event": "phase", "phase": phase, "attemptId": args[5]])
                 let stream = try await link.openStream(timeout: .seconds(10))
+                phase = "payload-send"; try emit(["event": "phase", "phase": phase, "attemptId": args[5]])
                 try await send(bytes, to: stream, authority: authority)
+                phase = "payload-receive"; try emit(["event": "phase", "phase": phase, "attemptId": args[5]])
                 try await receive(bytes, from: stream)
+                phase = "payload-close"; try emit(["event": "phase", "phase": phase, "attemptId": args[5]])
                 try await stream.closeAndAwait(timeout: .seconds(5))
+                phase = "digest-open"; try emit(["event": "phase", "phase": phase, "attemptId": args[5]])
                 let acknowledgement = try await link.openStream(timeout: .seconds(10))
+                phase = "digest-send"; try emit(["event": "phase", "phase": phase, "attemptId": args[5]])
                 try await send(digest, to: acknowledgement, authority: authority)
+                phase = "digest-receive"; try emit(["event": "phase", "phase": phase, "attemptId": args[5]])
                 try await receive(digest, from: acknowledgement)
+                phase = "digest-close"; try emit(["event": "phase", "phase": phase, "attemptId": args[5]])
                 try await acknowledgement.closeAndAwait(timeout: .seconds(5))
                 epoch = link.epochSnapshot; verified = true
-            } catch { failure = error }
+            } catch { failure = error; failurePhase = phase }
+            let beforeClose = link.protocolSnapshot
+            try emit(["event": "before-connection-close", "attemptId": args[5], "phase": phase,
+                "logicalOwners": beforeClose.owners, "pendingWriteBytes": beforeClose.pendingWriteBytes,
+                "bufferedReceiveBytes": beforeClose.bufferedReceiveBytes, "queuedControlFrames": beforeClose.queuedControlFrames,
+                "protocolDispatchPending": beforeClose.dispatchPending, "protocolFailed": beforeClose.failed,
+                "epochDispatchPending": link.epochSnapshot?.dispatchPending == true,
+                "retired": link.shutdownState.retired])
             link.close()
             do { try await link.closeAndAwait(timeout: .seconds(5)) }
             catch { cleanupFailure = error; if failure == nil { failure = error } }
@@ -120,6 +137,7 @@ private enum QualificationError: Error { case arguments, attachment, deadline, p
                 if let peer = epoch.peer { result["peerNonceSha256"] = SHA256.hash(data: peer.bytes).map { String(format: "%02x", $0) }.joined() }
             }
             if let failure { result["failure"] = describe(failure) }
+            if let failurePhase { result["failurePhase"] = failurePhase }
             if let cleanupFailure { result["cleanupFailure"] = describe(cleanupFailure) }
             try emit(result)
             if !completed { exit(1) }
