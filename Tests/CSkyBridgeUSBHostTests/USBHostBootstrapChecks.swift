@@ -23,8 +23,8 @@ import SkyBridgeProtocolCore
         }
         throw MultiplexFixtureError.check("Expected bootstrap failure")
     }
-    static func oneFreshStreamPerExchange() async throws {
-        let f = try USBMultiplexFixture(); try await f.start(); let c = try channel(f)
+    static func oneFreshStreamPerExchange(_ profile: USBHostMultiplexConnection.LinkProfile = .rawYamuxV1) async throws {
+        let f = try USBMultiplexFixture(configuration: .init(linkProfile: profile)); try await f.start(); let c = try channel(f)
         var ids = Set<UInt32>()
         for size in [1, 65_536, 3] {
             let bytes = usbPattern(size), request = Data([11, 12])
@@ -45,8 +45,8 @@ import SkyBridgeProtocolCore
         }
         try await f.sibling(); try await f.close()
     }
-    static func requesterDoesNotFINWhileConsentPending() async throws {
-        let f = try USBMultiplexFixture(); try await f.start(); let c = try channel(f)
+    static func requesterDoesNotFINWhileConsentPending(_ profile: USBHostMultiplexConnection.LinkProfile = .rawYamuxV1) async throws {
+        let f = try USBMultiplexFixture(configuration: .init(linkProfile: profile)); try await f.start(); let c = try channel(f)
         let result = Task { try await c.exchange(Data([1]), timeout: .seconds(2)) }
         let peer = try await f.b.acceptStream(); _ = try await peer.readFrame(timeout: .seconds(1))
         // Inspect emitted protocol frames while the responder has no response.
@@ -123,11 +123,24 @@ import SkyBridgeProtocolCore
         try usbCheck(received.body == Data([7]), "Full confirmation window rejected")
         try await f.close()
     }
-    static func cleanupTimeoutRetainsStreamAndForbidsReplay() async throws {
-        let f = try USBMultiplexFixture(); try await f.start(); let c = try channel(f), gate = USBFixtureGate()
+    static func cleanupTimeoutRetainsStreamAndForbidsReplay(_ profile: USBHostMultiplexConnection.LinkProfile = .rawYamuxV1) async throws {
+        let f = try USBMultiplexFixture(configuration: .init(linkProfile: profile)); try await f.start(); let c = try channel(f), gate = USBFixtureGate()
         f.nativeA.state.withLock { state in state.beforeWrite = { bytes in
-            let header = try USBLogicalStreamWire.decodeHeader(Data(bytes.prefix(12)))
-            if header.type == .data { try gate.wait() }
+            switch profile {
+            case .rawYamuxV1:
+                let header = try USBLogicalStreamWire.decodeHeader(Data(bytes.prefix(12)))
+                if header.type == .data { try gate.wait() }
+            case .epochV2:
+                // This two-byte request and its envelope fit in one native write.
+                // Initial link control records must not trigger the data gate.
+                var decoder = USBLinkWire.Decoder()
+                for byte in bytes {
+                    if case .record(let record) = try decoder.accept(byte), record.kind == .data {
+                        let header = try USBLogicalStreamWire.decodeHeader(Data(record.body.prefix(12)))
+                        if header.type == .data { try gate.wait() }
+                    }
+                }
+            }
         } }
         let result = Task { try await c.exchange(Data([1, 2]), timeout: .seconds(3)) }
         let peer = try await f.b.acceptStream()
@@ -150,8 +163,8 @@ import SkyBridgeProtocolCore
     static func main() async {
         do {
             let checks: [(String, () async throws -> Void)] = [
-                ("fresh-stream-complete-response-and-FIN", oneFreshStreamPerExchange),
-                ("consent-keeps-request-half-open", requesterDoesNotFINWhileConsentPending),
+                ("fresh-stream-complete-response-and-FIN", { try await oneFreshStreamPerExchange() }),
+                ("consent-keeps-request-half-open", { try await requesterDoesNotFINWhileConsentPending() }),
                 ("concurrent-bootstrap-rejected", concurrentExchangeIsRejected),
                 ("trailing-response-bytes-rejected", responseTailRejected),
                 ("cancellation-is-stream-local", cancellationRetiresExactStream),
@@ -159,9 +172,12 @@ import SkyBridgeProtocolCore
                 ("revoked-attachment-cannot-publish-response", revocationBeforeResponseIsNotSuccess),
                 ("bounded-response-length", malformedLengthDoesNotEscapeBound),
                 ("full-approval-window-is-bounded", fullApprovalWindowAndUpperBound),
-                ("unconfirmed-cleanup-forbids-replay", cleanupTimeoutRetainsStreamAndForbidsReplay)]
+                ("unconfirmed-cleanup-forbids-replay", { try await cleanupTimeoutRetainsStreamAndForbidsReplay() }),
+                ("epoch-v2-fresh-stream-complete-response-and-FIN", { try await oneFreshStreamPerExchange(.epochV2) }),
+                ("epoch-v2-consent-keeps-request-half-open", { try await requesterDoesNotFINWhileConsentPending(.epochV2) }),
+                ("epoch-v2-unconfirmed-cleanup-forbids-replay", { try await cleanupTimeoutRetainsStreamAndForbidsReplay(.epochV2) })]
             for (name, check) in checks { try await check(); print("PASS \(name)") }
-            print("PASS 10 native bootstrap groups")
+            print("PASS \(checks.count) native bootstrap groups")
         } catch { FileHandle.standardError.write(Data("FAIL \(error)\n".utf8)); exit(1) }
     }
 }

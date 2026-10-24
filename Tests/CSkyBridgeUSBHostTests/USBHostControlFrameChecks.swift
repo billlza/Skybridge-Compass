@@ -24,8 +24,8 @@ private final class FrameReceipts: Sendable {
 }
 
 @main enum USBHostControlFrameChecks {
-    static func fifoAndCanonicalBytes() async throws {
-        let f = try USBMultiplexFixture(); try await f.start(); let (a, b) = try await f.open()
+    static func fifoAndCanonicalBytes(_ profile: USBHostMultiplexConnection.LinkProfile = .rawYamuxV1) async throws {
+        let f = try USBMultiplexFixture(configuration: .init(linkProfile: profile)); try await f.start(); let (a, b) = try await f.open()
         let writer = try USBHostControlFrameTransport(stream: a), receipts = FrameReceipts()
         for n in 0..<8 {
             try writer.enqueueFramedBytes(P2PControlFramePolicy.frame(body: Data([UInt8(n), 29])),
@@ -184,11 +184,12 @@ private final class FrameReceipts: Sendable {
     }
     static func main() async {
         let checks: [(String, @Sendable () async throws -> Void)] = [
-            ("fifo-canonical-bytes", fifoAndCanonicalBytes), ("byte-count-bounds", byteAndCountBounds),
+            ("fifo-canonical-bytes", { try await fifoAndCanonicalBytes() }), ("byte-count-bounds", byteAndCountBounds),
             ("queued-expiry", queuedExpiryDoesNotCancelActiveFrame), ("queued-revocation-cancellation", queuedRevocationAndCancellation),
             ("active-deadline-cancellation", activeDeadlineAndCancellationRetireOnlyMain),
             ("native-cleanup-wait", cleanupWaitsForCommittedNativeWrite),
-            ("reader-owner-cancellation", readerOwnershipAndCancellation), ("malformed-frame", malformedFrameCannotReachNativeWriter)]
+            ("reader-owner-cancellation", readerOwnershipAndCancellation), ("malformed-frame", malformedFrameCannotReachNativeWriter),
+            ("epoch-v2-fifo-canonical-bytes", { try await fifoAndCanonicalBytes(.epochV2) })]
         for (name, check) in checks {
             record("START \(name)")
             do { try await check(); record("PASS \(name)") }
