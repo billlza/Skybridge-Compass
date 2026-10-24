@@ -6,7 +6,7 @@ import SkyBridgeProtocolCore
 
 /// Explicit, synthetic real-device check. No product session or audio output.
 /// Re-run with a fresh attempt UUID and the SAME registry/attachment to test reopen.
-private enum QualificationError: Error { case arguments, attachment, deadline, payload, prematureEnd, trailingBytes, cleanup, epoch }
+private enum QualificationError: Error { case arguments, attachment, deadline, payload, prematureEnd, trailingBytes, cleanup, epoch, interruptionNotInjected }
 
 @main private enum USBHostEpochQualification {
     static func emit(_ value: [String: Any]) throws {
@@ -40,13 +40,25 @@ private enum QualificationError: Error { case arguments, attachment, deadline, p
         guard left > .zero else { throw QualificationError.deadline }; return left
     }
     static func send(_ bytes: Data, to stream: USBHostMultiplexConnection.Stream,
-                     authority: @escaping @Sendable () throws -> Void) async throws {
+                     authority: @escaping @Sendable () throws -> Void,
+                     interruptAfterPrefix attempt: UUID? = nil) async throws {
         let end = ContinuousClock.now.advanced(by: .seconds(20))
         var offset = 0
         while offset < bytes.count {
             let next = min(offset + 16_384, bytes.count)
             try await stream.writeBytes(bytes.subdata(in: offset..<next), timeout: remaining(end), requireEffectAuthorization: authority)
             offset = next
+            if let attempt, offset == 16_384 {
+                // Explicit diagnostic mode only. The supervisor may kill this
+                // exact process after observing this completed native dispatch.
+                // Without that injection, fail rather than continue as a pass.
+                try emit(["event": "interrupt-checkpoint", "attemptId": attempt.uuidString.lowercased(),
+                    "processID": ProcessInfo.processInfo.processIdentifier,
+                    "applicationPrefixBytes": offset, "nativeDispatchConfirmed": true,
+                    "prefixSha256": SHA256.hash(data: bytes.prefix(offset)).map { String(format: "%02x", $0) }.joined()])
+                try await Task.sleep(for: .seconds(3))
+                throw QualificationError.interruptionNotInjected
+            }
         }
         try await stream.finishSending(timeout: remaining(end))
     }
@@ -72,7 +84,8 @@ private enum QualificationError: Error { case arguments, attachment, deadline, p
     static func main() async {
         do {
             let args = CommandLine.arguments
-            guard args.count == 6, args[1] == "transfer", let registry = UInt64(args[2]), registry != 0,
+            guard args.count == 6, ["transfer", "interrupt-after-prefix"].contains(args[1]),
+                  let registry = UInt64(args[2]), registry != 0,
                   !args[3].isEmpty, args[3].utf8.count <= 128 else { throw QualificationError.arguments }
             let attachment = try canonical(args[4]), attempt = try canonical(args[5])
             let end = ContinuousClock.now.advanced(by: .seconds(45)), began = ContinuousClock.now
@@ -86,7 +99,7 @@ private enum QualificationError: Error { case arguments, attachment, deadline, p
             let bytes = payload(attempt)
             let digest = Data(SHA256.hash(data: bytes))
             do {
-                try emit(["event": "starting", "attemptId": args[5], "attachmentId": attachment.uuidString.lowercased(), "registryId": registry, "profile": "epoch-v2"])
+                try emit(["event": "starting", "mode": args[1], "attemptId": args[5], "attachmentId": attachment.uuidString.lowercased(), "registryId": registry, "profile": "epoch-v2"])
                 phase = "epoch-start"; try emit(["event": "phase", "phase": phase, "attemptId": args[5]])
                 try await link.start(timeout: .seconds(10))
                 epoch = link.epochSnapshot
@@ -95,7 +108,8 @@ private enum QualificationError: Error { case arguments, attachment, deadline, p
                 phase = "payload-open"; try emit(["event": "phase", "phase": phase, "attemptId": args[5]])
                 let stream = try await link.openStream(timeout: .seconds(10))
                 phase = "payload-send"; try emit(["event": "phase", "phase": phase, "attemptId": args[5]])
-                try await send(bytes, to: stream, authority: authority)
+                try await send(bytes, to: stream, authority: authority,
+                               interruptAfterPrefix: args[1] == "interrupt-after-prefix" ? attempt : nil)
                 phase = "payload-receive"; try emit(["event": "phase", "phase": phase, "attemptId": args[5]])
                 try await receive(bytes, from: stream)
                 phase = "payload-close"; try emit(["event": "phase", "phase": phase, "attemptId": args[5]])
@@ -133,7 +147,7 @@ private enum QualificationError: Error { case arguments, attachment, deadline, p
             let completed = ready && verified && cleanup && failure == nil
             let elapsed = began.duration(to: .now).components
             var result: [String: Any] = ["event": "result", "attemptId": args[5], "attachmentId": attachment.uuidString.lowercased(), "registryId": registry,
-                "profile": "epoch-v2", "completed": completed, "ready": ready, "echoAndDigestVerified": verified,
+                "profile": "epoch-v2", "mode": args[1], "completed": completed, "ready": ready, "echoAndDigestVerified": verified,
                 "payloadBytes": bytes.count, "payloadSha256": digest.map { String(format: "%02x", $0) }.joined(),
                 "nativeWorkersExited": state.nativeWorkersExited, "referencesReleased": state.referencesReleased,
                 "pumpsJoined": state.pumpsJoined, "logicalOwnersReleased": state.logicalOwnersReleased, "cleanupConfirmed": cleanup,
