@@ -106,10 +106,18 @@ private enum QualificationError: Error { case arguments, attachment, deadline, p
                 try await send(digest, to: acknowledgement, authority: authority)
                 phase = "digest-receive"; try emit(["event": "phase", "phase": phase, "attemptId": args[5]])
                 try await receive(digest, from: acknowledgement)
-                phase = "digest-close"; try emit(["event": "phase", "phase": phase, "attemptId": args[5]])
-                try await acknowledgement.closeAndAwait(timeout: .seconds(5))
                 epoch = link.epochSnapshot; verified = true
+                // Both payload directions and the final digest/FIN are verified.
+                // This attempt now retires the entire connection. Its peer may
+                // already have closed the AOA descriptor, leaving a receive-credit
+                // write in native I/O. Retire the physical owner before waiting for
+                // its logical owners; the earlier payload-close still checks an
+                // independent stream close while the connection remains usable.
+                phase = "connection-close"; try emit(["event": "phase", "phase": phase, "attemptId": args[5]])
             } catch { failure = error; failurePhase = phase }
+            // Preserve an already observed transport failure before intentional
+            // retirement; byte verification cannot normalize a failed carrier.
+            if failure == nil, let terminal = link.terminalFailure { failure = terminal; failurePhase = phase }
             let beforeClose = link.protocolSnapshot
             try emit(["event": "before-connection-close", "attemptId": args[5], "phase": phase,
                 "logicalOwners": beforeClose.owners, "pendingWriteBytes": beforeClose.pendingWriteBytes,
@@ -119,7 +127,7 @@ private enum QualificationError: Error { case arguments, attachment, deadline, p
                 "retired": link.shutdownState.retired])
             link.close()
             do { try await link.closeAndAwait(timeout: .seconds(5)) }
-            catch { cleanupFailure = error; if failure == nil { failure = error } }
+            catch { cleanupFailure = error; if failure == nil { failure = error; failurePhase = "connection-close" } }
             let state = link.shutdownState
             let cleanup = state.nativeWorkersExited && state.referencesReleased && state.pumpsJoined && state.logicalOwnersReleased && link.epochSnapshot?.dispatchPending != true
             let completed = ready && verified && cleanup && failure == nil

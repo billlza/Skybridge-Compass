@@ -381,6 +381,60 @@ import os
         }
     }
 
+    static func finalReceiptParentRetirement() async throws {
+        let f = try USBMultiplexFixture(configuration: .init(linkProfile: .epochV2))
+        let gate = USBFixtureGate()
+        do {
+            try await f.start()
+            let (host, peer) = try await f.open()
+            let streamID = host.id
+            f.nativeA.state.withLock { state in
+                state.onInterrupt = { gate.release() }
+                state.beforeWrite = { bytes in
+                    var decoder = USBLinkWire.Decoder()
+                    for byte in bytes {
+                        if case .record(let record) = try decoder.accept(byte), record.kind == .data {
+                            let header = try USBLogicalStreamWire.decodeHeader(Data(record.body.prefix(12)))
+                            if header.streamID == streamID && header.type == .windowUpdate && header.flags == 0 && header.value == 32 {
+                                try gate.wait()
+                            }
+                        }
+                    }
+                }
+            }
+            try await host.finishSending()
+            guard case .end = try await peer.readBytes(maximumBytes: 1, timeout: .seconds(1)) else {
+                throw MultiplexFixtureError.check("Request FIN missing")
+            }
+            let digest = usbPattern(32)
+            try await peer.writeBytes(digest, timeout: .seconds(1), requireEffectAuthorization: {})
+            guard case .bytes(let received) = try await host.readBytes(maximumBytes: 32, timeout: .seconds(1)), received == digest else {
+                throw MultiplexFixtureError.check("Final receipt changed")
+            }
+            try await usbEventually { gate.entered.withLock { $0 } }
+            try await peer.finishSending()
+            guard case .end = try await host.readBytes(maximumBytes: 1, timeout: .seconds(1)) else {
+                throw MultiplexFixtureError.check("Receipt FIN missing")
+            }
+            try await peer.closeAndAwait()
+            try usbCheck(f.a.protocolSnapshot.dispatchPending, "Expected final native control flight")
+            try usbCheck(f.a.terminalFailure == nil, "Carrier failed before intentional retirement")
+            // The physical interrupt releases the outstanding native write. The
+            // real owner must join it and consume both dispatch records before it
+            // can release the final stream or report connection cleanup.
+            try await f.a.closeAndAwait(timeout: .seconds(1))
+            try await host.closeAndAwait()
+            try usbCheck(host.isClosed && !f.a.protocolSnapshot.dispatchPending &&
+                         f.a.epochSnapshot?.dispatchPending == false && f.a.protocolSnapshot.owners == 0,
+                         "Parent retirement left a final stream or native dispatch")
+            try await f.close()
+        } catch {
+            gate.release()
+            do { try await f.close() } catch { print("CLEANUP_FAILURE \(error)") }
+            throw error
+        }
+    }
+
     static func main() async {
         let tests: [(String, () async throws -> Void)] = [
             ("large_frame_across_credit_windows", framedLarge), ("blocked_bulk_keeps_control_live", blockedBulkControl),
@@ -405,7 +459,8 @@ import os
             ("epoch_queued_revocation_keeps_sibling", epochQueuedRevocationKeepsSibling),
             ("epoch_active_damage_is_terminal", epochActiveDamageIsTerminalAfterStaleQuarantine),
             ("epoch_parent_close_waits_for_native_return", epochParentCloseRetainsCommittedPayloadUntilNativeReturn),
-            ("final_receipt_retains_native_credit_flight", finalReceiptRetainsNativeCreditFlight)
+            ("final_receipt_retains_native_credit_flight", finalReceiptRetainsNativeCreditFlight),
+            ("final_receipt_parent_retirement_joins_credit_flight", finalReceiptParentRetirement)
         ]
         for (name, test) in tests {
             do { try await test(); print("PASS \(name)") }

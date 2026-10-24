@@ -83,6 +83,7 @@ final class USBMultiplexNativeFixture: USBHostDriver {
         var beforeWrite: (@Sendable (Data) throws -> Void)?
         var afterWrite: (@Sendable (Data) throws -> Void)?
         var afterLink: (@Sendable (USBLinkWire.Record) throws -> Void)?
+        var onInterrupt: (@Sendable () -> Void)?
         var openGate: USBFixtureGate?, closeGate: USBFixtureGate?
         var closeFailure = false
         var retired = false, closes = 0
@@ -138,7 +139,11 @@ final class USBMultiplexNativeFixture: USBHostDriver {
         try callbacks.1?(bytes)
     }
     func retire() { state.withLock { $0.retired = true } }
-    func interrupt() -> (any Error)? { input.close(); output.close(); return nil }
+    func interrupt() -> (any Error)? {
+        input.close(); output.close()
+        let callback = state.withLock { $0.onInterrupt }; callback?()
+        return nil
+    }
     func closeAndRelease() -> USBHostCleanup {
         let settings = state.withLock { value in value.closes += 1; return (value.closeGate, value.closeFailure) }
         do { try settings.0?.wait() }
