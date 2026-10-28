@@ -75,6 +75,8 @@ out/
 !Sources/Vendor/*.xcframework/**/*.a
 !Sources/Vendor/alac.xcframework/**/*.framework/
 !Sources/Vendor/alac.xcframework/**/*.framework/**
+!Sources/Vendor/boundsession.xcframework/**/*.framework/
+!Sources/Vendor/boundsession.xcframework/**/*.framework/**
 !Sources/Vendor/FreeRDPDylibs/*.dylib
 !SkyBridge Compass iOS/Vendor/liboqs.xcframework/**/*.a
 !SkyBridge Compass iOS/Vendor/qperiapt.xcframework/**/*.a

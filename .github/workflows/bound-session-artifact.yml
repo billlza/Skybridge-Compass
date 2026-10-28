@@ -1,0 +1,36 @@
+name: BoundSession artifact integrity
+
+on:
+  push:
+    paths:
+      - '.gitignore'
+      - 'Sources/Vendor/boundsession.xcframework/**'
+      - 'Sources/CBoundSession/**'
+      - 'Sources/SkyBridgeBoundSessionRuntime/**'
+      - 'Scripts/*boundsession*'
+      - '.github/workflows/bound-session-artifact.yml'
+  pull_request:
+    paths:
+      - '.gitignore'
+      - 'Sources/Vendor/boundsession.xcframework/**'
+      - 'Sources/CBoundSession/**'
+      - 'Sources/SkyBridgeBoundSessionRuntime/**'
+      - 'Scripts/*boundsession*'
+      - '.github/workflows/bound-session-artifact.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test artifact validation boundaries
+        run: python3 Scripts/test_verify_boundsession_xcframework.py
+      - name: Verify the native dependency from this clean checkout
+        run: python3 Scripts/verify_boundsession_xcframework.py
