@@ -1,5 +1,30 @@
 #!/usr/bin/env bash
 
+skybridge_resolve_app_packaging_entitlements() {
+  local root_dir="$1"
+  local package_context="$2"
+  local signing_identity="${3:-}"
+  local entitlements_path="${root_dir}/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.packaging.entitlements"
+
+  if [[ -z "${signing_identity}" || "${signing_identity}" == "-" ]]; then
+    if [[ "${package_context}" != "app" ||
+          "${SKYBRIDGE_REQUIRE_APP_GROUPS:-0}" == "1" ||
+          "${SKYBRIDGE_REQUIRE_WIDGET_EXTENSION:-0}" == "1" ]]; then
+      echo "错误：当前打包契约要求证书和 provisioning profile，不能使用本地 ad-hoc entitlements。" >&2
+      return 1
+    fi
+    # Match the native Xcode local target. Profile-backed entitlements make
+    # ad-hoc binaries fail AMFI validation even when codesign --verify passes.
+    entitlements_path="${root_dir}/XcodeSupport/SkyBridgeCompassMac/SkyBridgeCompassMac.local.entitlements"
+  fi
+
+  [[ -f "${entitlements_path}" ]] || {
+    echo "错误：签名 entitlements 文件不存在：${entitlements_path}" >&2
+    return 1
+  }
+  printf '%s\n' "${entitlements_path}"
+}
+
 skybridge_signing_policy_log() {
   local message="$1"
   if declare -F log >/dev/null 2>&1; then

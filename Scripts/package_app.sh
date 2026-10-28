@@ -1072,7 +1072,8 @@ FW_DIR="${CONTENTS_DIR}/Frameworks"
 LEGACY_FW_LINK="${CONTENTS_DIR}/lib"
 PLUGINS_DIR="${CONTENTS_DIR}/PlugIns"
 SIGN_IDENTITY="${IDENTITY:-$(select_identity)}"
-APP_PACKAGING_ENTITLEMENTS="${ROOT_DIR}/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.packaging.entitlements"
+APP_PACKAGING_ENTITLEMENTS="$(skybridge_resolve_app_packaging_entitlements \
+  "${ROOT_DIR}" "${PACKAGE_CONTEXT}" "${SIGN_IDENTITY}")" || exit 1
 WIDGET_EXT_NAME="SkyBridgeCompassWidgetsExtension"
 WIDGET_ENTITLEMENTS="${ROOT_DIR}/Sources/SkyBridgeCompassWidgets/SkyBridgeCompassWidgetsExtension.entitlements"
 MACOS_PROVISION_PROFILE_PATH="${SKYBRIDGE_MACOS_PROVISIONPROFILE_PATH:-}"
@@ -1128,6 +1129,7 @@ require_release_distribution_identity
 
 if [[ "${IS_ADHOC_SIGNING}" -eq 1 ]]; then
   log "签名模式: ad-hoc"
+  log "使用 Xcode 本地 entitlements；此预览包不具备 iCloud、推送、App Groups 或共享 Keychain 的 provisioning 授权"
 else
   log "签名模式: certificate (${SIGN_IDENTITY})"
 fi
@@ -1520,7 +1522,7 @@ if /usr/libexec/PlistBuddy -c 'Print :NSMainStoryboardFile' "${INFO_PLIST_DST}" 
 fi
 
 BUNDLE_IDENTIFIER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${INFO_PLIST_DST}" 2>/dev/null || true)
-if [[ -n "${BUNDLE_IDENTIFIER}" ]]; then
+if [[ -n "${BUNDLE_IDENTIFIER}" && "${IS_ADHOC_SIGNING}" -eq 0 ]]; then
   embed_macos_provisionprofile_if_available "${BUNDLE_IDENTIFIER}" "${APP_PACKAGING_ENTITLEMENTS}"
 fi
 
@@ -1530,11 +1532,10 @@ skybridge_prepare_signing_entitlements \
   "${INFO_PLIST_DST}" \
   "${SKYBRIDGE_RESOLVED_MACOS_PROVISIONPROFILE:-}"
 
-if [[ -f "${SKYBRIDGE_RESOLVED_MACOS_PROVISIONPROFILE:-}" ]] && \
-   ! skybridge_profile_supports_requested_profile_backed_entitlements \
-     "${SKYBRIDGE_RESOLVED_MACOS_PROVISIONPROFILE}" \
+if ! skybridge_profile_supports_requested_profile_backed_entitlements \
+     "${SKYBRIDGE_RESOLVED_MACOS_PROVISIONPROFILE:-}" \
      "${ACTIVE_APP_PACKAGING_ENTITLEMENTS}"; then
-  echo "错误：macOS provisioning profile 不覆盖最终签名 entitlements，禁止生成会被 AMFI 拒绝启动的 App。" >&2
+  echo "错误：缺少 macOS provisioning profile 或其不覆盖最终签名 entitlements，禁止生成会被 AMFI 拒绝启动的 App。" >&2
   exit 1
 fi
 
@@ -1747,26 +1748,17 @@ log "校验资源 bundle 存在性与非致命 Bundle 解析器标记"
   exit 1
 }
 
-# 优先使用正式证书签名；未配置证书时回退 ad-hoc
+# 签名身份与 entitlements 已在打包开始时确定；签名失败不能改变能力契约。
 stamp_packaging_source_inputs "${INFO_PLIST_DST}"
 if [[ "${IS_ADHOC_SIGNING}" -eq 0 ]]; then
   log "使用证书签名：${SIGN_IDENTITY}"
   resign_embedded_code
-  codesign --force --sign "${SIGN_IDENTITY}" --options runtime --timestamp \
+  if ! app_codesign_output="$(codesign --force --sign "${SIGN_IDENTITY}" --options runtime --timestamp \
     --entitlements "${ACTIVE_APP_PACKAGING_ENTITLEMENTS}" \
-    "${APP_DIR}" >/dev/null 2>&1 || {
-    if is_release_distribution_context; then
-      echo "错误：release_dmg 打包中的 Developer ID 签名失败，已停止，禁止回退 ad-hoc。" >&2
-      exit 1
-    fi
-    echo "警告：证书签名失败，回退 ad-hoc 签名。" >&2
-    SIGN_IDENTITY="-"
-    IS_ADHOC_SIGNING=1
-    resign_embedded_code
-    codesign --force --sign - --entitlements "${ACTIVE_APP_PACKAGING_ENTITLEMENTS}" "${APP_DIR}" >/dev/null 2>&1 || {
-      echo "警告：codesign 签名失败，但可在开发机上运行（未 notarize）。" >&2
-    }
-  }
+    "${APP_DIR}" 2>&1)"; then
+    echo "错误：App 证书签名失败，禁止回退 ad-hoc：${app_codesign_output}" >&2
+    exit 1
+  fi
 else
   if is_release_distribution_context; then
     echo "错误：release_dmg 打包禁止使用 ad-hoc 签名。" >&2
@@ -1774,20 +1766,18 @@ else
   fi
   log "未检测到可用证书，使用 ad-hoc 签名"
   resign_embedded_code
-  codesign --force --sign - --entitlements "${ACTIVE_APP_PACKAGING_ENTITLEMENTS}" "${APP_DIR}" >/dev/null 2>&1 || {
-    echo "警告：codesign 签名失败，但可在开发机上运行（未 notarize）。" >&2
-  }
-fi
-
-# 验证签名（非强制）
-if codesign --verify --deep --strict --verbose=2 "${APP_DIR}" >/dev/null 2>&1; then
-  log "签名验证通过"
-else
-  if is_release_distribution_context; then
-    echo "错误：release_dmg 打包的签名验证失败。" >&2
+  if ! app_codesign_output="$(codesign --force --sign - --entitlements "${ACTIVE_APP_PACKAGING_ENTITLEMENTS}" "${APP_DIR}" 2>&1)"; then
+    echo "错误：App ad-hoc 签名失败：${app_codesign_output}" >&2
     exit 1
   fi
-  log "签名验证未通过（开发阶段可忽略）"
+fi
+
+# 本地预览也必须通过签名校验，不能将无效产物报告为可运行。
+if app_signature_verification="$(codesign --verify --deep --strict --verbose=2 "${APP_DIR}" 2>&1)"; then
+  log "签名验证通过"
+else
+  echo "错误：App 签名验证失败：${app_signature_verification}" >&2
+  exit 1
 fi
 
 # 标记 App Bundle 为最新打包产物，便于后续 DMG 流程做 freshness 校验。

@@ -509,4 +509,55 @@ if skybridge_select_unique_profile_bound_codesign_identity_hash \
   fail "profile intersection must reject multiple current same-authority certificates"
 fi
 
+test_app_packaging_entitlement_selection() (
+  set -euo pipefail
+  unset SKYBRIDGE_REQUIRE_APP_GROUPS SKYBRIDGE_REQUIRE_WIDGET_EXTENSION
+  local root_dir="$(cd "${SCRIPT_DIR}/.." && pwd)"
+  local local_entitlements="${root_dir}/XcodeSupport/SkyBridgeCompassMac/SkyBridgeCompassMac.local.entitlements"
+  local distribution_entitlements="${root_dir}/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.packaging.entitlements"
+
+  [[ "$(skybridge_resolve_app_packaging_entitlements "${root_dir}" app -)" == "${local_entitlements}" ]] \
+    || fail "explicit ad-hoc app must use the native local target's entitlements"
+  [[ "$(skybridge_resolve_app_packaging_entitlements "${root_dir}" app '')" == "${local_entitlements}" ]] \
+    || fail "app with no installed signing identity must use local entitlements"
+  [[ "$(skybridge_resolve_app_packaging_entitlements "${root_dir}" app 'Apple Development: Test')" == "${distribution_entitlements}" ]] \
+    || fail "certificate-signed app must retain its profile-backed entitlements"
+  [[ "$(skybridge_resolve_app_packaging_entitlements "${root_dir}" release_dmg 'Developer ID Application: Test')" == "${distribution_entitlements}" ]] \
+    || fail "distribution entitlements must not be replaced by local capabilities"
+  skybridge_profile_supports_requested_profile_backed_entitlements '' "${local_entitlements}" \
+    || fail "local native entitlements must be usable without a provisioning profile"
+  if skybridge_profile_supports_requested_profile_backed_entitlements '' "${distribution_entitlements}"; then
+    fail "profile-backed capabilities must fail validation when the profile is absent"
+  fi
+
+  if skybridge_resolve_app_packaging_entitlements "${root_dir}" release_dmg -; then
+    fail "distribution must reject ad-hoc signing"
+  fi
+  if SKYBRIDGE_REQUIRE_APP_GROUPS=1 skybridge_resolve_app_packaging_entitlements "${root_dir}" app -; then
+    fail "required App Groups must not silently disappear in a local package"
+  fi
+  if SKYBRIDGE_REQUIRE_WIDGET_EXTENSION=1 skybridge_resolve_app_packaging_entitlements "${root_dir}" app -; then
+    fail "required widget provisioning must not silently disappear in a local package"
+  fi
+  if skybridge_resolve_app_packaging_entitlements "${TMP_DIR}/missing-root" app -; then
+    fail "missing local entitlement source must fail closed"
+  fi
+
+  python3 - "${local_entitlements}" <<'PY'
+import plistlib
+import sys
+with open(sys.argv[1], 'rb') as source:
+    entitlements = plistlib.load(source)
+allowed = {
+    'com.apple.security.network.client',
+    'com.apple.security.network.server',
+    'com.apple.security.personal-information.location',
+}
+assert set(entitlements) == allowed, 'Local preview must not request profile-backed capabilities'
+assert all(value is True for value in entitlements.values())
+PY
+)
+
+test_app_packaging_entitlement_selection
+
 echo "[test] signing entitlements helpers passed"

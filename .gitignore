@@ -12,6 +12,8 @@ Thumbs.db
 *.xcworkspace/xcuserdata/
 *.xcuserstate
 *.xcscheme
+# Preserve the widget-only build graph instead of Xcode's automatic host-app scheme.
+!SkyBridgeWidgets.xcodeproj/xcshareddata/xcschemes/SkyBridgeCompassWidgetsExtension.xcscheme
 !SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj/xcshareddata/xcschemes/SkyBridgeCompass-iOS.xcscheme
 !SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj/xcshareddata/xcschemes/SkyBridgeCompassiOSTests.xcscheme
 *.xccheckout
