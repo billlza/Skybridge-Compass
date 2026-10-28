@@ -136,6 +136,7 @@
 		AC0F23BC256F7E28306233DB /* DashboardDeviceProjection.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE8652B45DA53B71E01CFE75 /* DashboardDeviceProjection.swift */; };
 		7770EB84C922ABE8C792ABAA /* LanDirectConnectionShareView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F18979DD76506D2FF095C166 /* LanDirectConnectionShareView.swift */; };
 		91B7FDEA1097676247105147 /* AndroidUSBConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45B5068CC65AB531E04356F2 /* AndroidUSBConnectionView.swift */; };
+		342DF3AD3C9EEFD4D4103B38 /* WeatherInteractionOwner.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE66B01AC175221618BE3FE4 /* WeatherInteractionOwner.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -287,6 +288,7 @@
 		BE8652B45DA53B71E01CFE75 /* DashboardDeviceProjection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardDeviceProjection.swift; sourceTree = "<group>"; };
 		F18979DD76506D2FF095C166 /* LanDirectConnectionShareView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LanDirectConnectionShareView.swift; sourceTree = "<group>"; };
 		45B5068CC65AB531E04356F2 /* AndroidUSBConnectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AndroidUSBConnectionView.swift; sourceTree = "<group>"; };
+		DE66B01AC175221618BE3FE4 /* WeatherInteractionOwner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeatherInteractionOwner.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -395,6 +397,7 @@
 				A8D1E1B2B213D3C7CA21D24F /* ThemeConfiguration.swift */,
 				C7AA82D7D5FC282FEB03C6D1 /* UserProfileOverlay.swift */,
 				39D2A37D92B82FBD25E719A3 /* UserProfileView.swift */,
+				DE66B01AC175221618BE3FE4 /* WeatherInteractionOwner.swift */,
 				F08A9E6530CC6C2AB42A1164 /* WindowFocusManager.swift */,
 				D4E2E05D12D968E7C4EDB03F /* Core */,
 				17FCD93C560B29836849A9F2 /* Dashboard */,
@@ -766,6 +769,7 @@
 				91C63733F74A311A141A022C /* AuroraBackground.swift in Sources */,
 				A17447C790F9151442DBEC93 /* AuroraBackgroundV2.swift in Sources */,
 				B9967812E8862B2D5E969337 /* AuthenticationView.swift in Sources */,
+				342DF3AD3C9EEFD4D4103B38 /* WeatherInteractionOwner.swift in Sources */,
 				83E3064711CB4C8FDB487DAB /* AuthenticationViewModel.swift in Sources */,
 				FEB4E5F083CBE09135FC0B5A /* BackgroundControlManager.swift in Sources */,
 				96FE8CB503DA57E359B75805 /* BundleModule.swift in Sources */,

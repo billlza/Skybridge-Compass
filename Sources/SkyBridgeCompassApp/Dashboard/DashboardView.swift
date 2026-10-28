@@ -46,7 +46,8 @@ public struct DashboardView: View {
     @ObservedObject private var localizationManager = LocalizationManager.shared
 
  // 雾霾交互管理器
-    @StateObject private var hazeClearManager = InteractiveClearManager()
+    @StateObject private var weatherInteraction = WeatherInteractionOwner()
+    private var hazeClearManager: InteractiveClearManager { weatherInteraction.manager }
     @State private var rainScene = WeatherRainScene()
     // Only the small FPS indicator observes publications; do not invalidate the dashboard per sample.
     @State private var frameRateMonitor = WeatherFrameRateMonitor()

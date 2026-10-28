@@ -28,7 +28,8 @@ struct AuthenticationView: View {
     }
 
     @EnvironmentObject private var viewModel: AuthenticationViewModel
-    @StateObject private var hazeClearManager = InteractiveClearManager()
+    @StateObject private var weatherInteraction = WeatherInteractionOwner()
+    private var hazeClearManager: InteractiveClearManager { weatherInteraction.manager }
     @EnvironmentObject private var themeConfiguration: ThemeConfiguration
     @ObservedObject private var localizationManager = LocalizationManager.shared
     @Environment(\.colorScheme) private var colorScheme
