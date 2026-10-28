@@ -1,5 +1,6 @@
 import CryptoKit
 import XCTest
+import enum SkyBridgeProtocolCore.PQCModeSelectionError
 @testable import SkyBridgeCompass_iOS
 
 @available(iOS 17.0, *)
@@ -112,7 +113,7 @@ final class QPeriaptIOSRuntimeIntegrationTests: XCTestCase {
                 XCTFail("An identity-bound override must not be rebound to current settings")
             } catch CoreIdentityResolutionProbe.reached {
                 XCTFail("Mismatched frozen authority reached identity resolution")
-            } catch SkyBridgeError.handshakeFailed {
+            } catch PQCModeSelectionError.unavailableRuntime {
                 // Rejected before identity I/O, with no fallback or initialization commit.
             }
             XCTAssertFalse(core.isInitialized)
@@ -330,6 +331,7 @@ final class QPeriaptIOSRuntimeIntegrationTests: XCTestCase {
     func testExactCapabilityAndCompletePlatformAdmission() {
         let snapshot = admittedSnapshot()
         XCTAssertTrue(snapshot.isPeerEligible(capabilities(platformVersion: "iOS 26.0")))
+        XCTAssertTrue(snapshot.isPeerEligible(capabilities(platformVersion: "iPadOS 26.0")))
         XCTAssertTrue(snapshot.isPeerEligible(capabilities(platformVersion: "macOS 26.1")))
         XCTAssertTrue(snapshot.isPeerEligible(capabilities(platformVersion: "Android 16 (API 36)")))
         XCTAssertTrue(snapshot.isPeerEligible(capabilities(platformVersion: "Android 16 API 36")))
@@ -355,7 +357,8 @@ final class QPeriaptIOSRuntimeIntegrationTests: XCTestCase {
             "iOS 25.9",
             "prefix iOS 26.0",
             "26 iOS 25.0",
-            "iPadOS 26.0",
+            "iPadOS 25.9",
+            "prefix iPadOS 26.0",
             "iOS 26.0 build 23A",
             "Android 16 (API 35)",
             "Android API 36",

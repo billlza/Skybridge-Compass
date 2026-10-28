@@ -445,6 +445,16 @@ enum QPeriaptIOSRuntime {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         userDefaults: UserDefaults = .standard
     ) -> Bool {
+        isExplicitlyRequested(environment: environment) || userDefaults.bool(
+            forKey: PQCProviderPreferenceStorageKeys.preferQPeriaptBeta
+        )
+    }
+
+    /// Process-level requests are hard requirements, independent of the UI's
+    /// negotiated preference mode. Provider overrides cannot bypass them.
+    static func isExplicitlyRequested(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
         if isTruthy(environment["SB_ENABLE_QPERIAPT"]) { return true }
         if let preferredSuite = environment["SB_PQC_PREFERRED_SUITE"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -452,9 +462,7 @@ enum QPeriaptIOSRuntime {
            preferredSuite == "q-periapt" || preferredSuite == "qperiapt" {
             return true
         }
-        return userDefaults.bool(
-            forKey: PQCProviderPreferenceStorageKeys.preferQPeriaptBeta
-        )
+        return false
     }
 
     /// ML-DSA-65 is part of the authenticated ABI2 policy contract. A current

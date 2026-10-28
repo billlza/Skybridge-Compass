@@ -134,6 +134,9 @@ import XCTest
                 | UInt64(BS_FFI_CAPABILITY_CANONICAL_FILE_REQUEST_V2)
             XCTAssertEqual(compiledCapabilities, 0x3f)
             XCTAssertEqual(bs_ffi_capabilities_v3(), 1)
+            XCTAssertEqual(bs_ffi_capabilities_v4(), 1)
+            XCTAssertEqual(bs_ffi_capabilities_v5(), 1)
+            XCTAssertEqual(bs_ffi_capabilities_v6(), 1)
 
             let repositoryRoot = URL(fileURLWithPath: #filePath)
                 .deletingLastPathComponent()
@@ -145,7 +148,7 @@ import XCTest
                 "Sources/Vendor/boundsession.xcframework/ios-arm64/BoundSessionFFI.framework/Headers/bound_session_ffi.h",
                 "Sources/Vendor/boundsession.xcframework/ios-arm64-simulator/BoundSessionFFI.framework/Headers/bound_session_ffi.h",
             ]
-            let expectedHeaderSHA256 = "d2320167a417c3becffd87bf6d09b19977dd3d8580a03a7a3d0d459ac154a0cf"
+            let expectedHeaderSHA256 = "51eff4209582b367f57fdfa6d82e9112117d5d0b49ab30632915fbb3ed27d868"
 
             for path in headerPaths {
                 let bytes = try Data(contentsOf: repositoryRoot.appendingPathComponent(path))

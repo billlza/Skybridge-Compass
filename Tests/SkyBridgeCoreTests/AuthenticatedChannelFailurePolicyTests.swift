@@ -6,7 +6,10 @@ final class AuthenticatedChannelFailurePolicyTests: XCTestCase {
             "Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift"
         )
 
-        XCTAssertTrue(source.contains("let msg = try AppMessage.decodeWireMessage(from: plaintext)"))
+        let discriminator = try repositorySource("Sources/SkyBridgeCore/P2P/P2PAudioCarrier.swift")
+        XCTAssertTrue(source.contains("let decoded = try P2PInboundControlPayload.decode(plaintext, keys: keys, audioCarrier: audioCarrier)"))
+        XCTAssertTrue(source.contains("guard case .appMessage(let msg) = decoded else"))
+        XCTAssertTrue(discriminator.contains("case .nonAudio: return .appMessage(try AppMessage.decodeWireMessage(from: plaintext))"))
         XCTAssertTrue(source.contains("authenticated-channel-failed reason=invalid_app_frame"))
         XCTAssertTrue(source.contains("connection.cancel()"))
         XCTAssertFalse(source.contains("业务消息解密/解析失败（忽略）"))
@@ -77,16 +80,21 @@ final class AuthenticatedChannelFailurePolicyTests: XCTestCase {
 
         XCTAssertTrue(source.contains("try await Task.detached(priority: .userInitiated)"))
         XCTAssertTrue(source.contains("AES.GCM.open(sealedBox, using: key)"))
-        XCTAssertTrue(source.contains("return try AppMessage.decodeWireMessage(from: plaintext)"))
+        let discriminator = try repositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PAudioSession.swift"
+        )
+        XCTAssertTrue(source.contains("return try IOSAuthenticatedControlPayload.decode(plaintext)"))
+        XCTAssertTrue(discriminator.contains("return .app(try AppMessage.decodeWireMessage(from: plaintext))"))
         XCTAssertTrue(source.contains("throw P2PError.unexpectedAuthenticatedHandshakeFrame"))
-        XCTAssertTrue(source.contains("try await handleAppMessage(\n                    msg,\n                    from: peerId,"))
+        XCTAssertTrue(source.contains("case .app(let msg):\n                    try await handleAppMessage(\n                        msg,\n                        from: peerId,"))
         XCTAssertTrue(source.contains("expectedReceipt: AuthenticatedConnectionReceipt("))
         XCTAssertTrue(source.contains("private func handleAppMessage(\n        _ message: AppMessage,\n        from peerId: String,\n        expectedReceipt: AuthenticatedConnectionReceipt"))
         XCTAssertTrue(source.contains("try requireCurrentAuthenticatedConnection(expectedReceipt)"))
         XCTAssertTrue(source.contains("try await replyPong(\n                to: peerId,\n                pingId: payload.id,\n                expectedReceipt: expectedReceipt"))
         XCTAssertTrue(source.contains("throw P2PError.authenticatedPongReplyFailed"))
         XCTAssertTrue(source.contains("authenticated pong reply failed; closing session"))
-        XCTAssertTrue(source.contains("cleanupBrokenInboundConnection(connection, peerId: peerId, reason: reason)"))
+        XCTAssertTrue(source.contains("if connections.isCurrent(originLease, for: peerId)"))
+        XCTAssertTrue(source.contains("await cleanupBrokenInboundConnection(\n                        originLease.connection,\n                        peerId: peerId,\n                        reason: reason"))
         XCTAssertFalse(source.contains("无法解析业务消息（忽略）"))
         XCTAssertFalse(source.contains("收到握手控制包（忽略）"))
         XCTAssertFalse(source.contains("pong reply failed (ignored)"))
@@ -111,8 +119,10 @@ final class AuthenticatedChannelFailurePolicyTests: XCTestCase {
             "Sources/SkyBridgeCore/DeviceDiscovery/DeviceDiscoveryManagerOptimized.swift",
             "Sources/SkyBridgeCore/P2P/P2PModels.swift",
             "Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift",
+            "Sources/SkyBridgeCore/P2P/P2PAudioCarrier.swift",
             "Sources/SkyBridgeCore/RemoteConnection/WebRTC/WebRTCControlChannelCodec.swift",
             "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift",
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PAudioSession.swift",
             "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift",
         ]
 

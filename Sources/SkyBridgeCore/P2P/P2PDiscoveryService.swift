@@ -3972,7 +3972,7 @@ public class P2PDiscoveryService: BaseManager {
             }
             let response = try await channel.exchange(try JSONEncoder().encode(message),
                 timeout: .seconds(timeoutSeconds))
-            let decoded = try JSONDecoder().decode(AppMessage.self,
+            let decoded = try AppMessage.decodeWireMessage(
                 from: Self.normalizeInboundControlFrame(response.body))
             let opened = response.openingDuration.components
             let latency = Double(opened.seconds) * 1_000 + Double(opened.attoseconds) / 1_000_000_000_000_000
@@ -4039,8 +4039,7 @@ public class P2PDiscoveryService: BaseManager {
                     timeoutSeconds: timeoutSeconds
                 )
                 connection.cancel()
-                let decoded = try JSONDecoder().decode(
-                    AppMessage.self,
+                let decoded = try AppMessage.decodeWireMessage(
                     from: Self.normalizeInboundControlFrame(responseFrame)
                 )
                 return BootstrapControlExchangeResult(

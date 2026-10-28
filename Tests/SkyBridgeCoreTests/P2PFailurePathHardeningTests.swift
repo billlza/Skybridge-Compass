@@ -755,8 +755,10 @@ final class P2PFailurePathHardeningTests: XCTestCase {
         for source in [macConnection, discoveryTransport, iosManager, iosTransport] {
             XCTAssertTrue(source.contains("P2PControlFramePolicy.frame(body:"))
         }
-        XCTAssertTrue(macConnection.contains("FramedReader.nwConnection("))
-        XCTAssertTrue(macConnection.contains("reader.receiveFrame()"))
+        let carrier = try repositorySource("Sources/SkyBridgeCore/P2P/P2PControlFrameCarrier.swift")
+        XCTAssertTrue(macConnection.contains("try await self.frameCarrier.receiveFrame()"))
+        XCTAssertTrue(carrier.contains("case .network(let connection): return try await FramedReader.nwConnection(connection).receiveFrame()"))
+        XCTAssertTrue(carrier.contains("case .usb(let transport): return try await transport.receiveFrame()"))
         XCTAssertTrue(
             framedReaderAdapter.contains(
                 "public typealias FramedReader = SkyBridgeProtocolCore.FramedReader"

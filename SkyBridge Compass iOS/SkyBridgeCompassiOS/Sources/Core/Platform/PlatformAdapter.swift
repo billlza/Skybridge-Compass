@@ -134,7 +134,7 @@ public final class SkyBridgeiOSCore {
         let requestedConfiguration = try ProtocolSigningIdentityPolicy
             .requiredConfiguration()
         let selectedProvider = CryptoProviderFactory.make(policy: policy)
-        _ = try Self.validateRequestedQProvider(selectedProvider, configuration: requestedConfiguration)
+        _ = try Self.validateRequestedQProvider(selectedProvider, configuration: requestedConfiguration, policy: policy)
         // Policy alone does not identify a configuration: settings can switch
         // suite families or signing authority while requirePQC stays unchanged.
         if activeInitializationToken == nil,
@@ -345,10 +345,18 @@ public final class SkyBridgeiOSCore {
     /// turn a failed Q selection into another algorithm family.
     private static func validateRequestedQProvider(
         _ provider: (any CryptoProvider)?,
-        configuration: ProtocolIdentityConfigurationRecord
+        configuration: ProtocolIdentityConfigurationRecord,
+        policy: CryptoProviderFactory.SelectionPolicy = .preferPQC
     ) throws -> Bool {
         let mode = try PQCModePolicyStore.standard.snapshot()
         guard let provider else { throw SkyBridgeError.notInitialized }
+        if policy != .classicOnly, QPeriaptIOSRuntime.isExplicitlyRequested(), provider.tier != .qperiaptPQC {
+            throw SkyBridgeError.handshakeFailed(reason: "Explicit Q-Periapt selection requires an admitted Q provider")
+        }
+        guard !provider.supportedSuites.isEmpty,
+              policy != .requirePQC || provider.tier != .classic else {
+            throw PQCModeSelectionError.unavailableRuntime
+        }
         if provider.tier != .classic {
             guard provider.supportedSuites.contains(where: {
                 mode.selection.permittedSuiteWireIds.contains($0.wireId)
@@ -370,7 +378,7 @@ public final class SkyBridgeiOSCore {
         requestedConfiguration: ProtocolIdentityConfigurationRecord
     ) async throws {
         let modePolicy = try PQCModePolicyStore.standard.snapshot()
-        _ = try Self.validateRequestedQProvider(candidateProvider, configuration: requestedConfiguration)
+        _ = try Self.validateRequestedQProvider(candidateProvider, configuration: requestedConfiguration, policy: policy)
         let algorithm: ProtocolSigningAlgorithm = candidateProvider?.tier == .classic
             ? .ed25519
             : requestedConfiguration.algorithm
@@ -405,7 +413,7 @@ public final class SkyBridgeiOSCore {
                 reason: "Core initialization configuration changed while identity resolution was in progress"
             )
         }
-        _ = try Self.validateRequestedQProvider(candidateProvider, configuration: requestedConfiguration)
+        _ = try Self.validateRequestedQProvider(candidateProvider, configuration: requestedConfiguration, policy: policy)
 
         // Publish one complete configuration only after every fallible step has
         // succeeded. Failed policy changes preserve the prior coherent state.

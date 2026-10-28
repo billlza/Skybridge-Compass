@@ -227,7 +227,8 @@ final class PresenceServiceTests: XCTestCase {
         )
         XCTAssertTrue(
             engine.contains("AccountPresenceRefreshPolicy.loopSleepInterval(") &&
-                engine.contains("untilOnlineStateExpires: self.timeUntilOnlineStateExpires(at: current)"),
+                engine.contains("untilOnlineStateExpires: [self.timeUntilOnlineStateExpires(at: current),") &&
+                engine.contains("self.state.accountDevices?.timeUntilRouteExpiry(at: self.routeClock())].compactMap { $0 }.min()"),
             "the loop must wake for TTL expiry even while refresh is in a long backoff"
         )
         XCTAssertTrue(engine.contains("AccountPresenceRefreshPolicy.retryDelay("))

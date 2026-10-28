@@ -172,7 +172,7 @@ final class RemoteDesktopViewerStreamConfigurationPushPolicyTests: XCTestCase {
         let arm = try XCTUnwrap(source.range(of: "scheduleAcknowledgedMediaStartupWatchdogs(for: owner)", range: accepted.upperBound..<source.endIndex))
         XCTAssertLessThan(match.lowerBound, accepted.lowerBound)
         XCTAssertLessThan(accepted.lowerBound, arm.lowerBound)
-        XCTAssertTrue(source.contains("workspaceConfigurationWaiter.fail(RemoteDesktopError.streamingFailed(errorMessage))"))
+        XCTAssertTrue(source.contains("workspaceConfigurationWaiter.fail(isNormalHostEnd ? RemoteDesktopError.disconnected : RemoteDesktopError.streamingFailed(errorMessage))"))
         XCTAssertTrue(source.contains("realtimeMediaAudioStartupDiagnosticTask?.cancel()"))
     }
 

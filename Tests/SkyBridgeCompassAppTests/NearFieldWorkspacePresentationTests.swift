@@ -112,22 +112,27 @@ final class NearFieldWorkspacePresentationTests: XCTestCase {
 
     func testTwoSessionPickerRendersAtMinimumAndDefaultWindowSizes() async throws {
         _ = NSApplication.shared
-        let first = PresentationEngine()
-        let second = PresentationEngine()
-        var engines = [first, second]
-        let workspace = ControlledHostWorkspace(concurrentHostLimit: 2) { engines.removeFirst() }
-        defer { workspace.stopAll() }
-        try await connect("a", named: "办公 Mac · MacBook Pro", to: workspace)
-        try await connect("b", named: "测试 Mac · Mac mini", to: workspace)
-        let model = NearFieldWorkspaceViewModel(workspace: workspace)
-
         for size in [CGSize(width: 800, height: 600), CGSize(width: 1000, height: 700)] {
-            let content = NearFieldMirrorContent(model: model).workspaceContent
+            var engines = [PresentationEngine(), PresentationEngine()]
+            let workspace = ControlledHostWorkspace(concurrentHostLimit: 2) { engines.removeFirst() }
+            defer { workspace.stopAll() }
+            try await connect("a", named: "办公 Mac · MacBook Pro", to: workspace)
+            try await connect("b", named: "测试 Mac · Mac mini", to: workspace)
+            let discovery = DeviceDiscoveryManagerOptimized()
+            discovery.enableBonjourDiscovery = false
+            let model = NearFieldWorkspaceViewModel(discoveryManager: discovery, workspace: workspace)
+            defer { model.close() }
+            // Mount the actual view before reading its State-backed bindings.
+            let content = NearFieldMirrorContent(model: model)
                 .environment(\.colorScheme, .dark)
                 .frame(width: size.width, height: size.height)
             let host = NSHostingView(rootView: content)
             host.frame = CGRect(origin: .zero, size: size)
             host.layoutSubtreeIfNeeded()
+            model.showsDevicePicker = true
+            await Task.yield()
+            host.layoutSubtreeIfNeeded()
+            XCTAssertTrue(model.showsDevicePicker)
             let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
             host.cacheDisplay(in: host.bounds, to: bitmap)
             XCTAssertGreaterThan(bitmap.pixelsWide, 0)

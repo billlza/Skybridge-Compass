@@ -1,12 +1,31 @@
 import XCTest
 import Darwin
 import CryptoKit
+import enum SkyBridgeProtocolCore.PQCModeSelectionError
 @testable import SkyBridgeCompass_iOS
 
 @available(iOS 17.0, *)
 final class HandshakeCryptoPolicyParityTests: XCTestCase {
     private static let mlDSA87PublicKeyLength = 2_592
     private static let mlDSA87SignatureLength = 4_627
+
+    @MainActor
+    func testRequiredPQCRejectsClassicAndUnavailableProvidersBeforeIdentityIO() async throws {
+        enum ProbeError: Error { case identityReached }
+        for provider: any CryptoProvider in [ClassicCryptoProvider(), UnavailablePQCProvider()] {
+            let core = SkyBridgeiOSCore { _, _ in
+                XCTFail("Rejected providers must not enter identity I/O")
+                throw ProbeError.identityReached
+            }
+            do {
+                try await core.initialize(policy: .requirePQC, providerOverride: provider)
+                XCTFail("Required PQC must not publish a classic or unavailable provider")
+            } catch PQCModeSelectionError.unavailableRuntime {
+                XCTAssertFalse(core.isInitialized)
+                XCTAssertNil(core.cryptoProvider)
+            }
+        }
+    }
 
     @MainActor
     func testCoreCannotReuseOrOverrideAnOrdinaryProviderAfterQIsRequested() async throws {

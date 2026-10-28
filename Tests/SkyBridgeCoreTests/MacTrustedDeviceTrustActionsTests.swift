@@ -564,7 +564,9 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         let remoteSmokeScript = try repositorySource("Scripts/run_real_device_p2p_remote_smoke.sh")
 
         XCTAssertTrue(
-            rowSource.contains("(device.ipv4 != nil || device.ipv6 != nil) ? .green : .red") &&
+            rowSource.contains(".fill(transport != nil ? Color.green : Color.secondary)") &&
+            rowSource.contains("let transport = connectedTransport") &&
+            rowSource.contains("if transport != nil {") &&
             rowSource.contains("Button(action: onConnect)"),
             "Dashboard row visuals and controls must stay on the production implementation."
         )

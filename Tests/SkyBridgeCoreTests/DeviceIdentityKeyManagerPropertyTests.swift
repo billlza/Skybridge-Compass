@@ -155,7 +155,8 @@ final class DeviceIdentityKeyManagerPropertyTests: XCTestCase {
         )
         XCTAssertTrue(
             scopeSource.contains("hasSuffix(\".group.com.skybridge.compass\")") &&
-                scopeSource.contains("The app-only access group is deliberately not accepted"),
+                scopeSource.contains("resolved = sharedAccessGroup(from: groups)") &&
+                scopeSource.contains(".first { !$0.isEmpty && $0.hasSuffix(\".group.com.skybridge.compass\") }"),
             "Cross-process identity authority must require the shared signed group and reject an app-only authority."
         )
         XCTAssertTrue(

@@ -47,11 +47,15 @@ final class IOSContinuedAudioTaskScheduler: IOSContinuedAudioScheduler {
             let request = BGContinuedProcessingTaskRequest(identifier: identifier, title: title, subtitle: subtitle)
             request.strategy = .fail
             request.requiredResources = []
+            #if compiler(>=6.4)
             if #available(iOS 27.0, *) {
                 try await BGTaskScheduler.shared.submitTaskRequest(request)
             } else {
                 try BGTaskScheduler.shared.submit(request)
             }
+            #else
+            try BGTaskScheduler.shared.submit(request)
+            #endif
         }.value
     }
 

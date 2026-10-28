@@ -9333,7 +9333,7 @@ final class RegressionHardeningTests: XCTestCase {
       let preflightRange = p2pManager.range(
         of: "try await ensureStrictPQCKEMTrustReady(for: targetDevice, selectedTarget: selectedTarget)"),
       let transportRange = p2pManager.range(
-        of: "let (connection, selectedEndpoint) = try await establishReadyConnection")
+        of: "readyConnection = try await establishReadyConnection(")
     else {
       XCTFail("Strict PQC trust preflight must happen before opening a transport connection.")
       return

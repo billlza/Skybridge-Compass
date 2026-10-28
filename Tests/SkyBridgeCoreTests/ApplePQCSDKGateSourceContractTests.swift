@@ -903,41 +903,39 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
             )
         }
 
-        let productRootRPath = #"let swiftPMProductRootRPath = "@loader_path/../../..""#
-        let testLinkerSettingsHelper = "func webRTCTestLinkerSettings() -> [LinkerSetting]"
-        XCTAssertTrue(
-            manifest.contains(productRootRPath),
-            "SwiftPM test targets should share one canonical product-root rpath instead of spelling equivalent paths differently."
-        )
-        XCTAssertTrue(
-            manifest.contains(testLinkerSettingsHelper),
-            "SwiftPM test targets should share a named linker-settings helper so future targets do not duplicate rpath strings."
-        )
-        XCTAssertFalse(
-            manifest.contains("@loader_path/../.././.."),
-            "Do not hide duplicate rpath warnings by spelling the same path differently; fix rpath ownership instead."
-        )
+        // SwiftPM supplies this path itself. A target-level copy caused duplicate
+        // LC_RPATH warnings on the shipping SDK; inspect the linked test image too.
+        for targetName in ["SkyBridgeCoreTests", "SkyBridgeBenchTests", "SkyBridgeCompassAppTests"] {
+            let body = try packageManifestTargetBody(targetName, in: manifest)
+            XCTAssertFalse(body.contains("webRTCTestLinkerSettings()"))
+            XCTAssertFalse(body.contains("-rpath"), "Test targets must not duplicate SwiftPM's runtime paths")
+        }
+        XCTAssertFalse(manifest.contains("@loader_path/../.././.."))
+        XCTAssertFalse(manifest.contains("let swiftPMProductRootRPath"))
+        XCTAssertTrue(manifest.contains("target.type == .executable && usesALACFramework"))
+        XCTAssertTrue(manifest.contains("@executable_path/../Frameworks"))
 
-        let coreTestsBody = try packageManifestTargetBody("SkyBridgeCoreTests", in: manifest)
-        XCTAssertTrue(
-            coreTestsBody.contains("linkerSettings: webRTCTestLinkerSettings()"),
-            "SkyBridgeCoreTests must search the SwiftPM product root for WebRTC.framework when Xcode 27 SwiftBuild places binary-target frameworks beside the test bundle."
-        )
-        let benchTestsBody = try packageManifestTargetBody("SkyBridgeBenchTests", in: manifest)
-        XCTAssertFalse(
-            benchTestsBody.contains("linkerSettings: webRTCTestLinkerSettings()"),
-            "SwiftPM links package tests into one runner; adding the same WebRTC rpath from SkyBridgeBenchTests duplicates the runner LC_RPATH. OS27 lane prepares WebRTC.framework in PackageFrameworks before --skip-build test instead."
-        )
-        XCTAssertEqual(
-            manifest.components(separatedBy: productRootRPath).count - 1,
-            1,
-            "The package should define the WebRTC SwiftPM product-root rpath once and reuse it through the named helper."
-        )
-        XCTAssertEqual(
-            manifest.components(separatedBy: "linkerSettings: webRTCTestLinkerSettings()").count - 1,
-            1,
-            "The SwiftPM package test runner should receive the WebRTC product-root rpath exactly once."
-        )
+        let executable = try XCTUnwrap(Bundle(for: Self.self).executableURL)
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/otool")
+        process.arguments = ["-l", executable.path]
+        process.standardOutput = output
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+        let loadCommands = try XCTUnwrap(String(data: data, encoding: .utf8))
+        let paths = loadCommands.components(separatedBy: "cmd LC_RPATH").dropFirst().compactMap { command in
+            command.components(separatedBy: "\n").first { $0.trimmingCharacters(in: .whitespaces).hasPrefix("path ") }
+                .map { $0.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "path ", with: "")
+                    .components(separatedBy: " (offset ")[0] }
+        }
+        XCTAssertFalse(paths.isEmpty)
+        XCTAssertEqual(Set(paths.map { ($0 as NSString).standardizingPath }).count, paths.count,
+            "The linked XCTest image must not contain duplicate runtime search paths")
+        XCTAssertEqual(paths.filter { $0 == "@loader_path/../../.." }.count, 1,
+            "SwiftPM must provide the product-root runtime path exactly once")
     }
 
     func testSwiftPMMetalResourcesDoNotCheckInCompilerIntermediates() throws {
@@ -1447,42 +1445,52 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
         }
     }
 
-    func testProductionSourcesDoNotIntroduceOS27OnlyAvailabilityBranches() throws {
-        let sourceRoots = [
-            "Sources",
-            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources"
+    func testProductionOS27AvailabilityIsLimitedToGuardedNativeAudioAdapters() throws {
+        // These native audio APIs were added after the original OS27 crypto probe
+        // contract. Keep the precise platform/runtime gates while rejecting new
+        // OS-only capability assumptions elsewhere (especially protocol selection).
+        let approved: [String: [String]] = [
+            "Sources/SkyBridgeCore/Audio/CoreAudioOpusOutput.swift": [
+                "if #available(macOS 27.0, *) { try value.player.playAudio() } else { value.player.play() }"
+            ],
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/IOSScreenAudioCaptureBackend.swift": [
+                "@available(iOS 27.0, *)", "@available(iOS 27.0, *)", "@available(iOS 27.0, *)",
+                "guard #available(iOS 27.0, *) else { return .requiresNewerSystem }",
+                "if #available(iOS 27.0, *) {"
+            ],
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/IOSContinuedAudioTaskScheduler.swift": [
+                "if #available(iOS 27.0, *) {"
+            ]
         ]
-        let os27AvailabilityReferences = sourceRoots.flatMap { relativeRoot -> [String] in
-            let sourceRoot = repositoryRoot().appendingPathComponent(relativeRoot)
-            return FileManager.default.enumerator(
-                at: sourceRoot,
-                includingPropertiesForKeys: nil
-            )?
-                .compactMap { $0 as? URL }
-                .filter { $0.pathExtension == "swift" }
-                .flatMap { url -> [String] in
-                    let relativePath = url.path.replacingOccurrences(of: repositoryRoot().path + "/", with: "")
-                    let source = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-                    return source
-                        .split(separator: "\n", omittingEmptySubsequences: false)
-                        .enumerated()
-                        .compactMap { index, line in
-                            let trimmed = line.trimmingCharacters(in: .whitespaces)
-                            guard !trimmed.hasPrefix("//") else { return nil }
-                            let introducesAvailabilityBranch = trimmed.contains("#available(")
-                                || trimmed.contains("@available(")
-                            guard introducesAvailabilityBranch, trimmed.contains("27") else {
-                                return nil
-                            }
-                            return "\(relativePath):\(index + 1):\(trimmed)"
-                        }
-                } ?? []
+        var observed: [String] = []
+        for relativeRoot in ["Sources", "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources"] {
+            let files = try XCTUnwrap(FileManager.default.enumerator(
+                at: repositoryRoot().appendingPathComponent(relativeRoot), includingPropertiesForKeys: nil
+            ))
+            for case let url as URL in files where url.pathExtension == "swift" {
+                let path = url.path.replacingOccurrences(of: repositoryRoot().path + "/", with: "")
+                let source = try String(contentsOf: url, encoding: .utf8)
+                for line in source.components(separatedBy: "\n") {
+                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    guard !trimmed.hasPrefix("//"), trimmed.contains("27"),
+                          trimmed.contains("#available(") || trimmed.contains("@available(") else { continue }
+                    observed.append(path + ":" + trimmed)
+                }
+            }
         }
-
-        XCTAssertTrue(
-            os27AvailabilityReferences.isEmpty,
-            "OS27 beta work must not create production OS27-only branches. Keep new APIs behind SDK symbol probes, compile gates, and runtime proof instead: \(os27AvailabilityReferences.joined(separator: ", "))"
-        )
+        let expected = approved.flatMap { path, lines in lines.map { path + ":" + $0 } }
+        XCTAssertEqual(observed.sorted(), expected.sorted(), "Unreviewed OS27 availability branches must fail")
+        let output = try readSource("Sources/SkyBridgeCore/Audio/CoreAudioOpusOutput.swift")
+        XCTAssertTrue(output.contains("#if compiler(>=6.4)"))
+        let capture = try readSource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/IOSScreenAudioCaptureBackend.swift")
+        XCTAssertTrue(capture.contains("#if canImport(ScreenCaptureKit) && os(iOS)"))
+        XCTAssertTrue(capture.contains("SCContentSharingPicker.shared.isAvailable ? .available : .systemUnavailable"))
+        XCTAssertTrue(capture.contains("guard screenCaptureAvailability == .available else { throw IOSAudioCaptureError.unavailable }"))
+        let scheduler = try readSource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/IOSContinuedAudioTaskScheduler.swift")
+        XCTAssertTrue(scheduler.contains("#if compiler(>=6.4)"))
+        XCTAssertTrue(scheduler.contains("try await Task.detached(priority: .userInitiated)"))
+        XCTAssertTrue(scheduler.contains("try BGTaskScheduler.shared.submit(request)"))
+        XCTAssertTrue(scheduler.contains("guard accepted else { throw IOSAudioBackgroundError.registrationRejected }"))
     }
 
     func testMacOSReleaseWorkflowRunsOS27SourceContractsWithoutSwitchingToBetaToolchain() throws {

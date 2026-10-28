@@ -202,7 +202,7 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
         XCTAssertTrue(source.contains("path.usesInterfaceType(.loopback)"))
 
         let bootstrap = try sourceSlice(
-            from: "private func exchangeBootstrapControlMessage(",
+            from: "func exchangeBootstrapControlMessage(",
             to: "private func waitForBootstrapControlConnection(",
             in: source
         )
@@ -1308,7 +1308,7 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
             in: p2pSource
         )
         let bootstrapExchangeBody = try sourceSlice(
-            from: "private func exchangeBootstrapControlMessage(",
+            from: "func exchangeBootstrapControlMessage(",
             to: "private func waitForBootstrapControlConnection",
             in: p2pSource
         )
@@ -1408,7 +1408,7 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
         let p2pSource = try readSource("Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift")
         let networkManagerSource = try readSource("Sources/SkyBridgeCore/P2P/P2PNetworkManager.swift")
         let bootstrapExchange = try sourceSlice(
-            from: "private func exchangeBootstrapControlMessage(",
+            from: "func exchangeBootstrapControlMessage(",
             to: "private func waitForBootstrapControlConnection",
             in: p2pSource
         )

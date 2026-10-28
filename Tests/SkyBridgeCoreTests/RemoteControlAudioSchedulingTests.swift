@@ -588,7 +588,7 @@ final class RemoteControlAudioSchedulingTests: XCTestCase {
             "When the viewer disables damage telemetry for strict media, stale damage reports must not wait in the video sender."
         )
         XCTAssertTrue(
-            pumpBody.contains("guard !closed, streamingEnabled, damageTrackingEnabled else"),
+            pumpBody.contains("guard mediaAdmission.isOpen, !closed, streamingEnabled, damageTrackingEnabled else"),
             "Damage reports must be rejected before they can wake the outbound video pump in strict 60fps sessions."
         )
         XCTAssertTrue(
