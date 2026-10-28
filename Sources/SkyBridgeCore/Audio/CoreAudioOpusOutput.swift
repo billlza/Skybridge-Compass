@@ -345,8 +345,13 @@ private final class CoreAudioOpusOutputLedger: Sendable {
 }
 
 private final class NativeCoreAudioOpusDriver: CoreAudioOpusDriver {
-    private let engine: AVAudioEngine
-    private let player: AVAudioPlayerNode
+    private struct NativeState {
+        let engine: AVAudioEngine
+        let player: AVAudioPlayerNode
+    }
+    // SDK 26 does not declare these reference types Sendable. Keep them private
+    // to this lock after initialization, including all reads and cleanup.
+    private let native: OSAllocatedUnfairLock<NativeState>
     private let format: AVAudioFormat
     private let endpoint: AudioDeviceID
     private let endpointUID: String
@@ -355,7 +360,8 @@ private final class NativeCoreAudioOpusDriver: CoreAudioOpusDriver {
     init(endpointUID: String, channels: Int) throws {
         self.endpointUID = endpointUID; self.channels = channels
         endpoint = try CoreAudioExactPcmEndpointInspector.resolve(endpointUID)
-        engine = AVAudioEngine(); player = AVAudioPlayerNode()
+        let engine = AVAudioEngine(), player = AVAudioPlayerNode()
+        native = OSAllocatedUnfairLock(uncheckedState: NativeState(engine: engine, player: player))
         guard let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: AVAudioChannelCount(channels)) else {
             throw CoreAudioOpusOutputError.invalidFormat
         }
@@ -382,25 +388,39 @@ private final class NativeCoreAudioOpusDriver: CoreAudioOpusDriver {
                 }
             }
         }
-        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack, completionHandler: completion)
+        native.withLockUnchecked { value in
+            value.player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack, completionHandler: completion)
+        }
     }
     func start() throws {
-        try engine.start()
-        if #available(macOS 27.0, *) { try player.playAudio() } else { player.play() }
+        try native.withLockUnchecked { value in
+            try value.engine.start()
+            // The bundled Xcode 26 compiler cannot see the SDK 27 spelling,
+            // even inside a runtime availability check.
+            #if compiler(>=6.4)
+            if #available(macOS 27.0, *) { try value.player.playAudio() } else { value.player.play() }
+            #else
+            value.player.play()
+            #endif
+        }
     }
     func status() throws -> CoreAudioOpusDriverStatus {
-        guard let unit = engine.outputNode.audioUnit else { throw CoreAudioOpusOutputError.invalidFormat }
-        var selected = AudioDeviceID(kAudioObjectUnknown), size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        try Self.check(AudioUnitGetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &selected, &size))
-        let uid = try CoreAudioExactPcmEndpointInspector.string(endpoint, kAudioDevicePropertyDeviceUID)
-        let time = player.lastRenderTime.flatMap { player.playerTime(forNodeTime: $0) }
-        return .init(endpointCurrent: size == UInt32(MemoryLayout<AudioDeviceID>.size) && selected == endpoint && uid == endpointUID,
-            engineRunning: engine.isRunning && !engine.isInManualRenderingMode, playerPlaying: player.isPlaying,
-            renderedSourceFrame: time?.isSampleTimeValid == true ? time?.sampleTime : nil)
+        try native.withLockUnchecked { value in
+            guard let unit = value.engine.outputNode.audioUnit else { throw CoreAudioOpusOutputError.invalidFormat }
+            var selected = AudioDeviceID(kAudioObjectUnknown), size = UInt32(MemoryLayout<AudioDeviceID>.size)
+            try Self.check(AudioUnitGetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &selected, &size))
+            let uid = try CoreAudioExactPcmEndpointInspector.string(endpoint, kAudioDevicePropertyDeviceUID)
+            let time = value.player.lastRenderTime.flatMap { value.player.playerTime(forNodeTime: $0) }
+            return .init(endpointCurrent: size == UInt32(MemoryLayout<AudioDeviceID>.size) && selected == endpoint && uid == endpointUID,
+                engineRunning: value.engine.isRunning && !value.engine.isInManualRenderingMode, playerPlaying: value.player.isPlaying,
+                renderedSourceFrame: time?.isSampleTimeValid == true ? time?.sampleTime : nil)
+        }
     }
     func close() throws {
-        player.stop(); engine.stop()
-        guard !player.isPlaying, !engine.isRunning else { throw CoreAudioOpusOutputError.cleanupUnconfirmed }
+        try native.withLockUnchecked { value in
+            value.player.stop(); value.engine.stop()
+            guard !value.player.isPlaying, !value.engine.isRunning else { throw CoreAudioOpusOutputError.cleanupUnconfirmed }
+        }
     }
     private static func check(_ status: OSStatus) throws { if status != noErr { throw CoreAudioOpusOutputError.native(status) } }
 }

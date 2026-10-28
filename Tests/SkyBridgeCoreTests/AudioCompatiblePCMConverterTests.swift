@@ -1,5 +1,6 @@
 import AVFAudio
 import Foundation
+import os
 import SkyBridgeAudioFile
 import SkyBridgeProtocolCore
 import XCTest
@@ -298,24 +299,34 @@ final class AudioCompatiblePCMConverterTests: XCTestCase {
               let native = AVAudioConverter(from: inputFormat, to: outputFormat),
               let input = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: 4096),
               let output = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: 701),
-              let inputData = input.floatChannelData?[0], let outputData = output.floatChannelData?[0] else { throw Failure.allocation }
+              input.floatChannelData != nil, let outputData = output.floatChannelData?[0] else { throw Failure.allocation }
         native.sampleRateConverterAlgorithm = AVSampleRateConverterAlgorithm_Mastering
         native.sampleRateConverterQuality = Int(AVAudioQuality.max.rawValue); native.primeMethod = .normal
         // Continuous native input includes a full second of post-source silence before EOF.
         // This reference never uses the product's padding loop or noDataNow. Only the original
         // declared duration is compared: iPad native EOF was observed to omit its filter tail.
         let total = source.count / Int(channels) + Int(rate)
-        var offset = 0, result: [Float] = []
+        let inputState = OSAllocatedUnfairLock(uncheckedState: (buffer: input, offset: 0))
+        var result: [Float] = []
         for _ in 0..<1000 {
             var error: NSError?
-            let status = native.convert(to: output, error: &error) { wanted, state in
-                if offset == total { state.pointee = .endOfStream; return nil }
-                let count = min(Int(wanted), total - offset, 4096)
-                for i in 0..<(count * Int(channels)) {
-                    let index = offset * Int(channels) + i
-                    inputData[i] = index < source.count ? Float(source[index]) / 32768 : 0
+            let status = native.convert(to: output, error: &error) { @Sendable wanted, state in
+                inputState.withLockUnchecked { value in
+                    if value.offset == total { state.pointee = .endOfStream; return nil }
+                    guard let inputData = value.buffer.floatChannelData?[0] else {
+                        XCTFail("Reference input buffer lost its Float32 storage")
+                        state.pointee = .noDataNow
+                        return nil
+                    }
+                    let count = min(Int(wanted), total - value.offset, 4096)
+                    for i in 0..<(count * Int(channels)) {
+                        let index = value.offset * Int(channels) + i
+                        inputData[i] = index < source.count ? Float(source[index]) / 32768 : 0
+                    }
+                    value.buffer.frameLength = UInt32(count); value.offset += count
+                    state.pointee = .haveData
+                    return value.buffer
                 }
-                input.frameLength = UInt32(count); offset += count; state.pointee = .haveData; return input
             }
             if let error { throw error }
             result += Array(UnsafeBufferPointer(start: outputData, count: Int(output.frameLength) * Int(channels)))

@@ -1,5 +1,6 @@
 import AVFAudio
 import Foundation
+import os
 import SkyBridgeProtocolCore
 
 public enum AudioCompatiblePCMConversionError: Error, Equatable, Sendable {
@@ -169,38 +170,26 @@ public final class AudioCompatiblePCMConverter {
 
     private func convert(frames: Int, isTail: Bool, emit: ([Int16]) throws -> Void) throws {
         guard let converter, let inputBuffer, let outputBuffer,
-              let input = inputBuffer.floatChannelData?[0], let output = outputBuffer.floatChannelData?[0] else {
+              let output = outputBuffer.floatChannelData?[0] else {
             throw AudioCompatiblePCMConversionError.invalidState
         }
         let channels = Int(sourceFormat.channels)
-        var offset = 0
+        let input = ConversionInput(buffer: inputBuffer, samples: samples, frames: frames,
+            channels: channels, requireCurrent: { try self.requireCurrent() })
         // At the largest admitted ratio one append yields <= 6 * 4096 output frames. This
         // bound also allows partial native progress and a final inputRanDry/endOfStream call.
         for _ in 0..<16 {
             try requireCurrent()
-            let before = offset
-            var callbackFailure: (any Error)?
+            let before = input.snapshot().offset
             var nativeError: NSError?
             outputBuffer.frameLength = 0
-            let status = converter.convert(to: outputBuffer, error: &nativeError) { requested, inputStatus in
-                do {
-                    try self.requireCurrent()
-                    guard requested > 0 else { throw AudioCompatiblePCMConversionError.invalidNativeProgress }
-                    if offset == frames {
-                        inputStatus.pointee = .noDataNow
-                        return nil
-                    }
-                    let count = min(Int(requested), frames - offset)
-                    for index in 0..<(count * channels) { input[index] = Float(self.samples[offset * channels + index]) }
-                    inputBuffer.frameLength = AVAudioFrameCount(count); offset += count
-                    if isTail { self.tailInputFrames += UInt64(count) }
-                    inputStatus.pointee = .haveData
-                    return inputBuffer
-                } catch {
-                    callbackFailure = error; inputStatus.pointee = .noDataNow; return nil
-                }
+            let status = converter.convert(to: outputBuffer, error: &nativeError) { @Sendable requested, inputStatus in
+                input.provide(requested, status: inputStatus)
             }
-            if let callbackFailure { throw callbackFailure }
+            let progress = input.snapshot()
+            let offset = progress.offset
+            if isTail { tailInputFrames += UInt64(offset - before) }
+            if let failure = progress.failure { throw failure }
             if let nativeError { throw nativeError }
             try requireCurrent()
             guard status != .error else { throw AudioCompatiblePCMConversionError.invalidNativeProgress }
@@ -227,6 +216,60 @@ public final class AudioCompatiblePCMConverter {
             }
         }
         throw AudioCompatiblePCMConversionError.invalidNativeProgress
+    }
+
+    /// SDK 26 imports AVAudioConverter's input block as Sendable; SDK 27 corrects
+    /// it to non-Sendable. The native API calls it synchronously and does not
+    /// retain it. Keep its mutable cursor, error and buffer behind one lock so
+    /// either declaration uses the same bounded callback ownership. The serial
+    /// converter owner is suspended in convert(to:) while requireCurrent runs.
+    private struct ConversionInput: Sendable {
+        private struct State {
+            let buffer: AVAudioPCMBuffer
+            let samples: [Double]
+            let frames: Int
+            let channels: Int
+            let requireCurrent: () throws -> Void
+            var offset = 0
+            var failure: (any Error)?
+        }
+        private let state: OSAllocatedUnfairLock<State>
+
+        init(buffer: AVAudioPCMBuffer, samples: [Double], frames: Int, channels: Int,
+             requireCurrent: @escaping () throws -> Void) {
+            state = OSAllocatedUnfairLock(uncheckedState: State(buffer: buffer, samples: samples,
+                frames: frames, channels: channels, requireCurrent: requireCurrent))
+        }
+
+        func snapshot() -> (offset: Int, failure: (any Error)?) {
+            state.withLockUnchecked { ($0.offset, $0.failure) }
+        }
+
+        func provide(_ requested: AVAudioPacketCount,
+                     status: UnsafeMutablePointer<AVAudioConverterInputStatus>) -> AVAudioBuffer? {
+            state.withLockUnchecked { value in
+                do {
+                    if let failure = value.failure { throw failure }
+                    try value.requireCurrent()
+                    guard requested > 0, let samples = value.buffer.floatChannelData?[0] else {
+                        throw AudioCompatiblePCMConversionError.invalidNativeProgress
+                    }
+                    guard value.offset < value.frames else { status.pointee = .noDataNow; return nil }
+                    let count = min(Int(requested), value.frames - value.offset)
+                    for index in 0..<(count * value.channels) {
+                        samples[index] = Float(value.samples[value.offset * value.channels + index])
+                    }
+                    value.buffer.frameLength = AVAudioFrameCount(count)
+                    value.offset += count
+                    status.pointee = .haveData
+                    return value.buffer
+                } catch {
+                    value.failure = error
+                    status.pointee = .noDataNow
+                    return nil
+                }
+            }
+        }
     }
 
     private func normalize(_ bytes: Data) throws {
