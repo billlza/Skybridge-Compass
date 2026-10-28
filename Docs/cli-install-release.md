@@ -3,6 +3,13 @@
 ## Distribution Policy
 
 Rust binaries remain the source of truth.
+For the public CLI, this means the `rust/` workspace on every packaged host.
+The Windows repository's `core/skybridge-core` diagnostic binary is not a
+substitute for that archive. Both report an explicit `operator_profile`; see
+[ADR-0003](ADR-0003-Native-Runtimes-and-Operator-Contract.md). Retain existing
+local diagnostic scripts without silently installing their binary over the
+public `skybridge` command. Linux's existing packaging definitions are retained,
+but Linux development and acceptance are deferred in the current workstream.
 Package managers must download the exact same source-bound release artifacts instead of rebuilding the protocol core. The current workflow binds those bytes into a source/run handoff with `release-manifest.json` and `SHA256SUMS.txt`; public publication remains blocked until platform publisher-signature and notarization proofs are verified.
 
 Supported install surfaces for v1:
@@ -29,6 +36,11 @@ Public tag publication is currently fail-closed: the workflow builds and verifie
 The SkyBridge CLI headless Rust workspace lives under `rust/`. The product
 display name is SkyBridge CLI; the installed command and binary name remain
 `skybridge`.
+
+Before automation, run `skybridge version --json` and
+`skybridge capabilities --json`. Require `operator_profile.implementation_id`
+to match the intended implementation. Identical binary names or command-local
+schema numbers do not establish interchangeable runtime or completion behavior.
 
 Local build and test:
 

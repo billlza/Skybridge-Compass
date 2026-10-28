@@ -1,4 +1,5 @@
 import Foundation
+import SkyBridgeProtocolCore
 import Network
 import SwiftUI
 #if canImport(UIKit)
@@ -138,23 +139,11 @@ enum AppleMobileDeviceIdentity {
             )
         }
 
-        switch normalized {
-        case "iPhone17,1":
-            return ModelPresentation(modelName: "iPhone 16 Pro", chip: "A18 Pro")
-        case "iPhone17,2":
-            return ModelPresentation(modelName: "iPhone 16 Pro Max", chip: "A18 Pro")
-        case "iPhone17,3":
-            return ModelPresentation(modelName: "iPhone 16", chip: "A18")
-        case "iPhone17,4":
-            return ModelPresentation(modelName: "iPhone 16 Plus", chip: "A18")
-        case "iPad16,3", "iPad16,4":
-            return ModelPresentation(modelName: "iPad Pro 11-inch (M4)", chip: "M4")
-        default:
-            return ModelPresentation(
-                modelName: normalized,
-                chip: fallbackChipName(for: platform)
-            )
-        }
+        let model = AppleHardwareModelCatalog.model(for: normalized)
+        return ModelPresentation(
+            modelName: model?.name ?? normalized,
+            chip: model?.chip ?? fallbackChipName(for: platform)
+        )
     }
 
     static func displayDeviceName(

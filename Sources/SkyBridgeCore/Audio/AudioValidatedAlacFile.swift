@@ -1,0 +1,8 @@
+#if os(macOS)
+import SkyBridgeAudioFile
+
+typealias AudioAlacDecodeError = SkyBridgeAudioFile.AudioAlacDecodeError
+typealias AudioAlacValidationError = SkyBridgeAudioFile.AudioAlacValidationError
+typealias AudioValidatedAlacFile = SkyBridgeAudioFile.AudioValidatedAlacFile
+typealias AudioAlacPCMReadSession = SkyBridgeAudioFile.AudioAlacPCMReadSession
+#endif

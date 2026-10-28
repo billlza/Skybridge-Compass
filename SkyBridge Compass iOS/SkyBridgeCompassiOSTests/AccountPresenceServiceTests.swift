@@ -59,6 +59,7 @@ final class AccountPresenceServiceTests: XCTestCase {
   }
 
   func testClientErrorsMapToSharedPresenceFailures() {
+    XCTAssertEqual(SignalServerClientCompat.presenceFailure(for: AudioMembershipLeaseFailure.accountChanged), .notAuthenticated)
     XCTAssertEqual(
       SignalServerClientCompat.presenceFailure(for: SignalServerClientCompat.ClientError.serverRejected(403, #"{"bodyBytes":30,"error":"device_frozen"}"#)),
       .deviceNotActive(code: "device_frozen")
@@ -84,6 +85,10 @@ final class AccountPresenceServiceTests: XCTestCase {
     XCTAssertEqual(
       SignalServerClientCompat.presenceFailure(for: SignalServerClientCompat.ClientError.invalidAuthenticationClaims),
       .localAuthenticationUnavailable(code: "invalid_authentication_claims")
+    )
+    XCTAssertEqual(
+      SignalServerClientCompat.presenceFailure(for: SignalServerClientCompat.ClientError.expiredAuthentication),
+      .localAuthenticationUnavailable(code: "authentication_expired")
     )
     XCTAssertEqual(
       SignalServerClientCompat.presenceFailure(for: SignalServerClientCompat.ClientError.conflictingTenantClaims),
@@ -119,6 +124,7 @@ final class AccountPresenceServiceTests: XCTestCase {
     let principal = CurrentPathAuthenticationPrincipal(userID: "user-a", tenantID: "tenant-a")
     service.updateAuthentication(principal: principal)
     XCTAssertTrue(service.isAuthenticated)
+    let originalConnectionGeneration = service.connectionAccountGeneration
     await service.waitForCurrentRefresh()
     XCTAssertEqual(service.lastHeartbeatFailure, .localIdentityUnavailable)
     XCTAssertEqual(service.lastListFailure, .localIdentityUnavailable)
@@ -128,10 +134,12 @@ final class AccountPresenceServiceTests: XCTestCase {
     service.handleScenePhase(isActive: false)
     service.handleScenePhase(isActive: true)
     await service.waitForCurrentRefresh()
+    XCTAssertEqual(service.connectionAccountGeneration, originalConnectionGeneration)
     XCTAssertEqual(service.lastListFailure, .localIdentityUnavailable)
 
     service.updateAuthentication(principal: nil)
     XCTAssertFalse(service.isAuthenticated)
+    XCTAssertGreaterThan(service.connectionAccountGeneration, originalConnectionGeneration)
     XCTAssertNil(service.lastListFailure)
     XCTAssertNil(service.lastHeartbeatFailure)
     XCTAssertNil(service.accountDevices)
@@ -184,6 +192,16 @@ final class AccountPresenceServiceTests: XCTestCase {
     let sectionIndex = try XCTUnwrap(discovery.range(of: "AccountDevicesSectionView(")).lowerBound
     let scanIndex = try XCTUnwrap(discovery.range(of: "scanStatusHeader\n")).lowerBound
     XCTAssertLessThan(sectionIndex, scanIndex, "account devices precede nearby scanning")
+    XCTAssertTrue(discovery.contains("onConnectNearbyDevice: onConnectAccountDevice"),
+                  "The account action must reach the root connection owner, not open another detail sheet")
+    XCTAssertTrue(section.contains("onConnectNearbyDevice(record, nearbyDevice)"),
+                  "The selected account identity must survive the UI callback")
+    XCTAssertTrue(dashboard.contains("connectionManager.connect(account: selection, to: device)"))
+    XCTAssertTrue(dashboard.contains("accountPresence.requireCurrentConnectionSelection(activeAccountSelection)"))
+    let detail = try source("\(ios)/Views/Dashboard/Components/DeviceRowView.swift")
+    XCTAssertTrue(detail.contains("DeviceDetailSessionIdentity.matches(deviceID: device.id, sessionDeviceID: snapshot.deviceId)"))
+    XCTAssertTrue(detail.contains("DeviceDetailSessionIdentity.matches(deviceID: device.id, sessionDeviceID: current.id)"))
+    XCTAssertFalse(detail.contains("normalizedName("), "A device name cannot select a disconnect target")
 
     let app = try source("\(ios)/App/SkyBridgeCompassApp.swift")
     XCTAssertTrue(app.contains("AccountPresenceService.shared.updateAuthentication(principal: principal)"))

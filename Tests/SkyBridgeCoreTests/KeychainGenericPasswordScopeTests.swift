@@ -4,6 +4,30 @@ import XCTest
 
 @available(macOS 14.0, *)
 final class KeychainGenericPasswordScopeTests: XCTestCase {
+    func testApplicationCredentialGroupIsTheExactSignedApplicationIdentity() throws {
+        let resolved = try SkyBridgeKeychainAccessGroupResolver.requiredApplicationAccessGroup(
+            from: "FIXTURE1234.com.skybridge.compass.pro", bundleIdentifier: "com.skybridge.compass.pro")
+        XCTAssertEqual(resolved, "FIXTURE1234.com.skybridge.compass.pro")
+        XCTAssertNotEqual(resolved, "FIXTURE1234.group.com.skybridge.compass")
+    }
+
+    func testApplicationGroupResolutionRejectsMissingOrMismatchedSignedIdentity() {
+        let fixtures: [(String?, String?)] = [
+            (nil, "com.skybridge.compass.pro"), ("FIXTURE1234.com.skybridge.compass.pro", nil),
+            ("", "com.skybridge.compass.pro"), (".com.skybridge.compass.pro", "com.skybridge.compass.pro"),
+            ("FIXTURE1234.group.com.skybridge.compass", "com.skybridge.compass.pro"),
+            ("FIXTURE1234.com.skybridge.compass.pro ", "com.skybridge.compass.pro"),
+            ("FIXTURE1234.com.skybridge.compass.pro", " com.skybridge.compass.pro"),
+            ("FIXTURE1234.com.skybridge.compass.pro\0", "com.skybridge.compass.pro"),
+        ]
+        for (identity, bundle) in fixtures {
+            XCTAssertThrowsError(try SkyBridgeKeychainAccessGroupResolver.requiredApplicationAccessGroup(
+                from: identity, bundleIdentifier: bundle)) {
+                XCTAssertEqual($0 as? KeychainGenericPasswordScopeError, .missingApplicationIdentityAccessGroupEntitlement)
+            }
+        }
+    }
+
     func testPersistentReferenceMatchingUsesTheCorrectKeychainDomainSelector() {
         let reference = Data([0x53, 0x42, 0x50, 0x52])
 

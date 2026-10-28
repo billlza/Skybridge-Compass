@@ -355,12 +355,20 @@ final class WebRTCOutboundFileTransferSupportTests: XCTestCase {
         XCTAssertFalse(transferSource.contains("attributesOfItem(atPath: url.path)"))
         XCTAssertFalse(transferSource.contains("ack.receivedBytes ??"))
         XCTAssertTrue(transferSource.contains("expectedReceivedBytes: expectedReceivedBytes"))
-        XCTAssertTrue(readerSource.contains("O_RDONLY | O_NOFOLLOW | O_CLOEXEC"))
-        XCTAssertTrue(readerSource.contains("fstat(descriptor, &metadata)"))
-        XCTAssertTrue(readerSource.contains("metadata.st_ino > 0"))
-        XCTAssertTrue(readerSource.contains("Darwin.pread"))
-        XCTAssertTrue(readerSource.contains("try handle.close()\n        isClosed = true"))
-        XCTAssertFalse(readerSource.contains("isClosed = true\n        try handle.close()"))
+        let sharedReaderSource = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/SkyBridgeProtocolCore/RemoteConnection/PreparedOutboundFileReadSession.swift"
+            ), encoding: .utf8
+        )
+        XCTAssertTrue(readerSource.contains("PreparedOutboundFileReadSession.prepare("))
+        XCTAssertTrue(readerSource.contains("sourcePolicy: .ownedSingleLinkStableMetadata"))
+        XCTAssertTrue(sharedReaderSource.contains("O_RDONLY | O_NOFOLLOW | O_CLOEXEC"))
+        XCTAssertTrue(sharedReaderSource.contains("fstat(descriptor, &value)"))
+        XCTAssertTrue(sharedReaderSource.contains("value.st_ino == 0"))
+        XCTAssertTrue(sharedReaderSource.contains("Darwin.pread"))
+        XCTAssertTrue(sharedReaderSource.contains("do { try handle.close() }"))
+        XCTAssertTrue(readerSource.contains("closingTask = nil // Retain the failure"))
+        XCTAssertFalse(sharedReaderSource.contains("self.handle = nil\n        do { try handle.close() }"))
     }
 
     @MainActor

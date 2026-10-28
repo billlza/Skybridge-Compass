@@ -12,6 +12,7 @@ import CryptoKit
 /// 适配平铺显示模式，符合macOS设计规范
 @available(macOS 14.0, *)
 public struct SettingsView: View {
+    private let onShowAccountDevices: (() -> Void)?
     
  // MARK: - 状态管理
     @StateObject private var settingsManager = SettingsManager.shared
@@ -100,7 +101,9 @@ public struct SettingsView: View {
         }
     }
     
-    public init() {}
+    public init(onShowAccountDevices: (() -> Void)? = nil) {
+        self.onShowAccountDevices = onShowAccountDevices
+    }
     
     public var body: some View {
         VStack(spacing: 0) {
@@ -348,6 +351,15 @@ public struct SettingsView: View {
     private var generalSettings: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                if let onShowAccountDevices {
+                    settingsSection(localizationManager.localizedString("discovery.accountDevices.title")) {
+                        Button(action: onShowAccountDevices) {
+                            Label(localizationManager.localizedString("accountDevices.myDevices"),
+                                  systemImage: "person.crop.rectangle.stack")
+                        }
+                        .accessibilityIdentifier("settings.my-devices")
+                    }
+                }
                 settingsSection(localizationManager.localizedString("settings.general.language.sectionTitle")) {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
@@ -1164,17 +1176,8 @@ public struct SettingsView: View {
                                 .font(.caption.weight(.semibold))
                                 .foregroundColor(.secondary)
                         }
-                        .help("传输层 TLS 1.3 的混合后量子密钥交换组（X25519MLKEM768）由系统在双方支持时自动协商，App 无公开接口可强制开关。注意：SkyBridge 自有的 P2P 设备握手始终使用 PQC（X-Wing），与此传输层 TLS 无关。")
-                        Toggle(localizationManager.localizedString("settings.advanced.pqc.preferXWing"), isOn: $settingsManager.preferXWingHybrid)
-                            .help(localizationManager.localizedString("settings.advanced.pqc.preferXWing.help"))
-                        Text(localizationManager.localizedString("settings.advanced.pqc.preferXWing.caption"))
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        Toggle("Q-Periapt ABI2 PolicyBound 混合套件（beta）", isOn: $settingsManager.preferQPeriaptBeta)
-                            .disabled(!settingsManager.qPeriaptRuntimeSupported)
-                            .help("实验性：仅在已验证签名策略、独立验证密钥 pin、持久化可信状态和 ABI2 自检全部通过后，才优先协商 Q-Periapt PolicyBound。")
-                        Text("Beta：默认关闭；与现有 X-Wing / ML-KEM 不互通，且双方必须使用完全相同的已认证策略。")
-                            .font(.caption)
+                        .help("传输层 TLS 1.3 的混合后量子密钥交换组（X25519MLKEM768）由系统在双方支持时自动协商，App 无公开接口可强制开关。SkyBridge 的设备握手另行协商后量子算法，与此传输层 TLS 设置独立。")
+                        PQCModeSettingsView(settingsManager: settingsManager)
                         Text("现有 peer 继续使用已 pin 的 ML-DSA-65；只有完成 87 公钥认证与持久化后才使用 ML-DSA-87，不会因失败自动降级。")
                             .font(.caption)
                             .foregroundColor(.secondary)
@@ -1197,7 +1200,7 @@ public struct SettingsView: View {
                                 .foregroundColor(.secondary)
                         }
                         .help("此状态来自已恢复并完成签名自检的本机协议身份 authority；不代表远端硬件证明。")
-                        Text(localizationManager.localizedString("settings.advanced.pqc.note"))
+                        Text("没有双方共同支持且允许的后量子算法时，连接会明确停止。不会自动改为经典算法。")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -2218,6 +2221,10 @@ public struct SettingsView: View {
         do {
             let snapshot = try await applicationCacheService.cacheUsageSnapshot()
             cacheSizeDisplay = formattedByteCount(snapshot.totalBytes)
+            if showErrorMessage && !isCacheOperationInProgress {
+                cacheOperationIsError = false
+                cacheOperationMessage = nil
+            }
         } catch {
             cacheSizeDisplay = localizationManager.localizedString("settings.general.cacheSize.unavailable")
             SkyBridgeLogger.ui.error("计算缓存大小失败: \(error.localizedDescription, privacy: .private)")

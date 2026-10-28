@@ -1,10 +1,16 @@
 import Foundation
 import Combine
+import SkyBridgeProtocolCore
+
+struct AuthenticationObservationSettlementFailure: Error, Sendable {
+    let original: any Error
+    let settlement: any Error
+}
 
 /// 负责处理所有 SkyBridge 账户登录、注册与会话持久化逻辑的核心服务。
 @MainActor public final class AuthenticationService: BaseManager {
  /// 登录配置，必须使用真实环境的接口地址。
-    public struct Configuration: Sendable {
+    public struct Configuration: Sendable, Equatable {
         public let appleEndpoint: URL
         public let nebulaEndpoint: URL
         public let phoneEndpoint: URL
@@ -38,6 +44,7 @@ import Combine
         case invalidResponse
         case invalidAppleIdentityToken
         case sessionChangedDuringRefresh
+        case refreshCredentialUnavailable
         case nebulaMFARequired(String)
         case server(String)
         case storage(OSStatus)
@@ -52,6 +59,8 @@ import Combine
                 return "Apple 身份令牌无效"
             case .sessionChangedDuringRefresh:
                 return "认证会话在令牌刷新期间发生变化，请重新发起"
+            case .refreshCredentialUnavailable:
+                return "登录已过期，请重新登录"
             case .nebulaMFARequired:
                 return "需要多因素认证验证"
             case .server(let message):
@@ -87,6 +96,67 @@ import Combine
         sessionSubject.value
     }
 
+    func currentAudioAuthorization() throws -> AccountAudioAuthorization {
+        guard hasAuthenticatedSessionForProtectedServices(),
+              let current = audioAuthorization.current else {
+            throw AudioMembershipLeaseFailure.accountChanged
+        }
+        try audioAuthorization.requireCurrent(current)
+        return current
+    }
+
+    /// Nil means no published audio authorization (guest, logout, replacement or
+    /// changed configuration). Presence UI may still report its own independent state.
+    var audioAuthorizationSnapshot: AccountAudioAuthorization? {
+        guard let current = audioAuthorization.current, current.isCurrent else { return nil }
+        return current
+    }
+
+    func loadAudioMembershipCheckpoint(for authorization: AccountAudioAuthorization) async throws
+        -> AudioMembershipPersistenceSnapshot {
+        try requireAudioPersistenceOwner(authorization)
+        let intent = authenticationIntent
+        let snapshot = try await KeychainManager.shared.loadAudioMembershipCheckpoint(
+            loginID: authorization.loginID, intent: intent)
+        try requireAudioPersistenceOwner(authorization)
+        return snapshot
+    }
+
+    func saveAudioMembershipCheckpoint(_ bytes: Data?, replacing revision: UUID,
+                                        for authorization: AccountAudioAuthorization) async throws
+        -> AudioMembershipPersistenceSnapshot {
+        try requireAudioPersistenceOwner(authorization)
+        let intent = authenticationIntent
+        let snapshot = try await KeychainManager.shared.saveAudioMembershipCheckpoint(bytes,
+            replacing: revision, loginID: authorization.loginID, intent: intent)
+        try requireAudioPersistenceOwner(authorization)
+        return snapshot
+    }
+
+    func beginAudioMembershipObservation(for authorization: AccountAudioAuthorization) async throws
+        -> AudioMembershipPersistenceObservation {
+        try requireAudioPersistenceOwner(authorization)
+        guard let source = sessionSubject.value else { throw ProtectedAccountSessionError.missingSession }
+        let intent = authenticationIntent
+        let ticket = try await KeychainManager.shared.beginAccountObservation(kind: .devices,
+            expected: source, loginID: authorization.loginID, intent: intent)
+        do { try requireAudioPersistenceOwner(authorization) }
+        catch { await KeychainManager.shared.abandonAccountObservation(ticket); throw error }
+        return AudioMembershipPersistenceObservation(finish: { [self] revision, checkpoint in
+            try requireAudioPersistenceOwner(authorization)
+            let saved = try await KeychainManager.shared.finishAccountObservation(ticket,
+                checkpoint: checkpoint, expectedAudioRevision: revision)
+            try requireAudioPersistenceOwner(authorization)
+            return .init(revision: saved.audioRevision, checkpoint: saved.audioCheckpoint)
+        }, abandon: { await KeychainManager.shared.abandonAccountObservation(ticket) })
+    }
+
+    private func requireAudioPersistenceOwner(_ authorization: AccountAudioAuthorization) throws {
+        guard try currentAudioAuthorization() === authorization,
+              persistedLoginID == authorization.loginID else { throw AudioMembershipLeaseFailure.accountChanged }
+        try authenticationIntent.requireCurrent()
+    }
+
     /// Resolves and, when requested, refreshes the authoritative session through the
     /// single owner before returning a snapshot from the same actor turn.
     @MainActor
@@ -104,6 +174,8 @@ import Combine
             return nil
         }
         let sourceRevision = sessionRevision
+        let sourceLoginID = persistedLoginID
+        let sourceIntent = authenticationIntent
 #if DEBUG || SKYBRIDGE_TESTING
         if Self.shouldSkipAuthRefreshForSmoke(),
            !currentSession.accessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -113,7 +185,9 @@ import Combine
         guard let refreshToken = currentSession.refreshToken?.trimmingCharacters(in: .whitespacesAndNewlines),
               !refreshToken.isEmpty else {
             if forceRefresh || shouldRefreshAccessToken(currentSession.accessToken) {
-                throw AuthenticationError.server("登录已过期，请重新登录")
+                // No fresh authenticated request is possible. This local absence
+                // is distinct from an authenticated server revoking the account.
+                throw AuthenticationError.refreshCredentialUnavailable
             }
             return currentSession.accessToken
         }
@@ -131,55 +205,14 @@ import Combine
 
         cancelAccessTokenRefresh()
 
+        guard let sourceLoginID else { throw AuthenticationError.sessionChangedDuringRefresh }
         let refreshID = UUID()
         let requiresProviderJWTContinuity = isSupabaseMode
             || SupabaseService.shared.isSupabaseAccessToken(currentSession.accessToken)
         let refreshTask = Task<AuthSession, Error> { @MainActor [self, currentSession, refreshToken] in
-            let refreshedSession: AuthSession
-            if requiresProviderJWTContinuity {
-                refreshedSession = try await SupabaseService.shared.refreshAccessToken(refreshToken)
-            } else {
-                let nebulaResult = try await NebulaService.shared.refreshAccessToken(refreshToken)
-                refreshedSession = try self.session(fromNebulaResult: nebulaResult)
-            }
-
-            try Self.validateRefreshedIdentity(
-                refreshedSession,
-                sourceSession: currentSession,
-                requiresProviderJWTContinuity: requiresProviderJWTContinuity
-            )
-
-            let mergedSession = AuthSession(
-                accessToken: refreshedSession.accessToken,
-                refreshToken: Self.mergedRefreshToken(
-                    refreshedSession.refreshToken,
-                    fallback: currentSession.refreshToken
-                ),
-                userIdentifier: currentSession.userIdentifier,
-                nebulaId: refreshedSession.nebulaId ?? currentSession.nebulaId,
-                displayName: refreshedSession.displayName,
-                avatarURL: refreshedSession.avatarURL ?? currentSession.avatarURL,
-                issuedAt: refreshedSession.issuedAt
-            )
-
-            try Task.checkCancellation()
-            try await persistRefreshedSession(
-                mergedSession,
-                refreshID: refreshID,
-                sourceSession: currentSession,
-                sourceRevision: sourceRevision
-            )
-            try Task.checkCancellation()
-            guard accessTokenRefreshOperation?.id == refreshID,
-                  sessionRevision == sourceRevision,
-                  sessionSubject.value == currentSession else {
-                throw AuthenticationError.sessionChangedDuringRefresh
-            }
-            sessionRevision = UUID()
-            accessTokenRefreshOperation = nil
-            sessionSubject.send(mergedSession)
-            await TenantAccessController.shared.bindAuthentication(session: mergedSession)
-            return mergedSession
+            try await runCredentialRefresh(currentSession, refreshToken: refreshToken, refreshID: refreshID,
+                sourceRevision: sourceRevision, sourceLoginID: sourceLoginID, sourceIntent: sourceIntent,
+                requiresProviderJWTContinuity: requiresProviderJWTContinuity)
         }
 
         accessTokenRefreshOperation = AccessTokenRefreshOperation(
@@ -198,10 +231,123 @@ import Combine
         return refreshedSession.accessToken
     }
 
+    private func runCredentialRefresh(_ currentSession: AuthSession, refreshToken: String,
+                                     refreshID: UUID, sourceRevision: UUID, sourceLoginID: UUID,
+                                     sourceIntent: AuthenticationMutationIntent,
+                                     requiresProviderJWTContinuity: Bool) async throws -> AuthSession {
+        let observation = try await KeychainManager.shared.beginAccountObservation(kind: .credential,
+            expected: currentSession, loginID: sourceLoginID, intent: sourceIntent)
+        var enteredRequest = false
+        var settlementAttempted = false
+        do {
+            try Task.checkCancellation()
+            guard sessionRevision == sourceRevision, sessionSubject.value == currentSession else {
+                throw AuthenticationError.sessionChangedDuringRefresh
+            }
+            enteredRequest = true
+            let refreshedSession: AuthSession
+            do {
+                if requiresProviderJWTContinuity {
+                    refreshedSession = try await SupabaseService.shared.refreshAccessToken(refreshToken)
+                } else {
+                    let nebulaResult = try await NebulaService.shared.refreshAccessToken(refreshToken)
+                    refreshedSession = try self.session(fromNebulaResult: nebulaResult)
+                }
+            } catch {
+                if sessionRevision == sourceRevision, sessionSubject.value == currentSession,
+                   case let SupabaseService.SupabaseError.httpStatus(status, body) = error,
+                   AudioAccountRefreshFailurePolicy.invalidatesAuthorization(status: status, body: body) {
+                    try await revokeAudioForRejectedSession(currentSession, revision: sourceRevision,
+                        loginID: sourceLoginID, intent: sourceIntent)
+                }
+                throw error
+            }
+
+            do {
+                try Self.validateRefreshedIdentity(
+                    refreshedSession,
+                    sourceSession: currentSession,
+                    requiresProviderJWTContinuity: requiresProviderJWTContinuity
+                )
+            } catch {
+                if sessionRevision == sourceRevision, sessionSubject.value == currentSession {
+                    try await revokeAudioForRejectedSession(currentSession, revision: sourceRevision,
+                        loginID: sourceLoginID, intent: sourceIntent)
+                }
+                throw error
+            }
+
+            let mergedSession = AuthSession(
+                accessToken: refreshedSession.accessToken,
+                refreshToken: Self.mergedRefreshToken(
+                    refreshedSession.refreshToken,
+                    fallback: currentSession.refreshToken
+                ),
+                userIdentifier: currentSession.userIdentifier,
+                nebulaId: refreshedSession.nebulaId ?? currentSession.nebulaId,
+                displayName: refreshedSession.displayName,
+                avatarURL: refreshedSession.avatarURL ?? currentSession.avatarURL,
+                issuedAt: refreshedSession.issuedAt
+            )
+
+            try Task.checkCancellation()
+            settlementAttempted = true
+            let persisted = try await persistRefreshedSession(
+                mergedSession,
+                refreshID: refreshID,
+                sourceSession: currentSession,
+                sourceRevision: sourceRevision, observation: observation
+            )
+            try Task.checkCancellation()
+            guard accessTokenRefreshOperation?.id == refreshID,
+                  sessionRevision == sourceRevision,
+                  sessionSubject.value == currentSession else {
+                throw AuthenticationError.sessionChangedDuringRefresh
+            }
+            sessionRevision = UUID()
+            accessTokenRefreshOperation = nil
+            if audioAuthorization.current == nil, !persisted.audioRevoked,
+               !persisted.requiresCredentialVerification {
+                audioAuthorization.publishAuthenticatedSession(loginID: sourceLoginID)
+            }
+            sessionSubject.send(mergedSession)
+            await TenantAccessController.shared.bindAuthentication(session: mergedSession)
+            await KeychainManager.shared.abandonAccountObservation(observation)
+            return mergedSession
+        } catch {
+            if !settlementAttempted, sessionRevision == sourceRevision, sessionSubject.value == currentSession,
+               !enteredRequest || Self.isTemporaryCredentialRefreshFailure(error) {
+                do {
+                    _ = try await KeychainManager.shared.finishAccountObservation(observation, temporaryFailure: true)
+                } catch let settlement {
+                    await KeychainManager.shared.abandonAccountObservation(observation)
+                    throw AuthenticationObservationSettlementFailure(original: error, settlement: settlement)
+                }
+            }
+            await KeychainManager.shared.abandonAccountObservation(observation)
+            throw error
+        }
+    }
+
+    private static func isTemporaryCredentialRefreshFailure(_ error: any Error) -> Bool {
+        if AudioMembershipRequestFailurePolicy.isTemporaryNetworkError(error) { return true }
+        guard let failure = error as? SupabaseService.SupabaseError else { return false }
+        switch failure {
+        case .networkError(let cause): return AudioMembershipRequestFailurePolicy.isTemporaryNetworkError(cause)
+        case let .httpStatus(status, body):
+            guard !AudioAccountRefreshFailurePolicy.invalidatesAuthorization(status: status, body: body) else { return false }
+            return AudioMembershipRequestFailurePolicy.isTemporaryHTTPStatus(status,
+                errorCode: body.flatMap { SignalServerClient.serverRejectedErrorCode(fromSanitizedDescription: $0) })
+        default: return false
+        }
+    }
+
     private let sessionSubject = CurrentValueSubject<AuthSession?, Never>(nil)
     private let urlSession: URLSession
     private var configuration: Configuration?
     private var isSupabaseMode: Bool = false
+    private var configuredSupabase: SupabaseService.Configuration?
+    private let audioAuthorization = AccountAudioAuthorizationState()
     private struct AccessTokenRefreshOperation {
         let id: UUID
         let sourceSession: AuthSession
@@ -212,6 +358,9 @@ import Combine
     private var accessTokenRefreshOperation: AccessTokenRefreshOperation?
     private var sessionRevision = UUID()
     private var persistedSessionLoadTask: Task<Void, Never>?
+    private var persistedSessionLoadID: UUID?
+    private var persistedLoginID: UUID?
+    private var authenticationIntent = AuthenticationMutationIntent()
 
     private init() {
         let config = URLSessionConfiguration.ephemeral
@@ -232,6 +381,9 @@ import Combine
 
  /// 启用Supabase认证模式
     public func enableSupabaseMode(supabaseConfig: SupabaseService.Configuration) {
+        guard !isSupabaseMode || configuredSupabase != supabaseConfig else { return }
+        beginSessionMutation()
+        configuredSupabase = supabaseConfig
  // 更新Supabase配置
         SupabaseService.shared.updateConfiguration(supabaseConfig)
         // 显式标记，避免用 URL scheme 当“哨兵值”
@@ -242,6 +394,9 @@ import Combine
 
  /// 使用真实的配置覆盖默认设置，通常在应用启动阶段调用。
     public func updateConfiguration(_ configuration: Configuration) {
+        guard isSupabaseMode || self.configuration != configuration else { return }
+        beginSessionMutation()
+        configuredSupabase = nil
  // @MainActor 类中直接赋值，避免跨 actor 的并发闭包警告
         self.configuration = configuration
         self.isSupabaseMode = false
@@ -478,31 +633,43 @@ import Combine
 
     /// 在启动阶段交互式解锁 Keychain 后补读一次持久化 session，避免首次静默读取失败后永久丢失登录态。
     public func reloadPersistedSessionIfNeeded() {
-        guard sessionSubject.value == nil else { return }
-        guard persistedSessionLoadTask == nil else { return }
-
+        guard sessionSubject.value == nil, persistedSessionLoadTask == nil else { return }
+        let loadID = UUID(), sourceRevision = sessionRevision
+        let intent = authenticationIntent
+        persistedSessionLoadID = loadID
         persistedSessionLoadTask = Task(priority: .utility) { [weak self] in
-            let loadResult: Result<AuthSession?, Error>
-            do {
-                loadResult = .success(try await KeychainManager.shared.loadAuthSessionStrict())
-            } catch {
-                loadResult = .failure(error)
-            }
-
+            let loadResult: Result<AuthSessionRecord?, Error>
+            do { loadResult = .success(try await KeychainManager.shared.loadAuthSessionRecordStrict(intent: intent)) }
+            catch { loadResult = .failure(error) }
             guard let self else { return }
-            defer { self.persistedSessionLoadTask = nil }
-            guard !Task.isCancelled else { return }
-            let session: AuthSession?
+            defer {
+                if self.persistedSessionLoadID == loadID {
+                    self.persistedSessionLoadID = nil
+                    self.persistedSessionLoadTask = nil
+                }
+            }
+            guard !Task.isCancelled, self.sessionRevision == sourceRevision,
+                  self.authenticationIntent === intent, self.sessionSubject.value == nil else { return }
+            let record: AuthSessionRecord?
             switch loadResult {
-            case .success(let loadedSession):
-                session = loadedSession
+            case .success(let loaded): record = loaded
             case .failure(let error):
                 self.logger.error("AuthenticationService 持久化会话读取失败: \(error.localizedDescription, privacy: .private)")
                 return
             }
-            guard self.sessionSubject.value == nil, let session else { return }
+            guard let record, let session = record.session, let loginID = record.loginID else { return }
+            self.persistedLoginID = loginID
+            if session.isAuthenticatedForProtectedServices, !record.audioRevoked, !record.requiresCredentialVerification {
+                self.audioAuthorization.publishAuthenticatedSession(loginID: loginID)
+            }
             self.sessionSubject.send(session)
             await TenantAccessController.shared.bindAuthentication(session: session)
+            if record.requiresCredentialVerification {
+                do { _ = try await self.validAccessToken(forceRefresh: true) }
+                catch {
+                    self.logger.error("Stored account verification failed: \(String(reflecting: type(of: error)), privacy: .public)")
+                }
+            }
         }
     }
 
@@ -561,9 +728,13 @@ import Combine
 
     private func persistAndPublishSession(_ session: AuthSession) async throws {
         let revision = beginSessionMutation()
-        try await persist(session: session)
-        guard sessionRevision == revision else {
+        let record = try await persist(session: session, intent: authenticationIntent)
+        guard sessionRevision == revision, let loginID = record.loginID else {
             throw AuthenticationError.sessionChangedDuringRefresh
+        }
+        persistedLoginID = loginID
+        if session.isAuthenticatedForProtectedServices, !record.audioRevoked {
+            audioAuthorization.publishAuthenticatedSession(loginID: loginID)
         }
         sessionSubject.send(session)
         await TenantAccessController.shared.bindAuthentication(session: session)
@@ -573,8 +744,9 @@ import Combine
         _ session: AuthSession,
         refreshID: UUID,
         sourceSession: AuthSession,
-        sourceRevision: UUID
-    ) async throws {
+        sourceRevision: UUID,
+        observation: AuthSessionObservation
+    ) async throws -> AuthSessionRecord {
         guard accessTokenRefreshOperation?.id == refreshID,
               accessTokenRefreshOperation?.sourceSession == sourceSession,
               accessTokenRefreshOperation?.sourceRevision == sourceRevision,
@@ -582,17 +754,11 @@ import Combine
               sessionSubject.value == sourceSession else {
             throw AuthenticationError.sessionChangedDuringRefresh
         }
-        let replaced: Bool
+        let replaced: AuthSessionRecord
         do {
-            replaced = try await KeychainManager.shared.replaceAuthSession(
-                expected: sourceSession,
-                with: session
-            )
-        } catch let error as NSError {
-            throw AuthenticationError.storage(OSStatus(error.code))
-        }
-        guard replaced else {
-            throw AuthenticationError.sessionChangedDuringRefresh
+            replaced = try await KeychainManager.shared.finishAccountObservation(observation, replacement: session)
+        } catch ProtectedAccountSessionError.keychainStatus(let status) {
+            throw AuthenticationError.storage(status)
         }
         guard accessTokenRefreshOperation?.id == refreshID,
               accessTokenRefreshOperation?.sourceSession == sourceSession,
@@ -600,25 +766,41 @@ import Combine
               sessionRevision == sourceRevision,
               sessionSubject.value == sourceSession else {
             throw AuthenticationError.sessionChangedDuringRefresh
+        }
+        return replaced
+    }
+
+    private func persist(session: AuthSession, intent: AuthenticationMutationIntent) async throws -> AuthSessionRecord {
+        persistedSessionLoadTask?.cancel()
+        persistedSessionLoadTask = nil
+        persistedSessionLoadID = nil
+        do { return try await KeychainManager.shared.storeAuthSession(session, intent: intent) }
+        catch ProtectedAccountSessionError.keychainStatus(let status) {
+            throw AuthenticationError.storage(status)
         }
     }
 
-    private func persist(session: AuthSession) async throws {
-        persistedSessionLoadTask?.cancel()
-        persistedSessionLoadTask = nil
-        do {
-            try await KeychainManager.shared.storeAuthSession(session)
-        } catch let error as NSError {
-            throw AuthenticationError.storage(OSStatus(error.code))
-        }
+    private func revokeAudioForRejectedSession(_ source: AuthSession, revision: UUID,
+                                               loginID: UUID, intent: AuthenticationMutationIntent) async throws {
+        guard sessionRevision == revision, sessionSubject.value == source,
+              persistedLoginID == loginID, authenticationIntent === intent else { return }
+        // Revoke live consumers immediately. Only completion of the protected
+        // write establishes durable rejection; storage failure is propagated.
+        audioAuthorization.beginMutation()
+        try await KeychainManager.shared.revokeAudioAuthorization(expected: source, loginID: loginID, intent: intent)
     }
 
     @discardableResult
     private func beginSessionMutation() -> UUID {
+        audioAuthorization.beginMutation()
+        authenticationIntent.invalidate()
+        authenticationIntent = AuthenticationMutationIntent()
+        persistedLoginID = nil
         sessionRevision = UUID()
         cancelAccessTokenRefresh()
         persistedSessionLoadTask?.cancel()
         persistedSessionLoadTask = nil
+        persistedSessionLoadID = nil
         return sessionRevision
     }
 
@@ -630,7 +812,7 @@ import Combine
 
     private func replaceWithGuestSession(_ session: AuthSession) async throws {
         let revision = beginSessionMutation()
-        try await KeychainManager.shared.deleteAuthSession()
+        try await KeychainManager.shared.deleteAuthSession(intent: authenticationIntent)
         guard sessionRevision == revision else {
             throw AuthenticationError.sessionChangedDuringRefresh
         }
@@ -950,7 +1132,7 @@ import Combine
 
     private func clearLocalSessionState() async throws {
         let revision = beginSessionMutation()
-        try await KeychainManager.shared.deleteAuthSession()
+        try await KeychainManager.shared.deleteAuthSession(intent: authenticationIntent)
         guard sessionRevision == revision else { return }
         sessionSubject.send(nil)
         await TenantAccessController.shared.clearAuthentication()

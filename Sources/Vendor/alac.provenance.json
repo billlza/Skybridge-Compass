@@ -1,0 +1,126 @@
+{
+  "artifact_roots": {
+    "licenses": {
+      "file_count": 3,
+      "path": "Sources/Vendor/NativeLicenses/alac",
+      "tree_sha256": "f469b04796216657272fa59813cce5ab7e743b98f8dda3fca110e3975b56e8ac"
+    },
+    "source": {
+      "file_count": 11,
+      "path": "Sources/Vendor/NativeSources/alac",
+      "tree_sha256": "e32d3c01e6d38d6353dd66bcf8a0feffacb223323c4ad83131bed5a24bc95b20"
+    },
+    "xcframework": {
+      "file_count": 18,
+      "path": "Sources/Vendor/alac.xcframework",
+      "tree_sha256": "1d47293dcdab4c626369b51a00a2fe8b3b22908e19b8c84a41a60ce40f80267e"
+    }
+  },
+  "binaries": [
+    {
+      "architectures": [
+        "arm64"
+      ],
+      "dependencies": [
+        "@rpath/CSkyBridgeALAC.framework/CSkyBridgeALAC",
+        "/usr/lib/libSystem.B.dylib"
+      ],
+      "deployment_targets": [
+        "17.0"
+      ],
+      "install_name": "@rpath/CSkyBridgeALAC.framework/CSkyBridgeALAC",
+      "path": "Sources/Vendor/alac.xcframework/ios-arm64/CSkyBridgeALAC.framework/CSkyBridgeALAC",
+      "platforms": [
+        "ios"
+      ],
+      "sha256": "3533c2edc954243bc4e1ec7713769a123a92f58c68e75cebe965754c77b0e47f",
+      "size": 366352
+    },
+    {
+      "architectures": [
+        "x86_64",
+        "arm64"
+      ],
+      "dependencies": [
+        "@rpath/CSkyBridgeALAC.framework/CSkyBridgeALAC",
+        "/usr/lib/libSystem.B.dylib"
+      ],
+      "deployment_targets": [
+        "17.0"
+      ],
+      "install_name": "@rpath/CSkyBridgeALAC.framework/CSkyBridgeALAC",
+      "path": "Sources/Vendor/alac.xcframework/ios-arm64_x86_64-simulator/CSkyBridgeALAC.framework/CSkyBridgeALAC",
+      "platforms": [
+        "ios-simulator"
+      ],
+      "sha256": "746169838a15cd4bc4ce32f8cb091d5b0671e8281195ba20f31d734e65721612",
+      "size": 696864
+    },
+    {
+      "architectures": [
+        "arm64"
+      ],
+      "dependencies": [
+        "@rpath/CSkyBridgeALAC.framework/CSkyBridgeALAC",
+        "/usr/lib/libSystem.B.dylib"
+      ],
+      "deployment_targets": [
+        "14.0"
+      ],
+      "install_name": "@rpath/CSkyBridgeALAC.framework/CSkyBridgeALAC",
+      "path": "Sources/Vendor/alac.xcframework/macos-arm64/CSkyBridgeALAC.framework/Versions/A/CSkyBridgeALAC",
+      "platforms": [
+        "macos"
+      ],
+      "sha256": "2b75c0c3f6950fb1999bf6b8ad54e5c5002175c54814563638b549604ab61c2b",
+      "size": 352848
+    }
+  ],
+  "build": {
+    "inputs": {
+      "architectures": "macos-arm64,ios-arm64,ios-simulator-arm64,ios-simulator-x86_64",
+      "bridge_header_sha256": "64937077427af9c918231db0383fcfefaca6fe7edd98c7e82ca11c82f071061c",
+      "bridge_sha256": "a57fdcebba08c760a00deee349ac9b63fcc4e34c689a8596c69a4545a7fd77be",
+      "build_jobs": "1",
+      "codec": "alac-only",
+      "framework_recipe_sha256": "951908e395c62e44f61b2c7219a2a7bd5484b595b204abf308162b5f65586429",
+      "ios_deployment_target": "17.0",
+      "ios_sdk": "27.1",
+      "ios_simulator_sdk": "27.1",
+      "linkage": "dynamic-framework-with-private-codec-objects",
+      "macos_deployment_target": "14.0",
+      "native_exports": "six-sbalac-entry-points",
+      "provider_recipe_sha256": "141f80d1f29df3654adbaf3ed1ecfdc919756212f5721bdd5b30276f4cfd2107",
+      "source_lock_sha256": "53c6da34a3abfb5fc19358ce71647b10dcae02f4103dbb96eb9b57e7aadcb074",
+      "werror": "true"
+    },
+    "recipe": "Scripts/build_alac_xcframework.py",
+    "recipe_sha256": "9f37b364c5767c94877221d5c54a7b814952230af38ada76e9ed089877ce1945",
+    "toolchain": {
+      "clang": "Apple clang version 21.0.0 (clang-2100.3.34.2)",
+      "cmake": "cmake version 4.3.3",
+      "macos_sdk": "27.0",
+      "ninja": "1.13.2",
+      "xcode": "Xcode 27.1; Build version 27A9275"
+    }
+  },
+  "family": "alac",
+  "native_dependency_lock": {
+    "family": "alac",
+    "family_sha256": "4df3868b84f154460ff1a366e046d88b0715d463049f8d76483aa4120f66d2f4",
+    "path": "Config/native-dependencies.lock.json",
+    "schema_version": 2
+  },
+  "schema_version": 2,
+  "sources": [
+    {
+      "commit": "1041abdc962f4cc4f394aa8de9dc5236c0c3b9e7",
+      "git_tree": "4617f177ba2b559e393d7ca16cb8bba1bbde6ed2",
+      "name": "ffmpeg-alac",
+      "ref": "n8.1.3",
+      "repository": "https://github.com/FFmpeg/FFmpeg.git",
+      "source_archive_sha256": "801838344d51651d45ab3ce6502a2627da7746492475711ff2adfb723aeaf7b6",
+      "version": "8.1.3"
+    }
+  ]
+}

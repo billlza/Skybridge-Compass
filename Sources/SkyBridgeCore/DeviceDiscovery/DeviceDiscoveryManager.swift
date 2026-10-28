@@ -778,6 +778,7 @@ public class DeviceDiscoveryManager: BaseManager {
         var presenceLease: ConnectionPresenceService.PresenceLease?
         var classicTransferSessionLease: ClassicTransferSessionRegistry.SessionLease?
         var latestPeerCapabilities: [String] = []
+        var acceptedClassicCapabilities: ClassicTransferPeerCapabilities?
         let peer = PeerIdentifier(deviceId: peerDeviceId)
 
         // 关键：入站 responder 不能硬编码 Classic。
@@ -897,7 +898,8 @@ public class DeviceDiscoveryManager: BaseManager {
                 aliases: aliases,
                 endpointHostOrIP: endpointHostOrIP,
                 capabilities: latestPeerCapabilities,
-                sessionKeys: keys
+                sessionKeys: keys,
+                capabilityEvidence: acceptedClassicCapabilities
             )
             if let activeLease = classicTransferSessionLease {
                 guard await ClassicTransferSessionRegistry.shared
@@ -1245,6 +1247,13 @@ public class DeviceDiscoveryManager: BaseManager {
                                 )
                                 logger.info(
                                     "🔑 已提交对端 authority-bound KEM：declared=\(declaredDiagnosticLabel, privacy: .public) peer=\(Self.protocolIdentityLogRedaction, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"
+                                )
+                                guard await PairingIdentityExchangeCommitCoordinator.isCurrent(
+                                    commitReceipt, transportIsCurrent: transportIsCurrent
+                                ) else { return true }
+                                acceptedClassicCapabilities = try ClassicTransferPeerCapabilities(
+                                    acceptedCapabilities: payload.capabilities,
+                                    sessionID: keys.sessionId, transcriptHash: keys.transcriptHash
                                 )
                                 guard await publishClassicTransferSessionSnapshot(keys: keys) else {
                                     return true

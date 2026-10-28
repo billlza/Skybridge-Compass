@@ -118,6 +118,21 @@ public actor SignalServerClient {
         public let deviceName: String
     }
 
+    public struct AccountDeviceRemovalRequestBody: Encodable, Sendable {
+        public let deviceId: String
+        public let protocolSigningAlgorithm: String
+        public let protocolPublicKeyFingerprint: String
+        public let clientVersion: String
+        public let protocolVersion: String
+        public let target: AccountDeviceRemovalTarget
+        public init(deviceId: String, protocolSigningAlgorithm: String, protocolPublicKeyFingerprint: String,
+                    clientVersion: String, protocolVersion: String, target: AccountDeviceRemovalTarget) {
+            self.deviceId=deviceId; self.protocolSigningAlgorithm=protocolSigningAlgorithm
+            self.protocolPublicKeyFingerprint=protocolPublicKeyFingerprint; self.clientVersion=clientVersion
+            self.protocolVersion=protocolVersion; self.target=target
+        }
+    }
+
     public struct RegisteredDeviceResponseBody: Decodable, Sendable {
         public let registered: Bool
         public let activated: Bool
@@ -199,6 +214,7 @@ public actor SignalServerClient {
         public let osVersion: String?
         public let lanAddresses: [String]
         public let capabilities: [String]
+        public let lanControlPort: UInt16?
 
         public init(
             binding: ProtocolIdentityBinding,
@@ -217,6 +233,7 @@ public actor SignalServerClient {
             self.osVersion = report.osVersion
             self.lanAddresses = report.lanAddresses
             self.capabilities = report.capabilities
+            self.lanControlPort = report.lanControlPort
         }
     }
 
@@ -697,6 +714,7 @@ public actor SignalServerClient {
     public static let identityRotationCommitPath = "/api/devices/identity-rotation/commit"
     public static let presenceRegisterPath = "/api/presence/register"
     public static let accountDevicesListPath = "/api/devices/list"
+    public static let removeAccountDevicePath = "/api/devices/remove"
     public static let mediaLeasePath = "/api/media/lease"
     public static let mediaAdmissionRefreshPath = "/api/media/admission/refresh"
 
@@ -1122,7 +1140,9 @@ public actor SignalServerClient {
 
     /// 拉取调用方账号（JWT 的 tenant+user）下的全部设备及实时在线状态（绑定经 query 参数传递，与服务端 req.query 解析一致）。
     public func listAccountDevices(binding: ProtocolIdentityBinding) async throws -> AccountDeviceListSnapshot {
-        try await performJSONRequest(
+        let authentication = try await authenticatedRequestContext()
+        let scope = identityRotationScope(from: authentication)
+        let snapshot: AccountDeviceListSnapshot = try await performJSONRequest(
             path: Self.accountDevicesListPath,
             method: "GET",
             queryItems: [
@@ -1130,12 +1150,35 @@ public actor SignalServerClient {
                 URLQueryItem(name: "protocolSigningAlgorithm", value: binding.protocolSigningAlgorithm.rawValue),
                 URLQueryItem(name: "protocolPublicKeyFingerprint", value: binding.protocolPublicKeyFingerprint)
             ],
-            requiresUserAuthentication: true
+            requiresUserAuthentication: true,
+            authenticationContext: authentication,
+            extraHeaders: [
+                "X-SkyBridge-Client-Version": clientVersionProvider(),
+                "X-SkyBridge-Protocol-Version": protocolVersionProvider()
+            ]
         )
+        return try snapshot.validatedFor(deviceID: binding.deviceId, algorithm: binding.protocolSigningAlgorithm.rawValue,
+            fingerprint: binding.protocolPublicKeyFingerprint).scoped(to: "\(scope.tenantID)/\(scope.userID)")
+    }
+
+    public func removeAccountDevice(binding: ProtocolIdentityBinding, target: AccountDeviceRecord,
+                                    expectedAccountScope: String) async throws {
+        let authentication = try await authenticatedRequestContext()
+        let scope = identityRotationScope(from: authentication)
+        guard expectedAccountScope == "\(scope.tenantID)/\(scope.userID)" else { throw ClientError.authenticationSessionChanged }
+        let selected = AccountDeviceRemovalTarget(target)
+        let body = AccountDeviceRemovalRequestBody(deviceId: binding.deviceId,
+            protocolSigningAlgorithm: binding.protocolSigningAlgorithm.rawValue,
+            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
+            clientVersion: clientVersionProvider(), protocolVersion: protocolVersionProvider(), target: selected)
+        let receipt: AccountDeviceRemovalReceipt = try await performJSONRequest(path: Self.removeAccountDevicePath,
+            method: "POST", body: try JSONEncoder().encode(body), authenticationContext: authentication)
+        try receipt.validate(selected)
     }
 
     /// 把 presence/账号设备列表请求抛出的错误归类为可决策的失败类型。
     public nonisolated static func presenceFailure(for error: Error) -> AccountPresenceFailure {
+        if error is AccountDeviceContractError { return .malformedResponse }
         if let clientError = error as? ClientError {
             switch clientError {
             case .serverRejected(let status, let description):

@@ -45,7 +45,15 @@ final class AccountPresenceService: ObservableObject {
     @Published private(set) var lastSuccessfulListAt: Date?
     @Published private(set) var lastListFailure: AccountPresenceFailure?
     @Published private(set) var lastHeartbeatFailure: AccountPresenceFailure?
+    @Published private(set) var removingDeviceId: String?
+    @Published private(set) var lastRemovalFailure: AccountPresenceFailure?
+    @Published private(set) var callerRemoved = false
+    var removalScope: UInt64 { engine.removalScope }
+    func removeDevice(_ record: AccountDeviceRecord, expectedScope: UInt64) async {
+        await engine.removeDevice(record, expectedScope: expectedScope)
+    }
     @Published private(set) var isAuthenticated = false
+    @Published private(set) var connectionAccountGeneration: UInt64 = 0
 
     private var engine: AccountPresenceRefreshEngine!
     private var principal: CurrentPathAuthenticationPrincipal?
@@ -62,7 +70,8 @@ final class AccountPresenceService: ObservableObject {
                     protocolPublicKeyBytes: snapshot.publicKey
                 )
             },
-            reportProvider: { try IOSDevicePresenceReportBuilder.currentReport() }
+            reportProvider: { try IOSDevicePresenceReportBuilder.currentReport() },
+            audioRegistry: .shared
         )
     }
 
@@ -70,11 +79,14 @@ final class AccountPresenceService: ObservableObject {
         signalServer: SignalServerClientCompat,
         loadBinding: @escaping BindingLoader,
         reportProvider: @escaping ReportProvider,
+        audioRegistry: IOSAudioAccountMembershipProvider? = nil,
         refreshInterval: TimeInterval = AccountPresenceRefreshPolicy.heartbeatInterval,
         onlineStateTTL: TimeInterval = AccountPresenceRefreshPolicy.snapshotTTL,
         now: @escaping AccountPresenceRefreshEngine.NowProvider = Date.init,
+        routeClock: @escaping AccountPresenceRefreshEngine.RouteClock = { ContinuousClock.now },
         classifyFailure: @escaping AccountPresenceRefreshEngine.FailureClassifier = SignalServerClientCompat.presenceFailure(for:)
     ) {
+        self.routeClock = routeClock
         let binding: BindingLoader = {
             do {
                 return try await loadBinding()
@@ -88,12 +100,29 @@ final class AccountPresenceService: ObservableObject {
             refreshInterval: refreshInterval,
             onlineStateTTL: onlineStateTTL,
             now: now,
+            routeClock: routeClock,
             registerPresence: {
                 let report = try reportProvider()
-                _ = try await signalServer.registerPresence(binding: try await binding(), report: report)
+                if let audioRegistry {
+                    let context = try audioRegistry.captureContext()
+                    try await audioRegistry.registerPresence(binding: try await binding(), report: report, context: context)
+                } else { _ = try await signalServer.registerPresence(binding: try await binding(), report: report) }
             },
             listAccountDevices: {
-                try await signalServer.listAccountDevices(binding: try await binding())
+                if let audioRegistry {
+                    let context = try audioRegistry.captureContext()
+                    return try await audioRegistry.listAccountDevices(binding: try await binding(), context: context)
+                }
+                return try await signalServer.listAccountDevices(binding: try await binding())
+            },
+            removeAccountDevice: { record, scope in
+                if let audioRegistry {
+                    let context = try audioRegistry.captureContext()
+                    try await audioRegistry.removeAccountDevice(binding: try await binding(), target: record,
+                        expectedAccountScope: scope, context: context)
+                } else {
+                    try await signalServer.removeAccountDevice(binding: try await binding(), target: record, expectedAccountScope: scope)
+                }
             },
             trustedDeviceIDs: { [] },
             classifyFailure: classifyFailure,
@@ -106,6 +135,7 @@ final class AccountPresenceService: ObservableObject {
     /// 认证主体变化：登录 → 启动；登出/切换账号 → 停止并清空（旧账号的列表绝不残留）。
     func updateAuthentication(principal newPrincipal: CurrentPathAuthenticationPrincipal?) {
         guard newPrincipal != principal else { return }
+        connectionAccountGeneration &+= 1
         principal = newPrincipal
         engine.stop()
         isAuthenticated = newPrincipal != nil
@@ -138,7 +168,40 @@ final class AccountPresenceService: ObservableObject {
         engine.isSnapshotStale(at: currentTime)
     }
 
+    func connectionSelection(for record: AccountDeviceRecord) throws -> IOSAccountConnectionSelection {
+        try IOSAccountConnectionSelection(record: record, snapshot: accountDevices,
+            isAuthenticated: isAuthenticated, callerRemoved: callerRemoved,
+            authenticationGeneration: connectionAccountGeneration)
+    }
+
+    func requireCurrentConnectionSelection(_ selection: IOSAccountConnectionSelection) throws {
+        try selection.requireCurrent(snapshot: accountDevices, isAuthenticated: isAuthenticated,
+            callerRemoved: callerRemoved, authenticationGeneration: connectionAccountGeneration)
+    }
+
+    private let routeClock: AccountPresenceRefreshEngine.RouteClock
+
+    func hasLiveRoute(for record: AccountDeviceRecord) -> Bool {
+        isAuthenticated && !callerRemoved && !record.isCaller
+            && (record.platformRawValue == "macos" || record.platformRawValue == "windows")
+            && accountDevices?.accountScope != nil
+            && accountDevices?.devices.contains(where: { $0.isCaller && $0.status == "active" }) == true
+            && accountDevices?.liveRouteDeadline(for: record.id, at: routeClock()) != nil
+    }
+
+    func routedConnectionSelection(for record: AccountDeviceRecord) throws -> IOSAccountLANRouteSelection {
+        try IOSAccountLANRouteSelection(account: connectionSelection(for: record),
+                                       snapshot: accountDevices, now: routeClock())
+    }
+
+    func requireCurrentRouteSelection(_ selection: IOSAccountLANRouteSelection) throws {
+        try selection.requireCurrent(snapshot: accountDevices, isAuthenticated: isAuthenticated,
+            callerRemoved: callerRemoved, authenticationGeneration: connectionAccountGeneration, now: routeClock())
+    }
+
     private func apply(_ state: AccountPresenceRefreshEngine.State) {
+        removingDeviceId = state.removingDeviceId; lastRemovalFailure = state.lastRemovalFailure
+        callerRemoved = state.callerRemoved
         if accountDevices != state.accountDevices { accountDevices = state.accountDevices }
         if lastSuccessfulListAt != state.lastSuccessfulListAt { lastSuccessfulListAt = state.lastSuccessfulListAt }
         if lastListFailure != state.lastListFailure { lastListFailure = state.lastListFailure }

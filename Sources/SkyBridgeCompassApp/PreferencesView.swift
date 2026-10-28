@@ -1,5 +1,6 @@
 import SwiftUI
 import SkyBridgeCore
+import SkyBridgeProtocolCore
 import SkyBridgeUI
 import UniformTypeIdentifiers
 import UserNotifications
@@ -1101,12 +1102,8 @@ struct AdvancedPreferencesView: View {
                 .help("设置日志记录的详细程度")
             }
 
-            Section("量子安全套件") {
-                Toggle("优先 X-Wing 混合套件（macOS 26+）", isOn: $settingsManager.preferXWingHybrid)
-                    .help("仅调整本机套件优先顺序；若系统支持，启动时会同时声明 ML-KEM-768 与 X-Wing 能力。")
-                Toggle("Q-Periapt ABI2 PolicyBound 混合套件（beta）", isOn: $settingsManager.preferQPeriaptBeta)
-                    .disabled(!settingsManager.qPeriaptRuntimeSupported)
-                    .help("实验性：只有签名策略、独立验证密钥 pin、可信状态持久化与 ABI2 自检全部通过后才可启用；双方策略身份必须完全一致。")
+            Section("连接加密") {
+                PQCModeSettingsView(settingsManager: settingsManager)
             }
 
             Section("性能优化") {

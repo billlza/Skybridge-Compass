@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::{
     MediaLeaseDoctorArgs, OutputOptions, SignalingDoctorArgs, WebRtcMediaDiagnoseArgs,
-    WebRtcMediaDoctorArgs, control_plane_doctor, ensure_webrtc_media_doctor_passed,
+    WebRtcMediaDoctorArgs, control_plane_doctor, ensure_probe_report_passed,
     print_doctor_probe_report, webrtc_media_artifacts::resolve_webrtc_media_session_arg,
     webrtc_media_doctor::build_webrtc_media_doctor_report,
 };
@@ -15,7 +15,7 @@ pub(crate) async fn doctor_signaling(args: SignalingDoctorArgs) -> Result<()> {
         args.expected_backend.as_deref(),
     )
     .await?;
-    print_doctor_probe_report(&report, as_json)
+    finish_doctor_report(&report, as_json, "Signaling doctor failed")
 }
 
 pub(crate) async fn doctor_media_lease(args: MediaLeaseDoctorArgs) -> Result<()> {
@@ -27,7 +27,7 @@ pub(crate) async fn doctor_media_lease(args: MediaLeaseDoctorArgs) -> Result<()>
         args.media_admission_token,
     )
     .await?;
-    print_doctor_probe_report(&report, as_json)
+    finish_doctor_report(&report, as_json, "Media lease doctor failed")
 }
 
 pub(crate) async fn doctor_webrtc_media(args: WebRtcMediaDoctorArgs) -> Result<()> {
@@ -39,8 +39,27 @@ pub(crate) async fn doctor_webrtc_media(args: WebRtcMediaDoctorArgs) -> Result<(
         args.log_file.as_deref(),
     )?;
     let report = build_webrtc_media_doctor_report(&args, &session_id)?;
-    print_doctor_probe_report(&report, as_json)?;
-    ensure_webrtc_media_doctor_passed(&report)
+    finish_doctor_report(&report, as_json, "WebRTC media doctor failed")
+}
+
+fn finish_doctor_report(
+    report: &crate::DoctorProbeReport,
+    as_json: bool,
+    context: &str,
+) -> Result<()> {
+    let outcome = ensure_probe_report_passed(report, context);
+    if as_json && outcome.is_err() {
+        crate::cli_output::write_json_failure(&serde_json::json!({
+            "schema_version": 1,
+            "success": false,
+            "status": "failed",
+            "error": { "code": "doctor_checks_failed", "message": context, "retryable": false },
+            "report": report,
+        }))?;
+    } else {
+        print_doctor_probe_report(report, as_json)?;
+    }
+    outcome
 }
 
 pub(crate) async fn diagnose_webrtc_media(args: WebRtcMediaDiagnoseArgs) -> Result<()> {

@@ -21,7 +21,6 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-
 SCHEMA_VERSION = 1
 MAX_MANIFEST_BYTES = 256 * 1024
 HEX_40 = re.compile(r"[0-9a-f]{40}", re.ASCII)
@@ -147,7 +146,7 @@ def digest_app_bundle(root: Path) -> str:
                 fail(f"unable to read candidate app entry {relative}: {exc}")
         else:
             fail(f"candidate app contains a special file: {relative}")
-        header = f"{relative}\0{mode:o}\0".encode("utf-8") + kind + b"\0"
+        header = f"{relative}\0{mode:o}\0".encode() + kind + b"\0"
         digest.update(header)
         digest.update(len(body).to_bytes(8, "big"))
         digest.update(body)
@@ -176,10 +175,16 @@ def parse_codesign_details(output: str) -> tuple[str, str, str]:
 
 def canonical_requirement(output: str) -> str:
     marker = "designated =>"
-    index = output.find(marker)
-    if index < 0:
-        fail("codesign did not report a designated requirement")
-    requirement = " ".join(output[index + len(marker) :].split())
+    requirements = [
+        line[len(marker) :].strip()
+        for line in output.splitlines()
+        if line.startswith(marker)
+    ]
+    if len(requirements) != 1:
+        fail("codesign did not report exactly one designated requirement")
+    # codesign writes the requirement and Executable metadata to different streams.
+    # Preserve the requirement's quoted text without incorporating path metadata.
+    requirement = requirements[0]
     if not requirement or len(requirement) > 8192:
         fail("codesign reported an invalid designated requirement")
     return requirement

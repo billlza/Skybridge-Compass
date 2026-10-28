@@ -476,7 +476,8 @@
 "settings.advanced.performance.shadowQuality.format" = "Shadow Quality: %@";
 "settings.advanced.performance.postProcessing.format" = "Post Processing: %@";
 "settings.advanced.performance.showRealtimeFPS" = "Show real-time FPS";
-"settings.advanced.performance.showRealtimeFPS.help" = "Show Metal rendering FPS in top navigation; shows placeholder — FPS when unavailable";
+"settings.advanced.performance.showRealtimeFPS.help" = "Actual on-screen FPS of the weather background (rain, clouds and haze), averaged over one second. Other UI and remote sessions are not included. Shows — FPS when unavailable.";
+"metric.frameRate.paused" = "Paused";
 "settings.advanced.hardware.enableAcceleration" = "Enable hardware acceleration";
 "settings.advanced.memory.optimize" = "Optimize memory usage";
 "settings.advanced.backgroundScanning" = "Background scanning";
@@ -704,7 +705,7 @@
 "remote.connectionMode.near" = "Near";
 "remote.connectionMode.far" = "Far";
 "remote.connectionMode.auto.description" = "Automatically selects the best mode (prefers near-field on same network)";
-"remote.connectionMode.near.description" = "Near-field hardware mirroring — low latency on same network (ScreenCaptureKit + HEVC + QUIC)";
+"remote.connectionMode.near.description" = "View and control devices on the same network";
 "remote.connectionMode.far.description" = "Manual RDP (restricted preview) — FreeRDP 3.30 software GDI, strict certificate validation, no channel redirection";
 "common.unknown" = "Unknown";
 "profile.title" = "Profile";
@@ -1252,7 +1253,7 @@
 "discovery.accountDevices.registration.pending" = "Pending approval";
 "discovery.accountDevices.registration.frozen" = "Frozen";
 "discovery.accountDevices.action.useConnectionCode" = "Connect with code";
-"discovery.accountDevices.hint.online" = "This device is online but not on the same LAN: generate a connection code on it and enter it here";
+"discovery.accountDevices.hint.online" = "This device is online, but no usable direct route has been found. Generate a connection code on it and enter it here";
 "discovery.accountDevices.copyAddress" = "Copy address";
 "discovery.accountDevices.copyDeviceId" = "Copy device ID";
 "discovery.accountDevices.failure.notAuthenticated" = "Not signed in";
@@ -1271,3 +1272,86 @@
 "dashboard.accountDevices.summary" = "%d devices · %d online";
 "dashboard.accountDevices.viewAll" = "View All";
 "dashboard.accountDevices.empty" = "Other devices signed in with the same account will appear here";
+
+"remoteControl.securityNotice.inputController" = "Input controller";
+
+"remoteControl.securityNotice.observer" = "View only";
+
+"remoteControl.securityNotice.transferInput" = "Transfer input control";
+
+"remoteControl.securityNotice.approveView" = "Allow viewing";
+
+"info.appleSilicon" = "Apple silicon";
+"info.optimizationEnabled" = "Optimizations enabled";
+"info.pCore" = "Performance cores";
+"info.eCore" = "Efficiency cores";
+"info.multiCoreOpt" = "Multicore optimization";
+"info.reqAppleSilicon" = "Apple silicon required";
+"info.deviceUnsupported" = "Unsupported device";
+"info.standardMode" = "Standard mode";
+
+"remoteControl.securityNotice.localInputController" = "This Mac has keyboard and mouse control. Remote viewing continues.";
+
+// Saved pairing identity status
+"discovery.trustedDevices.section" = "Trusted devices";
+"discovery.pendingPairings.section" = "Pairings needing verification";
+"discovery.pendingPairings.explanation" = "These records cannot currently verify a connection. This does not mean the devices were removed from your account. Select an account device or scan its current connection QR code.";
+
+// Account device removal
+"accountDevices.remove.action" = "Remove from account";
+"accountDevices.remove.title" = "Remove account device";
+"accountDevices.remove.message" = "Remove “%@” from your account? This device will lose access to account device services. Local files and saved pairings are retained.";
+"accountDevices.remove.confirm" = "Remove";
+"accountDevices.remove.cancel" = "Cancel";
+"accountDevices.remove.selfRemoved" = "This device was removed. Account device synchronization has stopped.";
+"accountDevices.remove.failed" = "Removal was not confirmed. Refresh and check the device before retrying.";
+
+"accountDevices.myDevices" = "My Devices";
+
+/* Weather dashboard labels and relative time. */
+"weather.metric.humidity" = "Humidity";
+"weather.metric.windSpeed" = "Wind speed";
+"weather.metric.visibility" = "Visibility";
+"weather.metric.aqi" = "AQI";
+"weather.status.loading" = "Fetching weather information…";
+"weather.status.loadingHint" = "The first load may take a few seconds";
+"weather.status.error" = "Unable to load weather data";
+"weather.action.retry" = "Retry";
+"weather.time.justNow" = "Just now";
+"weather.time.minutesAgo" = "%d minutes ago";
+"weather.time.hoursAgo" = "%d hours ago";
+
+"remote.session.hostStopped" = "The host stopped screen sharing.";
+
+"remote.session.permissionRevoked" = "The host revoked screen-sharing permission.";
+
+"remote.session.captureFailed" = "The host could not continue screen capture.";
+
+"audio.output.source_format" = "Source PCM format";
+
+"audio.authorization.renewal.waiting" = "Account authorization will be renewed automatically when available during playback.";
+"audio.authorization.renewal.checking" = "Verifying account devices to renew this playback authorization.";
+"audio.authorization.renewal.retry_pending" = "Authorization could not be updated yet. Playback continues within its original validity period; another attempt is scheduled.";
+"audio.authorization.renewal.unavailable" = "Authorization could not be updated. Playback can continue only until the current expiry.";
+"audio.authorization.renewal.failed" = "Playback authorization is no longer valid. Stopping playback.";
+
+"audio.output.endpoint_unavailable" = "The selected output is unavailable. Check its connection and select an available output in system sound settings.";
+
+"audio.output.format_mismatch" = "This output cannot currently use the source sample rate, channel count, PCM representation or bit depth. Select an output that supports the displayed format.";
+
+"audio.output.mixing_required" = "The current output path permits system mixing and does not meet strict playback requirements. Select a device that supports exclusive output in the source format.";
+
+"audio.output.unsupported_layout" = "The output channel layout does not match the source or is not yet supported for strict playback. Select an output with a matching channel layout.";
+
+"audio.output.unsupported_topology" = "This output channel arrangement is not yet supported for strict playback. Use another output device.";
+
+"audio.output.processing_active" = "Volume gain, mute or mono processing is active, preventing strict playback. Check the system and device sound settings.";
+
+"audio.output.device_busy" = "Exclusive access to this output could not be obtained. Stop other audio playback and try again.";
+
+"audio.output.variable_buffer_size" = "This output uses variable buffers, which are not yet supported for strict playback. Select another output device.";
+
+"audio.output.property_unavailable" = "Strict output checks could not be completed for this device. Reconnect it and try again.";
+
+/* Reconnect the current USB accessory through a fresh authenticated session. */
+"connection.usb.retryTimeout" = "USB connection timed out. Open SkyBridge on your phone and retry the connection.";

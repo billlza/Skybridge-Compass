@@ -3,7 +3,308 @@ import CryptoKit
 import Network
 import enum SkyBridgeProtocolCore.BonjourInteropProtocolContract
 import enum SkyBridgeProtocolCore.P2PProtocolIdentityBindingAdmissionPolicy
+import struct SkyBridgeProtocolCore.AudioProtocolIdentity
+import struct SkyBridgeProtocolCore.AudioAccountMembership
+import struct SkyBridgeProtocolCore.AudioAccountIdentity
+import struct SkyBridgeProtocolCore.AccountDeviceRecord
+import struct SkyBridgeProtocolCore.AccountDeviceListSnapshot
+import enum SkyBridgeProtocolCore.FramedReaderError
 @testable import SkyBridgeCompass_iOS
+
+@MainActor
+final class P2PControlReceiveRecoveryTests: XCTestCase {
+    func testReadFailureBeforeStateCallbackSchedulesExactlyOneBoundedRetry() async throws {
+        try await withScenario { manager, peer, callbacks in
+            await callbacks.readFailure(NWError.posix(.ECONNABORTED))
+            XCTAssertTrue(manager.testControlRecoverySnapshot(peerId: peer).pending)
+            XCTAssertEqual(manager.testControlRecoverySnapshot(peerId: peer).attempts, 7)
+            XCTAssertEqual(manager.connectionStatusByDeviceId[peer], .connecting)
+            XCTAssertEqual(manager.connectionErrorByDeviceId[peer], "正在重新连接")
+            XCTAssertNil(manager.inboundConnectionNotice)
+            await callbacks.stateFailure()
+            XCTAssertTrue(manager.testControlRecoverySnapshot(peerId: peer).pending)
+            XCTAssertEqual(manager.testControlRecoverySnapshot(peerId: peer).attempts, 7)
+        }
+    }
+
+    func testStateCallbackBeforeReadFailureDoesNotLoseOrDuplicateRetry() async throws {
+        try await withScenario { manager, peer, callbacks in
+            await callbacks.stateFailure()
+            await callbacks.readFailure(NWError.posix(.ECONNABORTED))
+            XCTAssertTrue(manager.testControlRecoverySnapshot(peerId: peer).pending)
+            XCTAssertEqual(manager.testControlRecoverySnapshot(peerId: peer).attempts, 7)
+            XCTAssertNil(manager.inboundConnectionNotice, "A retired duplicate callback must not add another failure banner")
+        }
+    }
+
+    func testRetiredReadCannotReplaceAYoungerAuthenticatedConnection() async throws {
+        try await withScenario { manager, peer, callbacks in
+            try manager.testInstallAuthenticatedSession(.x25519Ed25519, for: peer)
+            await callbacks.readFailure(NWError.posix(.ECONNRESET))
+            await callbacks.stateFailure()
+            XCTAssertFalse(manager.testControlRecoverySnapshot(peerId: peer).pending)
+            XCTAssertEqual(manager.testControlRecoverySnapshot(peerId: peer).attempts, 6)
+            XCTAssertEqual(manager.getNegotiatedSuite(for: peer), .x25519Ed25519)
+            XCTAssertNil(manager.inboundConnectionNotice, "The old socket cannot present a failure for its replacement")
+        }
+    }
+
+    func testUnauthenticatedReadDoesNotCreateRecoveryIntent() async throws {
+        try await withScenario(authenticated: false) { manager, peer, callbacks in
+            await callbacks.readFailure(NWError.posix(.ECONNABORTED))
+            XCTAssertFalse(manager.testControlRecoverySnapshot(peerId: peer).pending)
+            XCTAssertEqual(manager.testControlRecoverySnapshot(peerId: peer).attempts, 6)
+        }
+    }
+
+    func testInboundProtocolFailureRemainsVisibleWithoutRecovery() async throws {
+        try await withScenario(authenticated: false) { manager, peer, callbacks in
+            await callbacks.readFailure(nil)
+            XCTAssertNotNil(manager.inboundConnectionNotice)
+            XCTAssertEqual(manager.connectionStatusByDeviceId[peer], .failed)
+            XCTAssertFalse(manager.testControlRecoverySnapshot(peerId: peer).pending)
+        }
+    }
+
+    func testAuthenticatedUnexpectedEOFUsesTheSameBoundedRecovery() async throws {
+        try await withScenario { manager, peer, callbacks in
+            await callbacks.readFailure(FramedReaderError.peerClosed)
+            XCTAssertTrue(manager.testControlRecoverySnapshot(peerId: peer).pending)
+            XCTAssertEqual(manager.testControlRecoverySnapshot(peerId: peer).attempts, 7)
+        }
+    }
+
+    func testOnlyKnownTransportLossesAreRecoverable() {
+        for code in [POSIXErrorCode.ECONNABORTED, .ECONNRESET, .ECANCELED, .ENOTCONN, .ETIMEDOUT,
+                     .EPIPE, .ENETDOWN, .ENETRESET, .ENETUNREACH, .EHOSTDOWN, .EHOSTUNREACH] {
+            XCTAssertTrue(P2PConnectionManager.isRecoverableControlReceiveFailure(NWError.posix(code)))
+        }
+        XCTAssertFalse(P2PConnectionManager.isRecoverableControlReceiveFailure(NWError.posix(.EACCES)))
+        XCTAssertFalse(P2PConnectionManager.isRecoverableControlReceiveFailure(NWError.dns(-65538)))
+        XCTAssertFalse(P2PConnectionManager.isRecoverableControlReceiveFailure(nil))
+    }
+
+    func testExplicitDisconnectBeforeLateReadDoesNotRestart() async throws {
+        try await withScenario { manager, peer, callbacks in
+            let disconnected = await manager.testDisconnectControlRecoveryScenario(peerId: peer)
+            XCTAssertTrue(disconnected)
+            await callbacks.readFailure(NWError.posix(.ECONNABORTED))
+            await callbacks.readFailure(NWError.posix(.ECANCELED))
+            await callbacks.stateFailure()
+            XCTAssertFalse(manager.testControlRecoverySnapshot(peerId: peer).pending)
+            XCTAssertNil(manager.testControlRecoverySnapshot(peerId: peer).attempts)
+        }
+    }
+
+    func testNativeCancellationOfCurrentOwnerQueuesOnlyOneRecovery() async throws {
+        try await withScenario { manager, peer, callbacks in
+            await callbacks.readFailure(NWError.posix(.ECANCELED))
+            await callbacks.stateFailure()
+            XCTAssertTrue(manager.testControlRecoverySnapshot(peerId: peer).pending)
+            XCTAssertEqual(manager.testControlRecoverySnapshot(peerId: peer).attempts, 7)
+        }
+    }
+
+    func testDisabledAutoReconnectIsRespectedInBothCallbackOrders() async throws {
+        for readFirst in [false, true] {
+            try await withScenario { manager, peer, callbacks in
+                SettingsManager.instance.autoReconnect = false
+                if readFirst { await callbacks.readFailure(NWError.posix(.ECONNABORTED)) }
+                await callbacks.stateFailure()
+                if !readFirst { await callbacks.readFailure(NWError.posix(.ECONNABORTED)) }
+                XCTAssertFalse(manager.testControlRecoverySnapshot(peerId: peer).pending)
+                XCTAssertEqual(manager.testControlRecoverySnapshot(peerId: peer).attempts, 6)
+            }
+        }
+    }
+
+    func testCancellationAndProtocolFailuresDoNotCreateRetry() async throws {
+        let failures: [Error] = [CancellationError(), NWError.tls(-9807),
+            FramedReaderError.invalidLength(0), NSError(domain: "private-server", code: 403)]
+        for error in failures {
+            try await withScenario { manager, peer, callbacks in
+                await callbacks.readFailure(error)
+                XCTAssertFalse(manager.testControlRecoverySnapshot(peerId: peer).pending)
+                XCTAssertEqual(manager.testControlRecoverySnapshot(peerId: peer).attempts, 6)
+            }
+        }
+    }
+
+    private func withScenario(authenticated: Bool = true,
+        _ run: (P2PConnectionManager, String, (
+            readFailure: @MainActor (Error?) async -> Void,
+            stateFailure: @MainActor () async -> Void
+        )) async throws -> Void) async throws {
+        let manager = P2PConnectionManager.instance, peer = UUID().uuidString
+        let previous = SettingsManager.instance.autoReconnect
+        SettingsManager.instance.autoReconnect = true
+        manager.dismissInboundConnectionNotice()
+        defer {
+            manager.testFinishControlRecoveryScenario(peerId: peer)
+            SettingsManager.instance.autoReconnect = previous
+        }
+        let callbacks = try manager.testInstallControlRecoveryScenario(peerId: peer, authenticated: authenticated)
+        try await run(manager, peer, callbacks)
+    }
+}
+
+@MainActor
+final class P2PPreflightFailurePropagationTests: XCTestCase {
+    func testConnectionFailuresDoNotBecomeIdentityRecoveryOrMissingKEM() {
+        let failures: [P2PConnectionManager.ConnectionAttemptFailure] = [
+            .init(code: .localNetworkPermissionDenied), .init(code: .transportWaiting),
+            .init(code: .transportFailed), .init(code: .transportTimedOut),
+            .init(code: .noLiveControlRoute), .init(code: .noLiveFileTransferRoute),
+            .init(code: .noAuthenticatedPeer), .init(code: .ambiguousTarget)
+        ]
+        for failure in failures {
+            XCTAssertThrowsError(try P2PConnectionManager.strictPQCRecoveryFailureReason(failure)) { error in
+                XCTAssertEqual((error as? P2PConnectionManager.ConnectionAttemptFailure)?.code, failure.code)
+                XCTAssertEqual(error.localizedDescription, failure.localizedDescription)
+            }
+        }
+    }
+
+    func testCancellationAndSelectedIdentityFailuresRemainTerminal() {
+        XCTAssertThrowsError(try P2PConnectionManager.strictPQCRecoveryFailureReason(CancellationError())) {
+            XCTAssertTrue($0 is CancellationError)
+        }
+        for failure in [IOSLanConnectionError.identityMismatch, .accountSelectionChanged, .accountRouteUnavailable] {
+            XCTAssertThrowsError(try P2PConnectionManager.strictPQCRecoveryFailureReason(failure)) {
+                XCTAssertEqual($0 as? IOSLanConnectionError, failure)
+            }
+        }
+    }
+
+    func testRemoteIdentityRejectionStillRequiresExistingOOBRecovery() throws {
+        let error = NSError(domain: "SignedLANKEMRefresh", code: 1, userInfo: [
+            NSLocalizedDescriptionKey: "remote rejected SKR-1 stage=kem_refresh reasonCode=requester_protocol_identity_not_pinned"
+        ])
+        let reason = try P2PConnectionManager.strictPQCRecoveryFailureReason(error)
+        XCTAssertEqual(recoveryAction(reason), .attemptOOBProtocolIdentityBindingThenRefresh)
+    }
+
+    func testInvalidRefreshSignatureDoesNotRequestIdentityReplacement() throws {
+        let error = NSError(domain: "SignedLANKEMRefresh", code: 1, userInfo: [
+            NSLocalizedDescriptionKey: "signature verification failed"
+        ])
+        let reason = try P2PConnectionManager.strictPQCRecoveryFailureReason(error)
+        XCTAssertEqual(recoveryAction(reason), .attemptSignedLANRefresh)
+    }
+
+    private func recoveryAction(_ reason: String) -> P2PConnectionManager.StrictPQCPreflightAction {
+        P2PConnectionManager.strictPQCPreflightAction(trustedPeerKEMSuites: [],
+            signedRefreshEvidence: nil, pinnedProtocolFingerprints: [String(repeating: "a", count: 64)],
+            preferredTargetSuite: .qperiaptABI2PolicyBound, signedRefreshFailureReason: reason,
+            requiresSignedRefreshEvidence: false)
+    }
+}
+
+@MainActor
+final class P2PListenerStartupGateTests: XCTestCase {
+    private enum Failure: Error, Equatable { case startupFailed, waiterDidNotArrive }
+
+    func testInboundOwnersWaitForTheExactStartupBeforeProceeding() async throws {
+        let gate = P2PListenerStartupGate()
+        let first = Task { try await gate.wait() }, second = Task { try await gate.wait() }
+        try await wait(gate, count: 2)
+        gate.finish(.success(()))
+        try await first.value; try await second.value
+        XCTAssertEqual(gate.waitingCount, 0)
+        try await gate.wait()
+    }
+
+    func testStartupFailureRejectsCurrentAndLateOwnersAndCannotBecomeSuccess() async throws {
+        let gate = P2PListenerStartupGate(), task = Task { try await gate.wait() }
+        try await wait(gate, count: 1)
+        gate.finish(.failure(Failure.startupFailed))
+        gate.finish(.success(()))
+        do { try await task.value; XCTFail("Failed startup admitted an owner") }
+        catch { XCTAssertEqual(error as? Failure, .startupFailed) }
+        do { try await gate.wait(); XCTFail("Late owner bypassed failed startup") }
+        catch { XCTAssertEqual(error as? Failure, .startupFailed) }
+        XCTAssertEqual(gate.waitingCount, 0)
+    }
+
+    func testCancellationReleasesOneOwnerWithoutCancellingSharedStartup() async throws {
+        let gate = P2PListenerStartupGate()
+        let cancelled = Task { try await gate.wait() }, retained = Task { try await gate.wait() }
+        try await wait(gate, count: 2)
+        cancelled.cancel()
+        do { try await cancelled.value; XCTFail("Cancelled owner was admitted") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(gate.waitingCount, 1)
+        gate.finish(.success(()))
+        try await retained.value
+        XCTAssertEqual(gate.waitingCount, 0)
+    }
+
+    func testAlreadyCancelledOwnerNeverLeavesAWaiter() async throws {
+        let gate = P2PListenerStartupGate()
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            try await gate.wait()
+        }
+        do { try await task.value; XCTFail("Already cancelled owner was admitted") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(gate.waitingCount, 0)
+    }
+
+    func testCancellationAfterStartupCompletesStillPreventsAdmission() async throws {
+        let gate = P2PListenerStartupGate(), task = Task { try await gate.wait() }
+        try await wait(gate, count: 1)
+        gate.finish(.success(()))
+        task.cancel()
+        do { try await task.value; XCTFail("Cancelled owner escaped after startup completion") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(gate.waitingCount, 0)
+    }
+
+    func testReplacementStartupCannotReleasePreviousGeneration() async throws {
+        let old = P2PListenerStartupGate(), replacement = P2PListenerStartupGate()
+        let oldOwner = Task { try await old.wait() }, newOwner = Task { try await replacement.wait() }
+        try await wait(old, count: 1); try await wait(replacement, count: 1)
+        replacement.finish(.success(())); try await newOwner.value
+        XCTAssertEqual(old.waitingCount, 1)
+        oldOwner.cancel()
+        do { try await oldOwner.value; XCTFail("Old generation was admitted") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(old.waitingCount, 0)
+    }
+
+    private func wait(_ gate: P2PListenerStartupGate, count: Int) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while gate.waitingCount != count {
+            guard ContinuousClock.now < deadline else { throw Failure.waiterDidNotArrive }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+    }
+}
+
+@MainActor
+@available(iOS 17.0, *)
+final class USBProtocolIdentityAdmissionTests: XCTestCase {
+    func testSignedUSBDiscoveryUsesBoundedBootstrapAdmission() throws {
+        let request = AppMessage.usbPeerDiscoveryRequest(try .init())
+        let decoded = try AppMessage.decodeWireMessage(from: JSONEncoder().encode(request))
+        XCTAssertEqual(P2PConnectionManager.inboundBootstrapAdmissionStage(for: decoded), .bootstrapCrypto)
+        XCTAssertNil(P2PConnectionManager.inboundBootstrapAdmissionStage(for: .ping(.init(id: 1))))
+        XCTAssertNil(P2PConnectionManager.inboundBootstrapAdmissionStage(for: nil))
+    }
+
+    func testLocalSocketDoesNotAuthorizeSelfIdentityOrReplaceSignatureChecks() {
+        let local = "A1B2C3D4-2222-3333-4444-555555555555"
+        let remote = "B1B2C3D4-2222-3333-4444-555555555555"
+        func rejected(_ requester: String, _ fingerprint: String) -> Bool {
+            P2PConnectionManager.rejectsLocalProtocolRequester(requesterID: requester,
+                requesterFingerprint: fingerprint, localID: local,
+                localAliases: ["id:\(local.lowercased())"], localFingerprint: String(repeating: "a", count: 64))
+        }
+        XCTAssertTrue(rejected("id:\(local.lowercased())", String(repeating: "b", count: 64)))
+        XCTAssertTrue(rejected(remote, String(repeating: "a", count: 64)))
+        XCTAssertFalse(rejected(remote, String(repeating: "b", count: 64)))
+    }
+}
 
 @available(iOS 17.0, *)
 final class AppMessageStrictDecodingTests: XCTestCase {
@@ -188,6 +489,59 @@ final class AuthenticatedPairingIdentityAuthorityTests: XCTestCase {
 
         XCTAssertEqual(result.declaredDeviceId, fixture.deviceId)
         XCTAssertEqual(result.authorizedDeviceIds, [fixture.deviceId])
+    }
+
+    func testAudioRegistryKeepsAuthenticatedProtocolIDSeparateFromTrustAlias() throws {
+        for deviceID in ["AABBCCDD-2222-4333-8444-555555555555", "Android-Device-ABC123"] {
+            let fixture = try fixture(deviceId: deviceID)
+            let authority = try AuthenticatedPairingIdentityAuthorityValidator.issue(
+                payload: fixture.payload,
+                sessionBinding: .init(authority: fixture.authority,
+                    authenticatedRemoteSOAPeerId: PeerSessionArbiter.soaPeerId(from: deviceID)),
+                sessionDeviceIds: [deviceID], operatorApproval: nil)
+            let peer = try IOSAudioPeerSnapshot(generation: UUID(), sessionID: "validated-session",
+                authority: authority, capabilities: [], filePort: nil,
+                acceptedMaterialDigest: Data(repeating: 1, count: 32))
+            let expectedPeer = try AudioProtocolIdentity(deviceID: deviceID, algorithm: .ed25519,
+                fingerprint: fixture.fingerprint)
+            XCTAssertEqual(authority.protocolDeviceId, deviceID)
+            XCTAssertEqual(peer.identity, expectedPeer)
+            XCTAssertEqual(peer.trustStoreDeviceID, authority.declaredDeviceId)
+            XCTAssertEqual(authority.declaredDeviceId, "id:" + deviceID.lowercased())
+
+            let local = try AudioProtocolIdentity(deviceID: "iOS-Registry-Caller", algorithm: .ed25519,
+                fingerprint: String(repeating: "12", count: 32))
+            func row(_ identity: AudioProtocolIdentity, caller: Bool) -> AccountDeviceRecord {
+                .init(deviceId: identity.deviceID, deviceName: nil, status: "active",
+                    protocolSigningAlgorithm: identity.algorithm.rawValue,
+                    protocolPublicKeyFingerprint: identity.fingerprint,
+                    platformRawValue: nil, deviceModel: nil, osVersion: nil, appVersion: nil,
+                    lanAddresses: [], publicAddress: nil, capabilities: [], registeredAtEpochMilliseconds: nil,
+                    lastSeenAtEpochMilliseconds: nil, presenceUpdatedAtEpochMilliseconds: nil,
+                    online: false, isCaller: caller)
+            }
+            let account = try AudioAccountIdentity(authority: "https://registry.example.invalid",
+                tenantID: "tenant", userID: "user")
+            let response = AccountDeviceListSnapshot(generatedAtEpochMilliseconds: 1_000_000,
+                callerDeviceId: local.deviceID, truncated: false,
+                devices: [row(local, caller: true), row(expectedPeer, caller: false)],
+                accountScope: account.serverScope)
+            XCTAssertFalse(AudioAccountMembership.contradicts(response, local: local, peer: peer.identity))
+            let now = ContinuousClock.now
+            let membership = try AudioAccountMembership.verifyFreshResponse(response, account: account,
+                local: local, peer: peer.identity, requestStartedMilliseconds: 1_000_000,
+                receivedMilliseconds: 1_000_000, requestStartedMonotonic: now, receivedMonotonic: now)
+            XCTAssertEqual(membership.peerIdentity, peer.identity)
+
+            // The previous adapter fed this trust alias into the exact registry
+            // comparison. It must still fail: the fix is the adapter, not relaxed matching.
+            let previousProjection = try AudioProtocolIdentity(deviceID: authority.declaredDeviceId,
+                algorithm: peer.identity.algorithm, fingerprint: peer.identity.fingerprint)
+            XCTAssertTrue(AudioAccountMembership.contradicts(response, local: local, peer: previousProjection))
+            let changedKey = try AudioProtocolIdentity(deviceID: deviceID, algorithm: peer.identity.algorithm,
+                fingerprint: String(repeating: "34", count: 32))
+            XCTAssertTrue(AudioAccountMembership.contradicts(response, local: local, peer: changedKey))
+        }
     }
 
     func testSOAMismatchRejectsBeforeMutation() async throws {
@@ -1060,8 +1414,8 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertTrue(managerSource.contains("preference == .xwingHybrid"))
         XCTAssertTrue(managerSource.contains("preference == .qPeriaptBeta"))
         XCTAssertTrue(managerSource.contains("PQCProviderPreferenceError.qPeriaptRequiresMLDSA65"))
-        XCTAssertTrue(managerSource.contains("previousXWing"))
-        XCTAssertTrue(managerSource.contains("previousQPeriapt"))
+        XCTAssertTrue(managerSource.contains("let previousPolicy = try PQCModePolicyStore.standard.snapshot()"))
+        XCTAssertTrue(managerSource.contains("try PQCModePolicyStore.standard.setPreference(previousPolicy.selection.preference)"))
         XCTAssertTrue(managerSource.contains("try await initialize()"))
         XCTAssertTrue(managerSource.contains("clearInMemoryKeyMaterial()"))
         XCTAssertEqual(
@@ -1920,7 +2274,8 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertTrue(source.contains("installOOBProtocolIdentityBinding"))
         XCTAssertTrue(source.contains("PIB-1 -> SKR-1 recovery completed"))
         XCTAssertTrue(source.contains("requester_protocol_identity_not_pinned"))
-        XCTAssertTrue(source.contains("signedRefreshFailureReason = Self.smokeSanitize(error.localizedDescription)"))
+        XCTAssertTrue(source.contains("signedRefreshFailureReason = try Self.strictPQCRecoveryFailureReason(error)"))
+        XCTAssertTrue(source.contains("return Self.smokeSanitize(error.localizedDescription)"))
         XCTAssertFalse(source.contains("signedRefreshFailureReason = \"preflight-kem-refresh-failed\""))
         XCTAssertFalse(source.contains("policyAllowClassicFallback: true"))
     }
@@ -2372,7 +2727,7 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         let requestLine = try XCTUnwrap(managerSource.range(of: "let requestLine =", range: skrStart.lowerBound..<managerSource.endIndex))
         let skrBody = String(managerSource[skrStart.lowerBound..<requestLine.lowerBound])
 
-        XCTAssertTrue(skrBody.contains("let routeCandidates = connectionEndpointCandidates(for: device)"))
+        XCTAssertTrue(skrBody.contains("let routeCandidates = connectionEndpointCandidates(for: device, selectedTarget: selectedTarget)"))
         XCTAssertFalse(skrBody.contains("preferDirectHostPort"))
         XCTAssertTrue(skrBody.contains("let directEndpoints = routeCandidates.filter"))
         XCTAssertTrue(skrBody.contains("Self.signedLANRefreshEndpointClass($0) == \"direct-host\""))
@@ -2775,11 +3130,28 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertTrue(bootstrapControlBody.contains("isProvisionalConnection: provisionalConnection != nil"))
         XCTAssertTrue(bootstrapControlBody.contains("hasHandshakeDriver: handshakeDrivers[peerId] != nil"))
         XCTAssertTrue(bootstrapControlBody.contains("hasSessionKeys: sessionKeys[peerId] != nil"))
-        XCTAssertTrue(
-            bootstrapControlBody.contains(
-                "case .kemRefreshRequest, .protocolIdentityBindingRequest, .protocolIdentityBindingConfirm:"
-            ),
-            "Only the three authenticated bootstrap-control message families may coexist with an active session."
+        let allowedCasesStart = try XCTUnwrap(
+            bootstrapControlBody.range(of: "switch message {\n        case ")
+        )
+        let allowedCasesEnd = try XCTUnwrap(
+            bootstrapControlBody.range(
+                of: ":\n            break\n        default:\n            return false",
+                range: allowedCasesStart.upperBound..<bootstrapControlBody.endIndex
+            )
+        )
+        let allowedCases = bootstrapControlBody[allowedCasesStart.upperBound..<allowedCasesEnd.lowerBound]
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        XCTAssertEqual(
+            Set(allowedCases),
+            Set([
+                ".usbPeerDiscoveryRequest",
+                ".handshakeConfigurationRequest",
+                ".kemRefreshRequest",
+                ".protocolIdentityBindingRequest",
+                ".protocolIdentityBindingConfirm",
+            ]),
+            "Provisional control routing must admit only the bounded discovery and authenticated management/binding requests, rejecting all other messages."
         )
         XCTAssertTrue(bootstrapControlBody.contains("provisionalConnection ?? connections[peerId]"))
 
@@ -3938,25 +4310,25 @@ final class P2PBootstrapRekeyTargetTests: XCTestCase {
 
     func testPairingIdentityBootstrapReadinessRequiresExactObservationAndTrustMaterial() {
         XCTAssertFalse(
-            P2PConnectionManager.isPairingIdentityBootstrapReady(
+            P2PPairingIdentityBootstrapCoordinator.isPairingIdentityBootstrapReady(
                 hasCurrentSessionObservation: false,
                 hasStrictPQCTrustMaterial: false
             )
         )
         XCTAssertFalse(
-            P2PConnectionManager.isPairingIdentityBootstrapReady(
+            P2PPairingIdentityBootstrapCoordinator.isPairingIdentityBootstrapReady(
                 hasCurrentSessionObservation: true,
                 hasStrictPQCTrustMaterial: false
             )
         )
         XCTAssertFalse(
-            P2PConnectionManager.isPairingIdentityBootstrapReady(
+            P2PPairingIdentityBootstrapCoordinator.isPairingIdentityBootstrapReady(
                 hasCurrentSessionObservation: false,
                 hasStrictPQCTrustMaterial: true
             )
         )
         XCTAssertTrue(
-            P2PConnectionManager.isPairingIdentityBootstrapReady(
+            P2PPairingIdentityBootstrapCoordinator.isPairingIdentityBootstrapReady(
                 hasCurrentSessionObservation: true,
                 hasStrictPQCTrustMaterial: true
             )
@@ -4112,16 +4484,21 @@ final class P2PBootstrapRekeyTargetTests: XCTestCase {
             )
         )
         let body = String(source[start.lowerBound..<end.lowerBound])
-        let existingObservation = try XCTUnwrap(body.range(of: "since: .distantPast"))
-        let strictTrust = try XCTUnwrap(
-            body.range(of: "await hasStrictPQCTrustBootstrapMaterial(for: observation)")
+        XCTAssertTrue(body.contains("since: .distantPast"))
+        XCTAssertTrue(body.contains("expectedConnectionGeneration: current.receipt.lease.generation"))
+        XCTAssertTrue(body.contains("expectedSessionId: current.receipt.sessionId"))
+        XCTAssertTrue(body.contains("hasStrictPQCTrustBootstrapMaterial(for: $0)"))
+        XCTAssertTrue(body.contains("requireCurrentAuthenticatedConnection(current.receipt)"))
+        let coordinator = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/P2P/P2PPairingIdentityBootstrapCoordinator.swift"
         )
-        let send = try XCTUnwrap(
-            body.range(of: "let sendOutcome = try await sendPairingIdentityExchange(")
-        )
-
+        let existingObservation = try XCTUnwrap(coordinator.range(of: "let observation = operations.observe()"))
+        let strictTrust = try XCTUnwrap(coordinator.range(of: "await operations.hasStrictMaterial(observation)"))
+        let receipt = try XCTUnwrap(coordinator.range(of: "try operations.makeCurrentReceipt(observation)"))
+        let send = try XCTUnwrap(coordinator.range(of: "try await operations.sendIdentityExchange()"))
         XCTAssertLessThan(existingObservation.lowerBound, strictTrust.lowerBound)
-        XCTAssertLessThan(strictTrust.lowerBound, send.lowerBound)
+        XCTAssertLessThan(strictTrust.lowerBound, receipt.lowerBound)
+        XCTAssertLessThan(receipt.lowerBound, send.lowerBound)
         XCTAssertTrue(body.contains("case .journalBusy:"))
         XCTAssertTrue(body.contains("case .current:"))
     }
@@ -4234,6 +4611,18 @@ final class P2PBootstrapRekeyTargetTests: XCTestCase {
         )
     }
 
+    func testQAndXWingRequireDifferentKEMIdentityMaterial() {
+        XCTAssertFalse(P2PConnectionManager.suiteSupportsTargetKEM(
+            .xwing, target: .qperiaptABI2PolicyBound
+        ))
+        XCTAssertFalse(P2PConnectionManager.suiteSupportsTargetKEM(
+            .qperiaptABI2PolicyBound, target: .xwing
+        ))
+        XCTAssertTrue(P2PConnectionManager.suiteSupportsTargetKEM(
+            .qperiaptABI2PolicyBound, target: .qperiaptABI2PolicyBound
+        ))
+    }
+
     func testSuiteSupportsTargetKEMTreatsFSAndCanonicalMLKEMAsEquivalent() {
         XCTAssertTrue(P2PConnectionManager.suiteSupportsTargetKEM(.mlkem768, target: .mlkem768fs))
         XCTAssertTrue(P2PConnectionManager.suiteSupportsTargetKEM(.mlkem768fs, target: .mlkem768))
@@ -4282,7 +4671,7 @@ final class P2PBootstrapRekeyTargetTests: XCTestCase {
         let commit = try XCTUnwrap(
             body.range(of: "persistedAuthority = try persistAuthenticatedRemoteAuthority(")
         )
-        let sessionKeyPublish = try XCTUnwrap(body.range(of: "guard setSessionKeys("))
+        let sessionKeyPublish = try XCTUnwrap(body.range(of: "guard try setSessionKeys("))
         let sessionAuthorityInstall = try XCTUnwrap(
             body.range(of: "try installSessionPairingAuthority(")
         )
@@ -4347,7 +4736,7 @@ final class P2PBootstrapRekeyTargetTests: XCTestCase {
         let commit = try XCTUnwrap(
             body.range(of: "persistedAuthority = try persistAuthenticatedRemoteAuthority(")
         )
-        let sessionKeyPublish = try XCTUnwrap(body.range(of: "guard setSessionKeys("))
+        let sessionKeyPublish = try XCTUnwrap(body.range(of: "guard try setSessionKeys("))
 
         XCTAssertLessThan(commit.lowerBound, sessionKeyPublish.lowerBound)
         XCTAssertFalse(

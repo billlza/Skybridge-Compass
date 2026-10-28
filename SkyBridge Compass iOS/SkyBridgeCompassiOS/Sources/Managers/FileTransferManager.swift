@@ -11,11 +11,15 @@ import Network
 import CryptoKit
 import ActivityKit
 import enum SkyBridgeProtocolCore.ApplePeerConnectivityPolicy
+import enum SkyBridgeProtocolCore.P2PEvidenceReference
+import enum SkyBridgeProtocolCore.HandshakeConfigurationWire
 import enum SkyBridgeProtocolCore.CrossNetworkFileTransferOp
 import struct SkyBridgeProtocolCore.CrossNetworkFileTransferMessage
 import class SkyBridgeProtocolCore.ClassicTransferChunkCryptoWorker
 import class SkyBridgeProtocolCore.ClassicTransferJSONWorker
 import class SkyBridgeProtocolCore.ClassicTransferOutboundFileReadSession
+import class SkyBridgeProtocolCore.PreparedOutboundFileReadSession
+import enum SkyBridgeProtocolCore.PreparedOutboundFileReadError
 import class SkyBridgeProtocolCore.ClassicTransferReceiveOperation
 import class SkyBridgeProtocolCore.ClassicTransferSendOperation
 import class SkyBridgeProtocolCore.ClassicTransferSourceFileInspectionWorker
@@ -23,6 +27,12 @@ import class SkyBridgeProtocolCore.ClassicTransferZlibCompressionWorker
 import class SkyBridgeProtocolCore.ClassicTransferZlibDecompressionWorker
 import class SkyBridgeProtocolCore.InboundFileTransferIOActor
 import enum SkyBridgeProtocolCore.ClassicTransferAuthenticationContract
+import enum SkyBridgeProtocolCore.ClassicTransferApprovalContract
+import enum SkyBridgeProtocolCore.ClassicTransferApprovalError
+import enum SkyBridgeProtocolCore.ClassicTransferApprovalRefusal
+import struct SkyBridgeProtocolCore.ClassicTransferApprovalRequest
+import struct SkyBridgeProtocolCore.ClassicTransferApprovalResponse
+import struct SkyBridgeProtocolCore.RemoteFileApprovalContext
 import enum SkyBridgeProtocolCore.ClassicTransferCanonicalTranscript
 import enum SkyBridgeProtocolCore.ClassicTransferChunkContract
 import enum SkyBridgeProtocolCore.ClassicTransferInboundPolicy
@@ -94,36 +104,36 @@ public class FileTransferManager: ObservableObject {
     private let historyRepository = FileTransferHistoryRepository(
         persistence: FileTransferHistoryPersistence(store: historyStore)
     )
-    
+
     // MARK: - Published Properties
-    
+
     /// 活跃的传输
     @Published public private(set) var activeTransfers: [FileTransfer] = []
-    
+
     /// 传输历史
     @Published public private(set) var transferHistory: [FileTransfer] = []
-    
+
     /// 总进度
     @Published public private(set) var totalProgress: Double = 0.0
-    
+
     /// 是否正在传输
     @Published public private(set) var isTransferring: Bool = false
 
     @Published public private(set) var historyPersistenceError: String?
-    
+
     // MARK: - Private Properties
-    
+
     private let fileManager = FileManager.default
     private let documentsDirectory: URL
     private let downloadsDirectory: URL
     private var transferStates: [String: TransferState] = [:]
+    private let inboundPublicationOwners = ClassicFileApprovalJournalReadiness.PublicationOwners()
     private var externalTransferTokensByTransferID: [String: ExternalTransferToken] = [:]
     private var chunkSize: Int = FileTransferConstants.defaultChunkSize
     private let maxChunkSizeBytes: Int = 512 * 1024
     private let maxMessageBytes: Int = 2_000_000
     private let queue = DispatchQueue(label: "com.skybridge.filetransfer", qos: .userInitiated)
     private let receiptWaitTimeoutSeconds: TimeInterval = 60
-    private var classicTransferIdentityBridgeConfirmedAtByDeviceId: [String: Date] = [:]
 
     private struct ClassicTransferSecurityContext {
         let transferKey: SymmetricKey
@@ -132,7 +142,20 @@ public class FileTransferManager: ObservableObject {
         let matchedBy: ClassicTransferPeerResolutionBranch
         let declaredCandidates: [String]
         let endpointCandidates: [String]
+        let approvalCapability: Bool?
+        let productEvidenceBinding: P2PConnectionManager.ClassicFileTransferKeyMaterial
     }
+
+    private struct ProductFileTransferEvidenceContext {
+        let transferID: String
+        let fileName: String
+        let fileSize: Int64
+        let owner: ProductEvidenceSessionOwner
+        let transferReference: String
+        let direction: ProductEvidenceFileDirection
+        var integrityReceiptVerified = false
+    }
+    private var productFileTransferEvidenceContext: ProductFileTransferEvidenceContext?
 
     private struct WebRTCOutboundPresentationOwner {
         let token: UUID
@@ -159,26 +182,155 @@ public class FileTransferManager: ObservableObject {
     private var nextHistoryGeneration: UInt64 = 0
     private var latestHistoryIntentGeneration: UInt64 = 0
     private var historyDrainTask: Task<Void, Never>?
-    
+
     /// P2P 连接管理器
     private var connectionManager: P2PConnectionManager { P2PConnectionManager.instance }
-    
+
     /// Cross-network (WebRTC) manager
     private var crossNetwork: CrossNetworkWebRTCManager { CrossNetworkWebRTCManager.instance }
-    
+
     /// 压缩是否启用
     /// ⚠️ 兼容性：旧版 macOS 端不会对入站 chunk 解压，默认关闭可避免跨版本互通失败。
     /// 若你同时使用本仓库更新后的 macOS 端（支持 compression=zlib），可以在设置里开启。
     public var compressionEnabled: Bool = false
-    
+
     private init() {
         documentsDirectory = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
         downloadsDirectory = documentsDirectory.appendingPathComponent("Downloads", isDirectory: true)
         enqueueHistoryCommand(.bootstrap)
     }
-    
+
     // MARK: - Public Methods
-    
+
+    /// Sends the exact file already offered on this audio channel. The caller
+    /// owns both resources through cleanup, and must retain them if close cannot
+    /// be confirmed. A returned signed file receipt is not a playback receipt.
+    func sendPreparedAudioFile(
+        _ source: IOSPreparedAudioFile,
+        channel: IOSAudioChannel,
+        connectionOwner: IOSAudioFileConnection,
+        requireEffectAuthorization: @escaping @MainActor () throws -> Void,
+        progress: @escaping @MainActor (Int64, Int64) async -> Void
+    ) async throws -> TransferReceipt {
+        let result: Result<TransferReceipt, Error>
+        var ownsConnection = false
+        var ownsSource = false
+        do {
+            try Task.checkCancellation()
+            try channel.requireCurrent()
+            try requireEffectAuthorization()
+            try await acquireTransferSlot()
+            do { try connectionOwner.holdTransferSlot(release: { [self] in releaseTransferSlot() }) }
+            catch { releaseTransferSlot(); throw error }
+            ownsConnection = true
+            try channel.requireCurrent()
+            try requireEffectAuthorization()
+            let content = try await source.claimForSending()
+            ownsSource = true
+            try Task.checkCancellation()
+            try channel.requireCurrent()
+            try requireEffectAuthorization()
+            let identity = try channel.localIdentityBindingForAccountRequest()
+            let authority = try channel.classicFileAuthority(transferID: content.transferID)
+            guard content.length >= 0, authority.offeredLength == UInt64(content.length),
+                  authority.offeredSHA256 == content.digest else {
+                throw FileTransferError.invalidMetadata
+            }
+            let expectedMaterial = authority.material
+            let peerID = channel.remoteIdentity.deviceID
+            let security = ClassicTransferSecurityContext(
+                transferKey: expectedMaterial.transferKey, matchDeviceId: peerID,
+                resolvedPeerDeviceId: peerID, matchedBy: .declaredSenderDeviceId,
+                declaredCandidates: [peerID], endpointCandidates: [],
+                approvalCapability: expectedMaterial.approvalCapability,
+                productEvidenceBinding: expectedMaterial
+            )
+            let validate: @MainActor () throws -> Void = {
+                try Task.checkCancellation()
+                try channel.requireCurrent()
+                try requireEffectAuthorization()
+                let current = try channel.classicFileAuthority(transferID: content.transferID)
+                guard current.route == authority.route, current.material.matches(expectedMaterial) else {
+                    throw FileTransferError.secureSessionRequired
+                }
+            }
+            try validate()
+            let connection: NWConnection
+            switch authority.route {
+            case .network(let endpoint):
+                connection = try await createConnection(to: endpoint, provenance: .authenticatedHost,
+                    beforeCreate: {
+                        try validate()
+                        try connectionOwner.requireUnattached()
+                    },
+                    onCreate: { connection in try connectionOwner.attach(connection) },
+                    observeState: { state in Task { @MainActor in connectionOwner.observe(state) } })
+            case .usbReturn:
+                guard expectedMaterial.approvalCapability == true else { throw FileTransferError.secureSessionRequired }
+                let port = try await connectionOwner.prepareUSBReturnListener(requireAuthorization: validate)
+                try await channel.announceUSBFileReturn(port: port, transferID: content.transferID,
+                    requireEffectAuthorization: validate)
+                connection = try await connectionOwner.waitForUSBReturnConnection(requireAuthorization: validate)
+            }
+            let requireSubmission: @MainActor () throws -> Void = {
+                try validate()
+                try connectionOwner.requireCurrent(connection)
+            }
+            try requireSubmission()
+            let bytesPerChunk = 64 * 1024
+            let digest = content.digest.map { String(format: "%02x", $0) }.joined()
+            let localDisplay = AppleMobileDeviceIdentity.currentSnapshot()
+            let metadata = FileMetadata(transferId: content.transferID, fileName: content.fileName,
+                fileSize: content.length, fileHash: digest, chunkSize: bytesPerChunk,
+                securityVersion: ClassicTransferInboundPolicy.currentSecurityVersion,
+                mimeType: content.mimeType, compression: nil,
+                totalChunks: Int((content.length + Int64(bytesPerChunk) - 1) / Int64(bytesPerChunk)),
+                senderDeviceId: identity.deviceId, senderDeviceName: localDisplay.deviceName,
+                senderPlatform: localDisplay.platformName, senderOSVersion: localDisplay.osVersion,
+                senderModelName: SBFT_currentModelDisplayName(), senderChip: SBFT_currentChipDisplayName())
+            let transfer = FileTransfer(id: content.transferID, fileName: content.fileName,
+                fileSize: content.length, fileType: .audio, isIncoming: false, remotePeer: peerID)
+            try await sendMetadata(metadata, securityContext: security,
+                requireAuthorization: requireSubmission, over: connection)
+            try await sendFileInChunks(preparedSource: content.reader, transfer: transfer,
+                securityContext: security, over: connection, chunkSize: bytesPerChunk,
+                compression: nil, expectedFileHash: digest, requireAuthorization: requireSubmission,
+                progress: progress)
+            let receipt = try await waitForTransferReceipt(over: connection, securityContext: security,
+                expectedTransferId: content.transferID, expectedFileSize: content.length,
+                expectedFileHash: digest, requireAuthorization: requireSubmission)
+            try requireSubmission()
+            result = .success(receipt)
+        } catch { result = .failure(error) }
+
+        // Each cleanup is attempted once. If native close is not confirmed, the
+        // owner retains both the socket and its global connection slot for retry.
+        var connectionFailure: String?
+        var sourceFailure: String?
+        if ownsConnection {
+            do { try await connectionOwner.close() }
+            catch { connectionFailure = String(describing: error) }
+        }
+        if ownsSource {
+            do { try await source.close() }
+            catch { sourceFailure = String(describing: error) }
+        }
+        if connectionFailure != nil || sourceFailure != nil {
+            let primary: String
+            switch result {
+            case .success: primary = "File receipt verified; cleanup incomplete"
+            case .failure(let error): primary = String(describing: error)
+            }
+            throw IOSAudioFileTransferCleanupError(primary: primary,
+                connectionFailure: connectionFailure, sourceFailure: sourceFailure)
+        }
+        let receipt = try result.get()
+        try Task.checkCancellation()
+        try channel.requireCurrent()
+        try requireEffectAuthorization()
+        return receipt
+    }
+
     /// 发送文件到设备
     /// - Parameters:
     ///   - url: 文件 URL
@@ -261,7 +413,7 @@ public class FileTransferManager: ObservableObject {
         }
         let fileName = url.lastPathComponent
         let fileType = determineFileType(from: url)
-        
+
         // 计算文件哈希（SHA256，流式处理）
         let fileHash = try await calculateFileHash(at: url)
         if let initialWebRTCTransportOwner {
@@ -269,9 +421,9 @@ public class FileTransferManager: ObservableObject {
                 initialWebRTCTransportOwner
             )
         }
-        
+
         let effectiveChunkSize = min(maxChunkSizeBytes, max(64 * 1024, chunkSize))
-        
+
         // 计算分块数
         let totalChunks = Int(ceil(Double(fileSize) / Double(effectiveChunkSize)))
 
@@ -302,7 +454,7 @@ public class FileTransferManager: ObservableObject {
             remotePeer: device.name,
             localPath: url.path
         )
-        
+
         activeTransfers.append(transfer)
         isTransferring = true
         postInAppTransferEvent(name: "FileTransferStarted", transfer: transfer)
@@ -330,6 +482,7 @@ public class FileTransferManager: ObservableObject {
         )
         transferStates[transfer.id] = state
         var webRTCOutboundOwner: WebRTCOutboundPresentationOwner?
+        var classicSource: PreparedOutboundFileReadSession?
 
         do {
             // Cross-network path (WebRTC DataChannel): zero-config, no ports required.
@@ -354,20 +507,17 @@ public class FileTransferManager: ObservableObject {
                 SkyBridgeLogger.shared.info("✅ 文件发送完成(WebRTC)")
                 return
             }
-            
+
             // 建立连接：优先 Bonjour service（不依赖 IP/默认端口）
             //
             // ⚠️ 重要：activeConnections 里的 `DiscoveredDevice` 有时是“连接时快照”，services/ip 可能不完整。
             // 这里尝试用发现管理器的最新记录补全（尤其是 `_skybridge-xfer._tcp`）。
             let resolvedDevice = resolveLatestTransferDevice(from: device)
 
-            try await ensureClassicTransferIdentityBridgeReady(for: resolvedDevice)
+            let identityReceipt = try await ensureClassicTransferIdentityBridgeReady(for: resolvedDevice)
 
             let endpoints = try await makeTransferEndpointCandidates(for: resolvedDevice)
-
-            let connection = try await createConnection(toAnyOf: endpoints)
-            defer { connection.cancel() }
-            transferStates[transfer.id]?.connection = connection
+            try connectionManager.requireCurrentPairingIdentityBootstrapReadiness(identityReceipt)
 
             let securityContext = try classicTransferSecurityContext(
                 peerContext: FileTransferPeerContext(
@@ -378,23 +528,70 @@ public class FileTransferManager: ObservableObject {
                 )
             )
 
+            let identityMaterial = try connectionManager.classicTransferKeyMaterial(
+                transferId: transfer.id, deviceId: identityReceipt.peerId
+            )
+            guard securityContext.productEvidenceBinding.matches(identityMaterial) else {
+                throw FileTransferError.secureSessionRequired
+            }
+            guard securityContext.approvalCapability != nil else {
+                throw ClassicTransferApprovalError.capabilityEvidenceUnavailable
+            }
+
+            let reader = try await PreparedOutboundFileReadSession.prepare(
+                url: url,
+                maximumSize: ClassicTransferInboundPolicy.maximumFileSizeBytes,
+                sourcePolicy: .regularFile,
+                validateLifetime: { @MainActor [weak self, transferID = transfer.id] in
+                    try Task.checkCancellation()
+                    guard let self, let current = self.transferStates[transferID], !current.isCancelled else {
+                        throw FileTransferError.transferCancelled
+                    }
+                }
+            )
+            classicSource = reader
+            guard reader.metadata.fileSize == fileSize,
+                  reader.metadata.contentSHA256.map({ String(format: "%02x", $0) }).joined() == fileHash else {
+                throw PreparedOutboundFileReadError.contentChanged
+            }
+            try connectionManager.requireCurrentPairingIdentityBootstrapReadiness(identityReceipt)
+            try requireCurrentApprovalSession(securityContext, transferID: transfer.id)
+
+            let connection = try await createConnection(toAnyOf: endpoints)
+            defer { connection.cancel() }
+            transferStates[transfer.id]?.connection = connection
+
             // 发送元数据
             try await sendMetadata(
                 state.metadata!,
                 securityContext: securityContext,
+                requireAuthorization: { [self] in
+                    try connectionManager.requireCurrentPairingIdentityBootstrapReadiness(identityReceipt)
+                    try requireCurrentApprovalSession(securityContext, transferID: transfer.id)
+                },
                 over: connection
+            )
+
+            beginProductFileTransferEvidence(
+                for: transfer,
+                securityContext: securityContext,
+                connection: connection
             )
 
             // 分块发送文件
             try await sendFileInChunks(
-                from: url,
+                preparedSource: reader,
                 transfer: transfer,
                 securityContext: securityContext,
                 over: connection,
                 chunkSize: effectiveChunkSize,
                 compression: state.metadata!.compression,
-                expectedFileHash: fileHash
+                expectedFileHash: fileHash,
+                requireAuthorization: { [self] in
+                    try requireCurrentApprovalSession(securityContext, transferID: transfer.id)
+                }
             )
+            classicSource = nil // Closed before the completion frame is emitted.
 
             // 必须等待接收端“落盘回执”，否则不能标记发送成功
             do {
@@ -403,7 +600,10 @@ public class FileTransferManager: ObservableObject {
                     securityContext: securityContext,
                     expectedTransferId: transfer.id,
                     expectedFileSize: fileSize,
-                    expectedFileHash: fileHash
+                    expectedFileHash: fileHash,
+                    requireAuthorization: { [self] in
+                        try requireCurrentApprovalSession(securityContext, transferID: transfer.id)
+                    }
                 )
             } catch {
                 let receiptError = ClassicTransferDeliveryConfirmationPolicy
@@ -415,23 +615,34 @@ public class FileTransferManager: ObservableObject {
                 throw receiptError
             }
 
+            confirmProductFileTransferIntegrityReceipt(for: transfer.id)
             // 完成传输
             await completeTransfer(transfer.id, success: true)
-            
+
             SkyBridgeLogger.shared.info("✅ 文件发送完成")
-            
+
         } catch {
+            var reportedError = error
+            if let classicSource {
+                do {
+                    try await classicSource.close()
+                } catch {
+                    reportedError = FileTransferError.transferFailed(
+                        "经典文件发送失败且关闭源文件失败: operation=\(reportedError), close=\(error)"
+                    )
+                }
+            }
             if let webRTCOutboundOwner,
                !isCurrentWebRTCOutboundPresentationOwner(webRTCOutboundOwner) {
                 abandonSupersededWebRTCOutboundTransferIfOwned(webRTCOutboundOwner)
                 throw CancellationError()
             }
-            if ClassicTransferDeliveryConfirmationPolicy.isUnknown(error),
+            if ClassicTransferDeliveryConfirmationPolicy.isUnknown(reportedError),
                let index = activeTransfers.firstIndex(where: { $0.id == transfer.id }) {
                 activeTransfers[index].receiptDeliveryStatus = .unknown
             }
-            await completeTransfer(transfer.id, success: false, error: error)
-            throw error
+            await completeTransfer(transfer.id, success: false, error: reportedError)
+            throw reportedError
         }
     }
 
@@ -737,76 +948,34 @@ public class FileTransferManager: ObservableObject {
         )
     }
 
-    private func ensureClassicTransferIdentityBridgeReady(for device: DiscoveredDevice) async throws {
-        let bridgeKey = Self.normalizedTransferIdentity(device.id)
-        let wasPreviouslyConfirmed =
-            classicTransferIdentityBridgeConfirmedAtByDeviceId[bridgeKey] != nil
-        if connectionManager.hasCurrentPairingIdentityExchangeActivity(with: device.id) {
-            classicTransferIdentityBridgeConfirmedAtByDeviceId[bridgeKey] = Date()
-            return
-        }
-        let since = Date()
-
+    private func ensureClassicTransferIdentityBridgeReady(
+        for device: DiscoveredDevice
+    ) async throws -> P2PPairingIdentityBootstrapReadinessReceipt {
+        let readiness: P2PPairingIdentityBootstrapReadinessResult
         do {
-            try await connectionManager.sendPairingIdentityExchange(to: device.id)
+            readiness = try await connectionManager.requestPairingIdentityExchangeBootstrapReadiness(
+                with: device,
+                requirement: .acceptedIdentity,
+                timeout: .seconds(6)
+            )
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            let resolved = connectionManager.resolvedPeerDevice(for: device)
-            guard resolved.id != device.id else {
-                throw FileTransferError.networkStageFailed(
-                    stage: "identity_bridge_send_failed",
-                    endpoint: device.id,
-                    details: "P2P pairing identity exchange 发送失败，拒绝启动经典文件传输: \(error.localizedDescription)"
-                )
-            }
-
-            do {
-                try await connectionManager.sendPairingIdentityExchange(to: resolved.id)
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                throw FileTransferError.networkStageFailed(
-                    stage: "identity_bridge_send_failed",
-                    endpoint: resolved.id,
-                    details: "P2P pairing identity exchange 发送失败，拒绝启动经典文件传输: \(error.localizedDescription)"
-                )
-            }
-        }
-
-        if wasPreviouslyConfirmed {
-            return
-        }
-
-        let confirmed = await connectionManager.waitForPairingIdentityExchangeActivity(
-            with: device.id,
-            since: since,
-            timeout: .seconds(4)
-        )
-        if confirmed {
-            classicTransferIdentityBridgeConfirmedAtByDeviceId[bridgeKey] = Date()
-            return
-        }
-
-        let resolved = connectionManager.resolvedPeerDevice(for: device)
-        if resolved.id != device.id {
-            let resolvedConfirmed = await connectionManager.waitForPairingIdentityExchangeActivity(
-                with: resolved.id,
-                since: since,
-                timeout: .seconds(2)
+            throw FileTransferError.networkStageFailed(
+                stage: "identity_bridge_send_failed",
+                endpoint: device.id,
+                details: "P2P pairing identity exchange 未能完成当前会话的身份确认: \(error.localizedDescription)"
             )
-            if resolvedConfirmed {
-                classicTransferIdentityBridgeConfirmedAtByDeviceId[bridgeKey] = Date()
-                classicTransferIdentityBridgeConfirmedAtByDeviceId[Self.normalizedTransferIdentity(resolved.id)] = Date()
-                return
-            }
         }
-
-        throw FileTransferError.networkStageFailed(
-            stage: "identity_bridge_not_confirmed",
-            endpoint: device.id,
-            details: "P2P pairing identity exchange 未被对端确认，拒绝启动经典文件传输"
-        )
+        guard let receipt = readiness.receipt else {
+            throw FileTransferError.networkStageFailed(
+                stage: "identity_bridge_not_confirmed",
+                endpoint: device.id,
+                details: "当前认证会话的 pairing identity exchange 未在期限内确认，拒绝启动经典文件传输"
+            )
+        }
+        try connectionManager.requireCurrentPairingIdentityBootstrapReadiness(receipt)
+        return receipt
     }
 
     private func preferredTransferDevice(_ lhs: DiscoveredDevice, _ rhs: DiscoveredDevice) -> DiscoveredDevice {
@@ -1026,11 +1195,32 @@ public class FileTransferManager: ObservableObject {
         let senderDeviceName: String? = senderIdentity.deviceName
         var didAttemptMetadata = false
         var didAttemptCompletion = false
-        var fileReader: ClassicTransferOutboundFileReadSession?
+        var fileReader: PreparedOutboundFileReadSession?
 
         do {
             try requireCurrentWebRTCOutboundPresentationOwner(owner)
             try ensureWebRTCTransferMayContinue(transferID: transfer.id)
+            // Hold one source and verify selected content before admitting any wire metadata.
+            try ClassicTransferMetadataContract.validateSHA256Hex(metadata.fileHash)
+            let reader = try await PreparedOutboundFileReadSession.prepare(
+                url: url,
+                maximumSize: ClassicTransferInboundPolicy.maximumFileSizeBytes,
+                sourcePolicy: .regularFile,
+                validateLifetime: { @MainActor [weak self] in
+                    guard let self else { throw CancellationError() }
+                    try Task.checkCancellation()
+                    try self.requireCurrentWebRTCOutboundPresentationOwner(owner)
+                    try self.ensureWebRTCTransferMayContinue(transferID: transfer.id)
+                }
+            )
+            fileReader = reader
+            try requireCurrentWebRTCOutboundPresentationOwner(owner)
+            try ensureWebRTCTransferMayContinue(transferID: transfer.id)
+            guard reader.metadata.fileSize == metadata.fileSize,
+                  reader.metadata.contentSHA256.map({ String(format: "%02x", $0) }).joined()
+                    == metadata.fileHash else {
+                throw PreparedOutboundFileReadError.contentChanged
+            }
             let meta = CrossNetworkFileTransferMessage(
                 op: .metadata,
                 transferId: transfer.id,
@@ -1049,15 +1239,6 @@ public class FileTransferManager: ObservableObject {
                 expectedOperation: .metadataAck,
                 timeoutSeconds: 15
             )
-            try requireCurrentWebRTCOutboundPresentationOwner(owner)
-            try ensureWebRTCTransferMayContinue(transferID: transfer.id)
-
-            try requireCurrentWebRTCOutboundPresentationOwner(owner)
-            let reader = try await ClassicTransferOutboundFileReadSession.open(
-                url: url,
-                tracksSHA256: true
-            )
-            fileReader = reader
             try requireCurrentWebRTCOutboundPresentationOwner(owner)
             try ensureWebRTCTransferMayContinue(transferID: transfer.id)
 
@@ -1138,7 +1319,9 @@ public class FileTransferManager: ObservableObject {
             }
 
             try requireCurrentWebRTCOutboundPresentationOwner(owner)
-            let fileSha256 = try await reader.finalizeAndClose()
+            try await reader.validateSourceIdentity()
+            let fileSha256 = reader.metadata.contentSHA256
+            try await reader.close()
             fileReader = nil
             try requireCurrentWebRTCOutboundPresentationOwner(owner)
             try ensureWebRTCTransferMayContinue(transferID: transfer.id)
@@ -1226,7 +1409,7 @@ public class FileTransferManager: ObservableObject {
             throw FileTransferError.transferCancelled
         }
     }
-    
+
     /// 接收文件
     /// - Parameters:
     ///   - metadata: 文件元数据
@@ -1290,9 +1473,73 @@ public class FileTransferManager: ObservableObject {
             "file-transfer inbound-authenticated stage=metadata"
         )
 
+        // Authentication proves who sent the request. Saving this particular
+        // file still requires the existing product Accept/Reject interaction.
+        let approvalRequest = CrossNetworkWebRTCManager.InboundFileTransferApprovalRequest(
+            transferId: metadata.transferId,
+            fileName: metadata.fileName,
+            fileSize: metadata.fileSize,
+            chunkSize: metadata.chunkSize,
+            totalChunks: metadata.fileSize == 0
+                ? 0 : Int((metadata.fileSize - 1) / Int64(metadata.chunkSize) + 1),
+            senderDeviceId: securityContext.resolvedPeerDeviceId,
+            senderDeviceName: metadata.senderDeviceName ?? peerContext.peerLabel
+                ?? securityContext.resolvedPeerDeviceId
+        )
+        let approvalDiagnostic = ClassicFileApprovalDiagnostics(senderDeviceId: securityContext.resolvedPeerDeviceId)
+        let remoteApproval: RemoteFileApprovalContext
+        let approvalAuthority: ClassicFileApprovalAuthority
+        do {
+            let authorityClock = ContinuousClock()
+            let authorityStarted = authorityClock.now
+            remoteApproval = try await connectionManager.remoteFileApprovalContext(
+                transferId: metadata.transferId, deviceId: securityContext.matchDeviceId,
+                senderDeviceId: securityContext.resolvedPeerDeviceId, material: securityContext.productEvidenceBinding,
+                metadataDigest: HandshakeConfigurationWire.hash(try metadataAuthenticationInput(metadata)),
+                fileName: metadata.fileName, fileSize: metadata.fileSize, fileSHA256: metadata.fileHash,
+                diagnostics: approvalDiagnostic)
+            approvalAuthority = ClassicFileApprovalAuthority(
+                context: remoteApproval,
+                initialPreparation: authorityStarted.duration(to: authorityClock.now)
+            )
+            try await awaitCurrentFileApproval(approvalAuthority, securityContext: securityContext)
+            approvalDiagnostic.stage = .nativeDecision
+            let decision = await InboundFileTransferApprovalService.shared.decide(for: approvalRequest, remoteApproval: remoteApproval)
+            if case .rejected(let reason) = decision { approvalDiagnostic.noteDecision(rejectedReason: reason) }
+            else { approvalDiagnostic.noteDecision(rejectedReason: nil) }
+            guard decision == .approved else { throw FileTransferError.transferCancelled }
+            approvalDiagnostic.stage = .cancellationCheck
+            try Task.checkCancellation()
+            approvalDiagnostic.stage = .currentMaterial
+            try await awaitCurrentFileApproval(approvalAuthority, securityContext: securityContext)
+            let currentMaterial = try connectionManager.classicTransferKeyMaterial(
+                transferId: metadata.transferId, deviceId: securityContext.matchDeviceId
+            )
+            approvalDiagnostic.stage = .approvedMaterialMatches
+            guard securityContext.productEvidenceBinding.matches(currentMaterial) else {
+                throw FileTransferError.secureSessionRequired
+            }
+        } catch {
+            let refusal: ClassicTransferApprovalRefusal
+            if case FileTransferError.transferCancelled = error { refusal = .denied }
+            else { refusal = .unavailable }
+            approvalDiagnostic.recordFailure(error, refusal: refusal, usesApprovalProtocol: metadata.approvalProtocol != nil)
+            if metadata.approvalProtocol != nil {
+                try await sendFileApproval(metadata, decision: .refused(refusal), securityContext: securityContext, over: connection)
+            } else {
+                await sendFailureReceiptIfPossible(
+                    transferId: metadata.transferId, securityVersion: metadata.securityVersion,
+                    error: error, securityContext: securityContext, over: connection
+                )
+            }
+            throw error
+        }
+
         try await acquireTransferSlot()
         defer { releaseTransferSlot() }
+        try await awaitCurrentFileApproval(approvalAuthority, securityContext: securityContext)
         try await prepareClassicInboundDirectory()
+        try await awaitCurrentFileApproval(approvalAuthority, securityContext: securityContext)
 
         guard !activeTransfers.contains(where: { $0.id == metadata.transferId }),
               transferStates[metadata.transferId] == nil,
@@ -1349,7 +1596,17 @@ public class FileTransferManager: ObservableObject {
         state.localURL = nil
         transferStates[transfer.id] = state
 
+        beginProductFileTransferEvidence(
+            for: transfer,
+            securityContext: securityContext,
+            connection: connection
+        )
+
         var inboundIOHandle: InboundFileTransferIOHandle?
+        var publicationOwner: ClassicFileApprovalJournalReadiness.PublicationOwners.Owner?
+        defer {
+            if let publicationOwner { inboundPublicationOwners.finish(publicationOwner) }
+        }
         var committedURL: URL?
         do {
             let ioHandle = try await InboundFileTransferIOActor.shared.createTemporaryFile(
@@ -1357,11 +1614,16 @@ public class FileTransferManager: ObservableObject {
                 declaredFileSize: metadata.fileSize
             )
             inboundIOHandle = ioHandle
+            try await awaitCurrentFileApproval(approvalAuthority, securityContext: securityContext)
+            if metadata.approvalProtocol != nil {
+                try await sendFileApproval(metadata, decision: .approved(approvalAuthority), securityContext: securityContext, over: connection)
+            }
 
             // 分块接收文件
             let receivedDigest = try await receiveFileInChunks(
                 transfer: transfer,
                 securityContext: securityContext,
+                approvalAuthority: approvalAuthority,
                 from: connection,
                 metadata: metadata,
                 ioHandle: ioHandle
@@ -1372,6 +1634,13 @@ public class FileTransferManager: ObservableObject {
                 throw FileTransferError.checksumMismatch
             }
 
+            try await awaitCurrentFileApproval(approvalAuthority, securityContext: securityContext)
+            try requireCurrentFileApproval(.approved(approvalAuthority), securityContext: securityContext, transferID: transfer.id)
+            // Register without yielding after the original strict context check.
+            // Durable revocation and rename then serialize on this exact handle.
+            publicationOwner = try inboundPublicationOwners.register(
+                context: approvalAuthority.context, handle: ioHandle, store: TrustedDeviceStore.shared
+            )
             let targetURL = try await InboundFileTransferIOActor.shared.commit(
                 using: ioHandle,
                 destinationDirectory: downloadsDirectory,
@@ -1401,11 +1670,17 @@ public class FileTransferManager: ObservableObject {
             try await InboundFileTransferIOActor.shared.releaseCommittedFile(using: ioHandle)
             inboundIOHandle = nil
 
+            if receiptDeliveryStatus == .delivered {
+                confirmProductFileTransferIntegrityReceipt(for: transfer.id)
+            } else {
+                retireProductFileTransferEvidence(for: transfer.id, reason: .protocolFailure)
+            }
+
             // 完成传输
             await completeTransfer(transfer.id, success: true)
 
             SkyBridgeLogger.shared.info("✅ classic inbound file receive completed")
-            
+
             return targetURL
 
         } catch {
@@ -1454,7 +1729,7 @@ public class FileTransferManager: ObservableObject {
             throw receiveError
         }
     }
-    
+
     /// 取消传输
     public func cancelTransfer(_ transferId: String) {
         if let externalToken = externalTransferTokensByTransferID[transferId] {
@@ -1464,23 +1739,24 @@ public class FileTransferManager: ObservableObject {
             return
         }
 
+        inboundPublicationOwners.cancel(transferID: transferId)
         if var state = transferStates[transferId] {
             state.isCancelled = true
             state.connection?.cancel()
             transferStates[transferId] = state
         }
-        
+
         crossNetwork.cancelFileTransferWaiters(transferId: transferId)
         updateTransferringState()
     }
-    
+
     /// 清空历史
     public func clearHistory() {
         transferHistory.removeAll()
         historyPersistenceError = nil
         enqueueHistoryCommand(.clear)
     }
-    
+
     /// 获取下载目录
     public func getDownloadsDirectory() -> URL {
         downloadsDirectory
@@ -1521,23 +1797,25 @@ public class FileTransferManager: ObservableObject {
             throw FileTransferError.transferFailed("经典文件接收目录不可用")
         }
     }
-    
+
     // MARK: - Private Methods - Sending
-    
+
     /// 分块发送文件
     private func sendFileInChunks(
-        from url: URL,
+        preparedSource fileReader: PreparedOutboundFileReadSession,
         transfer: FileTransfer,
         securityContext: ClassicTransferSecurityContext,
         over connection: NWConnection,
         chunkSize: Int,
         compression: String?,
-        expectedFileHash: String
+        expectedFileHash: String,
+        requireAuthorization: @escaping @MainActor () throws -> Void,
+        progress: (@MainActor (Int64, Int64) async -> Void)? = nil
     ) async throws {
-        let fileReader = try await ClassicTransferOutboundFileReadSession.open(
-            url: url,
-            tracksSHA256: true
-        )
+        guard fileReader.metadata.fileSize == transfer.fileSize,
+              fileReader.metadata.contentSHA256.map({ String(format: "%02x", $0) }).joined() == expectedFileHash else {
+            throw PreparedOutboundFileReadError.contentChanged
+        }
         do {
             let fileSize = transfer.fileSize
             var sentBytes: Int64 = 0
@@ -1545,19 +1823,18 @@ public class FileTransferManager: ObservableObject {
 
             while sentBytes < fileSize {
             // 检查是否取消
-            if let state = transferStates[transfer.id], state.isCancelled {
-                throw FileTransferError.transferCancelled
-            }
-            
+            try requireAuthorization()
+
             // 读取分块
             let remainingBytes = fileSize - sentBytes
             let currentChunkSize = min(Int64(chunkSize), remainingBytes)
-            
+
                 let chunkData = try await fileReader.read(
                     offset: UInt64(sentBytes),
                     length: Int(currentChunkSize)
                 )
-            
+                try requireAuthorization()
+
             // 可选：压缩数据
             let processedData: Data
             if compression == "zlib" {
@@ -1598,47 +1875,43 @@ public class FileTransferManager: ObservableObject {
                 nonce: encrypted.nonce,
                 authenticationTag: encrypted.tag
             )
-            
+
             // 发送分块
-            try await sendChunk(chunk, over: connection)
-            
+            try await sendChunk(chunk, requireAuthorization: requireAuthorization, over: connection)
+
             sentBytes += Int64(chunkData.count)
             chunkIndex += 1
-            
+
             // 更新进度
-            await updateProgress(transfer.id, transferredBytes: sentBytes, totalBytes: fileSize)
+            if let progress { await progress(sentBytes, fileSize) }
+            else { await updateProgress(transfer.id, transferredBytes: sentBytes, totalBytes: fileSize) }
             }
 
-            let sourceDigest = try await fileReader.finalizeAndClose()
-            let sourceHash = sourceDigest.map { String(format: "%02x", $0) }.joined()
-            guard sourceHash == expectedFileHash else {
-                throw FileTransferError.checksumMismatch
-            }
+            try await fileReader.validateSourceIdentity()
+            try requireAuthorization()
+            try await fileReader.close()
             // 发送完成信号
-            try await sendComplete(over: connection)
+            try requireAuthorization()
+            try await sendComplete(over: connection, requireAuthorization: requireAuthorization)
             logClassicReceiptPhase("all_chunks_sent", transferId: transfer.id)
-        } catch {
-            let transferError = error
-            do {
-                try await fileReader.close()
-            } catch {
-                throw FileTransferError.transferFailed(
-                    "经典文件发送失败且关闭源文件失败: operation=\(transferError), close=\(error)"
-                )
-            }
-            throw transferError
         }
     }
-    
+
     /// 发送元数据
     private func sendMetadata(
         _ metadata: FileMetadata,
         securityContext: ClassicTransferSecurityContext,
+        requireAuthorization: @escaping @MainActor () throws -> Void,
         over connection: NWConnection
     ) async throws {
+        try requireAuthorization()
+        guard let supportsApproval = securityContext.approvalCapability else {
+            throw ClassicTransferApprovalError.capabilityEvidenceUnavailable
+        }
         let unsignedMetadata = unsignedMetadataCopy(
             from: metadata,
-            securityVersion: ClassicTransferInboundPolicy.currentSecurityVersion
+            securityVersion: ClassicTransferInboundPolicy.currentSecurityVersion,
+            approvalProtocol: supportsApproval ? ClassicTransferApprovalContract.protocolIdentifier : nil
         )
         try ClassicTransferMetadataContract.validateSecurityVersion(unsignedMetadata.securityVersion)
         try await ClassicTransferJSONWorker.shared.validateMetadata(
@@ -1677,7 +1950,8 @@ public class FileTransferManager: ObservableObject {
             senderPlatform: unsignedMetadata.senderPlatform,
             senderOSVersion: unsignedMetadata.senderOSVersion,
             senderModelName: unsignedMetadata.senderModelName,
-            senderChip: unsignedMetadata.senderChip
+            senderChip: unsignedMetadata.senderChip,
+            approvalProtocol: unsignedMetadata.approvalProtocol
         )
         let data = try await ClassicTransferJSONWorker.shared.encode(
             signedMetadata,
@@ -1687,11 +1961,18 @@ public class FileTransferManager: ObservableObject {
             throw FileTransferError.invalidMetadata
         }
         let header = TransferHeader(type: .metadata, length: data.count)
-        try await sendData(header.encoded + data, over: connection, stage: "send_metadata")
+        try requireAuthorization()
+        try await sendData(header.encoded + data, over: connection, stage: "send_metadata", beforeSubmission: requireAuthorization)
+        if let request = try approvalRequest(for: signedMetadata) {
+            try await waitForFileApproval(request, securityContext: securityContext, from: connection,
+                requireAuthorization: requireAuthorization)
+        }
+        try requireAuthorization()
+
     }
-    
+
     /// 发送分块
-    private func sendChunk(_ chunk: FileChunk, over connection: NWConnection) async throws {
+    private func sendChunk(_ chunk: FileChunk, requireAuthorization: @escaping @MainActor () throws -> Void, over connection: NWConnection) async throws {
         let data = try await ClassicTransferJSONWorker.shared.encode(
             chunk,
             maximumOutputSize: maxMessageBytes
@@ -1700,13 +1981,14 @@ public class FileTransferManager: ObservableObject {
             throw FileTransferError.invalidMetadata
         }
         let header = TransferHeader(type: .chunk, length: data.count)
-        try await sendData(header.encoded + data, over: connection, stage: "send_chunk_\(chunk.index)")
+        try requireAuthorization()
+        try await sendData(header.encoded + data, over: connection, stage: "send_chunk_\(chunk.index)", beforeSubmission: requireAuthorization)
     }
-    
+
     /// 发送完成信号
-    private func sendComplete(over connection: NWConnection) async throws {
+    private func sendComplete(over connection: NWConnection, requireAuthorization: @escaping @MainActor () throws -> Void) async throws {
         let header = TransferHeader(type: .complete, length: 0)
-        try await sendData(header.encoded, over: connection, stage: "send_complete")
+        try await sendData(header.encoded, over: connection, stage: "send_complete", beforeSubmission: requireAuthorization)
     }
 
     /// 发送接收端回执（落盘确认/失败原因）
@@ -1845,8 +2127,10 @@ public class FileTransferManager: ObservableObject {
         securityContext: ClassicTransferSecurityContext,
         expectedTransferId: String,
         expectedFileSize: Int64,
-        expectedFileHash: String
+        expectedFileHash: String,
+        requireAuthorization: @escaping @MainActor () throws -> Void
     ) async throws -> TransferReceipt {
+        try requireAuthorization()
         let header: TransferHeader
         do {
             header = try await receiveHeader(
@@ -1865,6 +2149,7 @@ public class FileTransferManager: ObservableObject {
             logClassicReceiptPhase(stage, transferId: expectedTransferId, detail: details)
             throw FileTransferError.networkStageFailed(stage: stage, endpoint: endpoint, details: details)
         }
+        try requireAuthorization()
         guard header.type == .receipt else {
             throw FileTransferError.transferFailed("接收端未返回落盘回执")
         }
@@ -1891,6 +2176,7 @@ public class FileTransferManager: ObservableObject {
             logClassicReceiptPhase(stage, transferId: expectedTransferId, detail: details)
             throw FileTransferError.networkStageFailed(stage: stage, endpoint: endpoint, details: details)
         }
+        try requireAuthorization()
         let receipt = try await ClassicTransferJSONWorker.shared.decode(
             TransferReceipt.self,
             from: payload,
@@ -1937,15 +2223,17 @@ public class FileTransferManager: ObservableObject {
             throw FileTransferError.checksumMismatch
         }
 
+        try requireAuthorization()
         return receipt
     }
-    
+
     // MARK: - Private Methods - Receiving
-    
+
     /// 分块接收文件
     private func receiveFileInChunks(
         transfer: FileTransfer,
         securityContext: ClassicTransferSecurityContext,
+        approvalAuthority: ClassicFileApprovalAuthority,
         from connection: NWConnection,
         metadata: FileMetadata,
         ioHandle: InboundFileTransferIOHandle
@@ -2019,6 +2307,10 @@ public class FileTransferManager: ObservableObject {
                 throw FileTransferError.invalidMetadata
             }
 
+            if receivedBytes == 0 {
+                try await awaitCurrentFileApproval(approvalAuthority, securityContext: securityContext)
+                try requireCurrentFileApproval(.approved(approvalAuthority), securityContext: securityContext, transferID: transfer.id)
+            }
             _ = try await InboundFileTransferIOActor.shared.write(
                 processedData,
                 atOffset: UInt64(receivedBytes),
@@ -2057,7 +2349,7 @@ public class FileTransferManager: ObservableObject {
         logClassicReceiptPhase("hash_verification_completed", transferId: transfer.id)
         return digest
     }
-    
+
     /// 接收分块
     private func receiveChunk(from connection: NWConnection) async throws -> FileChunk {
         let header = try await receiveHeader(from: connection, stage: "receive_chunk_header")
@@ -2084,7 +2376,7 @@ public class FileTransferManager: ObservableObject {
         }
         return chunk
     }
-    
+
     /// 接收头部
     private func receiveHeader(
         from connection: NWConnection,
@@ -2192,7 +2484,10 @@ public class FileTransferManager: ObservableObject {
 
     private func createConnection(
         to endpoint: NWEndpoint,
-        provenance: ApplePeerConnectivityPolicy.RouteProvenance
+        provenance: ApplePeerConnectivityPolicy.RouteProvenance,
+        beforeCreate: (@MainActor () throws -> Void)? = nil,
+        onCreate: (@MainActor (NWConnection) throws -> Void)? = nil,
+        observeState: (@Sendable (NWConnection.State) -> Void)? = nil
     ) async throws -> NWConnection {
         let endpointDescription = String(describing: endpoint)
         let parameters = NWParameters.tcp
@@ -2204,10 +2499,18 @@ public class FileTransferManager: ObservableObject {
             tcp.keepaliveInterval = 15
             tcp.keepaliveCount = 4
         }
-        
+
+        // No failed effect check may strand a newly created connection outside
+        // its caller's owner. This check and the immediate handoff do not await.
+        try Task.checkCancellation()
+        try beforeCreate?()
         let connection = NWConnection(to: endpoint, using: parameters)
-        
-        return try await withCheckedThrowingContinuation { continuation in
+
+        do { try onCreate?(connection) }
+        catch { connection.cancel(); throw error }
+
+        let ready: NWConnection = try await withTaskCancellationHandler {
+        try await withCheckedThrowingContinuation { continuation in
             // Prevent SWIFT TASK CONTINUATION MISUSE: NWConnection may emit multiple state transitions
             // (e.g., .ready then later .cancelled) and `withCheckedThrowingContinuation` must be resumed exactly once.
             final class Once: @unchecked Sendable {
@@ -2222,8 +2525,9 @@ public class FileTransferManager: ObservableObject {
                 }
             }
             let once = Once()
-            
+
             connection.stateUpdateHandler = { state in
+                observeState?(state)
                 switch state {
                 case .ready:
                     let resolvedEndpoint = connection.currentPath?.remoteEndpoint
@@ -2237,7 +2541,7 @@ public class FileTransferManager: ObservableObject {
                         provenance: provenance
                     ) {
                         once.run {
-                            connection.stateUpdateHandler = nil
+                            connection.stateUpdateHandler = observeState
                             connection.cancel()
                             continuation.resume(throwing: FileTransferError.networkStageFailed(
                                 stage: "connect_route_rejected",
@@ -2248,7 +2552,7 @@ public class FileTransferManager: ObservableObject {
                         return
                     }
                     once.run {
-                        connection.stateUpdateHandler = nil
+                        connection.stateUpdateHandler = observeState
                         continuation.resume(returning: connection)
                     }
                 case .waiting(let error):
@@ -2258,7 +2562,8 @@ public class FileTransferManager: ObservableObject {
                     )
                 case .failed(let error):
                     once.run {
-                        connection.stateUpdateHandler = nil
+                        connection.stateUpdateHandler = observeState
+                        connection.cancel()
                         continuation.resume(throwing: FileTransferError.networkStageFailed(
                             stage: "connect_failed",
                             endpoint: endpointDescription,
@@ -2267,7 +2572,7 @@ public class FileTransferManager: ObservableObject {
                     }
                 case .cancelled:
                     once.run {
-                        connection.stateUpdateHandler = nil
+                        connection.stateUpdateHandler = observeState
                         continuation.resume(throwing: FileTransferError.transferCancelled)
                     }
                 default:
@@ -2275,10 +2580,11 @@ public class FileTransferManager: ObservableObject {
                 }
             }
             connection.start(queue: queue)
+            if Task.isCancelled { connection.cancel() }
 
             queue.asyncAfter(deadline: .now() + FileTransferConstants.connectionTimeout) {
                 once.run {
-                    connection.stateUpdateHandler = nil
+                    connection.stateUpdateHandler = observeState
                     SkyBridgeLogger.shared.error(
                         "❌ 文件传输连接超时: timeout=\(Int(FileTransferConstants.connectionTimeout))s"
                     )
@@ -2291,14 +2597,20 @@ public class FileTransferManager: ObservableObject {
                 }
             }
         }
+        } onCancel: { connection.cancel() }
+        try Task.checkCancellation()
+        return ready
     }
 
     /// 发送数据
-    private func sendData(_ data: Data, over connection: NWConnection, stage: String = "send_data") async throws {
+    private func sendData(
+        _ data: Data, over connection: NWConnection, stage: String = "send_data",
+        beforeSubmission: (@MainActor () throws -> Void)? = nil
+    ) async throws {
         // 上传限速（KB/s），0 表示不限制
         let kbps = SettingsManager.instance.fileTransferUploadLimitKBps
         if kbps <= 0 {
-            try await sendDataSlice(data, over: connection, stage: stage)
+            try await sendDataSlice(data, over: connection, stage: stage, beforeSubmission: beforeSubmission)
             return
         }
 
@@ -2309,7 +2621,7 @@ public class FileTransferManager: ObservableObject {
         while offset < data.count {
             let end = min(data.count, offset + chunkBytes)
             let slice = data.subdata(in: offset..<end)
-            try await sendDataSlice(slice, over: connection, stage: stage)
+            try await sendDataSlice(slice, over: connection, stage: stage, beforeSubmission: beforeSubmission)
 
             offset = end
 
@@ -2320,7 +2632,7 @@ public class FileTransferManager: ObservableObject {
             }
         }
     }
-    
+
     /// 接收数据
     private func receiveData(
         length: Int,
@@ -2424,6 +2736,86 @@ public class FileTransferManager: ObservableObject {
         return data
     }
 
+    private func beginProductFileTransferEvidence(
+        for transfer: FileTransfer,
+        securityContext: ClassicTransferSecurityContext,
+        connection: NWConnection
+    ) {
+        let binding = securityContext.productEvidenceBinding
+        guard transfer.fileSize > 0,
+              let transferID = UUID(uuidString: transfer.id),
+              let reference = binding.sessionReference,
+              let route = ProductEvidenceRouteClass.current(for: connection) else { return }
+        if let current = productFileTransferEvidenceContext {
+            retireProductFileTransferEvidence(for: current.transferID, reason: .sessionReplaced)
+        }
+        let recorder = ProductReleaseEvidenceRecorder.shared
+        guard let owner = recorder.beginSession(
+            transport: .p2p,
+            sessionReference: reference,
+            routeClass: route
+        ) else { return }
+        guard recorder.recordP2PSessionAuthenticated(owner: owner, role: binding.role, suite: binding.suite) else {
+            _ = recorder.endSession(owner: owner, reason: .protocolFailure)
+            return
+        }
+        let direction: ProductEvidenceFileDirection = transfer.isIncoming ? .receive : .send
+        let transferReference = P2PEvidenceReference.transaction(transferID)
+        guard recorder.recordFileTransferStarted(
+            owner: owner, transferReference: transferReference, direction: direction
+        ) else {
+            _ = recorder.endSession(owner: owner, reason: .protocolFailure)
+            return
+        }
+        productFileTransferEvidenceContext = ProductFileTransferEvidenceContext(
+            transferID: transfer.id, fileName: transfer.fileName, fileSize: transfer.fileSize,
+            owner: owner, transferReference: transferReference, direction: direction
+        )
+    }
+
+    private func confirmProductFileTransferIntegrityReceipt(for transferID: String) {
+        guard productFileTransferEvidenceContext?.transferID == transferID else { return }
+        productFileTransferEvidenceContext?.integrityReceiptVerified = true
+    }
+
+    private func retireProductFileTransferEvidence(
+        for transferID: String,
+        reason: ProductEvidenceDisconnectReason
+    ) {
+        guard let context = productFileTransferEvidenceContext,
+              context.transferID == transferID else { return }
+        productFileTransferEvidenceContext = nil
+        _ = ProductReleaseEvidenceRecorder.shared.endSession(owner: context.owner, reason: reason)
+    }
+
+    /// Invoked by the actual mounted active/history card. Persisted history alone
+    /// has no process-local owner or verified receipt and cannot create evidence.
+    @discardableResult
+    func recordProductFileTransferCompletionVisible(for transfer: FileTransfer) -> Bool {
+        guard let context = productFileTransferEvidenceContext,
+              context.transferID == transfer.id,
+              context.fileName == transfer.fileName,
+              context.fileSize == transfer.fileSize,
+              context.direction == (transfer.isIncoming ? .receive : .send),
+              context.integrityReceiptVerified,
+              transfer.status == .completed,
+              transfer.progress == 1,
+              transfer.receiptDeliveryStatus != .unknown,
+              transfer.operationalWarning == nil,
+              (activeTransfers + transferHistory).contains(where: {
+                  $0.id == transfer.id && $0.status == .completed && $0.progress == 1
+              }) else { return false }
+        let recorded = ProductReleaseEvidenceRecorder.shared.recordFileTransferCompleted(
+            owner: context.owner, transferReference: context.transferReference,
+            direction: context.direction, authenticatedReceipt: true,
+            integrityVerified: true, uiEffectVisible: true
+        )
+        retireProductFileTransferEvidence(
+            for: transfer.id, reason: context.direction == .send ? .user : .peer
+        )
+        return recorded
+    }
+
     private func classicTransferSecurityContext(
         peerContext: FileTransferPeerContext
     ) throws -> ClassicTransferSecurityContext {
@@ -2447,24 +2839,27 @@ public class FileTransferManager: ObservableObject {
             throw FileTransferError.secureSessionRequired
         }
 
-        let transferKey = try connectionManager.deriveClassicFileTransferKey(
+        let material = try connectionManager.classicTransferKeyMaterial(
             transferId: peerContext.transferId,
             deviceId: resolution.matchDeviceId
         )
 
         return ClassicTransferSecurityContext(
-            transferKey: transferKey,
+            transferKey: material.transferKey,
             matchDeviceId: resolution.matchDeviceId,
             resolvedPeerDeviceId: resolution.resolvedPeerDeviceId,
             matchedBy: resolution.matchedBy,
             declaredCandidates: resolution.declaredCandidates,
-            endpointCandidates: resolution.endpointCandidates
+            endpointCandidates: resolution.endpointCandidates,
+            approvalCapability: material.approvalCapability,
+            productEvidenceBinding: material
         )
     }
 
     private func unsignedMetadataCopy(
         from metadata: FileMetadata,
-        securityVersion: Int? = nil
+        securityVersion: Int? = nil,
+        approvalProtocol: String? = nil
     ) -> FileMetadata {
         FileMetadata(
             transferId: metadata.transferId,
@@ -2483,7 +2878,8 @@ public class FileTransferManager: ObservableObject {
             senderPlatform: metadata.senderPlatform,
             senderOSVersion: metadata.senderOSVersion,
             senderModelName: metadata.senderModelName,
-            senderChip: metadata.senderChip
+            senderChip: metadata.senderChip,
+            approvalProtocol: approvalProtocol ?? metadata.approvalProtocol
         )
     }
 
@@ -2502,6 +2898,110 @@ public class FileTransferManager: ObservableObject {
         )
     }
 
+    private func approvalRequest(for metadata: FileMetadata) throws -> ClassicTransferApprovalRequest? {
+        try ClassicTransferApprovalContract.validateRequestedProtocol(metadata.approvalProtocol)
+        guard metadata.approvalProtocol != nil else { return nil }
+        return try ClassicTransferApprovalRequest(
+            transferID: metadata.transferId, authenticatedMetadataTranscript: metadataAuthenticationInput(metadata)
+        )
+    }
+
+    private func requireCurrentApprovalMaterial(_ context: ClassicTransferSecurityContext, transferID: String) throws {
+        try Task.checkCancellation()
+        let current = try connectionManager.classicTransferKeyMaterial(transferId: transferID, deviceId: context.matchDeviceId)
+        guard context.productEvidenceBinding.matches(current) else { throw FileTransferError.secureSessionRequired }
+    }
+
+    private func requireCurrentApprovalSession(_ context: ClassicTransferSecurityContext, transferID: String) throws {
+        try Task.checkCancellation()
+        guard let state = transferStates[transferID], !state.isCancelled else { throw FileTransferError.transferCancelled }
+        try requireCurrentApprovalMaterial(context, transferID: transferID)
+    }
+
+    private typealias ClassicFileApprovalAuthority = ClassicFileApprovalJournalReadiness.Authority
+
+    private func awaitCurrentFileApproval(
+        _ authority: ClassicFileApprovalAuthority,
+        securityContext: ClassicTransferSecurityContext
+    ) async throws {
+        try await authority.revalidate(
+            validateCurrent: { [self] in
+                try requireCurrentApprovalMaterial(securityContext, transferID: authority.context.binding.transferID)
+            },
+            persistenceState: {
+                ClassicFileApprovalJournalReadiness.persistenceState(
+                    hasPersistenceError: TrustedDeviceStore.shared.persistenceErrorMessage != nil,
+                    acceptanceJournalPresent: PairingAcceptanceJournalStore.defaultJournalExists(),
+                    authorityStoreAvailable: TrustedDeviceStore.shared.isAuthorityPersistenceAvailable
+                )
+            }
+        )
+    }
+
+    /// A positive response always carries the original approved authority snapshot.
+    private enum ClassicFileApprovalDecision {
+        case approved(ClassicFileApprovalAuthority)
+        case refused(ClassicTransferApprovalRefusal)
+    }
+
+    private func requireCurrentFileApproval(
+        _ decision: ClassicFileApprovalDecision,
+        securityContext: ClassicTransferSecurityContext,
+        transferID: String
+    ) throws {
+        guard case .approved(let authority) = decision else { return }
+        try Task.checkCancellation()
+        try authority.context.revalidate()
+        try requireCurrentApprovalSession(securityContext, transferID: transferID)
+    }
+
+    private func sendFileApproval(
+        _ metadata: FileMetadata, decision: ClassicFileApprovalDecision,
+        securityContext: ClassicTransferSecurityContext, over connection: NWConnection
+    ) async throws {
+        if case .approved(let authority) = decision {
+            try await awaitCurrentFileApproval(authority, securityContext: securityContext)
+        }
+        try requireCurrentFileApproval(decision, securityContext: securityContext, transferID: metadata.transferId)
+        guard let request = try approvalRequest(for: metadata) else { throw FileTransferError.invalidMetadata }
+        let refusal: ClassicTransferApprovalRefusal?
+        switch decision {
+        case .approved: refusal = nil
+        case .refused(let reason): refusal = reason
+        }
+        let response = try ClassicTransferApprovalContract.makeResponse(for: request, refusal: refusal, using: securityContext.transferKey)
+        let payload = try await ClassicTransferJSONWorker.shared.encode(response, maximumOutputSize: ClassicTransferApprovalContract.maximumPayloadBytes)
+        if case .approved(let authority) = decision {
+            try await awaitCurrentFileApproval(authority, securityContext: securityContext)
+        }
+        try requireCurrentFileApproval(decision, securityContext: securityContext, transferID: metadata.transferId)
+        try await sendData(
+            TransferHeader(type: .approval, length: payload.count).encoded + payload,
+            over: connection, stage: "send_approval",
+            beforeSubmission: { [self] in
+                try requireCurrentFileApproval(decision, securityContext: securityContext, transferID: metadata.transferId)
+            }
+        )
+    }
+
+    private func waitForFileApproval(
+        _ request: ClassicTransferApprovalRequest,
+        securityContext: ClassicTransferSecurityContext, from connection: NWConnection,
+        requireAuthorization: @escaping @MainActor () throws -> Void
+    ) async throws {
+        try requireAuthorization()
+        let bytes = try await receiveData(length: 8, from: connection, timeout: ClassicTransferApprovalContract.responseHeaderTimeoutSeconds, stage: "approval_header")
+        guard let header = TransferHeader.decode(from: bytes), header.type == .approval,
+              header.length > 0, header.length <= ClassicTransferApprovalContract.maximumPayloadBytes else { throw FileTransferError.invalidMetadata }
+        let payload = try await receiveData(length: header.length, from: connection, timeout: ClassicTransferApprovalContract.responsePayloadTimeoutSeconds, stage: "approval_payload")
+        let response = try await ClassicTransferJSONWorker.shared.decode(ClassicTransferApprovalResponse.self, from: payload, maximumInputSize: ClassicTransferApprovalContract.maximumPayloadBytes)
+        if let reason = try ClassicTransferApprovalContract.validateResponse(response, for: request, using: securityContext.transferKey) {
+            ClassicFileApprovalDiagnostics.recordReceivedRefusal(reason)
+            throw ClassicTransferApprovalError.refused(reason)
+        }
+        try requireAuthorization()
+    }
+
     private func metadataAuthenticationInput(_ metadata: FileMetadata) throws -> Data {
         try ClassicTransferCanonicalTranscript.metadata(
             transferID: metadata.transferId,
@@ -2516,7 +3016,8 @@ public class FileTransferManager: ObservableObject {
             senderPlatform: metadata.senderPlatform,
             senderOSVersion: metadata.senderOSVersion,
             senderModelName: metadata.senderModelName,
-            senderChip: metadata.senderChip
+            senderChip: metadata.senderChip,
+            approvalProtocol: metadata.approvalProtocol
         )
     }
 
@@ -2584,7 +3085,8 @@ public class FileTransferManager: ObservableObject {
     private func sendDataSlice(
         _ data: Data,
         over connection: NWConnection,
-        stage: String
+        stage: String,
+        beforeSubmission: (@MainActor () throws -> Void)? = nil
     ) async throws {
         let operation = ClassicTransferSendOperation()
         let timeoutTask = Task.detached(priority: .utility) {
@@ -2615,6 +3117,11 @@ public class FileTransferManager: ObservableObject {
             try await withCheckedThrowingContinuation { continuation in
                 operation.install(continuation)
                 guard !operation.isCompleted else { return }
+                do { try beforeSubmission?() }
+                catch {
+                    if operation.fail(error) { connection.cancel() }
+                    return
+                }
                 connection.send(content: data, completion: .contentProcessed { error in
                     if let error {
                         let mappedError = FileTransferError.networkStageFailed(
@@ -2677,7 +3184,7 @@ public class FileTransferManager: ObservableObject {
     }
 
     // MARK: - Private Methods - Utilities
-    
+
     /// 计算文件哈希；共享 reader actor 负责流式读取、取消和显式关闭。
     private func calculateFileHash(at url: URL) async throws -> String {
         let reader = try await ClassicTransferOutboundFileReadSession.open(
@@ -2687,7 +3194,7 @@ public class FileTransferManager: ObservableObject {
         let digest = try await reader.hashWholeFileAndClose()
         return digest.map { String(format: "%02x", $0) }.joined()
     }
-    
+
     /// 更新进度
     private func updateProgress(_ transferId: String, transferredBytes: Int64, totalBytes: Int64) async {
         let progress = Double(transferredBytes) / Double(totalBytes)
@@ -2705,10 +3212,10 @@ public class FileTransferManager: ObservableObject {
             direction = activeTransfers[index].isIncoming ? .download : .upload
             transferSnapshot = activeTransfers[index]
         }
-        
+
         transferStates[transferId]?.transferredBytes = transferredBytes
         transferStates[transferId]?.lastUpdateTime = Date()
-        
+
         // 更新总进度
         updateTotalProgress()
 
@@ -2881,33 +3388,36 @@ public class FileTransferManager: ObservableObject {
         lastProgressEventAtByTransferId.removeValue(forKey: transferId)
         lastProgressEventPercentByTransferId.removeValue(forKey: transferId)
     }
-    
+
     /// 计算传输速度
     private func calculateSpeed(transferId: String, transferredBytes: Int64) -> Double {
         guard let state = transferStates[transferId],
               let startTime = state.startTime else {
             return 0
         }
-        
+
         let elapsed = Date().timeIntervalSince(startTime)
         guard elapsed > 0 else { return 0 }
-        
+
         return Double(transferredBytes) / elapsed
     }
-    
+
     /// 更新总进度
     private func updateTotalProgress() {
         guard !activeTransfers.isEmpty else {
             totalProgress = 0
             return
         }
-        
+
         let total = activeTransfers.reduce(0.0) { $0 + $1.progress }
         totalProgress = total / Double(activeTransfers.count)
     }
-    
+
     /// 完成传输
     private func completeTransfer(_ transferId: String, success: Bool, error: Error? = nil) async {
+        if !success {
+            retireProductFileTransferEvidence(for: transferId, reason: .protocolFailure)
+        }
         let savedURL = transferStates[transferId]?.localURL
         var finalizedTransfer: FileTransfer?
 
@@ -2964,7 +3474,7 @@ public class FileTransferManager: ObservableObject {
         Task {
             await LiveActivityManager.shared.transferCompleted()
         }
-        
+
         // 清理状态
         transferStates[transferId]?.connection?.cancel()
         transferStates.removeValue(forKey: transferId)
@@ -2972,7 +3482,7 @@ public class FileTransferManager: ObservableObject {
 
         updateTransferringState()
     }
-    
+
     /// 更新传输状态
     private func updateTransferringState() {
         isTransferring = !activeTransfers.isEmpty
@@ -2980,7 +3490,7 @@ public class FileTransferManager: ObservableObject {
     }
 
     // MARK: - External inbound (WebRTC DataChannel) helpers
-    
+
     /// Begin an inbound transfer delivered via an external transport (e.g. WebRTC DataChannel).
     @discardableResult
     public func beginExternalInboundTransfer(
@@ -3123,15 +3633,15 @@ public class FileTransferManager: ObservableObject {
         }
         return index
     }
-    
+
     /// 确定文件类型
     private func determineFileType(from url: URL) -> FileType {
         determineFileType(fromName: url.lastPathComponent)
     }
-    
+
     private func determineFileType(fromName name: String) -> FileType {
         let ext = (name as NSString).pathExtension.lowercased()
-        
+
         switch ext {
         case "jpg", "jpeg", "png", "gif", "heic", "webp", "bmp", "tiff":
             return .image
@@ -3147,11 +3657,11 @@ public class FileTransferManager: ObservableObject {
             return .other
         }
     }
-    
+
     /// 获取 MIME 类型
     private func getMimeType(for url: URL) -> String? {
         let ext = url.pathExtension.lowercased()
-        
+
         let mimeTypes: [String: String] = [
             "jpg": "image/jpeg",
             "jpeg": "image/jpeg",
@@ -3164,12 +3674,12 @@ public class FileTransferManager: ObservableObject {
             "zip": "application/zip",
             "txt": "text/plain"
         ]
-        
+
         return mimeTypes[ext]
     }
-    
+
     // MARK: - Persistence
-    
+
     private func prependHistoryForPresentation(_ transfer: FileTransfer) {
         transferHistory.removeAll { $0.id == transfer.id }
         transferHistory.insert(transfer, at: 0)

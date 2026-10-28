@@ -121,3 +121,65 @@ final class AccountDeviceRecordDecodingTests: XCTestCase {
         XCTAssertEqual(offline.markingAllOffline(), offline, "idempotent once nothing is online")
     }
 }
+
+
+extension AccountDeviceRecordDecodingTests {
+    private func routeResponse(_ route: [String: Any]?, generated: Int64 = 1_757_073_600_123) throws -> AccountDeviceListSnapshot {
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(Self.listResponse.utf8)) as? [String: Any])
+        var rows = try XCTUnwrap(json["devices"] as? [[String: Any]])
+        if let route { rows[0]["lanControlRoute"] = route } else { rows[0]["lanControlRoute"] = NSNull() }
+        json["devices"] = rows; json["generatedAt"] = generated
+        json["accountScope"] = "untrusted-wire-scope"
+        json["routeRequestStartedAt"] = 999_999
+        return try JSONDecoder().decode(AccountDeviceListSnapshot.self, from: JSONSerialization.data(withJSONObject: json))
+    }
+
+    func testAccountRouteUsesRequestStartAndNeverImportsClockOrScopeFromJSON() throws {
+        let start = ContinuousClock.now
+        let route: [String: Any] = ["addresses": ["10.0.0.5", "fd12::1"], "port": 51173, "expiresAt": 1_757_073_690_123]
+        let decoded = try routeResponse(route)
+        let id = try XCTUnwrap(decoded.devices.first).id
+        XCTAssertNil(decoded.accountScope)
+        XCTAssertNil(decoded.routeRequestStartedAt)
+        XCTAssertNil(decoded.liveRouteDeadline(for: id, at: start))
+        let observed = decoded.scoped(to: "verified-account")
+            .observingRoutes(requestStartedAt: start, now: start.advanced(by: .seconds(40)))
+        XCTAssertEqual(observed.devices.first?.lanControlRoute?.port, 51173)
+        XCTAssertEqual(observed.liveRouteDeadline(for: id, at: start.advanced(by: .seconds(89))), start.advanced(by: .seconds(90)))
+        XCTAssertNil(observed.liveRouteDeadline(for: id, at: start.advanced(by: .seconds(90))))
+        XCTAssertNil(observed.liveRouteDeadline(for: id, at: start.advanced(by: .seconds(-1))))
+        let roundTrip = try JSONDecoder().decode(AccountDeviceListSnapshot.self, from: JSONEncoder().encode(observed))
+        XCTAssertNil(roundTrip.routeRequestStartedAt)
+        XCTAssertNil(roundTrip.accountScope)
+        XCTAssertNil(roundTrip.liveRouteDeadline(for: id, at: start))
+        XCTAssertNil(observed.markingAllOffline().devices.first?.lanControlRoute)
+    }
+
+    func testExpiredArrivalAndOverlongServerTTLDoNotRenewTheRoute() throws {
+        let start = ContinuousClock.now
+        let route: [String: Any] = ["addresses": ["10.0.0.5"], "port": 51173, "expiresAt": Int64.max]
+        let response = try routeResponse(route)
+        let observed = response.observingRoutes(requestStartedAt: start, now: start)
+        let id = try XCTUnwrap(observed.devices.first).id
+        XCTAssertEqual(observed.timeUntilRouteExpiry(at: start), 90)
+        XCTAssertNil(observed.liveRouteDeadline(for: id, at: start.advanced(by: .seconds(90))))
+        let late = response.observingRoutes(requestStartedAt: start, now: start.advanced(by: .seconds(91)))
+        XCTAssertNil(late.devices.first?.lanControlRoute)
+        XCTAssertTrue(try XCTUnwrap(late.devices.first).online, "Route expiry does not rewrite ordinary online metadata")
+        XCTAssertNil(try routeResponse(nil).devices.first?.lanControlRoute, "Old servers and withdrawals are explicit absence")
+    }
+
+    func testMalformedAccountRoutesAreRejectedRatherThanUsedAsDiscoveryMetadata() throws {
+        var invalid: [[String: Any]] = []
+        for addresses in [[], ["localhost"], ["127.0.0.1"], ["0.0.0.0"], ["fe80::1%en0"], ["[fd12::1]"],
+                          ["10.0.0.5/path"], ["10.0.0.5\u{0}ignored"], ["fd12::1\u{0}ignored"],
+                          ["10.0.0.5", "10.0.0.5"], (1...9).map { "10.0.0.\($0)" }] {
+            invalid.append(["addresses": addresses, "port": 51173, "expiresAt": 1_757_073_690_123])
+        }
+        let invalidPorts: [Any] = [0, -1, 65536, 1.5, "51173"]
+        for port in invalidPorts {
+            invalid.append(["addresses": ["10.0.0.5"], "port": port, "expiresAt": 1_757_073_690_123])
+        }
+        for route in invalid { XCTAssertThrowsError(try routeResponse(route), "Accepted malformed route: \(route)") }
+    }
+}

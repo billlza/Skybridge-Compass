@@ -33,13 +33,7 @@ public struct WeatherCardView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
-        .background(weatherBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(LinearGradient(colors: [.white.opacity(0.4), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.2), radius: 10, x: 0, y: 4)
+        .liquidGlassCard(cornerRadius: 24, padding: 0)
         .task {
             if settingsManager.enableRealTimeWeather, !weatherManager.isInitialized {
                 await weatherManager.start()
@@ -51,44 +45,6 @@ public struct WeatherCardView: View {
             Task { @MainActor in
                 await weatherManager.setEnabled(enabled)
             }
-        }
-    }
-    
-    // MARK: - Background
-    
-    private var weatherBackground: some View {
-        ZStack {
-            // 自适应“玻璃底色”（在浅色背景下不会导致文字隐身）
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(.ultraThinMaterial)
-
-            if let weather = weatherManager.currentWeather {
-                LinearGradient(
-                    colors: gradientColors(for: weather.condition),
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-                .opacity(0.22)
-            }
-        }
-    }
-    
-    private func gradientColors(for condition: WeatherCondition) -> [Color] {
-        switch condition {
-        case .clear:
-            return [Color.orange.opacity(0.6), Color.yellow.opacity(0.4)]
-        case .cloudy:
-            return [Color.gray.opacity(0.5), Color.gray.opacity(0.3)]
-        case .rainy:
-            return [Color.blue.opacity(0.5), Color.cyan.opacity(0.3)]
-        case .snowy:
-            return [Color.cyan.opacity(0.4), Color.white.opacity(0.3)]
-        case .foggy, .haze:
-            return [Color.gray.opacity(0.4), Color.gray.opacity(0.2)]
-        case .stormy:
-            return [Color.purple.opacity(0.5), Color.blue.opacity(0.4)]
-        case .unknown:
-            return [Color.gray.opacity(0.3), Color.gray.opacity(0.2)]
         }
     }
     
@@ -124,7 +80,7 @@ public struct WeatherCardView: View {
                     HStack(spacing: 4) {
                         Image(systemName: "location.fill")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(LiquidGlass.supportingText)
                         
                         Text(weather.location)
                             .font(.subheadline.bold())
@@ -161,7 +117,7 @@ public struct WeatherCardView: View {
                 // 天气描述
                 Text(localizationManager.localized(weather.condition.localizationKey))
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(LiquidGlass.supportingText)
                 
                 // 详细指标
                 HStack(spacing: 12) {
@@ -203,7 +159,7 @@ public struct WeatherCardView: View {
                 
                 Text(localizationManager.localized("weather.permission_required"))
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(LiquidGlass.supportingText)
             }
             
             Spacer()
@@ -215,7 +171,7 @@ public struct WeatherCardView: View {
         HStack(spacing: 12) {
             Image(systemName: "icloud.slash")
                 .font(.title2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(LiquidGlass.supportingText)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(localizationManager.localized("weather.disabled_title"))
@@ -223,7 +179,7 @@ public struct WeatherCardView: View {
                     .foregroundStyle(.primary)
                 Text(localizationManager.localized("weather.disabled_hint"))
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(LiquidGlass.supportingText)
                     .lineLimit(1)
             }
 
@@ -247,7 +203,7 @@ public struct WeatherCardView: View {
                 
                 Text(message)
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(LiquidGlass.supportingText)
                     .lineLimit(1)
             }
             
@@ -337,7 +293,7 @@ struct WeatherMetricBadge: View {
             
             Text(value)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundColor(.white)
+                .foregroundStyle(.primary)
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 3)

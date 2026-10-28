@@ -47,6 +47,9 @@ extension P2PDiscoveryService {
 
     struct BootstrapControlResponse: Sendable {
         enum Kind: Sendable {
+            case usbPeerDiscoveryServed
+            case handshakeConfigurationServed
+            case handshakeConfigurationRejected
             case signedKEMRefreshServed
             case signedKEMRefreshRejected
             case protocolIdentityBindingServed
@@ -63,9 +66,9 @@ extension P2PDiscoveryService {
 
         var isFailure: Bool {
             switch kind {
-            case .signedKEMRefreshRejected, .protocolIdentityBindingRejected:
+            case .handshakeConfigurationRejected, .signedKEMRefreshRejected, .protocolIdentityBindingRejected:
                 return true
-            case .signedKEMRefreshServed, .protocolIdentityBindingServed, .protocolIdentityBindingConfirmed:
+            case .usbPeerDiscoveryServed, .handshakeConfigurationServed, .signedKEMRefreshServed, .protocolIdentityBindingServed, .protocolIdentityBindingConfirmed:
                 return false
             }
         }
@@ -74,7 +77,32 @@ extension P2PDiscoveryService {
     nonisolated static func makeBootstrapControlResponse(
         for plaintextControl: AppMessage
     ) async -> BootstrapControlResponse? {
-        await makeBootstrapControlResponse(
+        if case .usbPeerDiscoveryRequest(let request) = plaintextControl {
+            do {
+                let response = try await NativeHandshakeConfiguration.usbDiscoveryResponder.respond(to: request,
+                    name: Host.current().localizedName ?? "Mac", platform: "macos",
+                    identity: { try await NativeHandshakeConfiguration.identity() },
+                    sign: { try await NativeHandshakeConfiguration.sign($0) })
+                return BootstrapControlResponse(kind: .usbPeerDiscoveryServed,
+                    message: .usbPeerDiscoveryResponse(response), statusLine: "usb-peer-discovery result=advertised trust=unverified",
+                    protocolIdentityBindingRequest: nil, protocolIdentityBindingPayload: nil, protocolIdentityBindingCode: nil)
+            } catch {
+                SkyBridgeLogger.p2p.warning("USB peer discovery refused: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
+                return nil
+            }
+        }
+        if case .handshakeConfigurationRequest(let request) = plaintextControl {
+            do {
+                let response = try await NativeHandshakeConfiguration.service.handle(request)
+                return BootstrapControlResponse(kind: response.error == nil ? .handshakeConfigurationServed : .handshakeConfigurationRejected,
+                    message: .handshakeConfigurationResponse(response), statusLine: "handshake-configuration result=\(response.error?.rawValue ?? "ok")",
+                    protocolIdentityBindingRequest: nil, protocolIdentityBindingPayload: nil, protocolIdentityBindingCode: nil)
+            } catch {
+                SkyBridgeLogger.p2p.warning("Handshake management request refused: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
+                return nil
+            }
+        }
+        return await makeBootstrapControlResponse(
             for: plaintextControl,
             makeSignedKEMRefreshPayload: { request in
                 try await Self.makeSignedKEMRefreshPayload(for: request)
@@ -285,10 +313,10 @@ extension P2PDiscoveryService {
         keyManager: DeviceIdentityKeyManager,
         loadLocalIdentities: @Sendable () async throws -> [CommittedLocalProtocolIdentitySnapshot]
     ) async throws -> AppMessage.SignedKEMRefreshPayload {
+        let modePolicy = try PQCModePolicyStore.standard.snapshot()
         try Task.checkCancellation()
-        let requestedSuites: [CryptoSuite]
         do {
-            requestedSuites = try request.validatedStrictResponderSuites()
+            _ = try request.validatedStrictResponderSuites()
         } catch {
             throw makeSKRFailure(error.localizedDescription)
         }
@@ -320,6 +348,15 @@ extension P2PDiscoveryService {
             requesterDeviceId: request.requesterDeviceId,
             requesterFingerprint: requesterFingerprint
         ) {
+            if request.version == SignedKEMRefreshNegotiation.version {
+                guard let algorithm = ProtocolSigningAlgorithm(rawValue: cached.protocolSigningAlgorithm) else {
+                    throw PQCModeSelectionError.invalidCapabilities
+                }
+                let current = try CryptoProviderFactory.captureLANInventory(identityAlgorithm: algorithm, policy: modePolicy)
+                guard cached.permittedSuiteWireIds == current.suiteWireIds.sorted(),
+                      cached.qPeriaptAuthProfile == current.qProfile else { throw PQCModeSelectionError.policyChanged }
+            }
+            try PQCModePolicyStore.standard.withCurrent(modePolicy) {}
             return cached
         }
         let admission = await admissionGate.admit(
@@ -348,38 +385,29 @@ extension P2PDiscoveryService {
             throw makeSKRFailure("local protocol identity unavailable")
         }
         let selectedIdentity = localIdentities.first { identity in
-            targetFingerprint == nil
-                || targetFingerprint == identity.authoritativeFingerprint
+            (request.version != AppMessage.KEMRefreshRequestPayload.qPeriaptVersion || identity.algorithm == .mlDSA65)
+                && (targetFingerprint == nil || targetFingerprint == identity.authoritativeFingerprint)
         }
         guard let selectedIdentity else {
             throw makeSKRFailure("target protocol identity fingerprint mismatch")
         }
 
-        let provider = CryptoProviderFactory.makeInboundPQCResponderProvider(
-            policy: .requirePQC,
-            peerSupportedSuites: requestedSuites
-        )
-        let rawKEMKeys: [KEMPublicKeyInfo]
-        do {
-            rawKEMKeys = try await keyManager.pairingIdentityKEMPublicKeys(
-                using: provider,
-                limitingTo: requestedSuites
-            )
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            SkyBridgeLogger.p2p.error(
-                "SKR-1 responder KEM material load failed: code=local_pqc_kem_unavailable errorClass=\(String(reflecting: Swift.type(of: error)), privacy: .public) detail=\(error.localizedDescription, privacy: .private)"
-            )
-            throw makeSKRFailure("local PQC KEM material unavailable")
+        let isNegotiation = request.version == SignedKEMRefreshNegotiation.version
+        let inventory = try CryptoProviderFactory.captureLANInventory(identityAlgorithm: selectedIdentity.algorithm, policy: modePolicy)
+        let signedPlatform: String? = (isNegotiation || request.version == AppMessage.KEMRefreshRequestPayload.qPeriaptVersion) ? QPeriaptPlatformPolicy.localPlatformName() : nil
+        let signedOSVersion: String? = signedPlatform == nil ? nil : QPeriaptPlatformPolicy.localOSVersionString()
+        let intersection = isNegotiation
+            ? SignedKEMRefreshNegotiation.intersection(requested: request.requestedSuiteWireIds,
+                permitted: inventory.suiteWireIds, requesterProfile: request.qPeriaptAuthProfile, responderProfile: inventory.qProfile)
+            : inventory.suiteWireIds.filter { request.requestedSuiteWireIds.contains($0) }
+        if !isNegotiation && intersection.isEmpty { throw makeSKRFailure("no requested PQC KEM public key available") }
+        var collected: [KEMPublicKeyInfo] = []
+        for wireId in intersection {
+            let provider = try inventory.provider(for: wireId)
+            let publicKey = try await keyManager.getKEMPublicKey(for: CryptoSuite(wireId: wireId), provider: provider)
+            collected.append(KEMPublicKeyInfo(suiteWireId: wireId, publicKey: publicKey))
         }
-        let requestedWireIds = Set(requestedSuites.map(\.wireId))
-        let kemKeys = KEMPublicKeyInfo.normalizedValidKeys(rawKEMKeys).filter { key in
-            requestedWireIds.contains(key.suiteWireId)
-        }
-        guard !kemKeys.isEmpty else {
-            throw makeSKRFailure("no requested PQC KEM public key available")
-        }
+        let kemKeys = collected.sorted { $0.suiteWireId < $1.suiteWireId }
 
         let localIdRaw: String
         do {
@@ -404,8 +432,15 @@ extension P2PDiscoveryService {
             protocolFingerprint: selectedIdentity.authoritativeFingerprint,
             kemPublicKeys: kemKeys
         )
-        let aliases = PeerTrustLookup.lookupCandidates(for: localId)
+        guard let aliases = ProtocolIdentityBindingTarget.candidateAliases(
+            targetDeviceId: request.targetDeviceId,
+            localId: localId,
+            aliases: PeerTrustLookup.lookupCandidates(for: localId)
+        ) else {
+            throw makeSKRFailure("request target does not identify local responder")
+        }
         let unsigned = AppMessage.SignedKEMRefreshPayload(
+            version: request.version,
             deviceId: localId,
             aliases: aliases,
             protocolSigningAlgorithm: selectedIdentity.algorithm.rawValue,
@@ -422,6 +457,10 @@ extension P2PDiscoveryService {
             policyAllowClassicFallback: false,
             routeScope: "lan",
             bonjourEndpointDigest: request.bonjourEndpointDigest,
+            platform: signedPlatform,
+            osVersion: signedOSVersion,
+            permittedSuiteWireIds: isNegotiation ? inventory.suiteWireIds.sorted() : nil,
+            qPeriaptAuthProfile: isNegotiation ? inventory.qProfile : nil,
             signature: Data()
         )
         let signatureProvider = ProtocolSignatureProviderSelector.select(for: selectedIdentity.algorithm)
@@ -441,6 +480,7 @@ extension P2PDiscoveryService {
         }
         try Task.checkCancellation()
         let response = AppMessage.SignedKEMRefreshPayload(
+            version: unsigned.version,
             deviceId: unsigned.deviceId,
             aliases: unsigned.aliases,
             protocolSigningAlgorithm: unsigned.protocolSigningAlgorithm,
@@ -457,8 +497,13 @@ extension P2PDiscoveryService {
             policyAllowClassicFallback: unsigned.policyAllowClassicFallback,
             routeScope: unsigned.routeScope,
             bonjourEndpointDigest: unsigned.bonjourEndpointDigest,
+            platform: unsigned.platform,
+            osVersion: unsigned.osVersion,
+            permittedSuiteWireIds: unsigned.permittedSuiteWireIds,
+            qPeriaptAuthProfile: unsigned.qPeriaptAuthProfile,
             signature: signature
         )
+        try PQCModePolicyStore.standard.withCurrent(modePolicy) {}
         await admissionGate.recordCompletedResponse(
             response,
             requestHashHex: requestHashHex,
@@ -466,7 +511,7 @@ extension P2PDiscoveryService {
             requesterFingerprint: requesterFingerprint
         )
         try Task.checkCancellation()
-        return response
+        return try PQCModePolicyStore.standard.withCurrent(modePolicy) { response }
     }
 
     nonisolated private static func makeSKRFailure(_ reason: String) -> NSError {
@@ -546,7 +591,7 @@ extension P2PDiscoveryService {
             throw makePIBFailure("local device id unavailable")
         }
         let localAliases = PeerTrustLookup.lookupCandidates(for: localId)
-        guard Self.localResponderMatchesProtocolIdentityBindingTarget(
+        guard let candidateAliases = ProtocolIdentityBindingTarget.candidateAliases(
             targetDeviceId: request.targetDeviceId,
             localId: localId,
             aliases: localAliases
@@ -559,7 +604,7 @@ extension P2PDiscoveryService {
         let unsigned = AppMessage.SignedProtocolIdentityBindingPayload(
             transactionId: request.transactionId,
             deviceId: localId,
-            aliases: localAliases,
+            aliases: candidateAliases,
             protocolSigningAlgorithm: selectedIdentity.algorithm.rawValue,
             protocolIdentityPublicKey: selectedIdentity.publicKey,
             protocolIdentityFingerprint: selectedIdentity.authoritativeFingerprint,
@@ -812,9 +857,9 @@ extension P2PDiscoveryService {
         localId: String,
         aliases: [String]
     ) -> Bool {
-        let normalizedTarget = targetDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedTarget.isEmpty else { return false }
-        return Set([localId] + aliases).contains(normalizedTarget)
+        ProtocolIdentityBindingTarget.candidateAliases(
+            targetDeviceId: targetDeviceId, localId: localId, aliases: aliases
+        ) != nil
     }
 
     /// Request frames that `makeBootstrapControlResponse` owns. Distinct from
@@ -822,7 +867,7 @@ extension P2PDiscoveryService {
     /// and pairing-identity exchange for established-channel admission.
     nonisolated static func isInboundBootstrapControlRequest(_ message: AppMessage) -> Bool {
         switch message {
-        case .kemRefreshRequest, .protocolIdentityBindingRequest, .protocolIdentityBindingConfirm:
+        case .usbPeerDiscoveryRequest, .handshakeConfigurationRequest, .kemRefreshRequest, .protocolIdentityBindingRequest, .protocolIdentityBindingConfirm:
             return true
         default:
             return false

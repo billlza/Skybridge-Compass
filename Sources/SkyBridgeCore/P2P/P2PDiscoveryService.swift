@@ -13,6 +13,7 @@ import CryptoKit
 import Combine
 import Security
 import SkyBridgeProtocolCore
+import SkyBridgeAppleTransport
 
 enum P2PDiscoveryReadinessAction: Equatable, Sendable {
     case waitForInitialization
@@ -457,7 +458,26 @@ public class P2PDiscoveryService: BaseManager {
     /// Per-device generation for outbound connect orchestration. It prevents an
     /// older fallback attempt from removing/cancelling a newer connection that
     /// reused the same stable device key.
-    private var outboundConnectionAttemptIds: [String: UUID] = [:]
+    private var outboundConnectionAttemptIds: [String: UUID] = [:] {
+        didSet {
+            #if os(macOS)
+            androidUSBStorage?.invalidateSupersededAttempt(outboundConnectionAttemptIds)
+            #endif
+        }
+    }
+    #if os(macOS)
+    private var androidUSBStorage: AndroidUSBConnectionCoordinator?
+    public var androidUSBConnection: AndroidUSBConnectionCoordinator {
+        if let current = androidUSBStorage { return current }
+        let owner = AndroidUSBConnectionCoordinator { [weak self] source, peer, authority in
+            guard let self else { throw AndroidUSBConnectionError.unavailable }
+            return try AndroidUSBConnectionRuntime(source: source, peer: peer, authority: authority,
+                service: self, manager: USBCConnectionManager.shared)
+        }
+        androidUSBStorage = owner
+        return owner
+    }
+    #endif
     /// 已完成应用层握手认证的连接（用于保持 P2PConnection 生命周期）
     private var authenticatedConnections: [String: P2PConnection] = [:]
     private struct InboundControlSession {
@@ -465,6 +485,9 @@ public class P2PDiscoveryService: BaseManager {
         var task: Task<Void, Never>?
         var aliases: Set<String>
         var authenticatedAuthority: AuthenticatedRemoteAuthority?
+        let classicTransferLifetime: ClassicTransferSessionRegistry.SessionLifetime
+        let audioCarrier: P2PAudioCarrier
+        var audioCapabilityRefresh: P2PAudioCapabilityRefresh?
     }
     private static let maximumProvisionalInboundConnections =
         P2PInboundAdmissionPolicy.maximumConcurrentConnections
@@ -486,6 +509,53 @@ public class P2PDiscoveryService: BaseManager {
     private static let discoveryCapacityLogInterval: TimeInterval = 5
     private static let unprotectedAdmissionBackoffSeconds: TimeInterval = 1
     private var inboundControlSessions: [UUID: InboundControlSession] = [:]
+    private let incomingAudioChannelRegistry = P2PAudioIncomingChannelRegistry()
+
+    /// Each advertised source requires its running consumer and local approval presenter.
+    /// The callback retains its channel and performs account/playback admission separately.
+    func installIncomingAudioChannelHandler(advertiseCapture: Bool = false,
+        originalFileSupport: P2PAudioIncomingChannelRegistry.OriginalFileSupport = .unavailable,
+        advertiseBluetoothOpus: Bool = false,
+        advertiseFileOutputProgress: Bool = false,
+        _ handler: @escaping @Sendable (P2PAudioChannel) -> Void) throws -> UUID {
+        let id = try incomingAudioChannelRegistry.install(advertiseCapture: advertiseCapture,
+            originalFileSupport: originalFileSupport, advertiseBluetoothOpus: advertiseBluetoothOpus,
+            advertiseFileOutputProgress: advertiseFileOutputProgress, handler)
+        for session in inboundControlSessions.values { deliverIncomingAudioChannel(session.audioCarrier) }
+        requestAudioReceiveCapabilityRefresh()
+        return id
+    }
+
+    func removeIncomingAudioChannelHandler(ifOwnedBy id: UUID) {
+        let previous = incomingAudioChannelRegistry.advertisedReceiveCapabilities
+        incomingAudioChannelRegistry.remove(ifOwnedBy: id)
+        if previous != incomingAudioChannelRegistry.advertisedReceiveCapabilities {
+            requestAudioReceiveCapabilityRefresh()
+        }
+    }
+
+    private func requestAudioReceiveCapabilityRefresh() {
+        for connection in authenticatedConnections.values { connection.requestAudioReceiveCapabilityRefresh() }
+        for session in inboundControlSessions.values { session.audioCapabilityRefresh?.request() }
+    }
+
+    private func deliverIncomingAudioChannel(_ carrier: P2PAudioCarrier) {
+        do { try incomingAudioChannelRegistry.deliver(carrier) }
+        catch P2PAudioTransportError.alreadyRegistered { return }
+        catch {
+            logger.error("Incoming audio channel registration failed: \(String(describing: error), privacy: .public)")
+        }
+    }
+    private func deliverIncomingAudioOffer(_ message: AudioStreamingMessage, keys: SessionKeys, carrier: P2PAudioCarrier) {
+        do {
+            let delivered = try incomingAudioChannelRegistry.deliverIncomingOffer(message, keys: keys, carrier: carrier)
+            if !delivered {
+                logger.debug("Audio offer rejected: no installed incoming consumer")
+            }
+        } catch {
+            logger.error("Incoming audio offer registration failed: \(String(describing: error), privacy: .public)")
+        }
+    }
     private var provisionalInboundConnections: [ObjectIdentifier: NWConnection] = [:]
     private var provisionalInboundTimeoutTasks: [ObjectIdentifier: ProvisionalInboundTimeoutOwner] = [:]
     struct DiscoveryHydrationRoute: Hashable, Sendable {
@@ -732,10 +802,58 @@ public class P2PDiscoveryService: BaseManager {
         case plainTCP = "tcp"
     }
 
-    public enum ConnectionRoutePreference: Sendable {
+    public enum ConnectionRoutePreference: Sendable, Equatable {
         case automatic
         case preferUSB
         case managedRelayOnly
+        case networkOnly
+        case usbOnly(udid: String)
+    }
+
+    private var usbControlTargets: [String: DiscoveredDevice] = [:]
+
+    public var connectedUSBControlDevices: [DiscoveredDevice] {
+        usbControlTargets.values.filter {
+            authenticatedConnection(to: $0)?.controlTransport == .usb
+        }
+    }
+
+    /// Cable-bound targets precede discovery hints. One exact authenticated
+    /// connection can have several discovery UUIDs, but remains one selectable
+    /// connection. Unauthenticated hints are never merged by name or IP address.
+    public var nearbyControlDevices: [DiscoveredDevice] {
+        uniqueControlDeviceCandidates(connectedUSBControlDevices + discoveredDevices)
+    }
+
+    func uniqueControlDeviceCandidates(_ candidates: [DiscoveredDevice]) -> [DiscoveredDevice] {
+        var seenDevices = Set<UUID>()
+        var seenConnections = Set<UUID>()
+        return candidates.filter { device in
+            guard seenDevices.insert(device.id).inserted else { return false }
+            guard let connection = authenticatedConnection(to: device) else { return true }
+            return seenConnections.insert(connection.id).inserted
+        }
+    }
+
+    public func usbControlTarget(peerID: String, expectedFingerprint: String, udid: String) throws -> DiscoveredDevice {
+        let candidates = Set(PeerTrustLookup.lookupCandidates(for: peerID))
+        let existing = (connectedUSBControlDevices + discoveredDevices).first { device in
+            guard let identity = device.deviceId else { return false }
+            return !Set(PeerTrustLookup.lookupCandidates(for: identity)).isDisjoint(with: candidates)
+        }
+        if let existing {
+            if let fingerprint = Self.normalizedFingerprint(existing.pubKeyFP), fingerprint != expectedFingerprint {
+                throw Self.protocolIdentityBindingFailure("USB selected peer fingerprint mismatch")
+            }
+            var selected = existing
+            selected.pubKeyFP = expectedFingerprint
+            return selected
+        }
+        return DiscoveredDevice(
+            id: UUID(), name: "USB Apple device", ipv4: nil, ipv6: nil, platformName: "ios",
+            services: [Self.controlServiceType], portMap: [:], connectionTypes: [.usb],
+            uniqueIdentifier: "usb:\(udid)", deviceId: peerID, pubKeyFP: expectedFingerprint
+        )
     }
 
     #if DEBUG || SKYBRIDGE_TESTING
@@ -749,6 +867,50 @@ public class P2PDiscoveryService: BaseManager {
 
     public func activeAuthenticatedConnectionsForClassicTransfer() -> [P2PConnection] {
         authenticatedConnections.values.filter { $0.status == .authenticated }
+    }
+
+    /// Resolves the authenticated connection owned by this exact discovery
+    /// target, rather than inferring success from the manager's global status.
+    public func authenticatedConnection(to device: DiscoveredDevice) -> P2PConnection? {
+        guard let connection = authenticatedConnections[stableConnectionKey(for: device)],
+              connection.status == .authenticated else { return nil }
+        return connection
+    }
+
+    /// An active USB session may be reused only for its exact bound cable and
+    /// stable target. A different cable must run a fresh identity handshake.
+    public func authenticatedUSBConnection(to device: DiscoveredDevice, udid: String) -> P2PConnection? {
+        guard let bound = usbControlTargets[udid],
+              stableConnectionKey(for: bound) == stableConnectionKey(for: device),
+              let connection = authenticatedConnection(to: device),
+              connection.controlTransport == .usb else { return nil }
+        return connection
+    }
+
+    /// Retires only the observed outbound connection. A replacement installed
+    /// while the caller awaited validation is not owned by this operation.
+    public func retireAuthenticatedConnection(
+        _ expected: P2PConnection, for device: DiscoveredDevice
+    ) async throws {
+        let key = stableConnectionKey(for: device)
+        guard authenticatedConnections[key] === expected,
+              outboundConnectionAttemptIds[key] == nil else {
+            throw P2PDiscoveryError.connectionCancelled
+        }
+        authenticatedConnections.removeValue(forKey: key)
+        let carrier = connections.removeValue(forKey: key)
+        carrier?.stateUpdateHandler = nil
+        carrier?.cancel()
+        await expected.disconnectAndWait()
+        try Task.checkCancellation()
+        guard authenticatedConnections[key] == nil,
+              connections[key] == nil,
+              outboundConnectionAttemptIds[key] == nil else {
+            throw P2PDiscoveryError.connectionCancelled
+        }
+        if connections.isEmpty && authenticatedConnections.isEmpty && inboundControlSessions.isEmpty {
+            connectionStatus = .disconnected
+        }
     }
 
     private static func normalizedInboundControlAliases(_ aliases: [String?]) -> Set<String> {
@@ -782,13 +944,18 @@ public class P2PDiscoveryService: BaseManager {
 
     private func registerInboundControlSession(
         id: UUID,
-        connection: NWConnection
+        connection: NWConnection,
+        classicTransferLifetime: ClassicTransferSessionRegistry.SessionLifetime,
+        audioCarrier: P2PAudioCarrier
     ) {
         inboundControlSessions[id] = InboundControlSession(
             connection: connection,
             task: nil,
             aliases: [],
-            authenticatedAuthority: nil
+            authenticatedAuthority: nil,
+            classicTransferLifetime: classicTransferLifetime,
+            audioCarrier: audioCarrier,
+            audioCapabilityRefresh: nil
         )
     }
 
@@ -805,7 +972,11 @@ public class P2PDiscoveryService: BaseManager {
     }
 
     private func removeInboundControlSession(id: UUID) {
-        inboundControlSessions.removeValue(forKey: id)
+        if let session = inboundControlSessions.removeValue(forKey: id) {
+            session.audioCapabilityRefresh?.retire()
+            session.audioCarrier.finish()
+            session.classicTransferLifetime.invalidate()
+        }
     }
 
     private func cancelInboundControlSessions(
@@ -822,6 +993,9 @@ public class P2PDiscoveryService: BaseManager {
             inboundControlSessions.removeValue(forKey: id)
         }
         for session in selected.values {
+            session.audioCapabilityRefresh?.retire()
+            session.audioCarrier.finish()
+            session.classicTransferLifetime.invalidate()
             session.task?.cancel()
             session.connection.cancel()
         }
@@ -834,6 +1008,9 @@ public class P2PDiscoveryService: BaseManager {
         let sessions = Array(inboundControlSessions.values)
         inboundControlSessions.removeAll(keepingCapacity: false)
         for session in sessions {
+            session.audioCapabilityRefresh?.retire()
+            session.audioCarrier.finish()
+            session.classicTransferLifetime.invalidate()
             session.task?.cancel()
             session.connection.cancel()
         }
@@ -845,6 +1022,9 @@ public class P2PDiscoveryService: BaseManager {
         guard !sessionIDs.isEmpty else { return }
         let sessions = sessionIDs.compactMap { inboundControlSessions.removeValue(forKey: $0) }
         for session in sessions {
+            session.audioCapabilityRefresh?.retire()
+            session.audioCarrier.finish()
+            session.classicTransferLifetime.invalidate()
             session.task?.cancel()
             session.connection.cancel()
         }
@@ -1495,6 +1675,9 @@ public class P2PDiscoveryService: BaseManager {
     }
 
     private func handleTrustInvalidation(_ event: TrustInvalidationEvent) {
+        #if os(macOS)
+        androidUSBStorage?.invalidateTrust(event)
+        #endif
         let authenticatedTargets = authenticatedConnections.compactMap {
             key,
             connection -> (String, P2PConnection)? in
@@ -1555,6 +1738,9 @@ public class P2PDiscoveryService: BaseManager {
 
  /// 停止设备发现管理器
     public override func performStop() async {
+        #if os(macOS)
+        androidUSBStorage?.stop()
+        #endif
         logger.info("🛑 停止设备发现服务")
         acceptingInboundControlConnections = false
         outboundConnectionAttemptIds.removeAll(keepingCapacity: false)
@@ -1577,10 +1763,16 @@ public class P2PDiscoveryService: BaseManager {
             }
         }
         await cancelInboundControlSessions()
+        #if os(macOS)
+        await androidUSBStorage?.stopAndObserve()
+        #endif
     }
 
  /// 清理资源
     public override func cleanup() {
+        #if os(macOS)
+        androidUSBStorage?.stop()
+        #endif
         super.cleanup()
 
  // 清理发现的设备
@@ -1863,7 +2055,265 @@ public class P2PDiscoveryService: BaseManager {
 
     }
 
-    /// 连接到指定设备（优先 Bonjour 服务名，失败时自动回退到 host:port）
+    #if os(macOS)
+    func reserveAndroidUSBAttempt(for device: DiscoveredDevice, id: UUID) {
+        outboundConnectionAttemptIds[stableConnectionKey(for: device)] = id
+    }
+
+    func prepareSelectedAndroidUSBPeer(_ device: DiscoveredDevice, attempt: UUID) async throws {
+        let key = stableConnectionKey(for: device)
+        try requireAndroidUSBAttempt(device, attempt: attempt)
+        guard let peer = device.deviceId, let expected = Self.normalizedFingerprint(device.pubKeyFP) else {
+            throw AndroidUSBConnectionError.invalidPeer
+        }
+        let pins = await DefaultHandshakeTrustProvider().currentPathTrustedFingerprints(for: peer)
+        try requireAndroidUSBAttempt(device, attempt: attempt)
+        guard pins.contains(expected) else { throw HandshakeConfigurationError.peerUntrusted }
+        if let old = authenticatedConnections.removeValue(forKey: key) { await old.disconnectAndWait() }
+        try requireAndroidUSBAttempt(device, attempt: attempt)
+        if let old = connections.removeValue(forKey: key) { old.stateUpdateHandler = nil; old.cancel() }
+        connectionStatus = .connecting
+    }
+
+    private func requireAndroidUSBAttempt(_ device: DiscoveredDevice, attempt: UUID) throws {
+        try Task.checkCancellation()
+        guard outboundConnectionAttemptIds[stableConnectionKey(for: device)] == attempt else { throw CancellationError() }
+    }
+
+    func finishAndroidUSBAttempt(for device: DiscoveredDevice, id: UUID) {
+        let key = stableConnectionKey(for: device)
+        if outboundConnectionAttemptIds[key] == id { outboundConnectionAttemptIds.removeValue(forKey: key) }
+    }
+
+    func makeAndroidUSBConnection(for device: DiscoveredDevice, frames: USBHostControlFrameTransport,
+                                  attachmentNonce: UUID, fileConnection: USBHostMultiplexConnection? = nil) -> P2PConnection {
+        let route = "usb-android:\(attachmentNonce.uuidString.lowercased())"
+        let peer = P2PDevice(id: Self.handshakeDeviceIdentifier(for: device), name: device.name,
+            type: P2PDeviceType.remoteType(platformName: device.platformName, modelName: device.modelName),
+            address: route, port: 0, osVersion: device.osVersion ?? "", capabilities: device.services,
+            publicKey: Data(), lastSeen: Date(), endpoints: [route], lastMessageTimestamp: nil,
+            isVerified: false, verificationFailedReason: nil, persistentDeviceId: device.deviceId,
+            pubKeyFingerprint: device.pubKeyFP, macAddresses: nil)
+        return P2PConnection(device: peer, usbControl: frames, incomingAudioRegistry: incomingAudioChannelRegistry,
+            fileConnection: fileConnection)
+    }
+
+    func publishAndroidUSBConnection(_ connection: P2PConnection, for device: DiscoveredDevice,
+                                      attempt: UUID, expectedPeer: AndroidUSBSelectedPeer) throws {
+        try requireAndroidUSBAttempt(device, attempt: attempt)
+        guard connection.status == .authenticated, connection.negotiatedPQC == true,
+              connection.matchesAuthenticatedProtocolIdentity(algorithm: expectedPeer.algorithm,
+                                                              fingerprint: expectedPeer.fingerprint) else {
+            throw Self.protocolIdentityBindingFailure("Native USB authenticated identity or PQC mismatch")
+        }
+        let key = stableConnectionKey(for: device)
+        if let old = authenticatedConnections.updateValue(connection, forKey: key), old !== connection { old.disconnect() }
+        connectionStatus = .connected
+    }
+
+    func removeAndroidUSBConnection(_ connection: P2PConnection?, for device: DiscoveredDevice, attempt: UUID) {
+        let key = stableConnectionKey(for: device)
+        if let connection, authenticatedConnections[key] === connection { authenticatedConnections.removeValue(forKey: key) }
+        finishAndroidUSBAttempt(for: device, id: attempt)
+        if connections.isEmpty && authenticatedConnections.isEmpty && inboundControlSessions.isEmpty { connectionStatus = .disconnected }
+    }
+
+    /// Native Android USB uses the ordinary PIB/SKR admission and trust stores.
+    /// The caller owns this channel's multiplexer through authentication/cleanup.
+    /// This preflight neither publishes a session nor grants an audio capability.
+    public func prepareAndroidUSBHandshake(
+        for device: DiscoveredDevice, bootstrap: USBHostBootstrapChannel
+    ) async throws {
+        try bootstrap.checkCurrent()
+        let localIdentity = try await CanonicalBonjourAdvertisementIdentityProvider.current(allowCreateDeviceId: true)
+        if let evidence = P2PDiscoveryBonjourPolicy.localTargetEvidence(for: device, localIdentity: localIdentity,
+            localInterfaceAddresses: localInterfaceCacheSnapshot(forceRefresh: true).addresses) {
+            throw evidence == .authorityConflict
+                ? P2PDiscoveryError.targetAuthorityConflict : P2PDiscoveryError.localDeviceTarget
+        }
+        _ = try await ensureStrictPQCOutboundPreflightReady(for: device, endpointAttempts: [],
+            preferredServiceType: Self.controlServiceType, usbRoute: .android(bootstrap))
+        try bootstrap.checkCurrent()
+    }
+
+    public func inspectUSBPeer(udid: String) async throws -> USBPeerInspection {
+        let request = try USBPeerDiscoveryRequest()
+        let exchange = try await exchangeBootstrapControlMessage(.usbPeerDiscoveryRequest(request),
+            endpoints: [.unix(path: USBMultiplexTransport.socketPath)], timeoutSeconds: 6,
+            targetHasStrongAuthority: false, usbRoute: .apple(udid: udid))
+        guard case .usbPeerDiscoveryResponse(let response) = exchange.response else {
+            throw USBPeerDiscoveryError.invalidResponse
+        }
+        try await response.validate(for: request, verify: { data, signature, identity in
+            try await NativeHandshakeConfiguration.verify(data, signature: signature, identity: identity)
+        })
+        return try await TrustSyncService.shared.inspectUSBPeer(identity: response.identity, name: response.name, udid: udid)
+    }
+
+    public func recoverUSBTrust(udid: String, authorization: TrustMirrorRecoveryAuthorization) async throws -> TrustMirrorRecoveryResult {
+        let device = try usbControlTarget(peerID: authorization.peerID,
+                                         expectedFingerprint: authorization.expectedFingerprint, udid: udid)
+        guard let target = Self.uniqueStableProtocolIdentityCandidate(from: Self.stableProtocolIdentityCandidates(for: device)) else {
+            throw TrustMirrorRecoveryPlanError.crossDeviceClaim
+        }
+        do {
+            _ = try await attemptOutboundOOBProtocolIdentityBinding(
+                for: device, targetDeviceId: target,
+                candidates: Self.outboundStrictPQCTrustCandidates(for: device, stableTarget: target),
+                endpoints: [.unix(path: USBMultiplexTransport.socketPath)], usbRoute: .apple(udid: udid),
+                mirrorRecovery: authorization
+            )
+            return try TrustSyncService.shared.mirrorRecoveryResult(authorization: authorization,
+                                                                    bindingCompleted: true, errorCode: nil)
+        } catch {
+            logger.error("Explicit trust recovery failed: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
+            let code = (error as? TrustMirrorRecoveryPlanError)?.rawValue
+                ?? (error as? AuthenticatedRemoteAuthorityRejection)?.rawValue
+                ?? "trust_recovery_failed"
+            return try TrustSyncService.shared.mirrorRecoveryResult(authorization: authorization,
+                                                                    bindingCompleted: false, errorCode: code)
+        }
+    }
+
+    /// A previous authenticated cable binding is only a route hint. Re-enumerate
+    /// attached USB devices, then let the caller run the ordinary pinned handshake.
+    /// A stale LAN endpoint is neither required nor reused for this cable route.
+    public func resolvePreviouslyAuthenticatedUSBRoute(
+        peerID: String, expectedFingerprint: String
+    ) async throws -> (device: DiscoveredDevice, udid: String)? {
+        guard usbControlTargets.values.contains(where: {
+            Self.usbReconnectPeerMatches($0, peerID: peerID)
+        }) else { return nil }
+        let attached = try await USBMultiplexTransport.devices()
+        try Task.checkCancellation()
+        // Read the current map after enumeration. Another connection may have
+        // rebound the cable while the OS request was in flight.
+        return try Self.resolveUSBReconnectRoute(peerID: peerID, expectedFingerprint: expectedFingerprint,
+            knownTargets: usbControlTargets, attached: attached)
+    }
+
+    static func resolveUSBReconnectRoute(
+        peerID: String, expectedFingerprint: String,
+        knownTargets: [String: DiscoveredDevice], attached: [USBMultiplexDevice]
+    ) throws -> (device: DiscoveredDevice, udid: String)? {
+        guard let expected = normalizedFingerprint(expectedFingerprint) else {
+            throw protocolIdentityBindingFailure("USB reconnect requires a protocol fingerprint")
+        }
+        let matches = attached.filter { route in
+            route.connectionType == "USB" && knownTargets[route.udid].map {
+                usbReconnectPeerMatches($0, peerID: peerID)
+            } == true
+        }
+        guard matches.count <= 1 else { throw USBMultiplexError.ambiguousDevice }
+        guard let route = matches.first, let bound = knownTargets[route.udid] else { return nil }
+        guard normalizedFingerprint(bound.pubKeyFP) == expected else {
+            throw protocolIdentityBindingFailure("USB reconnect bound fingerprint mismatch")
+        }
+        // Drop cached IPs, Bonjour names and ports. They are not evidence about
+        // this USB connection and must not redirect it to a different carrier.
+        let target = DiscoveredDevice(id: bound.id, name: bound.name, ipv4: nil, ipv6: nil,
+            platformName: bound.platformName, services: [controlServiceType], portMap: [:],
+            connectionTypes: [.usb], uniqueIdentifier: "usb:\(route.udid)",
+            deviceId: bound.deviceId, pubKeyFP: expected)
+        return (target, route.udid)
+    }
+
+    private static func usbReconnectPeerMatches(_ target: DiscoveredDevice, peerID: String) -> Bool {
+        guard let identity = target.deviceId else { return false }
+        let expected = Set(PeerTrustLookup.lookupCandidates(for: peerID))
+        return !expected.isEmpty && !Set(PeerTrustLookup.lookupCandidates(for: identity)).isDisjoint(with: expected)
+    }
+
+    private func preferredUSBUDID(for device: DiscoveredDevice) async throws -> String? {
+        if let bound = usbControlTargets.first(where: { stableConnectionKey(for: $0.value) == stableConnectionKey(for: device) }) {
+            let attached = try await USBMultiplexTransport.devices()
+            if attached.contains(where: { $0.udid == bound.key }) { return bound.key }
+        }
+        let description = [device.modelName, device.name].compactMap { $0 }.joined(separator: " ").lowercased()
+        let family: String
+        if description.contains("iphone") { family = "iphone" }
+        else if description.contains("ipad") { family = "ipad" }
+        else { return nil }
+        let attached = try await USBMultiplexTransport.devices()
+        guard !attached.isEmpty else { return nil }
+        await USBCConnectionManager.shared.scanForUSBDevices()
+        let physical = USBCConnectionManager.shared.getConnectedUSBDevices()
+        let matches = attached.filter { route in
+            physical.contains { hardware in
+                hardware.name.lowercased().contains(family)
+                    && hardware.serialNumber?.replacingOccurrences(of: "-", with: "").lowercased()
+                        == route.udid.replacingOccurrences(of: "-", with: "").lowercased()
+            }
+        }
+        guard matches.count <= 1 else { throw USBMultiplexError.ambiguousDevice }
+        // Hardware family only selects a candidate route. The current signed
+        // peer ID and authority must still match during the normal handshake.
+        return matches.first?.udid
+    }
+
+    private func connectOverUSB(_ device: DiscoveredDevice, udid: String) async throws {
+        let localIdentity = try await CanonicalBonjourAdvertisementIdentityProvider.current(allowCreateDeviceId: true)
+        if let evidence = P2PDiscoveryBonjourPolicy.localTargetEvidence(
+            for: device, localIdentity: localIdentity,
+            localInterfaceAddresses: localInterfaceCacheSnapshot(forceRefresh: true).addresses
+        ) {
+            throw evidence == .authorityConflict
+                ? P2PDiscoveryError.targetAuthorityConflict : P2PDiscoveryError.localDeviceTarget
+        }
+        let key = stableConnectionKey(for: device)
+        let attempt = UUID()
+        outboundConnectionAttemptIds[key] = attempt
+        defer {
+            if outboundConnectionAttemptIds[key] == attempt { outboundConnectionAttemptIds.removeValue(forKey: key) }
+        }
+        func requireCurrent() throws {
+            try Task.checkCancellation()
+            guard outboundConnectionAttemptIds[key] == attempt else { throw CancellationError() }
+        }
+        let endpoint = NWEndpoint.unix(path: USBMultiplexTransport.socketPath)
+        connectionStatus = .connecting
+        var ownedConnection: NWConnection?
+        do {
+            // All bootstrap exchanges use fresh USB-only mux connections. The
+            // existing PIB/SKR messages, signatures, expiry and pins are reused.
+            _ = try await ensureStrictPQCOutboundPreflightReady(
+                for: device, endpointAttempts: [endpoint],
+                preferredServiceType: Self.controlServiceType, usbRoute: .apple(udid: udid)
+            )
+            try requireCurrent()
+            let connection = try await USBMultiplexTransport.openControl(udid: udid)
+            ownedConnection = connection
+            try requireCurrent()
+            let authenticated = try await authenticateConnection(
+                connection, for: device, endpoint: endpoint,
+                fallbackPort: Int(USBMultiplexTransport.controlPort), usbUDID: udid
+            )
+            try requireCurrent()
+            if let expected = Self.normalizedFingerprint(device.pubKeyFP),
+               authenticated.authenticatedProtocolFingerprint != expected {
+                authenticated.disconnect()
+                throw Self.protocolIdentityBindingFailure("USB authenticated peer fingerprint mismatch")
+            }
+            if let previous = authenticatedConnections.updateValue(authenticated, forKey: key),
+               previous !== authenticated { previous.disconnect() }
+            if let previous = connections.updateValue(connection, forKey: key), previous !== connection {
+                previous.stateUpdateHandler = nil
+                previous.cancel()
+            }
+            usbControlTargets[udid] = device
+            connectionStatus = .connected
+            RemoteControlSmokeStatusWriter.append(
+                "p2p-usb-authenticated route=usb carrier=usbmuxd networkFallback=0 suite=\(authenticated.negotiatedSuiteName ?? "missing")"
+            )
+        } catch {
+            ownedConnection?.cancel()
+            if outboundConnectionAttemptIds[key] == attempt { connectionStatus = .failed }
+            throw error
+        }
+    }
+    #endif
+
+    /// 连接到指定设备：USB 可用时优先，网络连接保留原有精确路由与认证规则。
     public func connectToDevice(_ device: DiscoveredDevice) async throws {
         let preferredRoute: ConnectionRoutePreference = SettingsManager.shared.enableP2PDirectConnection
             ? .automatic
@@ -1876,6 +2326,27 @@ public class P2PDiscoveryService: BaseManager {
         _ device: DiscoveredDevice,
         routePreference: ConnectionRoutePreference
     ) async throws {
+        #if os(macOS)
+        if case .usbOnly(let udid) = routePreference {
+            try await connectOverUSB(device, udid: udid)
+            return
+        }
+        if routePreference == .automatic || routePreference == .preferUSB,
+           let udid = try await preferredUSBUDID(for: device) {
+            // Availability is checked before any protocol transaction. Once
+            // identity verification begins, failures never fall through to LAN.
+            let probe: NWConnection
+            do { probe = try await USBMultiplexTransport.openControl(udid: udid) }
+            catch USBMultiplexError.deviceUnavailable, USBMultiplexError.portUnavailable {
+                return try await connectToDevice(device, routePreference: .networkOnly)
+            }
+            probe.cancel()
+            try await connectOverUSB(device, udid: udid)
+            return
+        }
+        #else
+        if case .usbOnly = routePreference { throw P2PDiscoveryError.noConnectableEndpoint }
+        #endif
         let device = resolveLatestConnectableDevice(from: device)
         let localIdentity = try await CanonicalBonjourAdvertisementIdentityProvider
             .current(allowCreateDeviceId: true)
@@ -2189,8 +2660,27 @@ public class P2PDiscoveryService: BaseManager {
         for device: DiscoveredDevice,
         endpoint: NWEndpoint,
         fallbackPort: Int,
+        usbUDID: String? = nil,
         timeoutSeconds: TimeInterval = 12
     ) async throws -> P2PConnection {
+        let p2pDevice = makeP2PDeviceForConnection(
+            from: device,
+            endpoint: endpoint,
+            fallbackPort: fallbackPort,
+            usbUDID: usbUDID
+        )
+        let authenticatedConnection = P2PConnection(
+            device: p2pDevice, connection: connection,
+            controlTransport: usbUDID == nil ? .network : .usb,
+            incomingAudioRegistry: incomingAudioChannelRegistry, usbDeviceID: usbUDID
+        )
+
+        try await authenticatePreparedConnection(authenticatedConnection, timeoutSeconds: timeoutSeconds)
+        return authenticatedConnection
+    }
+
+    func authenticatePreparedConnection(_ authenticatedConnection: P2PConnection,
+                                        timeoutSeconds: TimeInterval = 12) async throws {
         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
         let requestedPolicy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
         let requestedSelection: CryptoProviderFactory.SelectionPolicy = requestedPolicy.requirePQC ? .requirePQC : .preferPQC
@@ -2206,13 +2696,6 @@ public class P2PDiscoveryService: BaseManager {
             effectiveTimeoutSeconds = timeoutSeconds
         }
 
-        let p2pDevice = makeP2PDeviceForConnection(
-            from: device,
-            endpoint: endpoint,
-            fallbackPort: fallbackPort
-        )
-        let authenticatedConnection = P2PConnection(device: p2pDevice, connection: connection)
-
         do {
             try await withThrowingTaskGroup(of: Void.self) { group in
                 group.addTask {
@@ -2225,7 +2708,6 @@ public class P2PDiscoveryService: BaseManager {
                 defer { group.cancelAll() }
                 _ = try await group.next()
             }
-            return authenticatedConnection
         } catch {
             authenticatedConnection.disconnect()
             throw error
@@ -2235,9 +2717,11 @@ public class P2PDiscoveryService: BaseManager {
     private func makeP2PDeviceForConnection(
         from device: DiscoveredDevice,
         endpoint: NWEndpoint,
-        fallbackPort: Int
+        fallbackPort: Int,
+        usbUDID: String? = nil
     ) -> P2PDevice {
         let address: String = {
+            if let usbUDID { return "usb:\(usbUDID)" }
             switch endpoint {
             case .hostPort(let host, _):
                 return String(describing: host)
@@ -2863,9 +3347,12 @@ public class P2PDiscoveryService: BaseManager {
         case attemptOOBProtocolIdentityBindingThenRefresh
     }
 
-    private struct BootstrapControlExchangeResult {
+    struct BootstrapControlExchangeResult {
         let response: AppMessage
-        let endpoint: NWEndpoint
+        // Native Android USB has no NWEndpoint. nil is a typed route fact, not
+        // a failed lookup or permission failure disguised as an empty result.
+        let endpoint: NWEndpoint?
+        let routeDescription: String
         let connectLatencyMs: Double
         let attemptCount: Int
         let failedAttemptCount: Int
@@ -2880,19 +3367,78 @@ public class P2PDiscoveryService: BaseManager {
 
     private struct OutboundProtocolIdentityBindingResult: Sendable {
         let fingerprint: String
-        let endpoint: NWEndpoint
+        let endpoint: NWEndpoint?
         let transactionReference: String
+    }
+
+    /// Uses the canonical MAIN bootstrap route for a dedicated RD handshake.
+    /// This does not open/replace MAIN or derive trust from the route address.
+    public func prepareLANPQCHandshakePlan(deviceId: String, pinnedFingerprints: Set<String>,
+                                         currentConnection: P2PConnection? = nil) async throws -> LANPQCHandshakePlan {
+        let candidates = PeerTrustLookup.lookupCandidates(for: deviceId)
+        do {
+            return try await CryptoProviderFactory.captureLANHandshakePlan(candidates: candidates, pinnedFingerprints: pinnedFingerprints)
+        } catch PQCModeSelectionError.negotiatedEvidenceRequired {
+            var observedDevices = discoveredDevices
+            #if os(macOS)
+            observedDevices.append(contentsOf: usbControlTargets.values)
+            #endif
+            guard let target = Self.uniqueStableProtocolIdentityCandidate(from: [deviceId]),
+                  let device = observedDevices.first(where: {
+                    Self.uniqueStableProtocolIdentityCandidate(from: Self.stableProtocolIdentityCandidates(for: $0)) == target
+                  }) else { throw P2PDiscoveryError.noLiveControlRoute }
+            if let observedPin = Self.normalizedFingerprint(device.pubKeyFP), !pinnedFingerprints.contains(observedPin) {
+                throw P2PDiscoveryError.strictPQCTrustPreflightFailed("current MAIN advertisement authority mismatch")
+            }
+            #if os(macOS)
+            if let currentConnection, currentConnection.controlTransport == .usb {
+                // Rekey has already lowered its status to authenticating. Keep
+                // the exact registered cable owner instead of filtering it out
+                // through authenticatedConnection and trying a network address.
+                guard let bound = usbControlTargets.first(where: {
+                    stableConnectionKey(for: $0.value) == stableConnectionKey(for: device)
+                }), authenticatedConnections[stableConnectionKey(for: bound.value)] === currentConnection else {
+                    throw P2PDiscoveryError.connectionCancelled
+                }
+                _ = try await attemptOutboundSignedLANKEMRefresh(for: device, targetDeviceId: target,
+                    candidates: candidates, endpoints: [.unix(path: USBMultiplexTransport.socketPath)],
+                    pinnedProtocolFingerprints: pinnedFingerprints, preferredTargetSuite: nil,
+                    usbRoute: .apple(udid: bound.key))
+                guard authenticatedConnections[stableConnectionKey(for: bound.value)] === currentConnection else {
+                    throw P2PDiscoveryError.connectionCancelled
+                }
+                return try await CryptoProviderFactory.captureLANHandshakePlan(candidates: candidates,
+                    pinnedFingerprints: pinnedFingerprints)
+            }
+            if authenticatedConnection(to: device)?.controlTransport == .usb,
+               let bound = usbControlTargets.first(where: { stableConnectionKey(for: $0.value) == stableConnectionKey(for: device) }) {
+                _ = try await attemptOutboundSignedLANKEMRefresh(for: device, targetDeviceId: target,
+                    candidates: candidates, endpoints: [.unix(path: USBMultiplexTransport.socketPath)],
+                    pinnedProtocolFingerprints: pinnedFingerprints, preferredTargetSuite: nil, usbRoute: .apple(udid: bound.key))
+                return try await CryptoProviderFactory.captureLANHandshakePlan(candidates: candidates, pinnedFingerprints: pinnedFingerprints)
+            }
+            #endif
+            let endpoints = try await liveBonjourEndpointAttemptsAwaitingHydration(for: device,
+                serviceTypes: [BonjourInteropContract.controlServiceType])
+            guard !endpoints.isEmpty else { throw P2PDiscoveryError.noLiveControlRoute }
+            _ = try await attemptOutboundSignedLANKEMRefresh(for: device, targetDeviceId: target,
+                candidates: candidates, endpoints: endpoints, pinnedProtocolFingerprints: pinnedFingerprints,
+                preferredTargetSuite: nil)
+            return try await CryptoProviderFactory.captureLANHandshakePlan(candidates: candidates, pinnedFingerprints: pinnedFingerprints)
+        }
     }
 
     private func ensureStrictPQCOutboundPreflightReady(
         for device: DiscoveredDevice,
         endpointAttempts: [NWEndpoint],
-        preferredServiceType: String?
+        preferredServiceType: String?,
+        usbRoute: P2PUSBControlRoute? = nil
     ) async throws -> NWEndpoint? {
+        try usbRoute?.checkCurrent()
         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
         let policy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
-        guard policy.requirePQC else { return nil }
-        guard endpointAttempts.contains(where: {
+        guard policy.requirePQC || usbRoute != nil else { return nil }
+        guard usbRoute != nil || endpointAttempts.contains(where: {
             isSkyBridgeControlEndpoint($0, device: device, preferredServiceType: preferredServiceType)
         }) else {
             return nil
@@ -2908,7 +3454,40 @@ public class P2PDiscoveryService: BaseManager {
 	        }
 
         let candidates = Self.outboundStrictPQCTrustCandidates(for: device, stableTarget: targetDeviceId)
-        let preferredTargetSuite = await Self.preferredStrictPQCOutboundTargetSuite()
+        let modePolicy = try PQCModePolicyStore.standard.snapshot()
+        if !modePolicy.selection.strictlyMatchSelectedMode {
+            let inventory = try CryptoProviderFactory.captureLANInventory(
+                identityAlgorithm: await SettingsManager.shared.committedProtocolIdentityConfiguration().algorithm, policy: modePolicy)
+            guard !inventory.suiteWireIds.isEmpty else { throw PQCModeSelectionError.unavailableRuntime }
+            var pins = await Self.trustedProtocolFingerprints(provider: DefaultHandshakeTrustProvider(), candidates: candidates)
+            if let evidence = await PeerKEMBootstrapStore.shared.signedRefreshEvidence(forCandidates: candidates),
+               let fingerprint = evidence.protocolIdentityFingerprint, pins.contains(fingerprint),
+               let provenance = evidence.negotiation,
+               provenance.requestedSuiteWireIds.sorted() == inventory.suiteWireIds.sorted(),
+               provenance.requesterQProfile == inventory.qProfile {
+                _ = try provenance.select(mode: modePolicy.selection, locallyReadySuites: inventory.suiteWireIds, localQProfile: inventory.qProfile)
+                try PQCModePolicyStore.standard.withCurrent(modePolicy) {}
+                return nil
+            }
+            let endpoints = usbRoute == nil ? Self.strictPQCBootstrapEndpointCandidates(from: endpointAttempts) : endpointAttempts
+            guard usbRoute != nil || !endpoints.isEmpty else { throw P2PDiscoveryError.strictPQCTrustPreflightFailed("missing direct LAN bootstrap endpoint") }
+            var recovery: String?
+            var refreshEndpoints = endpoints
+            if pins.isEmpty {
+                let binding = try await attemptOutboundOOBProtocolIdentityBinding(for: device,
+                    targetDeviceId: targetDeviceId, candidates: candidates, endpoints: endpoints, usbRoute: usbRoute)
+                pins = [binding.fingerprint]
+                recovery = binding.transactionReference
+                refreshEndpoints = Self.prioritizingProvenEndpoint(binding.endpoint, in: endpoints)
+            }
+            let endpoint = try await attemptOutboundSignedLANKEMRefresh(for: device, targetDeviceId: targetDeviceId,
+                candidates: candidates, endpoints: refreshEndpoints, pinnedProtocolFingerprints: pins,
+                preferredTargetSuite: nil, recoveryReference: recovery, usbRoute: usbRoute)
+            return try PQCModePolicyStore.standard.withCurrent(modePolicy) { endpoint }
+        }
+        guard let preferredTargetSuite = await Self.preferredStrictPQCOutboundTargetSuite() else {
+            throw P2PDiscoveryError.strictPQCTrustPreflightFailed("local PQC provider unavailable")
+        }
         let trustProvider = DefaultHandshakeTrustProvider()
         let trustedKEMSuites = await Self.trustedKEMSuites(
             provider: trustProvider,
@@ -2928,8 +3507,10 @@ public class P2PDiscoveryService: BaseManager {
         )
         guard preflightAction != .proceed else { return nil }
 
-        let bootstrapEndpoints = Self.strictPQCBootstrapEndpointCandidates(from: endpointAttempts)
-        guard !bootstrapEndpoints.isEmpty else {
+        let bootstrapEndpoints = usbRoute == nil
+            ? Self.strictPQCBootstrapEndpointCandidates(from: endpointAttempts)
+            : endpointAttempts
+        guard usbRoute != nil || !bootstrapEndpoints.isEmpty else {
             throw P2PDiscoveryError.strictPQCTrustPreflightFailed("missing direct LAN bootstrap endpoint")
         }
 
@@ -2942,7 +3523,8 @@ public class P2PDiscoveryService: BaseManager {
                     candidates: candidates,
                     endpoints: bootstrapEndpoints,
                     pinnedProtocolFingerprints: pinnedFingerprints,
-                    preferredTargetSuite: preferredTargetSuite
+                    preferredTargetSuite: preferredTargetSuite,
+                    usbRoute: usbRoute
                 )
             } catch {
                 refreshFailure = error
@@ -2961,7 +3543,8 @@ public class P2PDiscoveryService: BaseManager {
                 for: device,
                 targetDeviceId: targetDeviceId,
                 candidates: candidates,
-                endpoints: bootstrapEndpoints
+                endpoints: bootstrapEndpoints,
+                usbRoute: usbRoute
             )
             identityBindingCompleted = true
             pinnedFingerprints = [identityBinding.fingerprint]
@@ -2976,7 +3559,8 @@ public class P2PDiscoveryService: BaseManager {
                 endpoints: refreshEndpoints,
                 pinnedProtocolFingerprints: pinnedFingerprints,
                 preferredTargetSuite: preferredTargetSuite,
-                recoveryReference: identityBinding.transactionReference
+                recoveryReference: identityBinding.transactionReference,
+                usbRoute: usbRoute
             )
         } catch {
             if let discoveryError = error as? P2PDiscoveryError,
@@ -2993,8 +3577,7 @@ public class P2PDiscoveryService: BaseManager {
                 RemoteControlSmokeStatusWriter.append(line)
                 throw error
             }
-            let baseReason = refreshFailure.map { "after SKR failure \($0.localizedDescription); " } ?? ""
-            throw P2PDiscoveryError.strictPQCTrustPreflightFailed(baseReason + error.localizedDescription)
+            throw P2PDiscoveryError.preflightFailure(error, refreshFailure: refreshFailure)
         }
     }
 
@@ -3002,12 +3585,14 @@ public class P2PDiscoveryService: BaseManager {
         for device: DiscoveredDevice,
         targetDeviceId: String,
         candidates: [String],
-        endpoints: [NWEndpoint]
+        endpoints: [NWEndpoint],
+        usbRoute: P2PUSBControlRoute? = nil,
+        mirrorRecovery: TrustMirrorRecoveryAuthorization? = nil
     ) async throws -> OutboundProtocolIdentityBindingResult {
         let requesterIdentity = try await localProtocolIdentityProofForOutboundPIB()
         let requesterDeviceId = try await localOutboundProtocolIdentityDeviceId()
         let nonce = Self.secureRandomNonce()
-        let endpointDigest = Self.bootstrapEndpointDigest(for: device)
+        let endpointDigest = Self.bootstrapEndpointDigest(for: device, usbRoute: usbRoute)
         let unsignedRequest = AppMessage.ProtocolIdentityBindingRequestPayload(
             requesterDeviceId: requesterDeviceId,
             targetDeviceId: targetDeviceId,
@@ -3062,7 +3647,8 @@ public class P2PDiscoveryService: BaseManager {
             .protocolIdentityBindingRequest(request),
             endpoints: endpoints,
             timeoutSeconds: candidateResponseTimeoutSeconds,
-            targetHasStrongAuthority: true
+            targetHasStrongAuthority: true,
+            usbRoute: usbRoute
         )
 
         if case .kemRefreshFailure(let failure) = exchange.response {
@@ -3073,6 +3659,10 @@ public class P2PDiscoveryService: BaseManager {
         }
 
         let validated = try payload.validatedForOOBBinding(request: request)
+        if usbRoute != nil, let expected = Self.normalizedFingerprint(device.pubKeyFP),
+           validated.protocolIdentityFingerprint.lowercased() != expected {
+            throw Self.protocolIdentityBindingFailure("USB candidate fingerprint does not match the selected peer")
+        }
         guard let algorithm = ProtocolSigningAlgorithm(rawValue: validated.protocolSigningAlgorithm) else {
             throw Self.protocolIdentityBindingFailure("invalid signature algorithm")
         }
@@ -3091,7 +3681,7 @@ public class P2PDiscoveryService: BaseManager {
         RemoteControlSmokeStatusWriter.append(verifiedLine)
 
         let approvalRequest = PairingTrustApprovalService.Request(
-            peerEndpoint: exchange.endpoint.debugDescription,
+            peerEndpoint: exchange.routeDescription,
             declaredDeviceId: validated.deviceId,
             policyBindingKey: "PIB-1-peer|\(validated.deviceId)|\(validated.protocolSigningAlgorithm)|\(validated.protocolIdentityFingerprint.lowercased())",
             displayName: validated.deviceName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
@@ -3108,10 +3698,14 @@ public class P2PDiscoveryService: BaseManager {
             protocolIdentitySASTranscriptHashHex: validated.sasTranscriptHashHex(request: request),
             kemKeyCount: 0
         )
+        defer {
+            PairingTrustApprovalService.shared.clearProtocolIdentityBindingCandidateDisplay(for: approvalRequest.id)
+        }
         let approval = await PairingTrustApprovalService.shared.decideProtocolIdentityBindingCandidate(
             for: approvalRequest,
             verificationCode: validated.shortAuthenticationCode(request: request)
         )
+        try usbRoute?.checkCurrent()
         guard approval != .reject else {
             throw Self.protocolIdentityBindingFailure("operator rejected PIB-1 verification code")
         }
@@ -3169,7 +3763,8 @@ public class P2PDiscoveryService: BaseManager {
             .protocolIdentityBindingConfirm(confirm),
             endpoints: confirmationEndpoints,
             timeoutSeconds: finalAckResponseTimeoutSeconds,
-            targetHasStrongAuthority: true
+            targetHasStrongAuthority: true,
+            usbRoute: usbRoute
         )
         if case .kemRefreshFailure(let failure) = confirmationExchange.response {
             throw Self.protocolIdentityBindingFailure(
@@ -3191,6 +3786,7 @@ public class P2PDiscoveryService: BaseManager {
         ) else {
             throw Self.protocolIdentityBindingFailure("PIB-1 final acknowledgement signature invalid")
         }
+        try usbRoute?.checkCurrent()
         let promoted: Bool
         do {
             promoted = try await TrustSyncService.shared.recordAuthenticatedRemoteAuthority(
@@ -3201,7 +3797,9 @@ public class P2PDiscoveryService: BaseManager {
                 protocolSigningAlgorithm: algorithm,
                 protocolPublicKeyFingerprint: validated.protocolIdentityFingerprint,
                 authenticatedProtocolPublicKey: validated.protocolIdentityPublicKey,
-                pinSource: .pib1OperatorApproval
+                pinSource: .pib1OperatorApproval,
+                mirrorRecovery: mirrorRecovery,
+                protocolTransactionReference: transactionReference
             )
         } catch TrustSyncError.aliasCleanupFailedAfterAuthoritativeCommit(let cleanupResidue),
                 TrustSyncError.fallbackCleanupFailedAfterAuthoritativeCommit(let cleanupResidue) {
@@ -3245,13 +3843,21 @@ public class P2PDiscoveryService: BaseManager {
         endpoints: [NWEndpoint],
         pinnedProtocolFingerprints: Set<String>,
         preferredTargetSuite: CryptoSuite?,
-        recoveryReference: String? = nil
-    ) async throws -> NWEndpoint {
-        let requestedSuites = await Self.signedLANRefreshRequestedSuites(preferredTargetSuite: preferredTargetSuite)
+        recoveryReference: String? = nil,
+        usbRoute: P2PUSBControlRoute? = nil
+    ) async throws -> NWEndpoint? {
+        let modePolicy = try PQCModePolicyStore.standard.snapshot()
+        let inventory = try CryptoProviderFactory.captureLANInventory(identityAlgorithm: try await SettingsManager.shared.committedProtocolIdentityConfiguration().algorithm, policy: modePolicy)
+        let negotiate = !modePolicy.selection.strictlyMatchSelectedMode
+        let requestedSuites = inventory.suiteWireIds.map(CryptoSuite.init(wireId:))
+        guard !requestedSuites.isEmpty else { throw PQCModeSelectionError.unavailableRuntime }
         let requesterDeviceId = try await localOutboundProtocolIdentityDeviceId()
         let requesterProof = try await localProtocolIdentityProofForOutboundPIB()
         let requesterFingerprint = requesterProof.fingerprint
         let request = AppMessage.KEMRefreshRequestPayload(
+            version: negotiate ? SignedKEMRefreshNegotiation.version : requestedSuites == [.qperiaptABI2PolicyBound]
+                ? AppMessage.KEMRefreshRequestPayload.qPeriaptVersion
+                : AppMessage.KEMRefreshRequestPayload.currentVersion,
             requesterDeviceId: requesterDeviceId,
             targetDeviceId: targetDeviceId,
             requesterProtocolIdentityFingerprint: requesterFingerprint,
@@ -3260,8 +3866,11 @@ public class P2PDiscoveryService: BaseManager {
             policyRequirePQC: true,
             policyAllowClassicFallback: false,
             routeScope: "lan",
-            bonjourEndpointDigest: Self.bootstrapEndpointDigest(for: device),
-            nonce: Self.secureRandomNonce()
+            bonjourEndpointDigest: Self.bootstrapEndpointDigest(for: device, usbRoute: usbRoute),
+            nonce: Self.secureRandomNonce(),
+            platform: negotiate ? QPeriaptPlatformPolicy.localPlatformName() : nil,
+            osVersion: negotiate ? QPeriaptPlatformPolicy.localOSVersionString() : nil,
+            qPeriaptAuthProfile: negotiate ? inventory.qProfile : nil
         )
 
         let connectStartLine = "🔐 SKR-1 signed LAN KEM refresh connect-start: peer=\(Self.protocolIdentityLogRedaction) endpointCount=\(endpoints.count) pinnedProtocolIdentity=\(pinnedProtocolFingerprints.isEmpty ? 0 : 1) missingPeerKEM=1 lifecycle=missing-kem>connect"
@@ -3280,10 +3889,14 @@ public class P2PDiscoveryService: BaseManager {
             .kemRefreshRequest(request),
             endpoints: endpoints,
             timeoutSeconds: responseTimeoutSeconds,
-            targetHasStrongAuthority: true
+            targetHasStrongAuthority: true,
+            usbRoute: usbRoute
         )
 
         if case .kemRefreshFailure(let failure) = exchange.response {
+            if failure.reasonCode == "missing_requested_pqc_kem" {
+                throw P2PDiscoveryError.peerPQCSuiteUnavailable
+            }
             throw Self.signedLANRefreshFailure("remote rejected SKR-1 stage=\(failure.stage) reasonCode=\(failure.reasonCode)")
         }
         guard case .signedKEMRefresh(let payload) = exchange.response else {
@@ -3302,6 +3915,8 @@ public class P2PDiscoveryService: BaseManager {
         guard let payloadReference = P2PEvidenceReference.payloadHash(payloadHashHex) else {
             throw Self.signedLANRefreshFailure("canonical SKR payload hash is invalid")
         }
+        try PQCModePolicyStore.standard.withCurrent(modePolicy) {}
+        try usbRoute?.checkCurrent()
         try await PeerKEMBootstrapStore.shared.upsertSignedKEMRefresh(
             deviceIds: candidates + [targetDeviceId, validated.deviceId] + validated.aliases,
             payload: validated,
@@ -3334,36 +3949,71 @@ public class P2PDiscoveryService: BaseManager {
         RemoteControlSmokeStatusWriter.append(verifiedLine)
 
         let evidence = await PeerKEMBootstrapStore.shared.signedRefreshEvidence(forCandidates: candidates)
-        guard Self.signedRefreshEvidenceSatisfiesStrictPQC(evidence, preferredTargetSuite: preferredTargetSuite) else {
+        guard negotiate || Self.signedRefreshEvidenceSatisfiesStrictPQC(evidence, preferredTargetSuite: preferredTargetSuite) else {
             throw Self.signedLANRefreshFailure("SKR-1 completed but strict suite still unsatisfied")
         }
-        return exchange.endpoint
+        return try PQCModePolicyStore.standard.withCurrent(modePolicy) { exchange.endpoint }
     }
 
-    private func exchangeBootstrapControlMessage(
+    func exchangeBootstrapControlMessage(
         _ message: AppMessage,
         endpoints: [NWEndpoint],
         timeoutSeconds: TimeInterval,
-        targetHasStrongAuthority: Bool
+        targetHasStrongAuthority: Bool,
+        usbRoute: P2PUSBControlRoute? = nil
     ) async throws -> BootstrapControlExchangeResult {
+        #if os(macOS)
+        if let usbRoute, case .android(let channel) = usbRoute {
+            // Native USB owns its exact attachment and one fresh stream per
+            // request. Do not enumerate or retry any network endpoint here.
+            guard endpoints.isEmpty else { throw P2PDiscoveryError.noConnectableEndpoint }
+            guard timeoutSeconds.isFinite && timeoutSeconds > 0 && timeoutSeconds <= 315 else {
+                throw USBHostMultiplexError.invalidTimeout
+            }
+            let response = try await channel.exchange(try JSONEncoder().encode(message),
+                timeout: .seconds(timeoutSeconds))
+            let decoded = try JSONDecoder().decode(AppMessage.self,
+                from: Self.normalizeInboundControlFrame(response.body))
+            let opened = response.openingDuration.components
+            let latency = Double(opened.seconds) * 1_000 + Double(opened.attoseconds) / 1_000_000_000_000_000
+            try usbRoute.checkCurrent()
+            return BootstrapControlExchangeResult(response: decoded, endpoint: nil,
+                routeDescription: usbRoute.description,
+                connectLatencyMs: latency, attemptCount: 1, failedAttemptCount: 0)
+        }
+        #endif
         var lastError: Error?
         var localNetworkPermissionError: Error?
         var failedAttemptCount = 0
         for (index, endpoint) in endpoints.enumerated() {
             try Task.checkCancellation()
-            let connection = makeConnection(to: endpoint, securityPlan: .plainTCP, interfacePreference: .automatic)
+            let connection: NWConnection
+            if let usbUDID = usbRoute?.appleUDID {
+                #if os(macOS)
+                connection = try await USBMultiplexTransport.openControl(udid: usbUDID)
+                #else
+                throw P2PDiscoveryError.noConnectableEndpoint
+                #endif
+            } else {
+                connection = makeConnection(to: endpoint, securityPlan: .plainTCP, interfacePreference: .automatic)
+            }
             let connectStartedAt = Date()
+            logger.info("bootstrap-control-attempt index=\(index) endpointClass=\(Self.smokeEndpointClass(endpoint), privacy: .public) peerToPeer=\(Self.shouldIncludePeerToPeer(for: endpoint)) endpointRef=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(endpoint.debugDescription), privacy: .public)")
             RemoteControlSmokeStatusWriter.append(
                 "bootstrap-control-attempt index=\(index) endpointClass=\(Self.smokeEndpointClass(endpoint)) peerToPeer=\(Self.shouldIncludePeerToPeer(for: endpoint) ? 1 : 0) endpoint=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(endpoint.debugDescription))"
             )
             do {
-                try await waitForBootstrapControlConnection(
-                    connection,
-                    endpoint: endpoint,
-                    attemptIndex: index,
-                    timeoutSeconds: min(10, max(3, timeoutSeconds))
-                )
-                if let evidence = readyConnectionLocalTargetEvidence(
+                if usbRoute == nil {
+                    try await waitForBootstrapControlConnection(
+                        connection,
+                        endpoint: endpoint,
+                        attemptIndex: index,
+                        timeoutSeconds: min(10, max(3, timeoutSeconds))
+                    )
+                }
+                // A USB connection's socket peer is the OS multiplexer. The
+                // remote device is still checked by the signed PIB/handshake ID.
+                if usbRoute == nil, let evidence = readyConnectionLocalTargetEvidence(
                     connection,
                     targetHasStrongAuthority: targetHasStrongAuthority
                 ) {
@@ -3373,6 +4023,7 @@ public class P2PDiscoveryService: BaseManager {
                         : P2PDiscoveryError.localDeviceTarget
                 }
                 let connectLatencyMs = Date().timeIntervalSince(connectStartedAt) * 1_000.0
+                logger.info("bootstrap-control-ready index=\(index) connectLatencyMs=\(connectLatencyMs)")
                 RemoteControlSmokeStatusWriter.append(
                     String(
                         format: "bootstrap-control-ready index=%d endpointClass=%@ connectLatencyMs=%.1f",
@@ -3382,6 +4033,7 @@ public class P2PDiscoveryService: BaseManager {
                     )
                 )
                 try await sendBootstrapFrame(try JSONEncoder().encode(message), over: connection)
+                logger.info("bootstrap-control-request-sent index=\(index)")
                 let responseFrame = try await Self.receiveBootstrapFrame(
                     over: connection,
                     timeoutSeconds: timeoutSeconds
@@ -3394,6 +4046,7 @@ public class P2PDiscoveryService: BaseManager {
                 return BootstrapControlExchangeResult(
                     response: decoded,
                     endpoint: endpoint,
+                    routeDescription: usbRoute?.description ?? endpoint.debugDescription,
                     connectLatencyMs: connectLatencyMs,
                     attemptCount: index + 1,
                     failedAttemptCount: failedAttemptCount
@@ -3437,6 +4090,7 @@ public class P2PDiscoveryService: BaseManager {
         timeoutSeconds: TimeInterval
     ) async throws {
         let cancellationHandle = ConnectionWaitCancellationHandle()
+        let connectionLogger = logger
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 let context = WaitForConnectionContext(continuation: continuation)
@@ -3450,6 +4104,7 @@ public class P2PDiscoveryService: BaseManager {
                     case .waiting(let error):
                         let path = connection.currentPath
                         if context.shouldReportWaiting() {
+                            connectionLogger.info("bootstrap-control-waiting index=\(attemptIndex) \(Self.bootstrapConnectionWaitingSummary(error, path: path), privacy: .public)")
                             RemoteControlSmokeStatusWriter.append(
                                 "bootstrap-control-waiting index=\(attemptIndex) endpointClass=\(Self.smokeEndpointClass(endpoint)) \(Self.bootstrapConnectionWaitingSummary(error, path: path))"
                             )
@@ -3622,19 +4277,24 @@ public class P2PDiscoveryService: BaseManager {
         policy: CryptoProviderFactory.SelectionPolicy
     ) async -> [CryptoSuite] {
         await Task.detached(priority: .utility) {
-            CryptoProviderFactory.make(policy: policy).supportedSuites
+            // Bootstrap must request the same key family as the actual LAN
+            // handshake, including an explicitly admitted Q provider.
+            P2PConnection.makeHandshakeCryptoProvider(policy: policy).supportedSuites
         }.value
     }
 
-    private static func preferredStrictPQCOutboundTargetSuite() async -> CryptoSuite? {
+    static func preferredStrictPQCOutboundTargetSuite() async -> CryptoSuite? {
         await cryptoProviderSupportedSuites(policy: .requirePQC)
             .first(where: { $0.isPQCGroup && $0.isNegotiable })?
             .canonicalKEMSuite
     }
 
-    private static func signedLANRefreshRequestedSuites(preferredTargetSuite: CryptoSuite?) async -> [CryptoSuite] {
+    static func signedLANRefreshRequestedSuites(preferredTargetSuite: CryptoSuite?) async -> [CryptoSuite] {
+        if preferredTargetSuite?.canonicalKEMSuite == .qperiaptABI2PolicyBound {
+            return [.qperiaptABI2PolicyBound]
+        }
         let providerSuites = await cryptoProviderSupportedSuites(policy: .requirePQC)
-            .filter { $0.isPQCGroup && $0.isNegotiable }
+            .filter { $0.isPQCGroup && $0.isNegotiable && $0.canonicalKEMSuite != .qperiaptABI2PolicyBound }
             .map(\.canonicalKEMSuite)
         var suites = providerSuites
         if let preferred = preferredTargetSuite?.canonicalKEMSuite, preferred.isNegotiable, preferred.isPQCGroup {
@@ -3688,12 +4348,8 @@ public class P2PDiscoveryService: BaseManager {
         return trustedPeerKEMSuites.contains(where: { $0.isPQCGroup })
     }
 
-    private static func suiteSupportsTargetKEM(_ availableSuite: CryptoSuite, target: CryptoSuite) -> Bool {
-        if availableSuite == target { return true }
-        if availableSuite.canonicalKEMSuite == target.canonicalKEMSuite { return true }
-        if target.isHybrid { return availableSuite.isHybrid }
-        if availableSuite.isHybrid { return target.isHybrid }
-        return false
+    static func suiteSupportsTargetKEM(_ availableSuite: CryptoSuite, target: CryptoSuite) -> Bool {
+        availableSuite.canonicalKEMSuite == target.canonicalKEMSuite
     }
 
     private static func signedRefreshEvidenceSatisfiesStrictPQC(
@@ -3852,7 +4508,11 @@ public class P2PDiscoveryService: BaseManager {
         return stableCandidates.count == 1 ? stableCandidates[0] : nil
     }
 
-    private static func bootstrapEndpointDigest(for device: DiscoveredDevice) -> String? {
+    private static func bootstrapEndpointDigest(for device: DiscoveredDevice, usbRoute: P2PUSBControlRoute? = nil) -> String? {
+        if let usbRoute {
+            let material = usbRoute.digestMaterial(peerID: device.deviceId ?? "")
+            return SHA256.hash(data: Data(material.utf8)).map { String(format: "%02x", $0) }.joined()
+        }
         let material = [
             device.uniqueIdentifier,
             device.ipv4,
@@ -5545,15 +6205,21 @@ public class P2PDiscoveryService: BaseManager {
             // 重要：P2PDiscoveryService 是 @MainActor；入站读取/握手必须放到后台，
             // 否则主线程繁忙时会导致对端握手超时并主动断开。
             let sessionId = UUID()
+            let classicTransferLifetime = ClassicTransferSessionRegistry.SessionLifetime()
+            let audioCarrier = P2PAudioCarrier(connection: connection, controlTransport: .network)
             registerInboundControlSession(
                 id: sessionId,
-                connection: connection
+                connection: connection,
+                classicTransferLifetime: classicTransferLifetime,
+                audioCarrier: audioCarrier
             )
             let task = Task.detached(priority: .userInitiated) { [weak self] in
                 guard let self else { return }
                 await self.handleInboundControlChannel(
                     connection,
-                    sessionId: sessionId
+                    sessionId: sessionId,
+                    classicTransferLifetime: classicTransferLifetime,
+                    audioCarrier: audioCarrier
                 )
             }
             attachInboundControlSessionTask(task, id: sessionId)
@@ -5637,16 +6303,17 @@ public class P2PDiscoveryService: BaseManager {
     }
 
     @available(macOS 14.0, iOS 17.0, *)
-    private nonisolated static func localSOAPeerIdBytes() async throws -> Data {
-        let deviceId = try await SelfIdentityProvider.shared
-            .existingProtocolIdentityDeviceIdReadOnly()
-        return soaPeerIdBytes(from: deviceId)
+    private nonisolated static func localSOAIdentitySnapshot() async throws -> (deviceID: String, peerID: Data) {
+        let deviceID = try await SelfIdentityProvider.shared.existingProtocolIdentityDeviceIdReadOnly()
+        return (deviceID, soaPeerIdBytes(from: deviceID))
     }
 
     /// 入站控制通道处理（回退 HandshakeDriver，与 iOS 互通）
     nonisolated private func handleInboundControlChannel(
         _ connection: NWConnection,
-        sessionId inboundControlSessionId: UUID
+        sessionId inboundControlSessionId: UUID,
+        classicTransferLifetime: ClassicTransferSessionRegistry.SessionLifetime,
+        audioCarrier: P2PAudioCarrier
     ) async {
         let logger = Logger(subsystem: "com.skybridge.Compass", category: "P2PInboundHandshake")
         var didMarkEstablished = false
@@ -5721,6 +6388,7 @@ public class P2PDiscoveryService: BaseManager {
         // Cache the committed identity for this socket so rekey reuses the same
         // listener-generation authority.
         var localSOAPeerId: Data?
+        var localProtocolDeviceId: String?
         var initialHandshakeProcessingLease: ProvisionalInboundProcessingLease?
         var expectedRemoteSOAPeerId: Data?
         // Protocol-grade gate:
@@ -5730,11 +6398,17 @@ public class P2PDiscoveryService: BaseManager {
         var sessionKeys: SessionKeys?
         var previousSessionKeysBeforeRekey: SessionKeys?
         var previousAuthenticatedRemoteAuthorityBeforeRekey: AuthenticatedRemoteAuthority?
+        var authenticatedPeerBinding: AuthenticatedHandshakePeerBinding?
+        var authenticatedLocalBinding: ProtocolIdentityBinding?
+        var previousPeerBindingBeforeRekey: AuthenticatedHandshakePeerBinding?
+        var previousLocalBindingBeforeRekey: ProtocolIdentityBinding?
+        var previousAudioHistoryBeforeRekey: P2PAudioCarrier.StreamHistory?
         var lastPairingIdentityExchangeReply: PairingIdentityExchangeReplyThrottleState?
         var didSendPostAuthPairingIdentityExchange = false
         var authenticatedRemoteAuthority: AuthenticatedRemoteAuthority?
         var latestPeerFileTransferPort: UInt16?
-        struct PairingOperationState {
+        var latestPeerDisplayName: String?
+        struct PairingOperationState: Sendable {
             var sessionKeys: SessionKeys?
             var authority: AuthenticatedRemoteAuthority?
             var isRekeying: Bool
@@ -5753,6 +6427,7 @@ public class P2PDiscoveryService: BaseManager {
 	        let peerDiagnosticLabel = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(peer.deviceId)
 	        let endpointDiagnosticLabel = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(endpointDescriptionForPresence)
 	        var latestPeerCapabilities: [String] = []
+        var acceptedClassicCapabilities: ClassicTransferPeerCapabilities?
 
         func refreshInboundControlSessionAliases() async {
             await MainActor.run {
@@ -5849,7 +6524,7 @@ public class P2PDiscoveryService: BaseManager {
             ) ?? "P2P Peer"
         }
 
-        func encryptAppPayload(_ plaintext: Data, with keys: SessionKeys) throws -> Data {
+        @Sendable func encryptAppPayload(_ plaintext: Data, with keys: SessionKeys) throws -> Data {
             let key = SymmetricKey(data: keys.sendKey)
             let box = try AES.GCM.seal(plaintext, using: key)
             guard let combined = box.combined else {
@@ -5876,10 +6551,10 @@ public class P2PDiscoveryService: BaseManager {
                 return
             }
             productConnectivityAttemptOwner = nil
-            guard let sessionReference = P2PEvidenceReference.sessionIncarnation(
-                sessionID: keys.sessionId,
-                transcriptHash: keys.transcriptHash
-            ) else {
+            guard let driverSnapshot = driver,
+                  let confirmation = await driverSnapshot
+                    .authenticatedFinishedConfirmation(matching: keys),
+                  driver === driverSnapshot else {
                 _ = await MainActor.run {
                     ProductReleaseEvidenceRecorder.shared.failConnectivityAttempt(
                         owner: owner,
@@ -5888,6 +6563,7 @@ public class P2PDiscoveryService: BaseManager {
                 }
                 return
             }
+            let sessionReference = confirmation.sessionReference
             let recorded = await MainActor.run {
                 ProductReleaseEvidenceRecorder.shared.authenticateConnectivityAttempt(
                     owner: owner,
@@ -5908,11 +6584,11 @@ public class P2PDiscoveryService: BaseManager {
         func publishInboundPresence(keys: SessionKeys) async -> Bool {
             let suite = keys.negotiatedSuite
             let kind = cryptoKind(for: suite)
-            let peerId = trimmedIdentifier(declaredDeviceIdForVerification) ?? peerIdForPresence
-            let advertisedTransferPort = latestPeerFileTransferPort.flatMap { port -> Int? in
-                let value = Int(port)
-                return (1...65535).contains(value) ? value : nil
-            }
+            let verifiedPeerId = trimmedIdentifier(declaredDeviceIdForVerification)
+            let peerId = verifiedPeerId ?? peerIdForPresence
+            let advertisedTransferPort = latestPeerFileTransferPort
+            let peerDisplayName = latestPeerDisplayName
+            let previousPresenceLease = presenceLease
 
             let publishedLease: ConnectionPresenceService.PresenceLease? = await MainActor.run {
                 () -> ConnectionPresenceService.PresenceLease? in
@@ -5923,7 +6599,7 @@ public class P2PDiscoveryService: BaseManager {
                     unifiedDevices: UnifiedOnlineDeviceSnapshotAccess.snapshot()
                 )
                 resolved.name = resolvedDisplayName(
-                    raw: resolved.name,
+                    raw: peerDisplayName ?? resolved.name,
                     model: nil,
                     platform: nil,
                     fallbackPeerId: peerId
@@ -5931,32 +6607,25 @@ public class P2PDiscoveryService: BaseManager {
 
                 guard let displayAddress = resolved.displayAddress?
                     .trimmingCharacters(in: .whitespacesAndNewlines),
-                    !displayAddress.isEmpty,
-                    (1...65535).contains(advertisedTransferPort ?? resolved.transferPort) else {
+                    !displayAddress.isEmpty else {
                     logger.error(
                         "❌ inbound establish route missing: peer=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(peerId), privacy: .public) endpoint=\(endpointDiagnosticLabel, privacy: .public)"
                     )
                     return nil
                 }
-                let transferPort = advertisedTransferPort ?? resolved.transferPort
-
-                let routeDescriptor = ConnectionPresenceService.PresenceRouteDescriptor(
-                    peerId: peerId,
-                    deviceName: resolved.name,
-                    displayAddress: displayAddress,
-                    transferAddress: displayAddress,
-                    transferPort: transferPort,
-                    routeSource: .inbound,
-                    connectedAt: Date()
-                )
-
-                guard let lease = ConnectionPresenceService.shared.publishConnectedOwnedAtomically(
+                let routeDescriptor = resolved.transferRouteDescriptor(
+                    peerId: peerId, advertisedPort: advertisedTransferPort, connectedAt: Date())
+                // The authenticated control connection is already usable for native audio.
+                // Publish its owned presence even if the phone exposes no separate file listener.
+                guard let lease = ConnectionPresenceService.shared.markConnectedOwned(
                     peerId: peerId,
                     displayName: resolved.name,
                     address: displayAddress,
                     cryptoKind: kind,
                     suite: suite.rawValue,
-                    routeDescriptor: routeDescriptor
+                    routeDescriptor: routeDescriptor,
+                    controlTransport: .network,
+                    replacing: previousPresenceLease
                 ) else {
                     logger.error("❌ inbound establish contract incomplete: peer=\(peerId, privacy: .public)")
                     return nil
@@ -5965,17 +6634,26 @@ public class P2PDiscoveryService: BaseManager {
                 ConnectionPresenceService.shared.clearRekeying(peerId: peerId)
                 #if os(macOS)
                 // `UnifiedOnlineDeviceManager` 是 macOS 侧在线设备聚合器（UI 展示用），不参与 P2P 协议决策。
-                UnifiedOnlineDeviceManager.shared.markDeviceAsConnected(
-                    peerId: peerId,
-                    displayName: resolved.name,
-                    cryptoKind: kind,
-                    suite: suite.rawValue,
-                    guardStatus: "守护中"
-                )
+                // Endpoint-only presence is temporary. Persist a device row
+                // only after the signed identity has supplied its stable ID.
+                if verifiedPeerId != nil {
+                    UnifiedOnlineDeviceManager.shared.markDeviceAsConnected(
+                        peerId: peerId,
+                        displayName: resolved.name,
+                        cryptoKind: kind,
+                        suite: suite.rawValue,
+                        guardStatus: "守护中"
+                    )
+                }
                 #endif
                 return lease
             }
-            guard let publishedLease else { return false }
+            guard let publishedLease else {
+                // First publication may await identity/route metadata. A
+                // previously published socket must never reclaim a lost owner.
+                if previousPresenceLease != nil { connection.cancel() }
+                return false
+            }
             presenceLease = publishedLease
             await authenticateProductConnectivityAttemptIfReady(keys: keys)
             return true
@@ -6002,6 +6680,7 @@ public class P2PDiscoveryService: BaseManager {
                 deviceName: LocalDevicePresentation.sanitizedDisplayNameCandidate(payload.deviceName)
             )
             guard !identity.isEmpty else { return }
+            latestPeerDisplayName = identity.deviceName
             let aliases = validatedAuthority.authorizedDeviceIds + [
                 LocalDevicePresentation.sanitizedDisplayNameCandidate(payload.deviceName),
                 endpointHostOrIPForClassicTransfer,
@@ -6041,7 +6720,7 @@ public class P2PDiscoveryService: BaseManager {
             )
         }
 
-        func makeLocalPairingIdentityExchangeMessage(
+        @Sendable func makeLocalPairingIdentityExchangeMessage(
             reason: String
         ) async -> (
             message: AppMessage,
@@ -6086,7 +6765,7 @@ public class P2PDiscoveryService: BaseManager {
 
             let endpoints = ServiceEndpointRegistry.shared.snapshot()
             let localIdentity = RemoteControlSecurityNoticeCenter.cachedLocalIdentitySnapshot()
-            let localPresentation = LocalDevicePresentation.current()
+            let localPresentation = LocalDevicePresentation.currentProtocolMetadata()
             let protocolIdentityPublicKeys: [AppMessage.ProtocolIdentityPublicKeyInfo]
             do {
                 protocolIdentityPublicKeys = try await Self.localProtocolIdentityPublicKeysForPairing()
@@ -6107,7 +6786,7 @@ public class P2PDiscoveryService: BaseManager {
                 chip: nil,
                 accountDisplayName: localIdentity?.accountDisplayName,
                 nebulaId: localIdentity?.nebulaId,
-                capabilities: ["clipboard_sync", "file_transfer", "remote_desktop", "remote_control"],
+                capabilities: ["clipboard_sync", "file_transfer", ClassicTransferApprovalContract.capability, "remote_desktop", "remote_control"],
                 fileTransferPort: endpoints.fileTransferPort,
                 remoteControlPort: endpoints.remoteControlPort
             ))
@@ -6118,6 +6797,27 @@ public class P2PDiscoveryService: BaseManager {
                 fileTransferPort: endpoints.fileTransferPort,
                 remoteControlPort: endpoints.remoteControlPort
             )
+        }
+
+        @Sendable func publishCurrentPairingIdentity(_ message: AppMessage, keys: SessionKeys) async throws {
+            guard case .pairingIdentityExchange(let prepared) = message else {
+                throw P2PAudioCapabilityPublicationError.identityUnavailable
+            }
+            try await P2PAudioCapabilityPublication.send(over: connection) { enqueue in
+                let payload = prepared.replacingAudioReceiveCapabilities(
+                    self.incomingAudioChannelRegistry.advertisedReceiveCapabilities)
+                try pairingOperationState.withLock { current in
+                    guard let live = current.sessionKeys, live.sessionId == keys.sessionId,
+                          live.sendKey == keys.sendKey, live.receiveKey == keys.receiveKey,
+                          live.transcriptHash == keys.transcriptHash else {
+                        throw P2PConnectionError.staleAuthenticatedFrame
+                    }
+                    let plaintext = try JSONEncoder().encode(AppMessage.pairingIdentityExchange(payload))
+                    let ciphertext = try encryptAppPayload(plaintext, with: live)
+                    let padded = try TrafficPadding.wrapForP2PControlFrame(ciphertext, label: "tx")
+                    try enqueue(P2PControlFramePolicy.frame(body: padded))
+                }
+            }
         }
 
         func sendInboundPostAuthPairingIdentityExchange(keys: SessionKeys) async throws {
@@ -6132,19 +6832,34 @@ public class P2PDiscoveryService: BaseManager {
                 )
             }
 
-            let outPlain = try JSONEncoder().encode(localIdentity.message)
-            let outCipher = try encryptAppPayload(outPlain, with: keys)
-            let outPadded = try TrafficPadding.wrapForP2PControlFrame(
-                outCipher,
-                label: "tx"
-            )
-            try await sendFramed(outPadded)
+            try await publishCurrentPairingIdentity(localIdentity.message, keys: keys)
 	            didSendPostAuthPairingIdentityExchange = true
 	            let localDiagnosticLabel = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(localIdentity.localId)
 	            logger.info(
 	                "🔑 inbound post-auth pairingIdentityExchange sent: peer=\(peerDiagnosticLabel, privacy: .public) local=\(localDiagnosticLabel, privacy: .public) keys=\(localIdentity.kemKeyCount, privacy: .public) fileTransferPort=\(localIdentity.fileTransferPort.map(String.init) ?? "-", privacy: .public) remoteControlPort=\(localIdentity.remoteControlPort.map(String.init) ?? "-", privacy: .public)"
 	            )
 	        }
+
+        await MainActor.run {
+            let refresh = P2PAudioCapabilityRefresh(operation: {
+                let current = pairingOperationState.withLock { $0 }
+                // Pending handshakes publish current flags in their normal
+                // pairing response, rather than creating another trust request.
+                guard !current.isRekeying, let keys = current.sessionKeys,
+                      audioCarrier.hasCommittedPeer else { return }
+                guard let local = await makeLocalPairingIdentityExchangeMessage(reason: "audio receiver changed") else {
+                    throw P2PAudioCapabilityPublicationError.identityUnavailable
+                }
+                try await publishCurrentPairingIdentity(local.message, keys: keys)
+            }, reportFailure: { error in
+                logger.error("Inbound audio capability refresh failed: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
+            })
+            guard var session = self.inboundControlSessions[inboundControlSessionId] else {
+                refresh.retire(); return
+            }
+            session.audioCapabilityRefresh = refresh
+            self.inboundControlSessions[inboundControlSessionId] = session
+        }
 
         func refreshInboundRouteFromHeartbeat(
             _ payload: AppMessage.HeartbeatPayload,
@@ -6209,7 +6924,8 @@ public class P2PDiscoveryService: BaseManager {
                 aliases: aliases,
                 endpointHostOrIP: endpointHostOrIPForClassicTransfer,
                 capabilities: latestPeerCapabilities,
-                sessionKeys: keys
+                sessionKeys: keys,
+                capabilityEvidence: acceptedClassicCapabilities
             )
             if let activeLease = classicTransferSessionLease {
                 guard await ClassicTransferSessionRegistry.shared
@@ -6221,8 +6937,14 @@ public class P2PDiscoveryService: BaseManager {
                     return false
                 }
             } else {
-                classicTransferSessionLease = await ClassicTransferSessionRegistry.shared
-                    .upsertOwned(session: snapshot)
+                guard let lease = await ClassicTransferSessionRegistry.shared.upsertOwned(
+                    session: snapshot, lifetime: classicTransferLifetime
+                ) else {
+                    logger.error("⛔️ inbound classic transfer owner was retired; closing stale session")
+                    connection.cancel()
+                    return false
+                }
+                classicTransferSessionLease = lease
             }
             return true
         }
@@ -6250,9 +6972,10 @@ public class P2PDiscoveryService: BaseManager {
                     // but retain the admission slot until signing and response
                     // delivery complete.
                     let processingStage: P2PInboundAdmissionStage
-                    if case .protocolIdentityBindingConfirm = plaintextControl {
+                    switch plaintextControl {
+                    case .protocolIdentityBindingConfirm, .handshakeConfigurationRequest:
                         processingStage = .protocolIdentityConfirmation
-                    } else {
+                    default:
                         processingStage = .bootstrapCrypto
                     }
                     let processingLease = await MainActor.run {
@@ -6332,10 +7055,20 @@ public class P2PDiscoveryService: BaseManager {
                     return
                 }
 
-                if let currentDriver = driver,
-                   let messageA = try? HandshakeMessageA.decode(from: frame) {
-                    let driverState = await currentDriver.getCurrentState()
-                    if Self.shouldRestartInboundHandshakeForRekey(state: driverState, frame: frame) {
+                // A failed rekey retains the old keys but retires its driver. A subsequent
+                // MessageA must still suspend audio and snapshot that exact old epoch.
+                let rekeyMessageA: HandshakeMessageA?
+                if let candidate = try? HandshakeMessageA.decode(from: frame) {
+                    if let currentDriver = driver {
+                        let driverState = await currentDriver.getCurrentState()
+                        rekeyMessageA = Self.shouldRestartInboundHandshakeForRekey(state: driverState, frame: frame) ? candidate : nil
+                    } else { rekeyMessageA = sessionKeys != nil ? candidate : nil }
+                } else { rekeyMessageA = nil }
+                if let messageA = rekeyMessageA {
+                        audioCarrier.invalidate()
+                        previousAudioHistoryBeforeRekey = audioCarrier.streamHistory()
+                        previousPeerBindingBeforeRekey = authenticatedPeerBinding
+                        previousLocalBindingBeforeRekey = authenticatedLocalBinding
                         let fromSuite = sessionKeys?.negotiatedSuite.rawValue ?? "?"
                         let fromKind = sessionKeys.map { cryptoKind(for: $0.negotiatedSuite) } ?? "?"
                         let toSuite = messageA.supportedSuites.first?.rawValue ?? "?"
@@ -6368,21 +7101,36 @@ public class P2PDiscoveryService: BaseManager {
                         pairingOperationState.withLock { $0.isRekeying = true }
                         driver = nil
                         sessionKeys = nil
-                    }
                 }
 
                 if let keys = sessionKeys {
                     var handledAuthenticatedAppFrame = false
                     do {
                         let plaintext = try decryptAppPayload(frame, with: keys)
-                        let msg = try AppMessage.decodeWireMessage(from: plaintext)
+                        let decoded = try P2PInboundControlPayload.decode(plaintext, keys: keys, audioCarrier: audioCarrier)
+                        if case .audioOfferNeedsChannel(let offer) = decoded {
+                            // Exactly one main-actor admission attempt; no new reader, task queue
+                            // or codec. The registry binds the offer before invoking the handler.
+                            await MainActor.run { self.deliverIncomingAudioOffer(offer, keys: keys, carrier: audioCarrier) }
+                            continue
+                        }
+                        if case .audioUnavailable = decoded {
+                            logger.debug("Audio frame rejected: no admitted audio consumer")
+                            continue
+                        }
+                        guard case .appMessage(let msg) = decoded else { continue }
                         handledAuthenticatedAppFrame = true
                         switch msg {
+                        case .usbPeerDiscoveryRequest, .usbPeerDiscoveryResponse, .handshakeConfigurationRequest, .handshakeConfigurationResponse:
+                            throw HandshakeConfigurationError.invalidRequest
+
                             case .kemRefreshRequest, .signedKEMRefresh, .kemRefreshFailure,
                                  .protocolIdentityBindingRequest, .signedProtocolIdentityBinding,
                                  .protocolIdentityBindingConfirm, .signedProtocolIdentityBindingFinalAck:
                                 break
                             case .pairingIdentityExchange(let payload):
+                                audioCarrier.withdrawChangedPairing(deviceID: payload.deviceId,
+                                    capabilities: Set(payload.capabilities ?? []))
                                 guard let payload = validatedPairingIdentityPayload(payload) else {
                                     connection.cancel()
                                     return
@@ -6509,6 +7257,21 @@ public class P2PDiscoveryService: BaseManager {
 		                                logger.info(
 		                                    "🔑 已提交对端 authority-bound KEM：declared=\(payloadDiagnosticLabel, privacy: .public) peer=\(peerDiagnosticLabel, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"
 		                                )
+			                                guard await PairingIdentityExchangeCommitCoordinator.isCurrent(
+			                                    commitReceipt, transportIsCurrent: transportIsCurrent
+			                                ) else { return true }
+                                        let acceptsAudio = try audioCarrier.acceptCommittedPairing(
+                                            deviceID: validatedAuthority.declaredDeviceId,
+                                            capabilities: Set(payload.capabilities ?? []), keys: keys,
+                                            authority: pairingAuthorityLease
+                                        )
+                                        if acceptsAudio {
+                                            await MainActor.run { self.deliverIncomingAudioChannel(audioCarrier) }
+                                        }
+			                                acceptedClassicCapabilities = try ClassicTransferPeerCapabilities(
+			                                    acceptedCapabilities: payload.capabilities,
+			                                    sessionID: keys.sessionId, transcriptHash: keys.transcriptHash
+			                                )
 			                                guard await publishInboundClassicTransferSession(keys: keys) else {
 			                                    return true
 		                                }
@@ -6527,7 +7290,6 @@ public class P2PDiscoveryService: BaseManager {
                                 guard let localIdentity = await makeLocalPairingIdentityExchangeMessage(reason: "bootstrap reply") else {
                                     return false
                                 }
-                                let outPlain = try JSONEncoder().encode(localIdentity.message)
                                 let now = Date()
                                 let requestKey = Self.pairingIdentityExchangeRequestKey(payload)
                                 if Self.shouldSendPairingIdentityExchangeReply(
@@ -6535,12 +7297,7 @@ public class P2PDiscoveryService: BaseManager {
                                     requestKey: requestKey,
                                     now: now
                                 ) {
-                                    let outCipher = try encryptAppPayload(outPlain, with: keys)
-                                    let outPadded = try TrafficPadding.wrapForP2PControlFrame(
-                                        outCipher,
-                                        label: "tx"
-                                    )
-                                    try await sendFramed(outPadded)
+                                    try await publishCurrentPairingIdentity(localIdentity.message, keys: keys)
                                     guard await PairingIdentityExchangeCommitCoordinator.isCurrent(
                                         commitReceipt,
                                         transportIsCurrent: transportIsCurrent
@@ -6561,6 +7318,14 @@ public class P2PDiscoveryService: BaseManager {
                                 return
                             }
                             case .ping(let payload):
+                                // An authenticated keepalive proves liveness of this exact owner;
+                                // it must not let an active file authority expire after 120 seconds.
+                                if let activeLease = classicTransferSessionLease,
+                                   !(await ClassicTransferSessionRegistry.shared.refreshIfOwned(activeLease)) {
+                                    logger.warning("⛔️ inbound control keepalive rejected: file-session owner expired or replaced")
+                                    connection.cancel()
+                                    return
+                                }
                                 let reply = AppMessage.pong(.init(id: payload.id))
                                 let outPlain = try JSONEncoder().encode(reply)
                                 let outCipher = try encryptAppPayload(outPlain, with: keys)
@@ -6704,7 +7469,9 @@ public class P2PDiscoveryService: BaseManager {
                                 frame,
                                 cachedLocalSOAPeerId: localSOAPeerId,
                                 loadLocalSOAPeerId: {
-                                    try await Self.localSOAPeerIdBytes()
+                                    let snapshot = try await Self.localSOAIdentitySnapshot()
+                                    localProtocolDeviceId = snapshot.deviceID
+                                    return snapshot.peerID
                                 }
                             ) else {
                                 connection.cancel()
@@ -6811,10 +7578,10 @@ public class P2PDiscoveryService: BaseManager {
 
                         if inboundProtocolIdentity.algorithm != .ed25519 {
                             selection = policy.requirePQC ? .requirePQC : .preferPQC
-                            cryptoProvider = CryptoProviderFactory.makeInboundPQCResponderProvider(
-                                policy: selection,
-                                peerSupportedSuites: messageA.supportedSuites
-                            )
+                            let inventory = try CryptoProviderFactory.captureLANInventory(
+                                identityAlgorithm: inboundProtocolIdentity.algorithm, policy: PQCModePolicyStore.standard.snapshot())
+                            let plan = try inventory.selecting(messageA.supportedSuites.map(\.wireId))
+                            cryptoProvider = plan.provider
                             let localPQCSuites = CryptoProviderFactory.handshakeOfferedPQCSuites(using: cryptoProvider)
                             if let rejection = StrictPQCAdmissionGate.inboundRejection(
                                 policy: policy,
@@ -6867,6 +7634,7 @@ public class P2PDiscoveryService: BaseManager {
                                 cryptoPolicy: cryptoPolicy,
                                 trustProvider: inboundTrustProvider,
                                 localSOAPeerId: activeLocalSOAPeerId,
+                                localProtocolDeviceId: localProtocolDeviceId,
                                 expectedRemoteSOAPeerId: expectedRemoteSOAPeerId,
                                 authenticatedIncomingEstablishedPolicy: effectivePolicy.requirePQC
                                     ? .replaceAuthenticated
@@ -6953,6 +7721,16 @@ public class P2PDiscoveryService: BaseManager {
                         sessionKeys = previousKeys
                         let restoredAuthority = previousAuthenticatedRemoteAuthorityBeforeRekey
                         authenticatedRemoteAuthority = restoredAuthority
+                        authenticatedPeerBinding = previousPeerBindingBeforeRekey
+                        authenticatedLocalBinding = previousLocalBindingBeforeRekey
+                        guard let restoredBinding = authenticatedPeerBinding,
+                              let restoredHistory = previousAudioHistoryBeforeRekey,
+                              audioCarrier.publishFinished(keys: previousKeys, peerBinding: restoredBinding,
+                                localBinding: authenticatedLocalBinding, restoring: restoredHistory) else {
+                            connection.cancel(); return
+                        }
+                        previousPeerBindingBeforeRekey = nil; previousLocalBindingBeforeRekey = nil
+                        previousAudioHistoryBeforeRekey = nil
                         pairingOperationState.withLock {
                             $0.sessionKeys = previousKeys
                             $0.authority = restoredAuthority
@@ -6975,6 +7753,8 @@ public class P2PDiscoveryService: BaseManager {
                         "⚠️ 入站握手失败，等待同连接重试: peer=\(peerDiagnosticLabel, privacy: .public) reason=\(reason.diagnosticReasonCode, privacy: .public)"
                     )
                     authenticatedRemoteAuthority = nil
+                    authenticatedPeerBinding = nil; authenticatedLocalBinding = nil
+                    audioCarrier.invalidate()
                     pairingOperationState.withLock {
                         $0.authority = nil
                         $0.isRekeying = false
@@ -6994,14 +7774,16 @@ public class P2PDiscoveryService: BaseManager {
                         }
                     }
                 case .established(let keys):
-                    guard let resolvedRemoteAuthority = await activeDriver
-                        .getAuthenticatedRemoteAuthority() else {
+                    guard let resolvedPeerBinding = await activeDriver.getAuthenticatedHandshakePeerBinding() else {
                         logger.error(
                             "⛔️ inbound established without authenticated protocol authority; closing session peer=\(peerDiagnosticLabel, privacy: .public)"
                         )
                         connection.cancel()
                         return
                     }
+                    let resolvedRemoteAuthority = resolvedPeerBinding.authority
+                    let resolvedLocalBinding = await activeDriver.getAuthenticatedLocalIdentityBinding(matching: keys)
+                    try Task.checkCancellation()
                     authenticatedRemoteAuthority = resolvedRemoteAuthority
                     // Bind invalidation ownership as soon as Finished exports
                     // the exact authority. Revocation must not wait for a
@@ -7019,16 +7801,25 @@ public class P2PDiscoveryService: BaseManager {
                             return
                         }
                     }
-                    establishedArbiterLease = newArbiterLease
-                    previousEstablishedArbiterLeaseBeforeRekey = nil
-                    sessionKeys = keys
-                    pairingOperationState.withLock {
-                        $0.sessionKeys = keys
-                        $0.authority = resolvedRemoteAuthority
-                        $0.isRekeying = false
+                    let modePolicy = try await activeDriver.frozenPQCModePolicy()
+                    try PQCModePolicyStore.standard.withCurrent(modePolicy) {
+                        guard audioCarrier.publishFinished(keys: keys, peerBinding: resolvedPeerBinding,
+                            localBinding: resolvedLocalBinding) else { throw P2PAudioTransportError.staleOwner }
+                        authenticatedPeerBinding = resolvedPeerBinding
+                        authenticatedLocalBinding = resolvedLocalBinding
+                        establishedArbiterLease = newArbiterLease
+                        previousEstablishedArbiterLeaseBeforeRekey = nil
+                        sessionKeys = keys
+                        pairingOperationState.withLock {
+                            $0.sessionKeys = keys
+                            $0.authority = resolvedRemoteAuthority
+                            $0.isRekeying = false
+                        }
                     }
                     previousSessionKeysBeforeRekey = nil
                     previousAuthenticatedRemoteAuthorityBeforeRekey = nil
+                    previousPeerBindingBeforeRekey = nil; previousLocalBindingBeforeRekey = nil
+                    previousAudioHistoryBeforeRekey = nil
                     if let processingLease = initialHandshakeProcessingLease {
                         try Task.checkCancellation()
                         guard await MainActor.run(body: {
@@ -7095,6 +7886,8 @@ public class P2PDiscoveryService: BaseManager {
         }
 
         await runSession()
+        audioCarrier.finish()
+        classicTransferLifetime.invalidate()
         await failProductConnectivityAttempt(
             Task.isCancelled ? .cancelled : .transportClosed
         )
@@ -7874,5 +8667,71 @@ fileprivate func P2P_ExtractIPAddress(from data: Data) -> String {
         default:
             return "未知地址"
         }
+    }
+}
+
+
+extension P2PDiscoveryService {
+    public func exchangeHandshakeConfiguration(
+        for device: DiscoveredDevice, action: HandshakeConfigurationRequest.Action,
+        profile: HandshakeProfile? = nil, previous: HandshakeConfigurationResponse? = nil,
+        usbUDID: String? = nil, fileDecision: RemoteFileApprovalDecision? = nil
+    ) async throws -> (response: HandshakeConfigurationResponse, transport: String) {
+        let device = usbUDID == nil ? resolveLatestConnectableDevice(from: device) : device
+        guard let target = Self.uniqueStableProtocolIdentityCandidate(from: Self.stableProtocolIdentityCandidates(for: device)) else {
+            throw HandshakeConfigurationError.identityMismatch
+        }
+        let pins = await DefaultHandshakeTrustProvider().currentPathTrustedFingerprints(for: target)
+        let advertised = authenticatedConnection(to: device)?.authenticatedProtocolFingerprint ?? device.pubKeyFP?.lowercased()
+        let fingerprint: String
+        if let advertised {
+            guard pins.contains(advertised) else { throw HandshakeConfigurationError.identityMismatch }
+            fingerprint = advertised
+        } else if pins.count == 1, let pinned = pins.first { fingerprint = pinned }
+        else { throw HandshakeConfigurationError.peerUntrusted }
+        let identity = try await NativeHandshakeConfiguration.identity()
+        if let previous {
+            guard previous.responder.deviceID == HandshakeConfigurationWire.canonicalDeviceID(target), previous.responder.fingerprint == fingerprint else {
+                throw HandshakeConfigurationError.identityMismatch
+            }
+        }
+        var request = HandshakeConfigurationRequest(action: action, requester: identity,
+            targetDeviceID: target, targetFingerprint: fingerprint, profile: profile,
+            expectedRevision: action == .apply ? previous?.snapshot?.revision : nil,
+            challenge: action.isReadOnly || action == .fileDecide ? nil : previous?.challenge, fileDecision: fileDecision)
+        request.signature = try await NativeHandshakeConfiguration.sign(request.signingData())
+        try request.validate()
+        let usb: String?
+        if let usbUDID { usb = usbUDID } else { usb = try await preferredUSBUDID(for: device) }
+        var endpoints: [NWEndpoint]
+        if usb != nil { endpoints = [.unix(path: USBMultiplexTransport.socketPath)] }
+        else {
+            endpoints = try await liveBonjourEndpointAttemptsAwaitingHydration(for: device, serviceTypes: [BonjourInteropContract.controlServiceType])
+            if !ApplePeerConnectivityPolicy.requiresLiveBonjourRoute(platform: P2PDiscoveryBonjourPolicy.advertisementPlatform(for: device)) {
+                endpoints += makeHostFallbackEndpoints(device: device, portValue: resolvedTCPControlPort(for: device))
+            }
+        }
+        guard !endpoints.isEmpty else { throw P2PDiscoveryError.noLiveControlRoute }
+        // A mutation is never automatically resent to another endpoint after an
+        // uncertain reply. Its single-use challenge cannot turn a retry into success.
+        if !action.isReadOnly { endpoints = Array(endpoints.prefix(1)) }
+        let exchange: BootstrapControlExchangeResult
+        do {
+            exchange = try await exchangeBootstrapControlMessage(.handshakeConfigurationRequest(request),
+                endpoints: Array(endpoints.prefix(3)), timeoutSeconds: action.isReadOnly ? 12 : 110,
+                targetHasStrongAuthority: true, usbRoute: usb.map { .apple(udid: $0) })
+        } catch {
+            if !action.isReadOnly { throw HandshakeConfigurationError.outcomeUnknown }
+            throw error
+        }
+        guard case .handshakeConfigurationResponse(let response) = exchange.response else {
+            throw HandshakeConfigurationError.peerUnsupported
+        }
+        try response.validate(for: request)
+        guard try await NativeHandshakeConfiguration.trusted(response.responder),
+              try await NativeHandshakeConfiguration.verify(response.signingData(), signature: response.signature, identity: response.responder) else {
+            throw HandshakeConfigurationError.signatureInvalid
+        }
+        return (response, usb == nil ? "network" : "usb")
     }
 }

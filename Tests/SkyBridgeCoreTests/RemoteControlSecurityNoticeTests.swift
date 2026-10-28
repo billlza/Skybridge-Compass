@@ -15,8 +15,8 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
 
     func testSecurityNoticeLocalizationContractCoversCodeShellGateAndAllLocales() throws {
         let requiredKeys = RemoteControlSecurityNoticeLocalizationContract.requiredKeys
-        XCTAssertEqual(requiredKeys.count, 20)
-        XCTAssertEqual(Set(requiredKeys).count, 20)
+        XCTAssertEqual(requiredKeys.count, 25)
+        XCTAssertEqual(Set(requiredKeys).count, 25)
 
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -163,6 +163,12 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
     }
 
     func testP2PAdmissionBlocksInputAndClipboardBeforeApproval() {
+        XCTAssertFalse(
+            RemoteControlSecurityAdmissionPolicy.allowsInboundPayload(
+                .sessionEnded,
+                isApproved: false
+            )
+        )
         XCTAssertFalse(
             RemoteControlSecurityAdmissionPolicy.allowsInboundPayload(
                 .mouseEvent,

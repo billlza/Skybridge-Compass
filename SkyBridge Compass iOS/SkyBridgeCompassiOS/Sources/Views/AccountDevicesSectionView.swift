@@ -3,20 +3,28 @@ import SkyBridgeProtocolCore
 
 /// 设备页顶部的「账号设备」区块（位于附近扫描之前）：同一账号下的全部设备（名称 / IP / 系统 / 在线状态）。
 ///
-/// 连接语义：局域网内发现且身份一致 → 打开该附近设备的详情页（走现有配对/连接流程）；仅跨网在线 → 提示使用连接码/二维码。
+/// 连接语义：优先有效账号路由，其次身份一致的附近设备；没有路由时提供扫码入口。
 /// iOS 是控制端，不会被别人控制：本机行标注「仅控制端」。
 @available(iOS 17.0, *)
 struct AccountDevicesSectionView: View {
     @ObservedObject private var presence = AccountPresenceService.shared
     @EnvironmentObject private var discoveryManager: DeviceDiscoveryManager
     @EnvironmentObject private var authManager: AuthenticationManager
+    @State private var removalSelection: AccountDeviceRecord?
+    @State private var selectionScope: UInt64 = 0
 
-    let onOpenNearbyDevice: (DiscoveredDevice) -> Void
-    let onOpenCrossNetworkConnect: () -> Void
+    var onConnectNearbyDevice: ((AccountDeviceRecord, DiscoveredDevice) -> Void)? = nil
+    var onConnectRoutedDevice: ((AccountDeviceRecord) -> Void)? = nil
+    var onOpenCrossNetworkConnect: (() -> Void)? = nil
+    var isConnectionInProgress = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
+            if let snapshot = presence.accountDevices,
+               let issue = AccountDevicePresentation.registrationIssueText(for: snapshot) {
+                notice(issue, tint: .orange)
+            }
             if let failure = presence.lastListFailure, presence.accountDevices != nil {
                 notice(
                     RuntimeLocalization.format("列表可能已过期（上次更新：%@）", [AccountDevicePresentation.relativeTimeText(from: presence.lastSuccessfulListAt)])
@@ -34,7 +42,20 @@ struct AccountDevicesSectionView: View {
                     tint: .orange
                 )
             }
+            if presence.lastRemovalFailure != nil { notice(RuntimeLocalization.string("accountDevices.remove.failed"), tint: .red) }
+            if presence.callerRemoved { notice(RuntimeLocalization.string("accountDevices.remove.selfRemoved"), tint: .orange) }
             content
+        }
+        .alert(RuntimeLocalization.string("accountDevices.remove.title"),
+               isPresented: Binding(get: { removalSelection != nil }, set: { if !$0 { removalSelection = nil } }),
+               presenting: removalSelection) { record in
+            Button(RuntimeLocalization.string("accountDevices.remove.confirm"), role: .destructive) {
+                let scope = selectionScope; removalSelection = nil
+                Task { await presence.removeDevice(record, expectedScope: scope) }
+            }
+            Button(RuntimeLocalization.string("accountDevices.remove.cancel"), role: .cancel) { removalSelection = nil }
+        } message: { record in
+            Text(RuntimeLocalization.format("accountDevices.remove.message", [AccountDevicePresentationPolicy.displayName(for: record)]))
         }
     }
 
@@ -42,15 +63,15 @@ struct AccountDevicesSectionView: View {
         HStack(spacing: 10) {
             Image(systemName: "person.crop.rectangle.stack.fill")
                 .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(.cyan)
+                .foregroundStyle(.tint)
             VStack(alignment: .leading, spacing: 2) {
                 Text(RuntimeLocalization.string("账号设备"))
                     .font(.headline)
-                    .foregroundColor(.white.opacity(0.9))
+                    .foregroundStyle(LiquidGlass.supportingText)
                 if let nebulaId = authManager.currentUser?.nebulaId, !nebulaId.isEmpty {
                     Text("Nebula ID · \(nebulaId)")
                         .font(.caption.monospaced())
-                        .foregroundColor(.white.opacity(0.5))
+                        .foregroundStyle(LiquidGlass.supportingText)
                         .lineLimit(1)
                 }
             }
@@ -58,14 +79,14 @@ struct AccountDevicesSectionView: View {
             if let updatedAt = presence.lastSuccessfulListAt {
                 Text(RuntimeLocalization.format("更新于 %@", [AccountDevicePresentation.relativeTimeText(from: updatedAt)]))
                     .font(.caption2)
-                    .foregroundColor(.white.opacity(0.5))
+                    .foregroundStyle(LiquidGlass.supportingText)
             }
             Button {
                 presence.triggerRefresh()
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .font(.subheadline.weight(.medium))
-                    .foregroundColor(.cyan)
+                    .foregroundStyle(.tint)
             }
             .accessibilityLabel(Text(RuntimeLocalization.string("刷新")))
         }
@@ -84,14 +105,25 @@ struct AccountDevicesSectionView: View {
             } else {
                 LazyVStack(spacing: 10) {
                     ForEach(devices) { record in
+                        VStack(alignment: .leading, spacing: 6) {
                         AccountDeviceRowView(
                             record: record,
                             nearbyDevice: nearbyDevice(for: record),
-                            onOpenNearbyDevice: onOpenNearbyDevice,
-                            onOpenCrossNetworkConnect: onOpenCrossNetworkConnect
+                            onConnectNearbyDevice: onConnectNearbyDevice,
+                            hasLiveRoute: presence.hasLiveRoute(for: record),
+                            onConnectRoutedDevice: onConnectRoutedDevice,
+                            onOpenCrossNetworkConnect: onOpenCrossNetworkConnect,
+                            isConnectionInProgress: isConnectionInProgress
                         )
+                        Button(RuntimeLocalization.string("accountDevices.remove.action"), role: .destructive) {
+                            selectionScope = presence.removalScope; removalSelection = record
+                        }
+                        .disabled(presence.removingDeviceId != nil || !snapshot.devices.contains { $0.isCaller && $0.status == "active" })
+                        .accessibilityIdentifier("account-device-remove-\(record.deviceId)")
+                        }
                     }
                 }
+                .liquidGlassGroup(spacing: 6)
             }
         } else if let failure = presence.lastListFailure {
             let isSignedOut = failure == .notAuthenticated && !presence.isAuthenticated
@@ -109,7 +141,7 @@ struct AccountDevicesSectionView: View {
                 ProgressView().tint(.cyan)
                 Text(RuntimeLocalization.string("正在同步账号设备…"))
                     .font(.caption)
-                    .foregroundColor(.white.opacity(0.6))
+                    .foregroundStyle(LiquidGlass.supportingText)
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 16)
@@ -138,7 +170,7 @@ struct AccountDevicesSectionView: View {
     private func notice(_ text: String, tint: Color) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "info.circle.fill").foregroundColor(tint)
-            Text(text).font(.caption).foregroundColor(.white.opacity(0.75))
+            Text(text).font(.caption).foregroundStyle(LiquidGlass.supportingText)
             Spacer()
         }
         .padding(12)
@@ -152,10 +184,10 @@ struct AccountDevicesSectionView: View {
                 .foregroundStyle(.cyan.opacity(0.6))
             Text(title)
                 .font(.subheadline.weight(.medium))
-                .foregroundColor(.white.opacity(0.8))
+                .foregroundStyle(LiquidGlass.supportingText)
             Text(message)
                 .font(.caption)
-                .foregroundColor(.white.opacity(0.4))
+                .foregroundStyle(LiquidGlass.supportingText)
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
@@ -169,84 +201,78 @@ struct AccountDevicesSectionView: View {
 private struct AccountDeviceRowView: View {
     let record: AccountDeviceRecord
     let nearbyDevice: DiscoveredDevice?
-    let onOpenNearbyDevice: (DiscoveredDevice) -> Void
-    let onOpenCrossNetworkConnect: () -> Void
+    let onConnectNearbyDevice: ((AccountDeviceRecord, DiscoveredDevice) -> Void)?
+    let hasLiveRoute: Bool
+    let onConnectRoutedDevice: ((AccountDeviceRecord) -> Void)?
+    let onOpenCrossNetworkConnect: (() -> Void)?
+    let isConnectionInProgress: Bool
 
     private var connectivity: AccountDevicePresentationPolicy.Connectivity {
         AccountDevicePresentationPolicy.connectivity(for: record, isLANReachable: nearbyDevice != nil)
     }
 
     var body: some View {
-        HStack(spacing: 14) {
-            ZStack {
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                AccountDevicePresentation.statusColor(for: connectivity).opacity(0.3),
-                                AccountDevicePresentation.statusColor(for: connectivity).opacity(0.1)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 14) {
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    AccountDevicePresentation.statusColor(for: connectivity).opacity(0.3),
+                                    AccountDevicePresentation.statusColor(for: connectivity).opacity(0.1)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
                         )
-                    )
-                    .frame(width: 44, height: 44)
-                Image(systemName: AccountDevicePresentation.systemImageName(for: record))
-                    .font(.system(size: 18))
-                    .foregroundColor(AccountDevicePresentation.statusColor(for: connectivity))
-            }
+                        .frame(width: 44, height: 44)
+                    Image(systemName: AccountDevicePresentation.systemImageName(for: record))
+                        .font(.system(size: 18))
+                        .foregroundColor(AccountDevicePresentation.statusColor(for: connectivity))
+                }
 
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text(AccountDevicePresentationPolicy.displayName(for: record))
                         .font(.subheadline.weight(.medium))
-                        .foregroundColor(.white)
-                        .lineLimit(1)
-                    badge(AccountDevicePresentation.statusText(for: connectivity), color: AccountDevicePresentation.statusColor(for: connectivity))
-                    badge(
-                        AccountDevicePresentation.capabilityText(for: record),
-                        color: AccountDevicePresentationPolicy.supportsRemoteControlHosting(record) ? .green : .gray
-                    )
-                    if let registration = AccountDevicePresentation.registrationBadgeText(for: record) {
-                        badge(registration, color: .orange)
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 6) {
+                        badge(AccountDevicePresentation.statusText(for: connectivity), color: AccountDevicePresentation.statusColor(for: connectivity))
+                        badge(
+                            AccountDevicePresentation.capabilityText(for: record),
+                            color: AccountDevicePresentationPolicy.supportsRemoteControlHosting(record) ? .green : .gray
+                        )
+                        if let registration = AccountDevicePresentation.registrationBadgeText(for: record) {
+                            badge(registration, color: .orange)
+                        }
                     }
+                    if let detail = AccountDevicePresentation.detailLine(for: record) {
+                        Text(detail)
+                            .font(.caption)
+                            .foregroundStyle(LiquidGlass.supportingText)
+                            .lineLimit(2)
+                    }
+                    if let address = addressText {
+                        Text(address)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(LiquidGlass.supportingText)
+                            .lineLimit(2)
+                    }
+                    Text("\(RuntimeLocalization.string("设备 ID")) \(AccountDevicePresentationPolicy.shortDeviceId(record.deviceId)) · \(RuntimeLocalization.string("最近活跃")) \(AccountDevicePresentation.relativeTimeText(from: record.lastSeenAt))")
+                        .font(.caption2)
+                        .foregroundStyle(LiquidGlass.supportingText)
+                        .lineLimit(2)
                 }
-                if let detail = AccountDevicePresentation.detailLine(for: record) {
-                    Text(detail)
-                        .font(.caption)
-                        .foregroundColor(.white.opacity(0.6))
-                        .lineLimit(1)
-                }
-                if let address = addressText {
-                    Text(address)
-                        .font(.caption.monospaced())
-                        .foregroundColor(.white.opacity(0.6))
-                        .lineLimit(1)
-                }
-                Text("\(RuntimeLocalization.string("设备 ID")) \(AccountDevicePresentationPolicy.shortDeviceId(record.deviceId)) · \(RuntimeLocalization.string("最近活跃")) \(AccountDevicePresentation.relativeTimeText(from: record.lastSeenAt))")
-                    .font(.caption2)
-                    .foregroundColor(.white.opacity(0.45))
-                    .lineLimit(1)
+
+                Spacer(minLength: 0)
             }
-
-            Spacer()
-
             actionButton
+                .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .padding(14)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(
-                    LinearGradient(
-                        colors: [AccountDevicePresentation.statusColor(for: connectivity).opacity(0.35), .clear],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1
-                )
-        )
+        .liquidGlassCard(cornerRadius: 20, padding: 0)
         .contextMenu {
             ForEach(record.lanAddresses + (record.publicAddress.map { [$0] } ?? []), id: \.self) { address in
                 Button {
@@ -279,31 +305,51 @@ private struct AccountDeviceRowView: View {
 
     @ViewBuilder
     private var actionButton: some View {
-        switch connectivity {
-        case .thisDevice, .offline:
-            EmptyView()
-        case .lanReachable:
-            if let nearbyDevice {
-                Button(RuntimeLocalization.string("连接设备")) {
-                    onOpenNearbyDevice(nearbyDevice)
-                }
+        // The identity-matched live Bonjour observation retains its observed
+        // peer-to-peer interface. A server-published IP is only a route hint;
+        // use it when this caller has no current nearby connection action.
+        if hasLiveRoute, let onConnectRoutedDevice,
+           nearbyDevice == nil || onConnectNearbyDevice == nil {
+            Button(RuntimeLocalization.string("连接设备")) { onConnectRoutedDevice(record) }
+                .disabled(isConnectionInProgress)
+                .accessibilityIdentifier("account-device-connect-\(record.deviceId)")
                 .font(.caption.weight(.semibold))
-                .foregroundColor(.white)
+                .foregroundStyle(.primary)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .background(LinearGradient(colors: [.cyan, .blue], startPoint: .leading, endPoint: .trailing))
+                .background(Color.accentColor.opacity(0.15))
                 .clipShape(Capsule())
+        } else {
+            switch connectivity {
+            case .thisDevice, .offline:
+                EmptyView()
+            case .lanReachable:
+                if let nearbyDevice, let onConnectNearbyDevice {
+                    Button(RuntimeLocalization.string("连接设备")) {
+                        onConnectNearbyDevice(record, nearbyDevice)
+                    }
+                    .disabled(isConnectionInProgress || record.status != "active")
+                    .accessibilityIdentifier("account-device-connect-\(record.deviceId)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.accentColor.opacity(0.15))
+                    .clipShape(Capsule())
+                }
+            case .online:
+                if let onOpenCrossNetworkConnect {
+                Button(RuntimeLocalization.string("扫码连接")) {
+                    onOpenCrossNetworkConnect()
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.cyan.opacity(0.15))
+                .clipShape(Capsule())
+                }
             }
-        case .online:
-            Button(RuntimeLocalization.string("用连接码连接")) {
-                onOpenCrossNetworkConnect()
-            }
-            .font(.caption.weight(.semibold))
-            .foregroundColor(.cyan)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Color.cyan.opacity(0.15))
-            .clipShape(Capsule())
         }
     }
 
@@ -312,8 +358,8 @@ private struct AccountDeviceRowView: View {
             .font(.system(size: 10, weight: .medium))
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
-            .background(color.opacity(0.8))
-            .foregroundColor(.white)
+            .background(color.opacity(0.16))
+            .foregroundStyle(.primary)
             .clipShape(RoundedRectangle(cornerRadius: 4))
     }
 }

@@ -1407,7 +1407,7 @@ final class ConnectionCodeFormatTests: XCTestCase {
         XCTAssertEqual(profile.nebulaId, "NEBULA-123")
     }
 
-    func testAuthSessionStrictLoaderDistinguishesMissingCorruptAndValidData() async throws {
+    func testAuthSessionTombstoneRetiresStaleLegacyAndExplicitLoginStoresValidData() async throws {
         let keychain = KeychainManager.shared
         try await keychain.deleteAuthSession()
         addTeardownBlock {
@@ -1418,14 +1418,11 @@ final class ConnectionCodeFormatTests: XCTestCase {
         XCTAssertNil(missingSession)
 
         try keychain.savePublicKey(Data("not-json".utf8), identifier: "auth.session")
-        do {
-            _ = try await keychain.loadAuthSessionStrict()
-            XCTFail("Expected corrupt auth.session data to throw.")
-        } catch {
-            guard case KeychainError.decodingError = error else {
-                return XCTFail("Expected corrupt auth.session data to throw KeychainError.decodingError, got \(error).")
-            }
-        }
+        // A canonical logout is authoritative: even malformed legacy bytes must
+        // be retired rather than decoded or resurrected as a new login.
+        let afterStaleLegacy = try await keychain.loadAuthSessionStrict()
+        XCTAssertNil(afterStaleLegacy)
+
 
         let expected = AuthSession(
             accessToken: "access-token",
@@ -1521,11 +1518,11 @@ final class ConnectionCodeFormatTests: XCTestCase {
         let source = try Self.authenticationManagerSource()
 
         XCTAssertTrue(
-            source.contains("try await KeychainManager.shared.loadAuthSessionStrict()"),
+            source.contains("try await sessionState.restore(intent: intent)"),
             "Launch-time auth restoration should distinguish absent sessions from corrupt Keychain data."
         )
         XCTAssertTrue(
-            source.contains("try await persistSession(session)\n        self.session = session"),
+            source.contains("try await sessionState.install(session, intent: intent)\n        let displayName"),
             "Login success should persist the session before publishing authenticated in-memory state."
         )
         XCTAssertFalse(
@@ -1533,8 +1530,8 @@ final class ConnectionCodeFormatTests: XCTestCase {
             "AuthenticationManager must not silently discard auth-session persistence failures."
         )
         XCTAssertTrue(
-            source.contains("public func signOut() async throws {\n        let sessionToRevoke = session\n        try await clearSession()") &&
-                source.contains("public func signInAsGuest() async throws {\n        try await clearSession()"),
+            source.contains("public func signOut() async throws {\n        let sessionToRevoke = session\n        let intent = beginAuthenticationIntent()\n        try await sessionState.clear(intent: intent)") &&
+                source.contains("public func signInAsGuest() async throws {\n        let intent = beginAuthenticationIntent()\n        try await sessionState.clear(intent: intent)"),
             "Sign-out and guest transitions must delete persisted auth state before publishing a new UI state."
         )
         XCTAssertTrue(

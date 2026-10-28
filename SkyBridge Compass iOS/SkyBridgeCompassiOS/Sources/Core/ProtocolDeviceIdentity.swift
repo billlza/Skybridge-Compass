@@ -887,6 +887,10 @@ struct IOSProtocolIdentityKeychainStore: ProtocolIdentityPersistence {
 
     private let accessGroup: String
 
+    /// Reuse the resolved authoritative group for other immutable protocol
+    /// records; callers cannot substitute or infer an unscoped legacy group.
+    var immutableRecordAccessGroup: String { accessGroup }
+
     init() throws {
         if SkyBridgeRuntimeEnvironment.isRunningUnderXCTest {
             accessGroup = "TEST.group.com.skybridge.compass"
@@ -1097,7 +1101,7 @@ struct IOSProtocolIdentityKeychainStore: ProtocolIdentityPersistence {
         query[kSecMatchLimit as String] = kSecMatchLimitAll
 
         var result: CFTypeRef?
-        switch SecItemCopyMatching(query as CFDictionary, &result) {
+        switch try IOSLegacyKeychainScope.current().copyMatching(query, &result) {
         case errSecItemNotFound:
             return []
         case errSecSuccess:
@@ -1148,6 +1152,7 @@ struct IOSProtocolIdentityKeychainStore: ProtocolIdentityPersistence {
             throw ProtocolDeviceIdentityError.missingSharedKeychainAccessGroup
         }
 
+        let scope = try IOSLegacyKeychainScope.current()
         let service = "com.skybridge.keychain-access-group-probe.\(UUID().uuidString)"
         let account = "active"
         let add: [String: Any] = [
@@ -1160,7 +1165,7 @@ struct IOSProtocolIdentityKeychainStore: ProtocolIdentityPersistence {
             kSecReturnPersistentRef as String: true
         ]
         var addedResult: CFTypeRef?
-        let addStatus = SecItemAdd(add as CFDictionary, &addedResult)
+        let addStatus = try scope.add(add, result: &addedResult)
         guard addStatus == errSecSuccess else {
             throw ProtocolDeviceIdentityError.keychainProbeFailed(addStatus)
         }
@@ -1177,7 +1182,7 @@ struct IOSProtocolIdentityKeychainStore: ProtocolIdentityPersistence {
                 kSecMatchLimit as String: kSecMatchLimitOne
             ]
             var recoveryResult: CFTypeRef?
-            if SecItemCopyMatching(recovery as CFDictionary, &recoveryResult) == errSecSuccess,
+            if try scope.copyMatching(recovery, &recoveryResult) == errSecSuccess,
                let recoveredReference = recoveryResult as? Data,
                !recoveredReference.isEmpty {
                 try deleteProbeItem(persistentReference: recoveredReference)

@@ -142,6 +142,13 @@ extension RegressionHardeningTests {
     return try readRepositorySource(at: sourceURL)
   }
 
+  func remoteDesktopLANReceiveSchedulerSource() throws -> String {
+    let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+    return try readRepositorySource(at: root.appendingPathComponent(
+      "SkyBridgeCompassiOS/Sources/Core/RemoteConnection/RemoteDesktop/RemoteDesktopLANReceiveScheduler.swift"
+    ))
+  }
+
   func remoteDesktopLANHandshakeTrustSource() throws -> String {
     let root = URL(fileURLWithPath: #filePath)
       .deletingLastPathComponent()

@@ -2,6 +2,7 @@ import Foundation
 import CryptoKit
 import Network
 import class SkyBridgeProtocolCore.ClassicTransferOutboundFileReadSession
+import class SkyBridgeProtocolCore.PreparedOutboundFileReadSession
 import class SkyBridgeProtocolCore.ClassicTransferZlibCompressionWorker
 import class SkyBridgeProtocolCore.ClassicTransferZlibDecompressionWorker
 import enum SkyBridgeProtocolCore.ClassicTransferCanonicalTranscript
@@ -610,13 +611,17 @@ final class FileTransferLANRoutePolicyTests: XCTestCase {
         let payload = Data((0..<1_025).map { UInt8($0 % 251) })
         try payload.write(to: fileURL, options: [.withoutOverwriting])
 
-        let reader = try await ClassicTransferOutboundFileReadSession.open(
+        let reader = try await PreparedOutboundFileReadSession.prepare(
             url: fileURL,
-            tracksSHA256: true
+            maximumSize: ClassicTransferInboundPolicy.maximumFileSizeBytes,
+            sourcePolicy: .regularFile,
+            expectedSHA256: Data(SHA256.hash(data: payload))
         )
         let firstChunk = try await reader.read(offset: 0, length: 512)
         let secondChunk = try await reader.read(offset: 512, length: payload.count - 512)
-        let completionDigest = try await reader.finalizeAndClose()
+        try await reader.validateSourceIdentity()
+        let completionDigest = reader.metadata.contentSHA256
+        try await reader.close()
 
         XCTAssertEqual(firstChunk + secondChunk, payload)
         XCTAssertEqual(completionDigest, Data(SHA256.hash(data: payload)))
@@ -802,10 +807,26 @@ final class FileTransferLANRoutePolicyTests: XCTestCase {
         let sendBody = String(
             fileTransferManagerSource[sendStart.lowerBound..<sendEnd.lowerBound]
         )
-        XCTAssertTrue(sendBody.contains("ClassicTransferOutboundFileReadSession.open("))
-        XCTAssertTrue(sendBody.contains("tracksSHA256: true"))
-        XCTAssertTrue(sendBody.contains("let fileSha256 = try await reader.finalizeAndClose()"))
+        XCTAssertTrue(sendBody.contains("PreparedOutboundFileReadSession.prepare("))
+        XCTAssertTrue(sendBody.contains("maximumSize: ClassicTransferInboundPolicy.maximumFileSizeBytes"))
+        XCTAssertTrue(sendBody.contains("sourcePolicy: .regularFile"))
+        XCTAssertTrue(sendBody.contains("guard reader.metadata.fileSize == metadata.fileSize,"))
+        XCTAssertTrue(sendBody.contains("== metadata.fileHash else"))
+        XCTAssertTrue(sendBody.contains("throw PreparedOutboundFileReadError.contentChanged"))
+        XCTAssertTrue(sendBody.contains("let fileSha256 = reader.metadata.contentSHA256"))
         XCTAssertTrue(sendBody.contains("fileSha256: fileSha256"))
+        XCTAssertTrue(sendBody.contains("guard completionAck.receivedBytes == metadata.fileSize else"))
+        XCTAssertTrue(sendBody.contains("guard completionAck.fileSha256 == fileSha256 else"))
+        let sourcePrepared = try XCTUnwrap(sendBody.range(of: "PreparedOutboundFileReadSession.prepare("))
+        let selectedContentChecked = try XCTUnwrap(sendBody.range(of: "== metadata.fileHash else"))
+        let metadataSent = try XCTUnwrap(sendBody.range(of: "didAttemptMetadata = true"))
+        XCTAssertLessThan(sourcePrepared.lowerBound, selectedContentChecked.lowerBound)
+        XCTAssertLessThan(selectedContentChecked.lowerBound, metadataSent.lowerBound)
+        let sourceValidated = try XCTUnwrap(sendBody.range(of: "try await reader.validateSourceIdentity()"))
+        let sourceClosed = try XCTUnwrap(sendBody.range(of: "try await reader.close()"))
+        let completionSent = try XCTUnwrap(sendBody.range(of: "didAttemptCompletion = true"))
+        XCTAssertLessThan(sourceValidated.lowerBound, sourceClosed.lowerBound)
+        XCTAssertLessThan(sourceClosed.lowerBound, completionSent.lowerBound)
 
         let decodeStart = try XCTUnwrap(
             webRTCManagerSource.range(of: "    private func handleDecodedControlPlaintext(")

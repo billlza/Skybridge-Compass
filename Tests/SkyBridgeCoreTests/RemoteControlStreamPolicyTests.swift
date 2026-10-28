@@ -123,6 +123,22 @@ final class RemoteControlStreamPolicyTests: XCTestCase {
         XCTAssertEqual(policy.targetFrameRate, 45)
     }
 
+    func testPreviewCadenceIsPreservedAcrossCodecsAndThermalStates() {
+        for formats in [Set(["h264"]), Set(["hevc"]), Set(["jpeg"])] {
+            for state in [ProcessInfo.ThermalState.nominal, .critical] {
+                for fps in [1, 2] {
+                    let policy = RemoteControlStreamPolicySelector.select(
+                        request: makeRequest(size: CGSize(width: 1280, height: 720), fps: fps),
+                        peerFormats: formats,
+                        thermalState: state,
+                        isAppleSilicon: true
+                    )
+                    XCTAssertEqual(policy.targetFrameRate, fps)
+                }
+            }
+        }
+    }
+
     func testSelectorNormalizesEncodedStreamDimensions() {
         let policy = RemoteControlStreamPolicySelector.select(
             request: makeRequest(size: CGSize(width: 2056, height: 1329), codec: .h264, fps: 60),

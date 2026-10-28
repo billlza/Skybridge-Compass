@@ -1,5 +1,7 @@
 # SkyBridge Compass Pro
 
+按主题进入 [文档入口](Docs/README.md)；账号设备五端统一遵循 [登记与移除契约](Docs/account-device-lifecycle.md)。
+
 
 SkyBridge Compass Pro 是一个以 **跨平台协议内核（SkyBridgeCore）** 为中心的 P2P 连接/安全栈，并提供 macOS 应用形态与论文复现实验流水线（IEEE/TDSC）。
 

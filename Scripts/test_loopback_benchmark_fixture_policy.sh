@@ -16,7 +16,7 @@ BENCHMARK_SUPPORT_FILES=(
 )
 BENCHMARK_KEM_CONSUMERS=(
   "Sources/BaselineBenchRunner/main.swift"
-  "Sources/HandshakeBenchRunner/main.swift"
+  "Sources/HandshakeBenchRunner/HandshakeBenchRunner.swift"
   "Tests/SkyBridgeBenchTests/HandshakeBenchmarkTests.swift"
   "Tests/SkyBridgeCoreTests/HandshakeBenchmarkTests.swift"
   "Tests/SkyBridgeCoreTests/SystemImpactBenchTests.swift"

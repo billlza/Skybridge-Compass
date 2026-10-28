@@ -582,12 +582,12 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             "Production Dashboard rows must not subscribe to smoke-only online state changes."
         )
         XCTAssertTrue(
-            dashboardPanelSource.contains("if let onlineDevice = appModel.onlineDevices.first(where: { $0.id == device.id })") &&
+            dashboardPanelSource.contains("if DashboardDeviceProjection.isSkyBridgePeer(device)") &&
+            dashboardPanelSource.contains("await appModel.connectDiscoveredPeer(to: device)") &&
+            dashboardPanelSource.contains("else if let onlineDevice = appModel.onlineDevices.first(where: { $0.id == device.id })") &&
             dashboardPanelSource.contains("await appModel.connect(to: onlineDevice)") &&
-            dashboardPanelSource.contains("await appModel.connect(to: device)") &&
-            dashboardPanelSource.contains("deviceId: od.uniqueIdentifier") &&
-            dashboardPanelSource.contains("pubKeyFP: od.protocolFingerprint"),
-            "Dashboard row clicks must preserve the discovered-device path, route mapped online rows through the online-device connector, and not erase online protocol identity in the mapped representation."
+            dashboardPanelSource.contains("await appModel.connect(to: device)"),
+            "SkyBridge row clicks must pass the selected observation to the MAIN connector, while online and auxiliary rows retain their own connection paths. Full identity/route preservation is exercised by DashboardDeviceProjectionTests."
         )
         XCTAssertFalse(
             dashboardPanelSource.contains("guard isMacOnlineIpadSmoke else") ||
@@ -906,7 +906,7 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         XCTAssertFalse(p2pSource.contains("连接码功能将支持"))
     }
 
-    func testMacMainSceneIsSingletonWhileAuxiliaryScenesRemainMultiWindow() throws {
+    func testMacMainAndNearFieldScenesAreSingletonWhileIndependentSessionsRemainMultiWindow() throws {
         let appSource = try repositorySource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift")
         let appDelegateSource = try repositorySource(
             "Sources/SkyBridgeCompassApp/Core/RemoteNotificationAppDelegate.swift"
@@ -919,7 +919,8 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         XCTAssertFalse(
             appSource.contains("WindowGroup(localizationManager.localizedString(\"app.name\"), id: \"main\")")
         )
-        XCTAssertTrue(appSource.contains("WindowGroup(id: \"near-field-mirror\")"))
+        XCTAssertTrue(appSource.contains("Window(\"近距远程控制\", id: \"near-field-mirror\")"))
+        XCTAssertFalse(appSource.contains("WindowGroup(id: \"near-field-mirror\")"))
         XCTAssertTrue(appSource.contains("WindowGroup(id: \"cross-network-connection\")"))
         XCTAssertTrue(appSource.contains("WindowGroup(id: \"vnc-viewer\")"))
         XCTAssertTrue(appSource.contains("WindowGroup(id: \"ssh-terminal\", for: UUID.self)"))

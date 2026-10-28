@@ -127,11 +127,11 @@ struct PQCVerificationView: View {
             
             Text("后量子加密验证")
                 .font(.title2.bold())
-                .foregroundColor(.white)
+                .foregroundStyle(.primary)
             
             Text("使用 NIST 标准的后量子密码算法确保设备身份的真实性和安全性")
                 .font(.body)
-                .foregroundColor(.gray)
+                .foregroundStyle(LiquidGlass.supportingText)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
             
@@ -141,7 +141,7 @@ struct PQCVerificationView: View {
                 FeatureRow(icon: "shield.lefthalf.filled", title: "X-Wing", description: "混合加密")
             }
             .padding()
-            .background(Color.white.opacity(0.05))
+            .background(Color.primary.opacity(0.05))
             .cornerRadius(16)
         }
     }
@@ -154,11 +154,11 @@ struct PQCVerificationView: View {
             
             Text("正在交换密钥...")
                 .font(.headline)
-                .foregroundColor(.white)
+                .foregroundStyle(.primary)
             
             Text("使用 ML-KEM-768 进行后量子密钥交换")
                 .font(.subheadline)
-                .foregroundColor(.gray)
+                .foregroundStyle(LiquidGlass.supportingText)
                 .multilineTextAlignment(.center)
             
             VStack(spacing: 8) {
@@ -167,7 +167,7 @@ struct PQCVerificationView: View {
                 InfoRow(label: "共享密钥", value: "计算中...")
             }
             .padding()
-            .background(Color.white.opacity(0.05))
+            .background(Color.primary.opacity(0.05))
             .cornerRadius(12)
         }
         .onAppear {
@@ -183,11 +183,11 @@ struct PQCVerificationView: View {
             
             Text("验证码确认")
                 .font(.title2.bold())
-                .foregroundColor(.white)
+                .foregroundStyle(.primary)
             
             Text("请在 \(device.name) 上查看并输入显示的 6 位验证码")
                 .font(.body)
-                .foregroundColor(.gray)
+                .foregroundStyle(LiquidGlass.supportingText)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
             
@@ -199,9 +199,9 @@ struct PQCVerificationView: View {
                         .frame(width: 40, height: 50)
                         .multilineTextAlignment(.center)
                         .keyboardType(.numberPad)
-                        .background(Color.white.opacity(0.1))
+                        .background(Color.primary.opacity(0.1))
                         .cornerRadius(8)
-                        .foregroundColor(.white)
+                        .foregroundStyle(.primary)
                         .onChange(of: verificationCode) { _, newValue in
                             if newValue.count == 6 {
                                 verifyCode()
@@ -226,11 +226,11 @@ struct PQCVerificationView: View {
             
             Text("验证成功！")
                 .font(.title2.bold())
-                .foregroundColor(.white)
+                .foregroundStyle(.primary)
             
             Text("\(device.name) 已被添加到受信任设备列表")
                 .font(.body)
-                .foregroundColor(.gray)
+                .foregroundStyle(LiquidGlass.supportingText)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
             
@@ -240,7 +240,7 @@ struct PQCVerificationView: View {
                 InfoRow(label: "验证时间", value: Date().formatted())
             }
             .padding()
-            .background(Color.white.opacity(0.05))
+            .background(Color.primary.opacity(0.05))
             .cornerRadius(12)
         }
     }
@@ -397,7 +397,7 @@ struct FeatureRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.subheadline.bold())
-                    .foregroundColor(.white)
+                    .foregroundStyle(.primary)
                 
                 Text(description)
                     .font(.caption)

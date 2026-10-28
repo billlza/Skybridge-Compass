@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 MAC_PRODUCT = "SkyBridgeCompassApp"
 IOS_PRODUCT = "SkyBridgeCompassiOS"
 
@@ -79,10 +78,14 @@ def _success_lines(
     )
     return [
         f"connectivityAttemptStarted {common} result=started",
-        f"connectivityAttemptAuthenticated {common} session_ref={session_ref} "
-        f"attemptProfile={attempt_profile} result=authenticated",
-        f"connectivityEndpoint {endpoint_common} attemptProfile={attempt_profile} "
-        f"suite={suite} requirePQC=1 allowClassicFallback=0 result=success",
+        (
+            f"connectivityAttemptAuthenticated {common} session_ref={session_ref} "
+            f"attemptProfile={attempt_profile} result=authenticated"
+        ),
+        (
+            f"connectivityEndpoint {endpoint_common} attemptProfile={attempt_profile} "
+            f"suite={suite} requirePQC=1 allowClassicFallback=0 result=success"
+        ),
     ]
 
 
@@ -104,12 +107,16 @@ def _rejection_lines(
     )
     return [
         f"connectivityAttemptStarted {common} result=started",
-        f"connectivityPolicyRejected {common} peerOfferedProfiles=classic "
-        "peerOfferSignature=verified reason=strict-pqc-rejects-classic result=rejected",
+        (
+            f"connectivityPolicyRejected {common} peerOfferedProfiles=classic "
+            "peerOfferSignature=verified reason=strict-pqc-rejects-classic result=rejected"
+        ),
     ]
 
 
-def connectivity_product_logs() -> tuple[list[str], list[str]]:
+def connectivity_product_logs(
+    *, include_q: bool = False
+) -> tuple[list[str], list[str]]:
     """Return the exact three-success/two-rejection Mac+iOS product matrix."""
 
     mac_lines: list[str] = []
@@ -130,42 +137,68 @@ def connectivity_product_logs() -> tuple[list[str], list[str]]:
         suite,
         mac_role,
     ) in enumerate(success_specs, 1):
-        mac_lines.extend(_success_lines(
+        mac_lines.extend(
+            _success_lines(
+                owner=MAC_PRODUCT,
+                attempt_byte=attempt_byte,
+                session_byte=session_byte,
+                generation=index,
+                role=mac_role,
+                local_profile=mac_profile,
+                offered_profiles="pqc+xwing",
+                attempt_profile=attempt_profile,
+                suite=suite,
+            )
+        )
+        ios_lines.extend(
+            _success_lines(
+                owner=IOS_PRODUCT,
+                attempt_byte=attempt_byte,
+                session_byte=session_byte,
+                generation=index + 10,
+                role="responder" if mac_role == "initiator" else "initiator",
+                local_profile=ios_profile,
+                offered_profiles="pqc" if ios_profile == "pqc" else "pqc+xwing",
+                attempt_profile=attempt_profile,
+                suite=suite,
+            )
+        )
+    mac_lines.extend(
+        _rejection_lines(
             owner=MAC_PRODUCT,
-            attempt_byte=attempt_byte,
-            session_byte=session_byte,
-            generation=index,
-            role=mac_role,
-            local_profile=mac_profile,
+            attempt_byte="4",
+            generation=4,
+            local_profile="pqc",
             offered_profiles="pqc+xwing",
-            attempt_profile=attempt_profile,
-            suite=suite,
-        ))
-        ios_lines.extend(_success_lines(
+        )
+    )
+    ios_lines.extend(
+        _rejection_lines(
             owner=IOS_PRODUCT,
-            attempt_byte=attempt_byte,
-            session_byte=session_byte,
-            generation=index + 10,
-            role="responder" if mac_role == "initiator" else "initiator",
-            local_profile=ios_profile,
-            offered_profiles="pqc" if ios_profile == "pqc" else "pqc+xwing",
-            attempt_profile=attempt_profile,
-            suite=suite,
-        ))
-    mac_lines.extend(_rejection_lines(
-        owner=MAC_PRODUCT,
-        attempt_byte="4",
-        generation=4,
-        local_profile="pqc",
-        offered_profiles="pqc+xwing",
-    ))
-    ios_lines.extend(_rejection_lines(
-        owner=IOS_PRODUCT,
-        attempt_byte="5",
-        generation=14,
-        local_profile="xwing",
-        offered_profiles="pqc+xwing",
-    ))
+            attempt_byte="5",
+            generation=14,
+            local_profile="xwing",
+            offered_profiles="pqc+xwing",
+        )
+    )
+    if include_q:
+        for lines, owner, role, generation in (
+            (mac_lines, MAC_PRODUCT, "initiator", 6),
+            (ios_lines, IOS_PRODUCT, "responder", 16),
+        ):
+            lines.extend(
+                _success_lines(
+                    owner=owner,
+                    attempt_byte="6",
+                    session_byte="6",
+                    generation=generation,
+                    role=role,
+                    local_profile="pqc",
+                    offered_profiles="pqc",
+                    attempt_profile="pqc",
+                    suite="Q-Periapt-ABI2-PolicyBound",
+                )
+            )
     return mac_lines, ios_lines
 
 

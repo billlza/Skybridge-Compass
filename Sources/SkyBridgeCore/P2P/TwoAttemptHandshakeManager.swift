@@ -14,6 +14,7 @@
 //
 
 import Foundation
+import SkyBridgeProtocolCore
 
 /// 握手尝试策略
 public enum HandshakeAttemptStrategy: String, Sendable {
@@ -162,14 +163,18 @@ public struct TwoAttemptHandshakeManager: Sendable {
         strategy: HandshakeAttemptStrategy,
         cryptoProvider: any CryptoProvider,
         pqcOfferMode: HandshakeOfferedSuites.PQCOfferMode = .allAvailable,
-        pqcSignatureAlgorithm: ProtocolSigningAlgorithm = .mlDSA65
+        pqcSignatureAlgorithm: ProtocolSigningAlgorithm = .mlDSA65,
+        selectedPQCSuite: UInt16? = nil
     ) throws -> AttemptPreparation {
 // 1. 先 build suites
         let buildResult: HandshakeOfferedSuites.BuildResult
-        let negotiationSuites = availableSuitesForNegotiation(
-            using: cryptoProvider,
-            pqcSignatureAlgorithm: pqcSignatureAlgorithm
-        )
+        let negotiationSuites: [CryptoSuite]
+        if strategy == .pqcOnly, let selectedPQCSuite {
+            negotiationSuites = try PQCModeSelection.frozenHandshakeOffer(selected: selectedPQCSuite,
+                providerSuites: cryptoProvider.supportedSuites.map(\.wireId), signingAlgorithm: pqcSignatureAlgorithm.rawValue).map(CryptoSuite.init(wireId:))
+        } else {
+            negotiationSuites = availableSuitesForNegotiation(using: cryptoProvider, pqcSignatureAlgorithm: pqcSignatureAlgorithm)
+        }
         switch strategy {
         case .pqcOnly:
             buildResult = HandshakeOfferedSuites.build(
@@ -262,8 +267,12 @@ public struct TwoAttemptHandshakeManager: Sendable {
         executor: PreparedHandshakeExecutor,
         enforceFallbackRateLimit: Bool = true,
         enablePQCBridgeRetry: Bool = true,
-        pqcSignatureAlgorithm: ProtocolSigningAlgorithm = .mlDSA65
+        pqcSignatureAlgorithm: ProtocolSigningAlgorithm = .mlDSA65,
+        selectedPQCSuite: UInt16? = nil
     ) async throws -> SessionKeys {
+        if selectedPQCSuite != nil {
+            guard preferPQC, policy.requirePQC, !policy.allowClassicFallback else { throw PQCModeSelectionError.invalidCapabilities }
+        }
         let qPeriaptFailClosed = isQPeriaptBoundProvider(cryptoProvider)
         if qPeriaptFailClosed, !preferPQC {
             throw HandshakeError.failed(.pqcProviderUnavailable)
@@ -282,7 +291,8 @@ public struct TwoAttemptHandshakeManager: Sendable {
                     strategy: .pqcOnly,
                     cryptoProvider: cryptoProvider,
                     pqcOfferMode: enablePQCBridgeRetry ? .preferredSingle : .allAvailable,
-                    pqcSignatureAlgorithm: pqcSignatureAlgorithm
+                    pqcSignatureAlgorithm: pqcSignatureAlgorithm,
+                    selectedPQCSuite: selectedPQCSuite
                 )
                 return try await executor(preparation)
             } catch let error as AttemptPreparationError {

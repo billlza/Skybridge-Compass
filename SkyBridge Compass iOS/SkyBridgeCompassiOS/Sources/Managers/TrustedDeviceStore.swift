@@ -344,6 +344,12 @@ public final class TrustedDeviceStore: ObservableObject {
     @Published public private(set) var persistenceErrorMessage: String?
     private var trustMutationRevisionByStableDeviceId: [String: UInt64] = [:]
     private var lastPersistedTrustedDevices: [TrustedDevice] = []
+    private struct AuthorityInvalidationObservation {
+        let fingerprint: String
+        let deviceId: String
+        let invalidate: @MainActor () -> Void
+    }
+    private var authorityInvalidationObservers: [UUID: AuthorityInvalidationObservation] = [:]
     private let pairingAcceptanceJournalExists: @Sendable () -> Bool
 
     /// Stored authority is usable only after a strict load and while every
@@ -563,11 +569,60 @@ public final class TrustedDeviceStore: ObservableObject {
         matchingDeviceId deviceId: String
     ) -> TrustedDevice? {
         guard isAuthorityPersistenceAvailable else { return nil }
+        return currentPathAuthorityRecord(
+            fingerprint: fingerprint, matchingDeviceId: deviceId, in: trustedDevices
+        )
+    }
+
+    /// Revocation-only observation of an already authorized operation. Registration
+    /// remains a strict read; a live acceptance journal cannot grant this ownership.
+    func observeCurrentPathAuthorityInvalidation(
+        fingerprint: String,
+        matchingDeviceId deviceId: String,
+        invalidate: @escaping @MainActor () -> Void
+    ) throws -> UUID {
+        try requireAuthorityPersistenceAvailable(outerPermit: nil)
+        guard currentPathTrustRecord(fingerprint: fingerprint, matchingDeviceId: deviceId) != nil else {
+            throw AuthorityUpdateError.missingAuthenticatedRemoteAuthority
+        }
+        let token = UUID()
+        authorityInvalidationObservers[token] = AuthorityInvalidationObservation(
+            fingerprint: fingerprint, deviceId: deviceId, invalidate: invalidate
+        )
+        return token
+    }
+
+    func removeAuthorityInvalidationObserver(_ token: UUID) {
+        authorityInvalidationObservers.removeValue(forKey: token)
+    }
+
+    private func currentPathAuthorityRecord(
+        fingerprint: String,
+        matchingDeviceId deviceId: String,
+        in records: [TrustedDevice]
+    ) -> TrustedDevice? {
         guard let normalized = normalizedFingerprint(fingerprint) else { return nil }
-        return trustedDevices.first { device in
-            guard authorityFingerprints(for: device).contains(normalized) else { return false }
-            guard isActive(device) else { return false }
-            return currentPathDeviceMatches(device, deviceId: deviceId)
+        return records.first { device in
+            authorityFingerprints(for: device).contains(normalized)
+                && isActiveAuthority(device, in: records)
+                && currentPathDeviceMatches(device, deviceId: deviceId)
+        }
+    }
+
+    /// Runs synchronously before the durable mutation completes. Callbacks may
+    /// only retire their operation; this path
+    /// never authorizes a read while the acceptance journal isolates the store.
+    private func invalidateAuthorityObservers(in candidate: [TrustedDevice]) {
+        let invalidated = authorityInvalidationObservers.filter { _, observation in
+            currentPathAuthorityRecord(
+                fingerprint: observation.fingerprint,
+                matchingDeviceId: observation.deviceId,
+                in: candidate
+            ) == nil
+        }
+        for (token, observation) in invalidated {
+            authorityInvalidationObservers.removeValue(forKey: token)
+            observation.invalidate()
         }
     }
 
@@ -1466,6 +1521,9 @@ public final class TrustedDeviceStore: ObservableObject {
         try requireAuthorityPersistenceAvailable(outerPermit: outerPermit)
         do {
             try savePersistedDevices(candidate)
+            // An already-authorized file's rename races this synchronous revoke,
+            // not a later MainActor task or Combine's pre-assignment notification.
+            invalidateAuthorityObservers(in: candidate)
             let changedStableDeviceIds = changedStableDeviceIdentifiers(
                 from: lastPersistedTrustedDevices,
                 to: candidate
@@ -1496,6 +1554,9 @@ public final class TrustedDeviceStore: ObservableObject {
 
     private func markPersistenceUnavailable(_ error: Error, operation: String) {
         let message = "\(operation)失败：\(error.localizedDescription)"
+        let invalidated = authorityInvalidationObservers.values
+        authorityInvalidationObservers.removeAll()
+        for observation in invalidated { observation.invalidate() }
         persistenceErrorMessage = message
         SkyBridgeLogger.shared.error("⛔️ 受信任设备持久化不可用，自动信任已禁用：\(message)")
     }
@@ -2190,10 +2251,11 @@ public final class TrustedDeviceStore: ObservableObject {
     }
 
     private func isActive(_ device: TrustedDevice) -> Bool {
-        guard isAuthorityPersistenceAvailable,
-              (device.currentPathLifecycleState ?? .active) == .active else {
-            return false
-        }
+        isAuthorityPersistenceAvailable && isActiveAuthority(device, in: trustedDevices)
+    }
+
+    private func isActiveAuthority(_ device: TrustedDevice, in records: [TrustedDevice]) -> Bool {
+        guard (device.currentPathLifecycleState ?? .active) == .active else { return false }
 
         let deviceOrderingKey = lifecycleOrderingKey(for: device)
         let stableAliases = stableTrustedAliasCandidates(for: device)
@@ -2202,7 +2264,7 @@ public final class TrustedDeviceStore: ObservableObject {
         // Legacy or partially-synced stores can contain duplicate authority
         // rows. Never authorize an older positive row when an equivalent row
         // carries a later lifecycle transition (including a revocation).
-        return !trustedDevices.contains { candidate in
+        return !records.contains { candidate in
             let representsSameAuthority = candidate.id == device.id
                 || (!stableAliases.isEmpty
                     && !stableTrustedAliasCandidates(for: candidate).isDisjoint(with: stableAliases))

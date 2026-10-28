@@ -269,6 +269,58 @@ final class PIB1V3ProtocolTests: XCTestCase {
         }
     }
 
+    func testFinalAckCannotExtendTheEarlierCandidateExpiry() {
+        let request = makeRequest()
+        let candidate = makeCandidate(request: request, expiresAt: now.addingTimeInterval(300))
+        let confirm = makeConfirm(request: request, candidate: candidate,
+            sentAt: now.addingTimeInterval(180), expiresAt: now.addingTimeInterval(360))
+        let ack = makeAck(request: request, candidate: candidate, confirm: confirm,
+            sentAt: now.addingTimeInterval(200), expiresAt: now.addingTimeInterval(301))
+        XCTAssertThrowsError(try ack.validatedForFinalization(request: request, candidate: candidate,
+            confirm: confirm, now: now.addingTimeInterval(210))) { error in
+            XCTAssertEqual(error as? AppMessage.ProtocolIdentityBindingValidationError, .invalidValidityWindow)
+        }
+    }
+
+    func testFinalAckCannotExtendTheEarlierConfirmationExpiry() {
+        let request = makeRequest()
+        let candidate = makeCandidate(request: request, expiresAt: now.addingTimeInterval(300))
+        let confirm = makeConfirm(request: request, candidate: candidate,
+            sentAt: now.addingTimeInterval(180), expiresAt: now.addingTimeInterval(240))
+        let ack = makeAck(request: request, candidate: candidate, confirm: confirm,
+            sentAt: now.addingTimeInterval(200), expiresAt: now.addingTimeInterval(241))
+        XCTAssertThrowsError(try ack.validatedForFinalization(request: request, candidate: candidate,
+            confirm: confirm, now: now.addingTimeInterval(210))) { error in
+            XCTAssertEqual(error as? AppMessage.ProtocolIdentityBindingValidationError, .invalidValidityWindow)
+        }
+    }
+
+    func testLateFinalAckCannotRenewAnExpiredPairingTransaction() {
+        let request = makeRequest()
+        let candidate = makeCandidate(request: request, expiresAt: now.addingTimeInterval(300))
+        let confirm = makeConfirm(request: request, candidate: candidate,
+            sentAt: now.addingTimeInterval(180), expiresAt: now.addingTimeInterval(300))
+        let ack = makeAck(request: request, candidate: candidate, confirm: confirm,
+            sentAt: now.addingTimeInterval(290), expiresAt: now.addingTimeInterval(590))
+        XCTAssertThrowsError(try ack.validatedForFinalization(request: request, candidate: candidate,
+            confirm: confirm, now: now.addingTimeInterval(310))) { error in
+            XCTAssertEqual(error as? AppMessage.ProtocolIdentityBindingValidationError, .invalidValidityWindow)
+        }
+    }
+
+    func testFinalAckAtEarlierParentExpiryRemainsValidAfterThreeMinuteSASWait() {
+        let request = makeRequest()
+        for confirmExpiry in [240.0, 300.0] {
+            let candidate = makeCandidate(request: request, expiresAt: now.addingTimeInterval(300))
+            let confirm = makeConfirm(request: request, candidate: candidate,
+                sentAt: now.addingTimeInterval(180), expiresAt: now.addingTimeInterval(confirmExpiry))
+            let ack = makeAck(request: request, candidate: candidate, confirm: confirm,
+                sentAt: now.addingTimeInterval(180), expiresAt: now.addingTimeInterval(min(300, confirmExpiry)))
+            XCTAssertNoThrow(try ack.validatedForFinalization(request: request, candidate: candidate,
+                confirm: confirm, now: now.addingTimeInterval(180)))
+        }
+    }
+
     func testTransactionStoreCapsActiveEntriesAndRejectsConflictingReuse() async throws {
         let store = ProtocolIdentityBindingTransactionStore.shared
         await store.clearForTesting()

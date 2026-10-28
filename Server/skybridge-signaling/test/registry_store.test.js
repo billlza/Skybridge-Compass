@@ -64,6 +64,16 @@ test('registry store routes identity rotation writes only through v6 RPCs', asyn
   );
 });
 
+test('account login registration uses only the service role RPC', async () => {
+  const store = configuredStore();
+  const calls = [];
+  store.request = async (request) => { calls.push(request); return { status: 'active' }; };
+  const payload = { p_device_id: 'new-device-identity' };
+  await store.registerAccountDevice(payload);
+  assert.deepEqual(calls, [{ path: '/rest/v1/rpc/register_account_device_v9',
+    method: 'POST', useServiceRole: true, body: payload }]);
+});
+
 test('registry store preserves PostgREST code and safe RPC error code', async () => {
   const store = configuredStore();
   const originalFetch = global.fetch;
@@ -175,6 +185,51 @@ test('registry store touches device presence only through the v7 RPC with the p_
   assert.deepEqual(requests[0].body, payload);
 });
 
+const malformedPresenceTouchResults = [
+  ['undefined', undefined],
+  ['null', null],
+  ['array', []],
+  ['array-with-updated', Object.assign([], { updated: true })],
+  ['string', 'not-an-rpc-object'],
+  ['number', 0],
+  ['boolean-true', true],
+  ['boolean-false', false],
+  ['missing-updated', {}],
+  ['updated-undefined', { updated: undefined }],
+  ['updated-null', { updated: null }],
+  ['updated-number', { updated: 0 }],
+  ['updated-string-false', { updated: 'false' }],
+  ['updated-string-true', { updated: 'true' }],
+  ['updated-boxed-boolean', { updated: new Boolean(false) }],
+  ['inherited-updated-true', Object.create({ updated: true })],
+  ['inherited-updated-false', Object.create({ updated: false })]
+];
+
+for (const [name, response] of malformedPresenceTouchResults) {
+  test(`registry store rejects malformed presence touch RPC result: ${name}`, async () => {
+    const store = configuredStore();
+    store.request = async () => response;
+    await assert.rejects(
+      store.touchRegisteredDevicePresence({ p_device_id: 'presence-contract-device' }),
+      { message: 'registry_malformed_response' },
+      'an unavailable or malformed RPC result is not evidence of an inactive caller'
+    );
+  });
+}
+
+for (const updated of [false, true]) {
+  test(`registry store retains explicit Boolean presence result: ${updated}`, async () => {
+    const store = configuredStore();
+    // Neither touched_at nor additional fields participate in this decision.
+    const response = { updated, additionalMetadata: 'preserved' };
+    store.request = async () => response;
+    assert.strictEqual(
+      await store.touchRegisteredDevicePresence({ p_device_id: 'presence-contract-device' }),
+      response
+    );
+  });
+}
+
 test('registry store list fails fast on a non-array PostgREST body instead of returning an empty list', async () => {
   const store = configuredStore();
   for (const body of [{}, null, 'rows', { data: [] }]) {
@@ -186,4 +241,14 @@ test('registry store list fails fast on a non-array PostgREST body instead of re
   }
   store.request = async () => [];
   assert.deepEqual(await store.listRegisteredDevices({ tenantId: 'tenant', userId: 'user', limit: 10 }), []);
+});
+
+test('account device removal uses the private RPC without client table writes', async () => {
+  const store = configuredStore();
+  const payload = { p_tenant_id: 'tenant', p_user_id: 'user', p_target_device_id: 'target' };
+  let request;
+  store.request = async (value) => { request = value; return { status: 'revoked' }; };
+  assert.deepEqual(await store.removeAccountDevice(payload), { status: 'revoked' });
+  assert.deepEqual(request, { path: '/rest/v1/rpc/remove_account_device_v10',
+    method: 'POST', useServiceRole: true, body: payload });
 });

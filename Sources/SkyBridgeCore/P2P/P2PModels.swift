@@ -3,6 +3,7 @@ import Network
 import CryptoKit
 import os
 import SkyBridgeProtocolCore
+import SkyBridgeAppleTransport
 #if canImport(Security)
 import Security
 #endif
@@ -47,6 +48,8 @@ struct P2PHandshakeOperationRegistry<Driver: AnyObject & Sendable>: Sendable {
     private var activeOperation: ActiveOperation?
     private(set) var isDisconnected = false
     private(set) var isOperationSequenceExhausted = false
+    var hasActiveOperation: Bool { activeOperation != nil }
+    var operationSequence: UInt64 { nextOperationSequence }
 
     init() {}
 
@@ -364,11 +367,41 @@ private final class P2PSessionHandoffGate: @unchecked Sendable {
 
 // MARK: - P2P连接
 public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sendable {
+    public enum ControlTransport: String, Codable, Sendable { case network, usb }
     private static let protocolIdentityLogRedaction = "<redacted>"
 
     public let id = UUID()
     public let device: P2PDevice
-    public let connection: NWConnection
+    /// Present only for an actual Network.framework carrier (including Apple
+    /// usbmuxd). A native Android USB logical stream has no network endpoint.
+    public let connection: NWConnection?
+    private let frameCarrier: P2PControlFrameCarrier
+    public let controlTransport: ControlTransport
+    private let incomingAudioRegistry: P2PAudioIncomingChannelRegistry?
+    @MainActor private var audioCapabilityRefresh: P2PAudioCapabilityRefresh?
+
+    @available(macOS 14.0, iOS 17.0, *)
+    public var negotiatedSuiteName: String? {
+        sessionKeysLock.withLock { $0?.negotiatedSuite.rawValue }
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    public var negotiatedPQC: Bool? {
+        sessionKeysLock.withLock { $0?.negotiatedSuite.isPQCGroup }
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    public var authenticatedProtocolFingerprint: String? {
+        authenticatedRemoteAuthorityLock.withLock { $0?.protocolPublicKeyFingerprint }
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    func matchesAuthenticatedProtocolIdentity(algorithm: ProtocolSigningAlgorithm, fingerprint: String) -> Bool {
+        authenticatedRemoteAuthorityLock.withLock { authority in
+            authority?.protocolSigningAlgorithm == algorithm &&
+                authority?.protocolPublicKeyFingerprint == fingerprint
+        }
+    }
 
     @Published public private(set) var status: P2PConnectionStatus = .connecting
     @Published public private(set) var lastActivity: Date = Date()
@@ -422,6 +455,14 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     private let metricsTaskOwnerLock = OSAllocatedUnfairLock<MetricsTaskOwner?>(
         initialState: nil
     )
+    private let disconnectionTaskLock = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)
+    @available(macOS 14.0, iOS 17.0, *)
+    private struct ClassicTransferRecoveryTaskOwner: Sendable {
+        let operation: P2PHandshakeOperationToken
+        var task: Task<Void, Never>?
+    }
+    @available(macOS 14.0, iOS 17.0, *)
+    private let classicTransferRecoveryTaskLock = OSAllocatedUnfairLock<ClassicTransferRecoveryTaskOwner?>(initialState: nil)
     @available(macOS 14.0, iOS 17.0, *)
     private let rekeyInProgressLock = OSAllocatedUnfairLock<Bool>(initialState: false)
     @available(macOS 14.0, iOS 17.0, *)
@@ -430,12 +471,15 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     private let lastPairingIdentityExchangeSentAtLock = OSAllocatedUnfairLock<Date?>(initialState: nil)
     @available(macOS 14.0, iOS 17.0, *)
     private let latestRemotePairingIdentityPayloadLock = OSAllocatedUnfairLock<AppMessage.PairingIdentityExchangePayload?>(initialState: nil)
+    private let acceptedClassicCapabilitiesLock = OSAllocatedUnfairLock<ClassicTransferPeerCapabilities?>(initialState: nil)
     @available(macOS 14.0, iOS 17.0, *)
     private let soaPairKeyLock = OSAllocatedUnfairLock<Data?>(initialState: nil)
     @available(macOS 14.0, iOS 17.0, *)
     private let establishedArbiterLeaseLock = OSAllocatedUnfairLock<PeerSessionArbiter.EstablishedLease?>(initialState: nil)
     @available(macOS 14.0, iOS 17.0, *)
     private let presenceLeaseLock = OSAllocatedUnfairLock<ConnectionPresenceService.PresenceLease?>(initialState: nil)
+    @available(macOS 14.0, iOS 17.0, *)
+    private let classicTransferLifetime = ClassicTransferSessionRegistry.SessionLifetime()
     @available(macOS 14.0, iOS 17.0, *)
     private let classicTransferSessionLeasesLock = OSAllocatedUnfairLock<[String: ClassicTransferSessionRegistry.SessionLease]>(initialState: [:])
     @available(macOS 14.0, iOS 17.0, *)
@@ -444,6 +488,8 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     private let authenticatedRemoteAuthorityLock = OSAllocatedUnfairLock<AuthenticatedRemoteAuthority?>(initialState: nil)
     @available(macOS 14.0, iOS 17.0, *)
     private let authenticatedHandshakePeerBindingLock = OSAllocatedUnfairLock<AuthenticatedHandshakePeerBinding?>(initialState: nil)
+    @available(macOS 14.0, iOS 17.0, *)
+    private let authenticatedLocalIdentityBindingLock = OSAllocatedUnfairLock<ProtocolIdentityBinding?>(initialState: nil)
     @available(macOS 14.0, iOS 17.0, *)
     private struct OwnedHandshakeDriver: Sendable {
         let token: P2PHandshakeOperationToken
@@ -460,24 +506,32 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         let owner: OwnedHandshakeDriver
         let keys: SessionKeys
         let peerBinding: AuthenticatedHandshakePeerBinding
+        let localIdentityBinding: ProtocolIdentityBinding?
         let soaPairKey: Data?
         let arbiterLease: PeerSessionArbiter.EstablishedLease?
         var connectivityAttemptOwner: ProductConnectivityAttemptOwner? = nil
+        var modePolicy: PQCModePolicySnapshot? = nil
     }
     @available(macOS 14.0, iOS 17.0, *)
     private struct EstablishedSessionSnapshot: Sendable {
         let keys: SessionKeys
         let peerBinding: AuthenticatedHandshakePeerBinding
+        let localIdentityBinding: ProtocolIdentityBinding?
         let soaPairKey: Data?
         let arbiterLease: PeerSessionArbiter.EstablishedLease?
         let assuranceLevel: P2PSessionAssuranceLevel
+        let retiredAudioStreams: P2PAudioCarrier.StreamHistory
     }
     @available(macOS 14.0, iOS 17.0, *)
     private struct AuthenticatedMessageSendWitness: Sendable {
         let connectionGeneration: UInt64
         let keys: SessionKeys
         let peerBinding: AuthenticatedHandshakePeerBinding
+        let localIdentityBinding: ProtocolIdentityBinding?
     }
+    // First accessed under handshakeOperationLock; all hosts share the same bounded audio owner.
+    @available(macOS 14.0, iOS 17.0, *)
+    private let audioCarrier: P2PAudioCarrier
     @available(macOS 14.0, iOS 17.0, *)
     private struct InboundRekeyRollbackReceipt: Sendable {
         let owner: OwnedHandshakeDriver
@@ -497,9 +551,43 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         }
     }
 
-    public init(device: P2PDevice, connection: NWConnection) {
+    public convenience init(device: P2PDevice, connection: NWConnection, controlTransport: ControlTransport = .network) {
+        self.init(device: device, connection: connection, controlTransport: controlTransport, incomingAudioRegistry: nil)
+    }
+
+    /// The discovery runtime supplies its existing receiver registry. Standalone
+    /// connections remain unadvertised unless a concrete consumer is supplied.
+    convenience init(device: P2PDevice, connection: NWConnection, controlTransport: ControlTransport,
+         incomingAudioRegistry: P2PAudioIncomingChannelRegistry?, usbDeviceID: String? = nil) {
+        self.init(device: device, frameCarrier: .network(connection), controlTransport: controlTransport,
+                  incomingAudioRegistry: incomingAudioRegistry,
+                  audioCarrier: P2PAudioCarrier(connection: connection, controlTransport: controlTransport,
+                    usbDeviceID: controlTransport == .usb ? usbDeviceID : nil))
+    }
+
+    #if os(macOS)
+    public convenience init(device: P2PDevice, usbControl: USBHostControlFrameTransport) {
+        self.init(device: device, usbControl: usbControl, incomingAudioRegistry: nil)
+    }
+
+    /// The attachment runtime retains usbControl through closeAndAwait. This
+    /// session uses the ordinary handshake/pairing state machine on its MAIN stream.
+    convenience init(device: P2PDevice, usbControl: USBHostControlFrameTransport,
+                     incomingAudioRegistry: P2PAudioIncomingChannelRegistry?, fileConnection: USBHostMultiplexConnection? = nil) {
+        self.init(device: device, frameCarrier: .usb(usbControl), controlTransport: .usb,
+                  incomingAudioRegistry: incomingAudioRegistry,
+                  audioCarrier: P2PAudioCarrier(usbControl: usbControl, fileConnection: fileConnection))
+    }
+    #endif
+
+    private init(device: P2PDevice, frameCarrier: P2PControlFrameCarrier, controlTransport: ControlTransport,
+                 incomingAudioRegistry: P2PAudioIncomingChannelRegistry?, audioCarrier: P2PAudioCarrier) {
         self.device = device
-        self.connection = connection
+        self.frameCarrier = frameCarrier
+        self.connection = frameCarrier.networkConnection
+        self.controlTransport = controlTransport
+        self.incomingAudioRegistry = incomingAudioRegistry
+        self.audioCarrier = audioCarrier
         self.handshakePeerLock = OSAllocatedUnfairLock(
             initialState: PeerIdentifier(
                 deviceId: device.deviceId,
@@ -513,8 +601,10 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     private func beginHandshakeOperation(
         kind: P2PHandshakeOperationKind
     ) async throws -> P2PHandshakeOperationToken {
-        let outcome = handshakeOperationLock.withLock {
-            $0.begin(kind: kind)
+        let outcome = handshakeOperationLock.withLock { registry in
+            let outcome = registry.begin(kind: kind)
+            if case .started = outcome { invalidateAudioTransportLocked() }
+            return outcome
         }
         switch outcome {
         case .started(let token):
@@ -653,9 +743,11 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             return EstablishedSessionSnapshot(
                 keys: keys,
                 peerBinding: peerBinding,
+                localIdentityBinding: authenticatedLocalIdentityBindingLock.withLock { $0 },
                 soaPairKey: soaPairKeyLock.withLock { $0 },
                 arbiterLease: establishedArbiterLeaseLock.withLock { $0 },
-                assuranceLevel: currentAssuranceLevel
+                assuranceLevel: currentAssuranceLevel,
+                retiredAudioStreams: audioCarrier.streamHistory()
             )
         }
     }
@@ -664,15 +756,28 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     private func publishEstablishedSession(
         _ receipt: EstablishedHandshakeReceipt
     ) throws {
-        let published = handshakeOperationLock.withLock { registry -> Bool in
+        let publish = { [self] in
+            self.handshakeOperationLock.withLock { registry -> Bool in
             guard registry.owns(
                 receipt.owner.token,
                 exactDriver: receipt.owner.driver
             ) else {
                 return false
             }
+            // A completed new key epoch gets fresh stream history. A later
+            // transaction rollback restores the previous history with its keys.
+            let sameAudioEpoch = sessionKeysLock.withLock {
+                $0?.sessionId == receipt.keys.sessionId
+                    && $0?.sendKey == receipt.keys.sendKey
+                    && $0?.receiveKey == receipt.keys.receiveKey
+            }
+            invalidateAudioTransportLocked(resetStreamHistory: !sameAudioEpoch)
+            guard audioCarrier.publishFinished(keys: receipt.keys, peerBinding: receipt.peerBinding,
+                localBinding: receipt.localIdentityBinding,
+                restoring: sameAudioEpoch ? audioCarrier.streamHistory() : nil) else { return false }
             sessionKeysLock.withLock { $0 = receipt.keys }
             authenticatedHandshakePeerBindingLock.withLock { $0 = receipt.peerBinding }
+            authenticatedLocalIdentityBindingLock.withLock { $0 = receipt.localIdentityBinding }
             authenticatedRemoteAuthorityLock.withLock { $0 = receipt.peerBinding.authority }
             soaPairKeyLock.withLock { $0 = receipt.soaPairKey }
             establishedArbiterLeaseLock.withLock { $0 = receipt.arbiterLease }
@@ -681,7 +786,12 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 sessionId: receipt.keys.sessionId
             ))
             return true
+            }
         }
+        let published: Bool
+        if let mode = receipt.modePolicy {
+            published = try PQCModePolicyStore.standard.withCurrent(mode, publish)
+        } else { published = publish() }
         guard published else {
             throw P2PConnectionError.staleHandshakeOperation
         }
@@ -803,11 +913,15 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
         let restored = handshakeOperationLock.withLock { registry -> Bool in
             guard registry.owns(token) else { return false }
+            invalidateAudioTransportLocked(resetStreamHistory: true)
             if let previousSession {
+                guard audioCarrier.publishFinished(keys: previousSession.keys, peerBinding: previousSession.peerBinding,
+                    localBinding: previousSession.localIdentityBinding, restoring: previousSession.retiredAudioStreams) else { return false }
                 sessionKeysLock.withLock { $0 = previousSession.keys }
                 authenticatedHandshakePeerBindingLock.withLock {
                     $0 = previousSession.peerBinding
                 }
+                authenticatedLocalIdentityBindingLock.withLock { $0 = previousSession.localIdentityBinding }
                 authenticatedRemoteAuthorityLock.withLock {
                     $0 = previousSession.peerBinding.authority
                 }
@@ -818,10 +932,12 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             } else {
                 sessionKeysLock.withLock { $0 = nil }
                 authenticatedHandshakePeerBindingLock.withLock { $0 = nil }
+                authenticatedLocalIdentityBindingLock.withLock { $0 = nil }
                 authenticatedRemoteAuthorityLock.withLock { $0 = nil }
                 soaPairKeyLock.withLock { $0 = nil }
                 establishedArbiterLeaseLock.withLock { $0 = nil }
                 latestRemotePairingIdentityPayloadLock.withLock { $0 = nil }
+                acceptedClassicCapabilitiesLock.withLock { $0 = nil }
             }
             inboundRekeyRollbackLock.withLock { $0 = nil }
             rekeyInProgressLock.withLock { $0 = false }
@@ -858,9 +974,11 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             registry -> PeerSessionArbiter.EstablishedLease? in
             guard registry.owns(token) else { return nil }
             sessionHandoffGate.invalidate(operation: token)
+            invalidateAudioTransportLocked(resetStreamHistory: true)
             sessionKeysLock.withLock { $0 = nil }
             authenticatedRemoteAuthorityLock.withLock { $0 = nil }
             authenticatedHandshakePeerBindingLock.withLock { $0 = nil }
+            authenticatedLocalIdentityBindingLock.withLock { $0 = nil }
             soaPairKeyLock.withLock { $0 = nil }
             return establishedArbiterLeaseLock.withLock { state in
                 let current = state
@@ -878,6 +996,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     }
 
     private func resolveCurrentRemoteIP() -> String? {
+        guard controlTransport == .network, let connection else { return nil }
         // Try active path first (most reliable)
         if let endpoint = connection.currentPath?.remoteEndpoint,
            case .hostPort(let host, _) = endpoint {
@@ -903,7 +1022,8 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
     @available(macOS 14.0, iOS 17.0, *)
     func classicTransferEndpointHostOrIP() -> String? {
-        resolveCurrentRemoteIP() ?? normalizedNonEmptyString(device.address)
+        guard controlTransport == .network else { return nil }
+        return resolveCurrentRemoteIP() ?? normalizedNonEmptyString(device.address)
     }
 
     @available(macOS 14.0, iOS 17.0, *)
@@ -919,7 +1039,9 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     }
 
     @available(macOS 14.0, iOS 17.0, *)
-    func classicTransferResolvedPeerDeviceId(
+    /// Canonical file-routing identity, shared by route publication and callers.
+    /// This projection does not itself authenticate a connection or authorize a send.
+    public func classicTransferResolvedPeerDeviceId(
         remoteIdentityPayload: AppMessage.PairingIdentityExchangePayload? = nil
     ) -> String {
         let payload = remoteIdentityPayload ?? latestRemotePairingIdentityPayloadLock.withLock { $0 }
@@ -1046,7 +1168,8 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             aliases: aliases,
             endpointHostOrIP: endpoint,
             capabilities: classicTransferCapabilities(remoteIdentityPayload: payload),
-            sessionKeys: keys
+            sessionKeys: keys,
+            capabilityEvidence: acceptedClassicCapabilitiesLock.withLock { $0 }
         )
 
         let activeSessionLease: ClassicTransferSessionRegistry.SessionLease
@@ -1063,9 +1186,11 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             }
             activeSessionLease = existingLease
         } else {
-            let newLease = await ClassicTransferSessionRegistry.shared.upsertOwned(
-                session: snapshot
-            )
+            guard let newLease = await ClassicTransferSessionRegistry.shared.upsertOwned(
+                session: snapshot, lifetime: classicTransferLifetime
+            ) else {
+                throw P2PConnectionError.classicTransferSessionLeaseUnavailable
+            }
             if let operationOwner {
                 do {
                     try requireCurrentHandshakeOperation(
@@ -1182,6 +1307,84 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         }
     }
 
+    /// An idle mobile process may resume after the derivative file-session cache
+    /// expires. Never revive that lease from a heartbeat. Reserve a fresh, exact
+    /// handshake operation on the existing carrier before returning to its reader.
+    /// The reader must remain free to deliver that handshake's replies.
+    @available(macOS 14.0, iOS 17.0, *)
+    private func prepareClassicTransferSessionRecovery(keys: SessionKeys) throws -> P2PHandshakeOperationToken {
+        try handshakeOperationLock.withLock { registry in
+            guard !registry.isDisconnected,
+                  let current = sessionKeysLock.withLock({ $0 }),
+                  current.sessionId == keys.sessionId,
+                  current.transcriptHash == keys.transcriptHash,
+                  current.sendKey == keys.sendKey,
+                  current.receiveKey == keys.receiveKey,
+                  authenticatedHandshakePeerBindingLock.withLock({ $0 }) != nil else {
+                throw P2PConnectionError.staleAuthenticatedFrame
+            }
+            let operation: P2PHandshakeOperationToken
+            switch registry.begin(kind: .outboundRekey) {
+            case .started(let token): operation = token
+            case .operationInProgress: throw P2PConnectionError.handshakeOperationInProgress
+            case .disconnected: throw P2PConnectionError.disconnected
+            case .sequenceExhausted: throw P2PConnectionError.handshakeOperationSequenceExhausted
+            }
+            invalidateAudioTransportLocked()
+            rekeyInProgressLock.withLock { $0 = true }
+            return operation
+        }
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func recoverClassicTransferSession(keys: SessionKeys) throws {
+        let operation = try prepareClassicTransferSessionRecovery(keys: keys)
+        classicTransferRecoveryTaskLock.withLock {
+            $0 = ClassicTransferRecoveryTaskOwner(operation: operation, task: nil)
+        }
+        SkyBridgeLogger.p2p.info("File-session lease unavailable; starting one fresh handshake on the current carrier")
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.classicTransferRecoveryTaskLock.withLock { owner in
+                    if owner?.operation == operation { owner = nil }
+                }
+            }
+            do {
+                try self.requireCurrentHandshakeOperation(operation)
+                try await withThrowingTaskGroup(of: Void.self) { group in
+                    group.addTask {
+                        try await self.authenticate(operation: operation, restorePreviousSessionOnFailure: false)
+                    }
+                    group.addTask {
+                        try await Task.sleep(for: .seconds(90))
+                        throw P2PDiscoveryError.timeout
+                    }
+                    defer { group.cancelAll() }
+                    do { _ = try await group.next() }
+                    catch {
+                        // Cancel the actual driver before joining the child that
+                        // may be awaiting its continuation. A finished/replaced
+                        // operation is not owned by this timeout.
+                        if self.handshakeOperationLock.withLock({ $0.owns(operation) }) {
+                            self.disconnect()
+                        }
+                        throw error
+                    }
+                }
+                SkyBridgeLogger.p2p.info("File-session recovery completed with a fresh authenticated session")
+            } catch {
+                SkyBridgeLogger.p2p.error("File-session reauthentication failed: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
+            }
+        }
+        let installed = classicTransferRecoveryTaskLock.withLock { owner -> Bool in
+            guard owner?.operation == operation else { return false }
+            owner?.task = task
+            return true
+        }
+        if !installed { task.cancel() }
+    }
+
     @available(macOS 14.0, iOS 17.0, *)
     private func removeAllClassicTransferSessionLeases() async {
         let leases = classicTransferSessionLeasesLock.withLock { state -> [ClassicTransferSessionRegistry.SessionLease] in
@@ -1207,6 +1410,36 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     }
 
     #if DEBUG || SKYBRIDGE_TESTING
+    /// Injects only already-established test state, then exercises the real snapshot,
+    /// failure rollback and clear paths. It never starts the connection or a handshake.
+    @available(macOS 14.0, iOS 17.0, *)
+    func testingLocalIdentityRollback(
+        keys: SessionKeys, peerBinding: AuthenticatedHandshakePeerBinding,
+        previous: ProtocolIdentityBinding?, replacement: ProtocolIdentityBinding?
+    ) async throws -> (restored: ProtocolIdentityBinding?, cleared: ProtocolIdentityBinding?) {
+        let operation = try await beginHandshakeOperation(kind: .outboundRekey)
+        handshakeOperationLock.withLock { _ in
+            sessionKeysLock.withLock { $0 = keys }
+            authenticatedHandshakePeerBindingLock.withLock { $0 = peerBinding }
+            authenticatedLocalIdentityBindingLock.withLock { $0 = previous }
+        }
+        let previousSession = try await currentEstablishedSessionSnapshot(for: operation)
+        handshakeOperationLock.withLock { _ in
+            authenticatedLocalIdentityBindingLock.withLock { $0 = replacement }
+        }
+        try await failHandshakeOperation(operation, restoring: previousSession, terminalStatus: .authenticated)
+        let restored = authenticatedLocalIdentityBindingLock.withLock { $0 }
+        let clearOperation = try await beginHandshakeOperation(kind: .outboundRekey)
+        await clearPublishedSession(for: clearOperation)
+        _ = handshakeOperationLock.withLock { $0.finish(clearOperation) }
+        return (restored, authenticatedLocalIdentityBindingLock.withLock { $0 })
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    func testingInstallEstablishedLeaseForDisconnection(_ lease: PeerSessionArbiter.EstablishedLease) {
+        establishedArbiterLeaseLock.withLock { $0 = lease }
+    }
+
     @available(macOS 14.0, iOS 17.0, *)
     func testingRollbackPublishedArbiterLease(
         currentLease: PeerSessionArbiter.EstablishedLease?,
@@ -1298,6 +1531,33 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     }
 
     public func disconnect() {
+        _ = disconnectionTask()
+    }
+
+    /// Reconnection may start only after this connection's exact owner leases
+    /// have been retired. Repeated callers await the same teardown operation.
+    public func disconnectAndWait() async {
+        await disconnectionTask().value
+    }
+
+    private func disconnectionTask() -> Task<Void, Never> {
+        disconnectionTaskLock.withLock { existing in
+            if let existing { return existing }
+            let task = beginDisconnection()
+            existing = task
+            return task
+        }
+    }
+
+    private func beginDisconnection() -> Task<Void, Never> {
+        if #available(macOS 14.0, iOS 17.0, *) {
+            let recoveryTask = classicTransferRecoveryTaskLock.withLock { owner -> Task<Void, Never>? in
+                let task = owner?.task
+                owner = nil
+                return task
+            }
+            recoveryTask?.cancel()
+        }
         let receiveTask = receiveLeaseLock.withLock { state -> Task<Void, Never>? in
             let current = state?.task
             state = nil
@@ -1311,6 +1571,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         }
         metricsTask?.cancel()
 
+        let ownershipCleanup: Task<Void, Never>?
         if #available(macOS 14.0, iOS 17.0, *) {
             let peerIds = Array(
                 Set(([handshakePeer.deviceId] + classicTransferPeerLookupAliases())
@@ -1325,10 +1586,13 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 classicTransferConnectionLease: ClassicTransferSessionRegistry.ConnectionLease?
             ) in
                 let driver = registry.disconnect()
+                invalidateAudioTransportLocked(resetStreamHistory: true)
+                classicTransferLifetime.invalidate()
                 sessionHandoffGate.invalidateAll()
                 sessionKeysLock.withLock { $0 = nil }
                 authenticatedRemoteAuthorityLock.withLock { $0 = nil }
                 authenticatedHandshakePeerBindingLock.withLock { $0 = nil }
+                authenticatedLocalIdentityBindingLock.withLock { $0 = nil }
                 inboundRekeyRollbackLock.withLock { $0 = nil }
                 soaPairKeyLock.withLock { $0 = nil }
                 let arbiterLease = establishedArbiterLeaseLock.withLock {
@@ -1365,6 +1629,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             }
             lastPairingIdentityExchangeSentAtLock.withLock { $0 = nil }
             latestRemotePairingIdentityPayloadLock.withLock { $0 = nil }
+            acceptedClassicCapabilitiesLock.withLock { $0 = nil }
             metricsLock.withLock { state in
                 state.lastBandwidthSampleAt = nil
                 state.lastPingSentAt = nil
@@ -1373,15 +1638,11 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             }
             rekeyInProgressLock.withLock { $0 = false }
             bootstrapAssistedHandshakeLock.withLock { $0 = false }
-            if teardown.driver != nil || teardown.arbiterLease != nil {
-                Task {
-                    await teardown.driver?.cancel()
-                    if let arbiterLease = teardown.arbiterLease {
-                        _ = await PeerSessionArbiter.shared.clearEstablished(arbiterLease)
-                    }
+            ownershipCleanup = Task {
+                await teardown.driver?.cancel()
+                if let arbiterLease = teardown.arbiterLease {
+                    _ = await PeerSessionArbiter.shared.clearEstablished(arbiterLease)
                 }
-            }
-            Task {
                 for sessionLease in teardown.classicTransferSessionLeases {
                     _ = await ClassicTransferSessionRegistry.shared.remove(
                         ifOwned: sessionLease
@@ -1411,10 +1672,14 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                     }
                 }
             }
+        } else {
+            ownershipCleanup = nil
         }
-        connection.cancel()
-        Task { @MainActor [weak self] in
+        frameCarrier.close()
+        let presentationCleanup = Task { @MainActor [weak self] in
             guard let self else { return }
+            self.audioCapabilityRefresh?.retire()
+            self.audioCapabilityRefresh = nil
             self.status = .disconnected
             self.measuredLatency = 0
             self.measuredPacketLoss = 0
@@ -1422,6 +1687,10 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             if #available(macOS 14.0, iOS 17.0, *) {
                 self.assuranceLevel = .unknown
             }
+        }
+        return Task {
+            await ownershipCleanup?.value
+            await presentationCleanup.value
         }
     }
 
@@ -1436,9 +1705,16 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             ? .authentication
             : .outboundRekey
         let operation = try await beginHandshakeOperation(kind: operationKind)
+        try await authenticate(operation: operation, restorePreviousSessionOnFailure: true)
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func authenticate(operation: P2PHandshakeOperationToken,
+                              restorePreviousSessionOnFailure: Bool) async throws {
         var previousSession: EstablishedSessionSnapshot?
         var pendingConnectivityAttemptOwner: ProductConnectivityAttemptOwner?
         do {
+            try Task.checkCancellation()
             let gateStaged = handshakeOperationLock.withLock { registry -> Bool in
                 guard registry.owns(operation) else { return false }
                 if operation.kind == .outboundRekey {
@@ -1465,7 +1741,9 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                     guard registry.owns(operation) else { return }
                     authenticatedRemoteAuthorityLock.withLock { $0 = nil }
                     authenticatedHandshakePeerBindingLock.withLock { $0 = nil }
+                    authenticatedLocalIdentityBindingLock.withLock { $0 = nil }
                     latestRemotePairingIdentityPayloadLock.withLock { $0 = nil }
+                    acceptedClassicCapabilitiesLock.withLock { $0 = nil }
                 }
             }
 
@@ -1537,13 +1815,32 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                     )
                 }
             }
-            try await failHandshakeOperation(
-                operation,
-                restoring: previousSession,
-                terminalStatus: previousSession == nil ? .failed : .authenticated
-            )
+            if restorePreviousSessionOnFailure {
+                try await failHandshakeOperation(
+                    operation,
+                    restoring: previousSession,
+                    terminalStatus: previousSession == nil ? .failed : .authenticated
+                )
+            } else if handshakeOperationLock.withLock({ $0.owns(operation) }) {
+                // This operation still excludes a replacement rekey. An expired
+                // file owner must never be restored by a failed recovery attempt.
+                disconnect()
+            }
             throw originalError
         }
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    static func makeHandshakeCryptoProvider(
+        policy: CryptoProviderFactory.SelectionPolicy
+    ) -> any CryptoProvider {
+        // LAN prepares its local offer before receiving an authenticated peer
+        // offer. The outbound selector still captures an admitted explicit Q
+        // request here; trusted peer keys are loaded by HandshakeDriver later.
+        CryptoProviderFactory.makeOutboundPQCInitiatorProvider(
+            policy: policy,
+            peerAdvertisedSuites: []
+        )
     }
 
     @available(macOS 14.0, iOS 17.0, *)
@@ -1551,9 +1848,11 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         operation: P2PHandshakeOperationToken
     ) async throws -> EstablishedHandshakeReceipt {
         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
-        let policy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
+        let policy = HandshakePolicy.recommendedDefault(
+            compatibilityModeEnabled: controlTransport != .usb && compatibilityModeEnabled
+        )
         let selection: CryptoProviderFactory.SelectionPolicy = policy.requirePQC ? .requirePQC : .preferPQC
-        let requestedProvider = CryptoProviderFactory.make(policy: selection)
+        let requestedProvider = Self.makeHandshakeCryptoProvider(policy: selection)
 
         do {
             let receipt = try await performHandshakeAttempt(
@@ -1572,6 +1871,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 operation: operation
             )
         } catch {
+            if policy.requirePQC { throw error }
             if let receipt = try await performPQCBootstrapRecoveryIfNeeded(
                 for: error,
                 requestedPolicy: policy,
@@ -1656,16 +1956,25 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         operation: P2PHandshakeOperationToken
     ) async throws -> EstablishedHandshakeReceipt {
         try requireCurrentHandshakeOperation(operation)
-        let baseProvider = CryptoProviderFactory.make(policy: selectionPolicy)
+        let lanPlan: LANPQCHandshakePlan?
+        if policy.requirePQC {
+            let candidates = PeerTrustLookup.lookupCandidates(for: handshakePeer.deviceId)
+            var pins = Set<String>()
+            let trust = DefaultHandshakeTrustProvider()
+            for candidate in candidates { pins.formUnion(await trust.trustedFingerprints(for: candidate)) }
+            lanPlan = try await P2PDiscoveryService.shared.prepareLANPQCHandshakePlan(
+                deviceId: handshakePeer.deviceId, pinnedFingerprints: pins,
+                currentConnection: operation.kind == .outboundRekey ? self : nil)
+        } else { lanPlan = nil }
+        let baseProvider = lanPlan?.provider ?? Self.makeHandshakeCryptoProvider(policy: selectionPolicy)
         let successfulConnectivityAttemptOwner = OSAllocatedUnfairLock<
             ProductConnectivityAttemptOwner?
         >(initialState: nil)
 
         let shouldAdvertiseSOA = allowSOA && shouldUseSOA()
         let previousSession = try await currentEstablishedSessionSnapshot(for: operation)
-        let localSOAPeerId: Data? = shouldAdvertiseSOA
-            ? try await localSOAPeerIdBytes()
-            : nil
+        let localSOAIdentity = shouldAdvertiseSOA ? try await localSOAIdentitySnapshot() : nil
+        let localSOAPeerId = localSOAIdentity?.peerID
         try requireCurrentHandshakeOperation(operation)
         let expectedRemoteSOAPeerId: Data?
         if shouldAdvertiseSOA {
@@ -1734,7 +2043,9 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                     let cryptoProvider: any CryptoProvider = {
                         switch preparation.strategy {
                         case .pqcOnly:
-                            return CryptoProviderFactory.make(policy: selectionPolicy)
+                            // Use the provider captured for this attempt's
+                            // offered suites throughout the actual handshake.
+                            return baseProvider
                         case .classicOnly:
                             return CryptoProviderFactory.make(policy: .classicOnly)
                         }
@@ -1799,7 +2110,10 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                             operation,
                             exactDriver: exactDriver
                         )
-                        try await self.sendFramed(data)
+                        try await self.sendFramed(data) { [weak self] in
+                            guard let self else { throw P2PConnectionError.disconnected }
+                            try self.requireCurrentHandshakeOperation(operation, exactDriver: exactDriver)
+                        }
                         try self.requireCurrentHandshakeOperation(
                             operation,
                             exactDriver: exactDriver
@@ -1817,6 +2131,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                             cryptoPolicy: cryptoPolicy,
                             soaMetadata: outboundSOA,
                             localSOAPeerId: localSOAPeerId,
+                            localProtocolDeviceId: localSOAIdentity?.deviceID,
                             expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
                         )
                         exactDriverLock.withLock { $0 = driver }
@@ -1856,7 +2171,8 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                         throw error
                     }
                 },
-                pqcSignatureAlgorithm: outboundProtocolIdentity.selectedAlgorithm
+                pqcSignatureAlgorithm: outboundProtocolIdentity.selectedAlgorithm,
+                selectedPQCSuite: lanPlan?.suiteWireId
             )
             try requireCurrentHandshakeOperation(operation)
             guard let owner = currentOwnedHandshakeDriver(), owner.token == operation else {
@@ -1867,6 +2183,8 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             guard let peerBinding else {
                 throw P2PConnectionError.authenticatedBindingUnavailable
             }
+            let localIdentityBinding = await owner.driver.getAuthenticatedLocalIdentityBinding(matching: sessionKeys)
+            try requireCurrentHandshakeOperation(operation, exactDriver: owner.driver)
             let newArbiterLease = await owner.driver.getEstablishedArbiterLease()
             try requireCurrentHandshakeOperation(operation, exactDriver: owner.driver)
 
@@ -1893,17 +2211,24 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 }
                 pairKey = nil
             }
+            if let lanPlan {
+                try lanPlan.withCurrent {
+                    guard sessionKeys.negotiatedSuite.wireId == lanPlan.suiteWireId else { throw PQCModeSelectionError.invalidCapabilities }
+                }
+            }
             return EstablishedHandshakeReceipt(
                 owner: owner,
                 keys: sessionKeys,
                 peerBinding: peerBinding,
+                localIdentityBinding: localIdentityBinding,
                 soaPairKey: pairKey,
                 arbiterLease: newArbiterLease,
                 connectivityAttemptOwner: successfulConnectivityAttemptOwner.withLock {
                     let current = $0
                     $0 = nil
                     return current
-                }
+                },
+                modePolicy: lanPlan?.inventory.policy
             )
         } catch {
             if let connectivityAttemptOwner = successfulConnectivityAttemptOwner.withLock({
@@ -2298,10 +2623,9 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     }
 
     @available(macOS 14.0, iOS 17.0, *)
-    private func localSOAPeerIdBytes() async throws -> Data {
-        let deviceId = try await SelfIdentityProvider.shared
-            .protocolIdentityDeviceId(allowCreate: true)
-        return Self.soaPeerIdBytes(from: deviceId)
+    private func localSOAIdentitySnapshot() async throws -> (deviceID: String, peerID: Data) {
+        let deviceID = try await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
+        return (deviceID, Self.soaPeerIdBytes(from: deviceID))
     }
 
     @available(macOS 14.0, iOS 17.0, *)
@@ -2665,6 +2989,15 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
     @available(macOS 14.0, iOS 17.0, *)
     private func sendPairingIdentityExchange(force: Bool = false) async throws {
+        try await sendPreparedPairingIdentityExchange(force: force) {
+            try await self.makeLocalPairingIdentityExchange()
+        }
+    }
+
+    private func sendPreparedPairingIdentityExchange(
+        force: Bool,
+        prepare: @Sendable () async throws -> AppMessage.PairingIdentityExchangePayload
+    ) async throws {
         let now = Date()
         if !force {
             let canSend = lastPairingIdentityExchangeSentAtLock.withLock { last in
@@ -2674,6 +3007,12 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             guard canSend else { return }
         }
 
+        let payload = try await prepare()
+        try await publishPairingIdentity(payload)
+        lastPairingIdentityExchangeSentAtLock.withLock { $0 = now }
+    }
+
+    private func makeLocalPairingIdentityExchange() async throws -> AppMessage.PairingIdentityExchangePayload {
         let provider = CryptoProviderFactory.make(policy: .preferPQC)
         let keyManager = DeviceIdentityKeyManager.shared
         let kemKeys = KEMPublicKeyInfo.normalizedValidKeys(
@@ -2681,20 +3020,19 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         )
         guard !kemKeys.isEmpty else {
             SkyBridgeLogger.p2p.warning("⚠️ 跳过 pairingIdentityExchange：本机 KEM 公钥为空")
-            return
+            throw P2PAudioCapabilityPublicationError.identityUnavailable
         }
 
         let localDeviceIdRaw = try await keyManager.getDeviceId()
         let localDeviceId = localDeviceIdRaw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !localDeviceId.isEmpty else {
             SkyBridgeLogger.p2p.warning("⚠️ 跳过 pairingIdentityExchange：本机 deviceId 为空")
-            return
+            throw P2PAudioCapabilityPublicationError.identityUnavailable
         }
         let protocolIdentityPublicKeys = try await localProtocolIdentityPublicKeysForPairing()
-        let localPresentation = LocalDevicePresentation.current()
+        let localPresentation = LocalDevicePresentation.currentProtocolMetadata()
         let localIdentity = RemoteControlSecurityNoticeCenter.cachedLocalIdentitySnapshot()
-
-        let message = AppMessage.pairingIdentityExchange(.init(
+        return AppMessage.PairingIdentityExchangePayload(
             deviceId: localDeviceId,
             kemPublicKeys: kemKeys,
             protocolIdentityPublicKeys: protocolIdentityPublicKeys,
@@ -2705,12 +3043,47 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             chip: nil,
             accountDisplayName: localIdentity?.accountDisplayName,
             nebulaId: localIdentity?.nebulaId,
-            capabilities: ["clipboard_sync", "file_transfer", "remote_desktop", "remote_control", ClassicTransferCapability.classicResume],
+            capabilities: ["clipboard_sync", "file_transfer", ClassicTransferApprovalContract.capability, "remote_desktop", "remote_control", ClassicTransferCapability.classicResume],
             fileTransferPort: ServiceEndpointRegistry.shared.snapshot().fileTransferPort,
             remoteControlPort: ServiceEndpointRegistry.shared.snapshot().remoteControlPort
-        ))
-        try await sendEncryptedAppMessage(message)
-        lastPairingIdentityExchangeSentAtLock.withLock { $0 = now }
+        )
+    }
+
+    @MainActor
+    private func publishPairingIdentity(_ prepared: AppMessage.PairingIdentityExchangePayload) async throws {
+        var payloadBytes = 0
+        let carrier = frameCarrier
+        try await P2PAudioCapabilityPublication.sendAuthorized(submit: { frame, authorization, complete in
+            try carrier.enqueuePreparedFrame(frame, authorization: authorization, completion: complete)
+        }, cancelTransport: { carrier.close() }) { enqueue in
+            let audioCapabilities = currentAudioReceiveCapabilities()
+            let receiverAuthorization = audioCapabilities.isEmpty ? nil : incomingAudioRegistry?.capturePublicationAuthorization()
+            let audioAuthorization = audioCapabilities.isEmpty ? nil : audioCarrier.capturePublicationAuthorization()
+            let message = AppMessage.pairingIdentityExchange(
+                prepared.replacingAudioReceiveCapabilities(audioCapabilities))
+            payloadBytes = try handshakeOperationLock.withLock { registry in
+                guard !registry.isDisconnected, let keys = sessionKeysLock.withLock({ $0 }) else {
+                    throw P2PConnectionError.noSessionKeys
+                }
+                let encoded = try encodedAppMessage(message)
+                if rekeyInProgressLock.withLock({ $0 }), !encoded.allowDuringBootstrap {
+                    throw P2PConnectionError.bootstrapControlOnly
+                }
+                let ciphertext = try encryptAppPayload(encoded.plaintext, with: keys)
+                let padded = try TrafficPadding.wrapForP2PControlFrame(ciphertext, label: "tx")
+                let generation = registry.connectionGeneration
+                try enqueue(P2PControlFramePolicy.frame(body: padded), { [weak self] in
+                    guard let self else { throw P2PConnectionError.disconnected }
+                    try self.requireCurrentConnectionGeneration(generation)
+                    try self.requireCurrentOutboundKeys(keys, allowDuringBootstrap: encoded.allowDuringBootstrap)
+                    try receiverAuthorization?()
+                    try audioAuthorization?()
+                })
+                return padded.count
+            }
+        }
+        bytesSent &+= UInt64(payloadBytes)
+        lastActivity = Date()
     }
 
     @available(macOS 14.0, iOS 17.0, *)
@@ -2827,6 +3200,69 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         remoteDesktopFrameHandlerLock.withLock { $0 = handler }
     }
 
+    /// Opens a single bounded audio carrier on this exact paired connection.
+    /// The caller must separately check account membership and admit each stream
+    /// before accessing a file or an output device. No audio capability is
+    /// advertised until that consumer and its permission lifecycle are installed.
+    @available(macOS 14.0, iOS 17.0, *)
+    func openAudioChannel(requiringRemoteProtocolFingerprint fingerprint: String) throws -> P2PAudioChannel {
+        let normalized = try DeviceTextMessagePolicy.normalizedConversationFingerprint(fingerprint)
+        let witness = try authenticatedMessageSendWitness(requiringRemoteProtocolFingerprint: normalized)
+        return try handshakeOperationLock.withLock { registry in
+            guard registry.ownsConnectionGeneration(witness.connectionGeneration), !registry.hasActiveOperation,
+                  !rekeyInProgressLock.withLock({ $0 }), let current = sessionKeysLock.withLock({ $0 }),
+                  current.sessionId == witness.keys.sessionId, current.transcriptHash == witness.keys.transcriptHash,
+                  current.sendKey == witness.keys.sendKey, current.receiveKey == witness.keys.receiveKey,
+                  authenticatedHandshakePeerBindingLock.withLock({ $0 }) == witness.peerBinding,
+                  authenticatedLocalIdentityBindingLock.withLock({ $0 }) == witness.localIdentityBinding else {
+                throw P2PAudioTransportError.staleOwner
+            }
+            return try audioCarrier.open(requiringRemoteProtocolFingerprint: normalized)
+        }
+    }
+
+    private var originalAudioFileRouteReady: Bool {
+        controlTransport == .network || (controlTransport == .usb &&
+            (audioCarrier.canReceiveFileOverUSB || audioCarrier.canReceiveLogicalFileOverUSB))
+    }
+
+    @MainActor
+    func currentAudioReceiveCapabilities() -> [String] {
+        // USB file-return support is known only after peer capability admission.
+        // Publishing capture/Opus earlier exposes a target whose snapshot would
+        // be retired by the forced ready reply. Publish the complete USB set once
+        // that admission commits; unrelated network readiness stays unchanged.
+        guard controlTransport != .usb || audioCarrier.hasCommittedPeer else { return [] }
+        return incomingAudioRegistry?.receiveCapabilities(originalFileRouteReady: originalAudioFileRouteReady,
+            usbFileReturnReady: controlTransport == .usb && audioCarrier.canReceiveFileOverUSB,
+            usbLogicalFileReady: controlTransport == .usb && audioCarrier.canReceiveLogicalFileOverUSB) ?? []
+    }
+
+    @MainActor
+    func requestAudioReceiveCapabilityRefresh() {
+        guard incomingAudioRegistry != nil else { return }
+        if audioCapabilityRefresh == nil {
+            audioCapabilityRefresh = P2PAudioCapabilityRefresh(operation: { [weak self] in
+                guard let self else { return }
+                let ready = self.handshakeOperationLock.withLock { registry in
+                    !registry.isDisconnected && !registry.hasActiveOperation && self.audioCarrier.hasCommittedPeer
+                }
+                // A pending handshake publishes current flags through its normal
+                // post-auth/pairing reply; it is not an existing admitted peer.
+                guard ready else { return }
+                try await self.sendPairingIdentityExchange(force: true)
+            }, reportFailure: { error in
+                SkyBridgeLogger.p2p.error("Audio capability refresh failed: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
+            })
+        }
+        audioCapabilityRefresh?.request()
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func invalidateAudioTransportLocked(resetStreamHistory: Bool = false) {
+        audioCarrier.invalidate(resetStreamHistory: resetStreamHistory)
+    }
+
     @available(macOS 14.0, iOS 17.0, *)
     public func sendRemoteDesktopFrame(_ data: Data, timestampNs: UInt64) async throws {
         let envelope = BusinessEnvelope.remoteDesktopFrame(timestampNs: timestampNs, payload: data)
@@ -2857,30 +3293,53 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             encoded.plaintext,
             label: "tx",
             allowDuringBootstrap: encoded.allowDuringBootstrap,
-            using: witness.keys
+            using: witness.keys,
+            additionalAuthorization: { [weak self] in
+                guard let self else { throw P2PConnectionError.disconnected }
+                try self.requireCurrentAuthenticatedMessageSendWitness(witness)
+            }
         )
         try requireCurrentAuthenticatedMessageSendWitness(witness)
     }
 
+    /// An encrypted handshake is not yet the peer's accepted identity/capability
+    /// exchange. Operators wait on this exact live witness, never a cached key.
+    @available(macOS 14.0, iOS 17.0, *)
+    @MainActor
+    public func waitForCurrentPeerIdentityExchange() async throws {
+        guard let fingerprint = authenticatedProtocolFingerprint else {
+            throw P2PConnectionError.authenticatedBindingUnavailable
+        }
+        let witness = try authenticatedMessageSendWitness(requiringRemoteProtocolFingerprint: fingerprint)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(8))
+        while true {
+            try Task.checkCancellation()
+            try requireCurrentAuthenticatedMessageSendWitness(witness)
+            let accepted = acceptedClassicCapabilitiesLock.withLock {
+                $0?.approvalSupport(sessionID: witness.keys.sessionId, transcriptHash: witness.keys.transcriptHash) != nil
+            }
+            if accepted {
+                try requireCurrentAuthenticatedMessageSendWitness(witness)
+                return
+            }
+            guard ContinuousClock.now < deadline else {
+                throw P2PConnectionError.postAuthPairingIdentityExchangeTimeout
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
     @available(macOS 14.0, iOS 17.0, *)
     public func deriveClassicFileTransferKey(transferId: String) throws -> SymmetricKey {
+        try classicTransferKeyMaterial(transferId: transferId).transferKey
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    func classicTransferKeyMaterial(transferId: String) throws -> ClassicTransferKeyMaterial {
         guard let keys = sessionKeysLock.withLock({ $0 }) else {
             throw P2PConnectionError.noSessionKeys
         }
-
-        let orderedKeys = [keys.sendKey, keys.receiveKey].sorted { lhs, rhs in
-            lhs.lexicographicallyPrecedes(rhs)
-        }
-        let combinedMaterial = orderedKeys.reduce(into: Data()) { partial, key in
-            partial.append(key)
-        }
-
-        return HKDF<SHA256>.deriveKey(
-            inputKeyMaterial: SymmetricKey(data: combinedMaterial),
-            salt: Data("skybridge-classic-file-transfer-v1".utf8),
-            info: Data(transferId.utf8),
-            outputByteCount: 32
-        )
+        return ClassicTransferKeyMaterial(sessionKeys: keys, transferId: transferId, capabilityEvidence: acceptedClassicCapabilitiesLock.withLock { $0 })
     }
 
     @available(macOS 14.0, iOS 17.0, *)
@@ -2936,7 +3395,8 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             return AuthenticatedMessageSendWitness(
                 connectionGeneration: registry.connectionGeneration,
                 keys: keys,
-                peerBinding: peerBinding
+                peerBinding: peerBinding,
+                localIdentityBinding: authenticatedLocalIdentityBindingLock.withLock { $0 }
             )
         }
     }
@@ -2973,7 +3433,10 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             ciphertext,
             label: label
         )
-        try await sendFramed(padded)
+        try await sendFramed(padded) { [weak self] in
+            guard let self else { throw P2PConnectionError.disconnected }
+            try self.requireCurrentOutboundKeys(keys, allowDuringBootstrap: allowDuringBootstrap)
+        }
     }
 
     @available(macOS 14.0, iOS 17.0, *)
@@ -2981,7 +3444,8 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         _ plaintext: Data,
         label: String,
         allowDuringBootstrap: Bool,
-        using keys: SessionKeys
+        using keys: SessionKeys,
+        additionalAuthorization: @escaping @Sendable () throws -> Void = {}
     ) async throws {
         if rekeyInProgressLock.withLock({ $0 }), !allowDuringBootstrap {
             throw P2PConnectionError.bootstrapControlOnly
@@ -2991,7 +3455,22 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             ciphertext,
             label: label
         )
-        try await sendFramed(padded)
+        try await sendFramed(padded) { [weak self] in
+            guard let self else { throw P2PConnectionError.disconnected }
+            try self.requireCurrentOutboundKeys(keys, allowDuringBootstrap: allowDuringBootstrap)
+            try additionalAuthorization()
+        }
+    }
+
+    private func requireCurrentOutboundKeys(_ expected: SessionKeys, allowDuringBootstrap: Bool) throws {
+        try handshakeOperationLock.withLock { registry in
+            guard !registry.isDisconnected, let current = sessionKeysLock.withLock({ $0 }),
+                  current.sessionId == expected.sessionId, current.transcriptHash == expected.transcriptHash,
+                  current.sendKey == expected.sendKey else { throw P2PConnectionError.staleAuthenticatedFrame }
+            if rekeyInProgressLock.withLock({ $0 }), !allowDuringBootstrap {
+                throw P2PConnectionError.bootstrapControlOnly
+            }
+        }
     }
 
     @available(macOS 14.0, iOS 17.0, *)
@@ -3048,13 +3527,13 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         }
     }
 
-    private func sendFramed(_ payload: Data) async throws {
-        let frame = try P2PControlFramePolicy.frame(body: payload)
-
-        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-            connection.send(content: frame, completion: .contentProcessed { error in
-                if let error { c.resume(throwing: error) } else { c.resume() }
-            })
+    private func sendFramed(_ payload: Data,
+                            requireEffectAuthorization: @escaping @Sendable () throws -> Void = {}) async throws {
+        let generation = handshakeOperationLock.withLock { $0.connectionGeneration }
+        try await frameCarrier.sendFrame(payload) { [weak self] in
+            guard let self else { throw P2PConnectionError.disconnected }
+            try self.requireCurrentConnectionGeneration(generation)
+            try requireEffectAuthorization()
         }
 
         // Update counters on main thread for SwiftUI.
@@ -3293,10 +3772,9 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
             let task = Task.detached(priority: .userInitiated) { [weak self] in
                 guard let self else { return }
-                let reader = FramedReader.nwConnection(self.connection)
                 do {
                     while !Task.isCancelled {
-                        let payload = try await reader.receiveFrame()
+                        let payload = try await self.frameCarrier.receiveFrame()
                         try self.requireCurrentConnectionGeneration(connectionGeneration)
                         try await self.handleInboundFrame(
                             payload,
@@ -3471,6 +3949,39 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         }
     }
 
+    /// Called after the MAIN reader has authenticated/decrypted the frame. True
+    /// means the audio carrier consumed or explicitly rejected it, not that a
+    /// consumer authorized playback. Non-audio payloads continue to AppMessage.
+    func routeAuthenticatedAudio(_ plaintext: Data, keys: SessionKeys,
+                                 connectionGeneration: UInt64) async throws -> Bool {
+        let (disposition, carrier) = try handshakeOperationLock.withLock { registry in
+            guard registry.ownsConnectionGeneration(connectionGeneration) else { throw P2PAudioTransportError.staleOwner }
+            return (try audioCarrier.receiveAuthenticatedPlaintext(plaintext, keys: keys), audioCarrier)
+        }
+        switch disposition {
+        case .nonAudio: return false
+        case .audio: return true
+        case .unavailable:
+            SkyBridgeLogger.p2p.debug("Audio frame rejected: no admitted audio consumer")
+            return true
+        case .offerNeedsChannel(let message):
+            guard let incomingAudioRegistry else {
+                SkyBridgeLogger.p2p.debug("Audio offer rejected: no installed receiver")
+                return true
+            }
+            do {
+                let delivered = try await incomingAudioRegistry.deliverIncomingOffer(message, keys: keys,
+                    carrier: carrier, originalFileRouteReady: originalAudioFileRouteReady)
+                if !delivered { SkyBridgeLogger.p2p.debug("Audio offer rejected: receiver or file route unavailable") }
+            } catch {
+                // A retired/replaced audio consumer must not tear down unrelated
+                // MAIN traffic. The carrier still enforces exact epoch ownership.
+                SkyBridgeLogger.p2p.error("Outgoing connection audio admission failed: \(String(describing: error), privacy: .public)")
+            }
+            return true
+        }
+    }
+
     @available(macOS 14.0, iOS 17.0, *)
     private func handleAuthenticatedFrame(
         _ frame: Data,
@@ -3485,6 +3996,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         }) else {
             throw P2PConnectionError.staleAuthenticatedFrame
         }
+        if try await routeAuthenticatedAudio(plaintext, keys: keys, connectionGeneration: connectionGeneration) { return }
         if let envelope = BusinessEnvelope.decode(plaintext) {
             switch envelope.kind {
             case .remoteDesktopFrame:
@@ -3614,7 +4126,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 forKey: "Settings.EnableCompatibilityMode"
             )
             let requestedPolicy = HandshakePolicy.recommendedDefault(
-                compatibilityModeEnabled: compatibilityModeEnabled
+                compatibilityModeEnabled: controlTransport != .usb && compatibilityModeEnabled
             )
             let capability = CryptoProviderFactory.detectCapability()
             let localPQCAvailable = capability.hasApplePQC || capability.hasLiboqs
@@ -3652,12 +4164,10 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             }
 
             if inboundProtocolIdentity.algorithm != .ed25519 {
-                let selection: CryptoProviderFactory.SelectionPolicy =
-                    effectivePolicy.requirePQC ? .requirePQC : .preferPQC
-                cryptoProvider = CryptoProviderFactory.makeInboundPQCResponderProvider(
-                    policy: selection,
-                    peerSupportedSuites: messageA.supportedSuites
-                )
+                let inventory = try CryptoProviderFactory.captureLANInventory(
+                    identityAlgorithm: inboundProtocolIdentity.algorithm, policy: PQCModePolicyStore.standard.snapshot())
+                let plan = try inventory.selecting(messageA.supportedSuites.map(\.wireId))
+                cryptoProvider = plan.provider
                 let localPQCSuites = CryptoProviderFactory.handshakeOfferedPQCSuites(
                     using: cryptoProvider
                 )
@@ -3695,7 +4205,8 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 }
             }
 
-            let localSOAPeerId = try await localSOAPeerIdBytes()
+            let localSOAIdentity = try await localSOAIdentitySnapshot()
+            let localSOAPeerId = localSOAIdentity.peerID
             try requireCurrentHandshakeOperation(operation)
             let soaBinding = InboundHandshakeAdapter.bindSOAState(
                 from: messageA,
@@ -3717,7 +4228,10 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                     operation,
                     exactDriver: exactDriver
                 )
-                try await self.sendFramed(data)
+                try await self.sendFramed(data) { [weak self] in
+                            guard let self else { throw P2PConnectionError.disconnected }
+                            try self.requireCurrentHandshakeOperation(operation, exactDriver: exactDriver)
+                        }
                 try self.requireCurrentHandshakeOperation(
                     operation,
                     exactDriver: exactDriver
@@ -3735,6 +4249,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 policy: effectivePolicy,
                 cryptoPolicy: cryptoPolicy,
                 localSOAPeerId: localSOAPeerId,
+                localProtocolDeviceId: localSOAIdentity.deviceID,
                 expectedRemoteSOAPeerId: soaBinding.expectedRemotePeerId
             )
             exactDriverLock.withLock { $0 = driver }
@@ -3875,6 +4390,8 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 guard let peerBinding else {
                     throw P2PConnectionError.authenticatedBindingUnavailable
                 }
+                let localIdentityBinding = await owner.driver.getAuthenticatedLocalIdentityBinding(matching: keys)
+                try requireCurrentHandshakeOperation(owner.token, exactDriver: owner.driver)
                 let newArbiterLease = await owner.driver.getEstablishedArbiterLease()
                 try requireCurrentHandshakeOperation(
                     owner.token,
@@ -3898,12 +4415,12 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                     }
                     pairKey = nil
                 }
+                let modePolicy = try await owner.driver.frozenPQCModePolicy()
+                try requireCurrentHandshakeOperation(owner.token, exactDriver: owner.driver)
                 let receipt = EstablishedHandshakeReceipt(
-                    owner: owner,
-                    keys: keys,
-                    peerBinding: peerBinding,
-                    soaPairKey: pairKey,
-                    arbiterLease: newArbiterLease
+                    owner: owner, keys: keys, peerBinding: peerBinding,
+                    localIdentityBinding: localIdentityBinding, soaPairKey: pairKey,
+                    arbiterLease: newArbiterLease, modePolicy: modePolicy
                 )
                 try publishEstablishedSession(receipt)
                 inboundRekeyRollbackLock.withLock { $0 = nil }
@@ -3966,6 +4483,37 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         }
     }
 
+    struct OutboundPresenceProjection {
+        let displayName: String
+        let address: String
+        let fileRoute: ConnectionPresenceService.PresenceRouteDescriptor?
+    }
+
+    static func outboundPresenceProjection(peerId: String, displayName: String,
+        remoteDisplayName: String?, carrierAddress: String, controlTransport: ControlTransport,
+        discovered: P2PDiscoveryService.InboundPresenceResolution, advertisedTransferPort: Int?,
+        connectedAt: Date) -> OutboundPresenceProjection {
+        if controlTransport == .usb {
+            // A TCP listener learned through discovery/pairing does not belong
+            // to this cable. The current MAIN owner resolves USB file channels.
+            return .init(displayName: displayName, address: carrierAddress, fileRoute: nil)
+        }
+        let resolvedAddress = discovered.displayAddress?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let transferAddress = resolvedAddress.flatMap { $0.isEmpty ? nil : $0 } ?? carrierAddress
+        let transferPort = advertisedTransferPort ?? discovered.transferPort
+        let fileRoute: ConnectionPresenceService.PresenceRouteDescriptor?
+        if !transferAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           (1...65535).contains(transferPort) {
+            fileRoute = .init(peerId: peerId, deviceName: remoteDisplayName ?? discovered.name,
+                displayAddress: transferAddress, transferAddress: transferAddress,
+                transferPort: transferPort, routeSource: .outbound, connectedAt: connectedAt)
+        } else {
+            fileRoute = nil
+        }
+        return .init(displayName: fileRoute == nil ? displayName : (remoteDisplayName ?? discovered.name),
+                     address: fileRoute == nil ? carrierAddress : transferAddress, fileRoute: fileRoute)
+    }
+
     @available(macOS 14.0, iOS 17.0, *)
     private func publishAuthenticatedPresence(
         keys: SessionKeys,
@@ -4014,51 +4562,30 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 discoveredDevices: P2PDiscoveryService.shared.discoveredDevices,
                 unifiedDevices: UnifiedOnlineDeviceSnapshotAccess.snapshot()
             )
-            let displayAddress = resolvedRoute.displayAddress?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let transferAddress = displayAddress?.isEmpty == false ? displayAddress! : address
-            let transferPort = advertisedTransferPort ?? resolvedRoute.transferPort
-
-            let routeDescriptor: ConnectionPresenceService.PresenceRouteDescriptor?
-            if !transferAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-               (1...65535).contains(transferPort) {
-                let resolvedRouteDescriptor = ConnectionPresenceService.PresenceRouteDescriptor(
-                    peerId: peerId,
-                    deviceName: remoteDisplayName ?? resolvedRoute.name,
-                    displayAddress: transferAddress,
-                    transferAddress: transferAddress,
-                    transferPort: transferPort,
-                    routeSource: .outbound,
-                    connectedAt: Date()
-                )
-                routeDescriptor = resolvedRouteDescriptor
-            } else {
-                routeDescriptor = nil
-            }
-
-            let publishedDisplayName = routeDescriptor == nil
-                ? displayName
-                : (remoteDisplayName ?? resolvedRoute.name)
-            let publishedAddress = routeDescriptor == nil ? address : transferAddress
+            let projection = Self.outboundPresenceProjection(peerId: peerId, displayName: displayName,
+                remoteDisplayName: remoteDisplayName, carrierAddress: address, controlTransport: self.controlTransport,
+                discovered: resolvedRoute, advertisedTransferPort: advertisedTransferPort, connectedAt: Date())
             if let activeLease = self.presenceLeaseLock.withLock({ $0 }) {
                 guard ConnectionPresenceService.shared.refreshConnectedIfOwned(
                     activeLease,
-                    displayName: publishedDisplayName,
-                    address: publishedAddress,
+                    displayName: projection.displayName,
+                    address: projection.address,
                     cryptoKind: cryptoKind,
                     suite: suite.rawValue,
-                    routeDescriptor: routeDescriptor
+                    routeDescriptor: projection.fileRoute,
+                    controlTransport: self.controlTransport
                 ) else {
                     return false
                 }
             } else {
                 let newLease = ConnectionPresenceService.shared.markConnectedOwned(
                     peerId: peerId,
-                    displayName: publishedDisplayName,
-                    address: publishedAddress,
+                    displayName: projection.displayName,
+                    address: projection.address,
                     cryptoKind: cryptoKind,
                     suite: suite.rawValue,
-                    routeDescriptor: routeDescriptor
+                    routeDescriptor: projection.fileRoute,
+                    controlTransport: self.controlTransport
                 )
                 guard let newLease else { return false }
                 self.presenceLeaseLock.withLock { $0 = newLease }
@@ -4098,6 +4625,9 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             return
         }
         switch message {
+        case .usbPeerDiscoveryRequest, .usbPeerDiscoveryResponse, .handshakeConfigurationRequest, .handshakeConfigurationResponse:
+            throw P2PConnectionError.invalidAuthenticatedPayload
+
         case .clipboard(let payload):
             // 随航剪贴板：把远端剪贴板内容交给 ClipboardSyncService 应用到本地（仅 macOS 主机端）。
             #if os(macOS)
@@ -4144,7 +4674,11 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             guard let keys = sessionKeysLock.withLock({ $0 }) else {
                 throw P2PConnectionError.noSessionKeys
             }
-            try await refreshClassicTransferSessionFromHeartbeat(payload, keys: keys)
+            do {
+                try await refreshClassicTransferSessionFromHeartbeat(payload, keys: keys)
+            } catch P2PConnectionError.classicTransferSessionLeaseUnavailable {
+                try recoverClassicTransferSession(keys: keys)
+            }
         case .authenticatedRouteBinding:
             break
         case .peerDisconnecting:
@@ -4178,8 +4712,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
               authenticatedRemoteAuthorityLock.withLock({ $0 }) == expectedAuthority else {
             return false
         }
-        if case .ready = connection.state { return true }
-        return false
+        return frameCarrier.isReady
     }
 
     @available(macOS 14.0, iOS 17.0, *)
@@ -4187,6 +4720,50 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         _ reservation: PairingIdentityExchangeCommitCoordinator.Reservation
     ) async {
         _ = await PairingIdentityExchangeCommitCoordinator.rollback(reservation)
+    }
+
+    /// Called only inside the current durable pairing receipt. Identity metadata
+    /// and audio admission remain separate: a handshake still in progress cannot
+    /// publish an audio peer, even when its identity record has been accepted.
+    private func commitPairingRuntimeCapabilities(
+        _ payload: AppMessage.PairingIdentityExchangePayload,
+        expectedKeys: SessionKeys,
+        expectedAuthority: AuthenticatedRemoteAuthority,
+        audioPairingSequence: UInt64?
+    ) throws -> Bool {
+        let shouldForceIdentityReply = latestRemotePairingIdentityPayloadLock.withLock { current -> Bool in
+            let previousDeviceId = normalizedNonEmptyString(current?.deviceId)
+            guard let previousDeviceId else { return true }
+            return previousDeviceId.caseInsensitiveCompare(payload.deviceId) != .orderedSame
+        }
+        latestRemotePairingIdentityPayloadLock.withLock { $0 = payload }
+        let acceptedCapabilities = try ClassicTransferPeerCapabilities(
+            acceptedCapabilities: payload.capabilities,
+            sessionID: expectedKeys.sessionId, transcriptHash: expectedKeys.transcriptHash
+        )
+        acceptedClassicCapabilitiesLock.withLock { $0 = acceptedCapabilities }
+
+        let didAdmitAudioPeer = try handshakeOperationLock.withLock { registry -> Bool in
+            guard let audioPairingSequence,
+                  registry.operationSequence == audioPairingSequence,
+                  !registry.isDisconnected, !registry.hasActiveOperation,
+                  !rekeyInProgressLock.withLock({ $0 }),
+                  let current = sessionKeysLock.withLock({ $0 }),
+                  current.sessionId == expectedKeys.sessionId,
+                  current.sendKey == expectedKeys.sendKey,
+                  current.receiveKey == expectedKeys.receiveKey,
+                  let binding = authenticatedHandshakePeerBindingLock.withLock({ $0 }),
+                  binding.authority == expectedAuthority else { return false }
+            let hadCommittedAudioPeer = audioCarrier.hasCommittedPeer
+            let accepted = try audioCarrier.acceptCommittedPairing(deviceID: payload.deviceId,
+                capabilities: Set(payload.capabilities ?? []), keys: current, authority: expectedAuthority)
+            return accepted && !hadCommittedAudioPeer
+        }
+        // The identity may already be cached from an exchange observed during
+        // the handshake. First audio admission changes the usable USB route and
+        // must publish once, even inside the ordinary same-peer reply throttle.
+        // Identical admitted exchanges do not create another publication.
+        return shouldForceIdentityReply || didAdmitAudioPeer
     }
 
     @available(macOS 14.0, iOS 17.0, *)
@@ -4206,6 +4783,22 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             )
             disconnect()
             return
+        }
+
+        let audioPairingSequence = handshakeOperationLock.withLock { registry -> UInt64? in
+            guard !registry.isDisconnected, !registry.hasActiveOperation,
+                  let current = sessionKeysLock.withLock({ $0 }),
+                  current.sessionId == expectedKeys.sessionId,
+                  current.sendKey == expectedKeys.sendKey,
+                  current.receiveKey == expectedKeys.receiveKey else { return nil }
+            return registry.operationSequence
+        }
+
+        // Withdraw changed capability evidence before any asynchronous trust or
+        // persistence work. Identical exchanges (apart from their timestamp) do
+        // not interrupt an existing audio stream.
+        handshakeOperationLock.withLock { _ in
+            audioCarrier.withdrawChangedPairing(deviceID: payload.deviceId, capabilities: Set(payload.capabilities ?? []))
         }
 
         guard let validatedAuthority = await validatedPairingIdentityAuthority(for: payload) else {
@@ -4283,12 +4876,9 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             from: payload,
             validatedAuthority: validatedAuthority
         )
-        let shouldForceIdentityReply = latestRemotePairingIdentityPayloadLock.withLock { current -> Bool in
-            let previousDeviceId = normalizedNonEmptyString(current?.deviceId)
-            guard let previousDeviceId else { return true }
-            return previousDeviceId.caseInsensitiveCompare(payload.deviceId) != .orderedSame
-        }
-        latestRemotePairingIdentityPayloadLock.withLock { $0 = payload }
+        let shouldForceIdentityReply = try commitPairingRuntimeCapabilities(payload,
+            expectedKeys: expectedKeys, expectedAuthority: expectedAuthority,
+            audioPairingSequence: audioPairingSequence)
 
         if let keys = sessionKeysLock.withLock({ $0 }) {
             do {
@@ -4369,6 +4959,10 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     @available(macOS 14.0, iOS 17.0, *)
     private static func appMessageKindForDiagnostics(_ message: AppMessage) -> String {
         switch message {
+        case .usbPeerDiscoveryRequest: "usbPeerDiscoveryRequest"
+        case .usbPeerDiscoveryResponse: "usbPeerDiscoveryResponse"
+        case .handshakeConfigurationRequest: "handshakeConfigurationRequest"
+        case .handshakeConfigurationResponse: "handshakeConfigurationResponse"
         case .clipboard: "clipboard"
         case .textMessage: "textMessage"
         case .textMessageReceipt: "textMessageReceipt"
@@ -4437,6 +5031,66 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
 #if DEBUG || SKYBRIDGE_TESTING
 extension P2PConnection {
+    /// Exercises the production reservation using test-owned Finished inputs;
+    /// does not run a handshake, read credentials, or add a trust record.
+    func testingPrepareClassicTransferSessionRecovery(keys: SessionKeys) throws -> P2PHandshakeOperationToken {
+        try prepareClassicTransferSessionRecovery(keys: keys)
+    }
+
+    func testingOwnsClassicTransferSessionRecovery(_ operation: P2PHandshakeOperationToken) -> Bool {
+        handshakeOperationLock.withLock { registry in
+            registry.owns(operation) && rekeyInProgressLock.withLock { $0 }
+        }
+    }
+
+    func testingRunClassicTransferSessionRecovery(_ operation: P2PHandshakeOperationToken) async throws {
+        try await authenticate(operation: operation, restorePreviousSessionOnFailure: false)
+    }
+
+    /// Controlled Finished/pairing inputs for routing regressions. This does not
+    /// execute a network handshake or create a product trust-store entry.
+    func testingInstallAudioEpoch(keys: SessionKeys, peerBinding: AuthenticatedHandshakePeerBinding,
+                                  local: ProtocolIdentityBinding, peer: ProtocolIdentityBinding,
+                                  commitPairing: Bool = true, peerCapabilities: Set<String> = []) throws -> UInt64 {
+        try handshakeOperationLock.withLock { registry in
+            sessionKeysLock.withLock { $0 = keys }
+            authenticatedHandshakePeerBindingLock.withLock { $0 = peerBinding }
+            authenticatedLocalIdentityBindingLock.withLock { $0 = local }
+            guard audioCarrier.publishFinished(keys: keys, peerBinding: peerBinding, localBinding: local) else {
+                throw P2PAudioTransportError.closed
+            }
+            if commitPairing {
+                try audioCarrier.acceptCommittedPairing(deviceID: peer.deviceId, capabilities: peerCapabilities,
+                    keys: keys, authority: peerBinding.authority)
+            }
+            return registry.connectionGeneration
+        }
+    }
+
+    @MainActor
+    func testingPublishPreparedPairingIdentity(_ payload: AppMessage.PairingIdentityExchangePayload) async throws {
+        try await publishPairingIdentity(payload)
+    }
+
+    /// Exercises the production throttle and encrypted native publisher while
+    /// supplying test-owned identity material instead of reading the Keychain.
+    func testingSendPreparedPairingIdentity(_ payload: AppMessage.PairingIdentityExchangePayload,
+                                           force: Bool) async throws {
+        try await sendPreparedPairingIdentityExchange(force: force) { payload }
+    }
+
+    var testingAudioPairingOperationSequence: UInt64 {
+        handshakeOperationLock.withLock { $0.operationSequence }
+    }
+
+    /// Controlled post-durable-commit inputs, not a replacement for authenticating
+    /// a real peer or obtaining a production trust-store receipt.
+    func testingCommitPairingRuntimeCapabilities(_ payload: AppMessage.PairingIdentityExchangePayload,
+        keys: SessionKeys, authority: AuthenticatedRemoteAuthority, sequence: UInt64?) throws -> Bool {
+        try commitPairingRuntimeCapabilities(payload, expectedKeys: keys,
+            expectedAuthority: authority, audioPairingSequence: sequence)
+    }
+
     @MainActor
     func testingSetStatus(_ status: P2PConnectionStatus) {
         self.status = status

@@ -6,7 +6,7 @@
 // Everything here is pure so it can be unit tested without the HTTP runtime.
 // The rules are deliberately strict (reject, never coerce): the values end up
 // in the account device list of every device signed into the same account and
-// are persisted into public.registered_devices.
+// may be persisted into public.registered_devices. Listener ports are ephemeral only.
 
 const crypto = require('node:crypto');
 const net = require('node:net');
@@ -155,6 +155,15 @@ function normalizeCapabilities(raw) {
   return [...normalized].sort();
 }
 
+function normalizeListenerPort(raw) {
+  // Omission/null withdraws a previous listener; old clients never advertise one.
+  if (raw === undefined || raw === null) return null;
+  if (!Number.isInteger(raw) || raw < 1 || raw > 65535) {
+    throw new PresenceReportError('invalid_presence_metadata', 'lanControlPort');
+  }
+  return raw;
+}
+
 /**
  * Validates the optional metadata of a presence heartbeat body.
  * Every field is optional so clients that only send `deviceName` keep working.
@@ -167,7 +176,8 @@ function normalizePresenceReport(body) {
     deviceModel: normalizeMetadataString(source.deviceModel, 'deviceModel'),
     osVersion: normalizeMetadataString(source.osVersion, 'osVersion'),
     lanAddresses: normalizeLanAddresses(source.lanAddresses),
-    capabilities: normalizeCapabilities(source.capabilities)
+    capabilities: normalizeCapabilities(source.capabilities),
+    lanControlPort: normalizeListenerPort(source.lanControlPort)
   };
 }
 

@@ -15,7 +15,9 @@ DISALLOWED_COREAUDIO_PATTERN="AddInstanceForFactory: No factory registered|Aggre
 DUPLICATE_CLASS_PATTERN="Class .* is implemented in both"
 ALLOWED_CORESIMULATOR_DUPLICATE_CLASS_PATTERN="Class UIAccessibilityLoaderWebShared is implemented in both .*WebCore\\.axbundle/WebCore .*WebKit\\.axbundle/WebKit"
 DISALLOWED_PROJECT_DUPLICATE_CLASS_PATTERN="Class .* is implemented in both .*(Build/Products|PackageFrameworks|SkyBridgeCompass-iOS\\.app|SkyBridgeAppleRuntime\\.framework)"
-TEST_SUITE_START="Test Suite 'All tests' started"
+# XCTest names its outer suite "Selected tests" when -only-testing is used.
+# Both markers define the same pre-test boundary; diagnostics after it still fail.
+TEST_SUITE_START="^Test Suite '(All|Selected) tests' started"
 
 for log_file in "${BUILD_LOG}" "${TEST_LOG}"; do
   if [[ ! -f "${log_file}" ]]; then
@@ -83,7 +85,7 @@ fi
 
 if [[ "${allowed_count}" -eq 1 ]]; then
   diagnostic_line="$(grep -Fn "${ALLOWED_IOSURFACE_DIAGNOSTIC}" "${TEST_LOG}" | head -n 1 | cut -d: -f1)"
-  suite_line="$(grep -Fn "${TEST_SUITE_START}" "${TEST_LOG}" | head -n 1 | cut -d: -f1 || true)"
+  suite_line="$(grep -En "${TEST_SUITE_START}" "${TEST_LOG}" | head -n 1 | cut -d: -f1 || true)"
   if [[ -z "${suite_line}" || "${diagnostic_line}" -ge "${suite_line}" ]]; then
     echo "[iOS simulator diagnostics] IOSurface diagnostic was not confined to pre-test CoreSimulator startup" >&2
     exit 1

@@ -76,8 +76,13 @@ class IOSProductInstallationTests(unittest.TestCase):
 
     def _write_install_result(self, **mutations: object) -> None:
         installed = {
-            "bundleIdentifier": "com.skybridge.compass.ios",
+            "bundleID": "com.skybridge.compass.ios",
             "launchServicesIdentifier": self.launch_identifier,
+            "installationURL": (
+                "file:///private/var/containers/Bundle/Application/"
+                "11111111-2222-3333-4444-555555555555/"
+                "SkyBridgeCompass-iOS.app/"
+            ),
         }
         installed.update(mutations)
         self._write_json(
@@ -184,14 +189,66 @@ class IOSProductInstallationTests(unittest.TestCase):
         ):
             self._verify()
 
-        self._write_install_result(bundleIdentifier="com.example.unrelated")
+        self._write_install_result(bundleID="com.example.unrelated")
+        with self.assertRaisesRegex(installation.IOSInstallationError, "different bundle"):
+            self._verify()
+
+    def test_install_receipt_does_not_substitute_the_apps_query_field(self) -> None:
+        payload = json.loads(self.install_result.read_text(encoding="utf-8"))
+        installed = payload["result"]["installedApplications"][0]
+        installed["bundleIdentifier"] = installed.pop("bundleID")
+        self._write_json(self.install_result, payload)
+        with self.assertRaisesRegex(installation.IOSInstallationError, "different bundle"):
+            self._verify()
+
+        self._write_install_result(
+            bundleID="com.example.unrelated",
+            bundleIdentifier="com.skybridge.compass.ios",
+        )
         with self.assertRaisesRegex(installation.IOSInstallationError, "different bundle"):
             self._verify()
 
     def test_malformed_persistent_identifier_fails_closed(self) -> None:
-        self._write_install_result(launchServicesIdentifier="not base64")
-        with self.assertRaisesRegex(installation.IOSInstallationError, "base64"):
+        for identifier in ("not base64", "Unknown", "unknown "):
+            with self.subTest(identifier=identifier):
+                self._write_install_result(launchServicesIdentifier=identifier)
+                with self.assertRaisesRegex(installation.IOSInstallationError, "base64"):
+                    self._verify()
+
+    def test_unavailable_sync_identifier_retains_exact_installation_binding(self) -> None:
+        self._write_install_result(launchServicesIdentifier="unknown")
+        payload = self._verify()
+        self.assertEqual(payload["launchServicesIdentifier"], "unknown")
+        self.assertEqual(payload["iosReleaseArchive"], golden_ios_archive_binding())
+        self.assertTrue(payload["installationVerified"])
+
+        self._write_apps_result(url=(
+            "file:///private/var/containers/Bundle/Application/"
+            "99999999-2222-3333-4444-555555555555/SkyBridgeCompass-iOS.app/"
+        ))
+        with self.assertRaisesRegex(installation.IOSInstallationError, "exact installation receipt"):
             self._verify()
+
+    def test_receipt_path_is_required_canonical_and_equal_to_query(self) -> None:
+        for value in (
+            None,
+            "file:///private/var/containers/Bundle/Application/other/SkyBridgeCompass-iOS.app/",
+            "file:///private/var/containers/Bundle/Application/../SkyBridgeCompass-iOS.app/",
+            "file:///private/var/containers/Bundle/Application/a/./SkyBridgeCompass-iOS.app/",
+            "file:///private/var/containers/Bundle/Application/a/Other.app/",
+            "file:///private/var/containers/Bundle/Application/a/SkyBridgeCompass-iOS.app/?x=1",
+        ):
+            with self.subTest(url=value):
+                self._write_install_result(installationURL=value)
+                with self.assertRaises(installation.IOSInstallationError):
+                    self._verify()
+
+    def test_missing_sync_identifier_is_not_the_unavailable_sentinel(self) -> None:
+        for value in (None, "", False):
+            with self.subTest(value=value):
+                self._write_install_result(launchServicesIdentifier=value)
+                with self.assertRaisesRegex(installation.IOSInstallationError, "no launchServicesIdentifier"):
+                    self._verify()
 
 
 if __name__ == "__main__":

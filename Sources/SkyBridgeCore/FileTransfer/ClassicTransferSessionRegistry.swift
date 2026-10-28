@@ -1,5 +1,55 @@
 import CryptoKit
 import Foundation
+import os
+import struct SkyBridgeProtocolCore.ClassicTransferPeerCapabilities
+
+/// One immutable read of the keys that actually protect this file transfer.
+/// The opaque reference and key cannot be taken from different rekey generations.
+@available(macOS 14.0, iOS 17.0, *)
+struct ClassicTransferKeyMaterial: Sendable {
+    let transferKey: SymmetricKey
+    let sessionReference: String?
+    let role: HandshakeRole
+    let negotiatedSuite: CryptoSuite
+    let approvalCapability: Bool?
+    // Registry reads can finish before their caller resumes on MainActor.
+    // Retain the exact owner so a cached result cannot validate after retirement.
+    private let lifetime: ClassicTransferSessionRegistry.SessionLifetime?
+    private let registrationLifetime: ClassicTransferSessionRegistry.SessionLifetime?
+
+    func matches(_ other: Self) -> Bool {
+        guard sessionReference == other.sessionReference, role == other.role,
+              negotiatedSuite == other.negotiatedSuite else { return false }
+        let keysMatch = transferKey.withUnsafeBytes { lhs in
+            other.transferKey.withUnsafeBytes { rhs in
+                guard lhs.count == rhs.count else { return false }
+                var difference: UInt8 = 0
+                for index in lhs.indices { difference |= lhs[index] ^ rhs[index] }
+                return difference == 0
+            }
+        }
+        return keysMatch && lifetime?.isActive != false && other.lifetime?.isActive != false
+            && registrationLifetime?.isActive != false && other.registrationLifetime?.isActive != false
+    }
+
+    init(
+        sessionKeys: SessionKeys, transferId: String,
+        capabilityEvidence: ClassicTransferPeerCapabilities? = nil,
+        lifetime: ClassicTransferSessionRegistry.SessionLifetime? = nil,
+        registrationLifetime: ClassicTransferSessionRegistry.SessionLifetime? = nil
+    ) {
+        self.lifetime = lifetime
+        self.registrationLifetime = registrationLifetime
+        transferKey = sessionKeys.deriveClassicFileTransferKey(transferId: transferId)
+        sessionReference = P2PEvidenceReference.sessionIncarnation(
+            sessionID: sessionKeys.sessionId,
+            transcriptHash: sessionKeys.transcriptHash
+        )
+        role = sessionKeys.role
+        negotiatedSuite = sessionKeys.negotiatedSuite
+        approvalCapability = capabilityEvidence?.approvalSupport(sessionID: sessionKeys.sessionId, transcriptHash: sessionKeys.transcriptHash)
+    }
+}
 
 @available(macOS 14.0, iOS 17.0, *)
 struct ClassicTransferSessionSnapshot: Sendable {
@@ -9,6 +59,7 @@ struct ClassicTransferSessionSnapshot: Sendable {
     let aliases: [String]
     let endpointHostOrIP: String?
     let capabilities: [String]
+    let capabilityEvidence: ClassicTransferPeerCapabilities?
     let sessionKeys: SessionKeys
     let lastSeenAt: Date
 
@@ -20,6 +71,7 @@ struct ClassicTransferSessionSnapshot: Sendable {
         endpointHostOrIP: String?,
         capabilities: [String],
         sessionKeys: SessionKeys,
+        capabilityEvidence: ClassicTransferPeerCapabilities? = nil,
         lastSeenAt: Date = Date()
     ) {
         self.sessionId = sessionId
@@ -28,6 +80,7 @@ struct ClassicTransferSessionSnapshot: Sendable {
         self.aliases = aliases
         self.endpointHostOrIP = endpointHostOrIP
         self.capabilities = capabilities
+        self.capabilityEvidence = capabilityEvidence
         self.sessionKeys = sessionKeys
         self.lastSeenAt = lastSeenAt
     }
@@ -61,6 +114,26 @@ actor ClassicTransferSessionRegistry {
     static let shared = ClassicTransferSessionRegistry()
     static let sessionSnapshotTimeToLive: TimeInterval = 120
 
+    /// One terminal control owner, allocated before its first asynchronous publication.
+    /// Invalidation is synchronous: registry cleanup may await actors/transport, but
+    /// no later read, registration or refresh may reuse this owner's snapshots.
+    final class SessionLifetime: Sendable {
+        private let active = OSAllocatedUnfairLock(initialState: true)
+
+        var isActive: Bool { active.withLock { $0 } }
+
+        func invalidate() { active.withLock { $0 = false } }
+
+        fileprivate func whileActive<T: Sendable>(_ body: () -> T) -> T? {
+            // The nonescaping body executes synchronously on the registry actor;
+            // it is not transferred to the thread that invalidates this lifetime.
+            active.withLockUnchecked { isActive in
+                guard isActive else { return nil }
+                return body()
+            }
+        }
+    }
+
     struct SessionLease: Sendable, Hashable {
         fileprivate let ownerId: UUID
         let sessionId: String
@@ -86,15 +159,25 @@ actor ClassicTransferSessionRegistry {
         case lease(UUID)
     }
 
+    struct SessionReadHandle: Sendable {
+        let snapshot: ClassicTransferSessionSnapshot
+        fileprivate let generation: UUID
+    }
+
     private struct SessionRegistration {
+        let generation: UUID
         let snapshot: ClassicTransferSessionSnapshot
         let owner: SessionOwner
+        let lifetime: SessionLifetime
+        // Removing/replacing one registration must not retire other snapshots
+        // on the same control owner, but must invalidate already returned reads.
+        let registrationLifetime: SessionLifetime
     }
 
     private var connectionsByKey: [String: ConnectionRegistration] = [:]
     private var sessionsById: [String: SessionRegistration] = [:]
 
-    private init() {}
+    init() {}
 
     func upsert(connection: P2PConnection, peerKeys: [String]) {
         for normalized in normalizedPeerKeys(peerKeys) {
@@ -144,7 +227,7 @@ actor ClassicTransferSessionRegistry {
             }
         }
         for sessionId in legacySessionIdsToRemove {
-            sessionsById.removeValue(forKey: sessionId)
+            sessionsById.removeValue(forKey: sessionId)?.registrationLifetime.invalidate()
         }
     }
 
@@ -169,20 +252,48 @@ actor ClassicTransferSessionRegistry {
     }
 
     func upsert(session snapshot: ClassicTransferSessionSnapshot) {
+        sessionsById[snapshot.sessionId]?.registrationLifetime.invalidate()
         sessionsById[snapshot.sessionId] = SessionRegistration(
+            generation: UUID(),
             snapshot: snapshot,
-            owner: .legacy
+            owner: .legacy,
+            lifetime: SessionLifetime(),
+            registrationLifetime: SessionLifetime()
         )
     }
 
     @discardableResult
     func upsertOwned(session snapshot: ClassicTransferSessionSnapshot) -> SessionLease {
+        sessionsById[snapshot.sessionId]?.registrationLifetime.invalidate()
         let ownerId = UUID()
         sessionsById[snapshot.sessionId] = SessionRegistration(
+            generation: UUID(),
             snapshot: snapshot,
-            owner: .lease(ownerId)
+            owner: .lease(ownerId),
+            lifetime: SessionLifetime(),
+            registrationLifetime: SessionLifetime()
         )
         return SessionLease(ownerId: ownerId, sessionId: snapshot.sessionId)
+    }
+
+    /// The caller retains this lifetime before awaiting admission. A terminal
+    /// callback can therefore revoke an owner whose first lease has not returned.
+    /// A revoked publication must not replace a newer registration with the same ID.
+    @discardableResult
+    func upsertOwned(
+        session snapshot: ClassicTransferSessionSnapshot,
+        lifetime: SessionLifetime
+    ) -> SessionLease? {
+        lifetime.whileActive {
+            sessionsById[snapshot.sessionId]?.registrationLifetime.invalidate()
+            let ownerId = UUID()
+            sessionsById[snapshot.sessionId] = SessionRegistration(
+                generation: UUID(), snapshot: snapshot, owner: .lease(ownerId),
+                lifetime: lifetime,
+                registrationLifetime: SessionLifetime()
+            )
+            return SessionLease(ownerId: ownerId, sessionId: snapshot.sessionId)
+        }
     }
 
     /// Replaces an authenticated snapshot without changing its exact owner.
@@ -200,11 +311,23 @@ actor ClassicTransferSessionRegistry {
               let registration = liveSessionRegistration(ifOwned: lease, now: now) else {
             return false
         }
-        sessionsById[lease.sessionId] = SessionRegistration(
-            snapshot: snapshot,
-            owner: registration.owner
-        )
-        return true
+        return registration.lifetime.whileActive {
+            let materialLifetime: SessionLifetime
+            if sameSessionMaterial(registration.snapshot.sessionKeys, snapshot.sessionKeys) {
+                materialLifetime = registration.registrationLifetime
+            } else {
+                registration.registrationLifetime.invalidate()
+                materialLifetime = SessionLifetime()
+            }
+            sessionsById[lease.sessionId] = SessionRegistration(
+                generation: registration.generation,
+                snapshot: snapshot,
+                owner: registration.owner,
+                lifetime: registration.lifetime,
+                registrationLifetime: materialLifetime
+            )
+            return true
+        } ?? false
     }
 
     /// Refreshes liveness and non-authoritative route hints for one exact owner.
@@ -235,18 +358,24 @@ actor ClassicTransferSessionRegistry {
                 remoteControlPort: remoteControlPort
             ),
             sessionKeys: current.sessionKeys,
+            capabilityEvidence: current.capabilityEvidence,
             lastSeenAt: now
         )
-        sessionsById[lease.sessionId] = SessionRegistration(
-            snapshot: refreshed,
-            owner: registration.owner
-        )
-        return true
+        return registration.lifetime.whileActive {
+            sessionsById[lease.sessionId] = SessionRegistration(
+                generation: registration.generation,
+                snapshot: refreshed,
+                owner: registration.owner,
+                lifetime: registration.lifetime,
+                registrationLifetime: registration.registrationLifetime
+            )
+            return true
+        } ?? false
     }
 
     func remove(sessionId: String) {
         guard sessionsById[sessionId]?.owner == .legacy else { return }
-        sessionsById.removeValue(forKey: sessionId)
+        sessionsById.removeValue(forKey: sessionId)?.registrationLifetime.invalidate()
     }
 
     @discardableResult
@@ -254,8 +383,32 @@ actor ClassicTransferSessionRegistry {
         guard sessionsById[lease.sessionId]?.owner == .lease(lease.ownerId) else {
             return false
         }
-        sessionsById.removeValue(forKey: lease.sessionId)
+        sessionsById.removeValue(forKey: lease.sessionId)?.registrationLifetime.invalidate()
         return true
+    }
+
+    func activeSessionHandles(now: Date = Date()) -> [SessionReadHandle] {
+        pruneExpiredSessions(now: now)
+        return sessionsById.values.map {
+            SessionReadHandle(snapshot: $0.snapshot, generation: $0.generation)
+        }
+    }
+
+    func currentKeyMaterial(
+        for handle: SessionReadHandle, transferId: String, now: Date = Date()
+    ) -> ClassicTransferKeyMaterial? {
+        pruneExpiredSessions(now: now)
+        guard let registration = sessionsById[handle.snapshot.sessionId],
+              registration.generation == handle.generation else { return nil }
+        return registration.lifetime.whileActive {
+            ClassicTransferKeyMaterial(
+                sessionKeys: registration.snapshot.sessionKeys,
+                transferId: transferId,
+                capabilityEvidence: registration.snapshot.capabilityEvidence,
+                lifetime: registration.lifetime,
+                registrationLifetime: registration.registrationLifetime
+            )
+        }
     }
 
     func activeSessions(now: Date = Date()) -> [ClassicTransferSessionSnapshot] {
@@ -270,12 +423,13 @@ actor ClassicTransferSessionRegistry {
 
     private func pruneExpiredSessions(now: Date) {
         let expiredSessionIds = sessionsById.compactMap { sessionId, registration in
-            now.timeIntervalSince(registration.snapshot.lastSeenAt) > Self.sessionSnapshotTimeToLive
+            !registration.lifetime.isActive
+                || now.timeIntervalSince(registration.snapshot.lastSeenAt) > Self.sessionSnapshotTimeToLive
                 ? sessionId
                 : nil
         }
         for sessionId in expiredSessionIds {
-            sessionsById.removeValue(forKey: sessionId)
+            sessionsById.removeValue(forKey: sessionId)?.registrationLifetime.invalidate()
         }
     }
 
@@ -287,12 +441,19 @@ actor ClassicTransferSessionRegistry {
               registration.owner == .lease(lease.ownerId) else {
             return nil
         }
-        guard now.timeIntervalSince(registration.snapshot.lastSeenAt)
+        guard registration.lifetime.isActive,
+              now.timeIntervalSince(registration.snapshot.lastSeenAt)
                 <= Self.sessionSnapshotTimeToLive else {
-            sessionsById.removeValue(forKey: lease.sessionId)
+            sessionsById.removeValue(forKey: lease.sessionId)?.registrationLifetime.invalidate()
             return nil
         }
         return registration
+    }
+
+    private func sameSessionMaterial(_ lhs: SessionKeys, _ rhs: SessionKeys) -> Bool {
+        lhs.sessionId == rhs.sessionId && lhs.role == rhs.role
+            && lhs.negotiatedSuite == rhs.negotiatedSuite && lhs.transcriptHash == rhs.transcriptHash
+            && lhs.sendKey == rhs.sendKey && lhs.receiveKey == rhs.receiveKey
     }
 
     private func refreshedCapabilities(

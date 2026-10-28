@@ -168,6 +168,7 @@ actor SignalServerClientCompat {
         case invalidBaseURL
         case invalidResponse
         case missingAuthentication
+        case expiredAuthentication
         case missingTenantID
         case missingTenantClaim
         case tenantIdentityMismatch
@@ -193,6 +194,8 @@ actor SignalServerClientCompat {
                 return "信令服务器返回了非 HTTP 响应"
             case .missingAuthentication:
                 return "缺少上游登录态，无法申请 admission"
+            case .expiredAuthentication:
+                return "登录凭据已过期，需更新后才能发起账户请求"
             case .missingTenantID:
                 return "缺少租户标识，无法访问当前租户的公网能力"
             case .missingTenantClaim:
@@ -610,6 +613,47 @@ actor SignalServerClientCompat {
         let mediaTokenGeneration: String?
     }
 
+    struct ResolvedAuthenticationSession: Sendable {
+        let session: AuthSession
+        let requireCurrent: @Sendable () throws -> Void
+    }
+
+    /// A request authority captured after the account owner resolves/refreshes
+    /// credentials. The client never re-reads environment tokens or a new login
+    /// when using this value. No refresh token is retained by the request client.
+    struct FrozenAccountRequest: Sendable {
+        let account: AudioAccountIdentity
+        let bearerToken: String
+        let requireCurrent: @Sendable () throws -> Void
+
+        init(account: AudioAccountIdentity, authentication: ResolvedAuthenticationSession,
+             audioAuthorization: AccountAudioAuthorization?) throws {
+            try authentication.requireCurrent()
+            if let audioAuthorization, !audioAuthorization.isCurrent {
+                throw AudioMembershipLeaseFailure.accountChanged
+            }
+            guard let url = URLComponents(string: account.authority), url.scheme == "https",
+                  url.host?.isEmpty == false, url.user == nil, url.password == nil,
+                  url.query == nil, url.fragment == nil else { throw ClientError.invalidBaseURL }
+            let identity = try SignalServerClientCompat.resolveAuthenticatedJWTIdentity(
+                accessToken: authentication.session.accessToken,
+                expectedUserIdentifier: authentication.session.userIdentifier)
+            guard identity.subject == account.userID, identity.effectiveTenantID == account.tenantID else {
+                throw AudioMembershipError.scopeMismatch
+            }
+            try SignalServerClientCompat.validateAuthenticatedRequestBearerFreshness(authentication.session.accessToken)
+            self.account = account
+            bearerToken = authentication.session.accessToken
+            let validateOwner = authentication.requireCurrent
+            requireCurrent = {
+                try validateOwner()
+                if let audioAuthorization, !audioAuthorization.isCurrent {
+                    throw AudioMembershipLeaseFailure.accountChanged
+                }
+            }
+        }
+    }
+
     struct AuthenticationDependencies: Sendable {
         let accessTokenOverride: @Sendable () -> String
         let tenantIDOverride: @Sendable () -> String
@@ -617,6 +661,7 @@ actor SignalServerClientCompat {
         let refreshSession: @Sendable (String) async throws -> AuthSession
         let validateRefreshedAccessToken: @Sendable (String) async throws -> Void
         let replacePersistedSession: @Sendable (AuthSession, AuthSession) async throws -> Bool
+        var resolveSession: (@Sendable () async throws -> ResolvedAuthenticationSession)? = nil
 
         nonisolated static func live() -> Self {
             Self(
@@ -637,19 +682,23 @@ actor SignalServerClientCompat {
                         throw ClientError.invalidAuthenticationClaims
                     }
                 },
-                replacePersistedSession: { expected, replacement in
-                    try await KeychainManager.shared.replaceAuthSession(
-                        expected: expected,
-                        with: replacement
-                    )
+                // Live requests must resolve through AuthenticationManager, which
+                // owns durable login identity and prepares refresh before HTTP.
+                // The injected legacy test path cannot write a live raw session.
+                replacePersistedSession: { _, _ in
+                    throw IOSAuthenticationSessionError.unownedSessionOperation
+                },
+                resolveSession: {
+                    try await AuthenticationManager.instance.resolveSignalingSession()
                 }
             )
         }
     }
 
-    private struct AuthenticatedRequestContext: Sendable, Equatable {
+    private struct AuthenticatedRequestContext: Sendable {
         let bearerToken: String
         let tenantID: String
+        var requireCurrent: @Sendable () throws -> Void = {}
     }
 
     private struct AccessTokenRefreshBinding: Sendable, Equatable {
@@ -667,6 +716,7 @@ actor SignalServerClientCompat {
 
     private let urlSession: URLSession
     private let authenticationDependencies: AuthenticationDependencies
+    private let frozenAccountRequest: FrozenAccountRequest?
     private let logger = Logger(subsystem: "com.skybridge.crossnetwork", category: "SignalServerClientCompat")
     nonisolated private static let defaultRequestTimeoutSeconds: TimeInterval = 30
     private static let absoluteMaximumResponseBytes = 1_024 * 1_024
@@ -686,9 +736,16 @@ actor SignalServerClientCompat {
         return URLSession(configuration: configuration)
     }
 
+    /// One registry factory owns this transport across its short-lived frozen
+    /// credential clients. Headers stay request-scoped; caches remain disabled.
+    nonisolated static func makeAccountRegistryTransport() -> URLSession {
+        defaultURLSession(requestTimeoutSeconds: 30, resourceTimeoutSeconds: 45)
+    }
+
     init(
         urlSession: URLSession? = nil,
         authenticationDependencies: AuthenticationDependencies = .live(),
+        frozenAccountRequest: FrozenAccountRequest? = nil,
         requestTimeoutSeconds: TimeInterval = 30,
         resourceTimeoutSeconds: TimeInterval = 45,
         maximumResponseBytes: Int = 256 * 1_024
@@ -698,6 +755,7 @@ actor SignalServerClientCompat {
             resourceTimeoutSeconds: resourceTimeoutSeconds
         )
         self.authenticationDependencies = authenticationDependencies
+        self.frozenAccountRequest = frozenAccountRequest
         self.requestTimeoutSeconds = requestTimeoutSeconds
         self.resourceTimeoutSeconds = resourceTimeoutSeconds
         self.maximumResponseBytes = maximumResponseBytes
@@ -822,7 +880,9 @@ actor SignalServerClientCompat {
 
     /// 拉取本账号（JWT 的 tenant+user）下的全部设备及实时在线状态。
     func listAccountDevices(binding: ProtocolIdentityBindingCompat) async throws -> AccountDeviceListSnapshot {
-        try await performJSONRequest(
+        let authentication = try await authenticatedRequestContext()
+        let scope = try identityRotationScope(from: authentication)
+        let snapshot: AccountDeviceListSnapshot = try await performJSONRequest(
             path: SignalServerClient.accountDevicesListPath,
             method: "GET",
             queryItems: [
@@ -830,12 +890,45 @@ actor SignalServerClientCompat {
                 URLQueryItem(name: "protocolSigningAlgorithm", value: binding.protocolSigningAlgorithm.rawValue),
                 URLQueryItem(name: "protocolPublicKeyFingerprint", value: binding.protocolPublicKeyFingerprint)
             ],
-            requiresUserAuthentication: true
+            requiresUserAuthentication: true, authenticationContext: authentication
         )
+        return try snapshot.validatedFor(deviceID: binding.deviceId, algorithm: binding.protocolSigningAlgorithm.rawValue,
+            fingerprint: binding.protocolPublicKeyFingerprint).scoped(to: "\(scope.tenantID)/\(scope.userID)")
+    }
+
+    func removeAccountDevice(binding: ProtocolIdentityBindingCompat, target: AccountDeviceRecord,
+                             expectedAccountScope: String) async throws {
+        let authentication = try await authenticatedRequestContext()
+        let scope = try identityRotationScope(from: authentication)
+        guard expectedAccountScope == "\(scope.tenantID)/\(scope.userID)" else { throw ClientError.authenticationSessionChanged }
+        let selected = AccountDeviceRemovalTarget(target)
+        let body = SignalServerClient.AccountDeviceRemovalRequestBody(deviceId: binding.deviceId,
+            protocolSigningAlgorithm: binding.protocolSigningAlgorithm.rawValue,
+            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
+            clientVersion: clientVersion(), protocolVersion: protocolVersion(), target: selected)
+        let receipt: AccountDeviceRemovalReceipt = try await performJSONRequest(path: SignalServerClient.removeAccountDevicePath,
+            method: "POST", body: try JSONEncoder().encode(body), authenticationContext: authentication)
+        try receipt.validate(selected)
     }
 
     /// 把 presence/账号设备列表请求抛出的错误归类为共享的 `AccountPresenceFailure`。
     nonisolated static func presenceFailure(for error: Error) -> AccountPresenceFailure {
+        if error is AccountDeviceContractError { return .malformedResponse }
+        if let failure = error as? AudioMembershipLeaseFailure, failure == .accountChanged {
+            return .notAuthenticated
+        }
+        if error is KeychainError || error is ProtectedAccountSessionError || error is IOSAuthenticationPersistenceFailure {
+            return .localAuthenticationUnavailable(code: "authentication_storage_unavailable")
+        }
+        if let ownerError = error as? IOSAuthenticationSessionError {
+            switch ownerError {
+            case .changed, .missing: return .notAuthenticated
+            case .publicationInProgress:
+                return .localAuthenticationUnavailable(code: "authentication_update_in_progress")
+            case .unownedSessionOperation:
+                return .localAuthenticationUnavailable(code: "authentication_owner_unavailable")
+            }
+        }
         if let clientError = error as? ClientError {
             switch clientError {
             case .serverRejected(let status, let description):
@@ -846,6 +939,8 @@ actor SignalServerClientCompat {
             // 只有"确实没有会话"才是未登录；本地存储/声明校验故障是错误，不能被渲染成登录引导。
             case .missingAuthentication, .missingTenantID, .authenticationSessionChanged:
                 return .notAuthenticated
+            case .expiredAuthentication:
+                return .localAuthenticationUnavailable(code: "authentication_expired")
             case .authenticationStorageUnavailable:
                 return .localAuthenticationUnavailable(code: "authentication_storage_unavailable")
             case .missingTenantClaim:
@@ -1534,7 +1629,8 @@ actor SignalServerClientCompat {
         extraHeaders: [String: String] = [:]
     ) async throws -> Response {
         try validateRequestLimits()
-        guard var components = URLComponents(string: CrossNetworkServerConfig.signalingServerURL) else {
+        let authority = frozenAccountRequest?.account.authority ?? CrossNetworkServerConfig.signalingServerURL
+        guard var components = URLComponents(string: authority) else {
             throw ClientError.invalidBaseURL
         }
         components.path += path
@@ -1549,18 +1645,26 @@ actor SignalServerClientCompat {
         request.httpMethod = method
         request.timeoutInterval = requestTimeoutSeconds
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        // GET requests have no JSON body. Carry version identity on every request so
+        // account-device reads meet the same production version gate as heartbeats.
+        request.setValue(clientVersion(), forHTTPHeaderField: "X-SkyBridge-Client-Version")
+        request.setValue(protocolVersion(), forHTTPHeaderField: "X-SkyBridge-Protocol-Version")
         let apiKey = CrossNetworkServerConfig.clientAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         if !apiKey.isEmpty {
             request.setValue(apiKey, forHTTPHeaderField: "X-API-Key")
         }
+        let resolvedAuthentication: AuthenticatedRequestContext?
         if let authentication = authenticationContext {
+            resolvedAuthentication = authentication
             request.setValue(authentication.tenantID, forHTTPHeaderField: "X-SkyBridge-Tenant-Id")
             request.setValue("Bearer \(authentication.bearerToken)", forHTTPHeaderField: "Authorization")
         } else if requiresUserAuthentication {
             let authentication = try await authenticatedRequestContext()
+            resolvedAuthentication = authentication
             request.setValue(authentication.tenantID, forHTTPHeaderField: "X-SkyBridge-Tenant-Id")
             request.setValue("Bearer \(authentication.bearerToken)", forHTTPHeaderField: "Authorization")
         } else {
+            resolvedAuthentication = nil
             let tenantID = try await currentTenantID()
             if !tenantID.isEmpty {
                 request.setValue(tenantID, forHTTPHeaderField: "X-SkyBridge-Tenant-Id")
@@ -1575,6 +1679,7 @@ actor SignalServerClientCompat {
         }
 
         try Task.checkCancellation()
+        try resolvedAuthentication?.requireCurrent()
 
         logger.debug(
             "🌐 performJSONRequest method=\(method, privacy: .public) path=\(path, privacy: .public) auth=\((requiresUserAuthentication || authenticationContext != nil) ? 1 : 0)"
@@ -1584,6 +1689,7 @@ actor SignalServerClientCompat {
         do {
             (data, response) = try await boundedResponse(for: request, path: path)
         } catch {
+            try resolvedAuthentication?.requireCurrent()
             if error is CancellationError {
                 throw error
             }
@@ -1592,6 +1698,7 @@ actor SignalServerClientCompat {
             )
             throw error
         }
+        try resolvedAuthentication?.requireCurrent()
         guard let http = response as? HTTPURLResponse else {
             throw ClientError.invalidResponse
         }
@@ -1694,9 +1801,26 @@ actor SignalServerClientCompat {
     /// resolved only after the final bearer has been selected/refreshed and is derived from
     /// that exact bearer, so a Keychain update cannot mix identities within one request.
     private func authenticatedRequestContext() async throws -> AuthenticatedRequestContext {
+        if let frozen = frozenAccountRequest {
+            try frozen.requireCurrent()
+            try Self.validateAuthenticatedRequestBearerFreshness(frozen.bearerToken)
+            return AuthenticatedRequestContext(bearerToken: frozen.bearerToken,
+                tenantID: frozen.account.tenantID, requireCurrent: frozen.requireCurrent)
+        }
         let explicitTenantID = normalized(authenticationDependencies.tenantIDOverride())
         let accessTokenOverride = normalized(authenticationDependencies.accessTokenOverride())
-        let persistedSession = try await loadPersistedAuthSession()
+        let resolved: ResolvedAuthenticationSession?
+        let persistedSession: AuthSession?
+        if let resolver = authenticationDependencies.resolveSession {
+            // An owner failure is terminal for this request; never retry through
+            // the disk-only path or borrow credentials from a newer login.
+            resolved = try await resolver()
+            persistedSession = resolved?.session
+            try resolved?.requireCurrent()
+        } else {
+            resolved = nil
+            persistedSession = try await loadPersistedAuthSession()
+        }
 
         let bearerToken: String
         let identitySession: AuthSession?
@@ -1709,10 +1833,12 @@ actor SignalServerClientCompat {
                   normalized(persistedSession.accessToken) != nil else {
                 throw ClientError.missingAuthentication
             }
-            let validSession = try await validAuthSession(
-                persistedSession,
-                explicitTenantID: explicitTenantID
-            )
+            let validSession: AuthSession
+            if resolved != nil {
+                validSession = persistedSession
+            } else {
+                validSession = try await validAuthSession(persistedSession, explicitTenantID: explicitTenantID)
+            }
             guard let normalizedToken = normalized(validSession.accessToken) else {
                 throw ClientError.missingAuthentication
             }
@@ -1730,6 +1856,10 @@ actor SignalServerClientCompat {
         )
         guard !tenantID.isEmpty else {
             throw ClientError.missingTenantID
+        }
+        if let resolved {
+            return AuthenticatedRequestContext(bearerToken: bearerToken, tenantID: tenantID,
+                requireCurrent: resolved.requireCurrent)
         }
         return AuthenticatedRequestContext(bearerToken: bearerToken, tenantID: tenantID)
     }
@@ -1772,7 +1902,7 @@ actor SignalServerClientCompat {
             return session
         }
 
-        if !forceRefresh && !shouldRefreshAccessToken(session.accessToken) {
+        if !forceRefresh && !Self.shouldRefreshAccessToken(session.accessToken) {
             return session
         }
 
@@ -1826,7 +1956,7 @@ actor SignalServerClientCompat {
         return try await refreshTask.value
     }
 
-    private func shouldRefreshAccessToken(_ token: String, skewSeconds: TimeInterval = 300) -> Bool {
+    nonisolated static func shouldRefreshAccessToken(_ token: String, skewSeconds: TimeInterval = 300) -> Bool {
         let segments = token.split(separator: ".", omittingEmptySubsequences: false)
         guard segments.count == 3 else {
             return false
@@ -1854,10 +1984,10 @@ actor SignalServerClientCompat {
         let segments = accessToken.split(separator: ".", omittingEmptySubsequences: false)
         guard segments.count == 3 else { return }
         guard let claims = decodeJWTClaims(accessToken),
-              let expiration = numericJWTClaim(claims["exp"]),
-              expiration > now.timeIntervalSince1970 else {
+              let expiration = numericJWTClaim(claims["exp"]) else {
             throw ClientError.invalidAuthenticationClaims
         }
+        guard expiration > now.timeIntervalSince1970 else { throw ClientError.expiredAuthentication }
     }
 
     /// Validates the identity continuity of a Supabase refresh response before it can replace

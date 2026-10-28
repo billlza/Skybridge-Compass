@@ -351,7 +351,11 @@ pub(crate) async fn send(state_dir: Option<std::path::PathBuf>, args: FileSendAr
     }
 
     let timeout = Duration::from_secs(args.timeout_seconds);
-    match wait_for_file_transfer(&paths, &request.request_id, timeout).await {
+    let mut progress =
+        crate::transfer_progress::TransferProgress::new(args.progress, args.output.json);
+    let result = wait_for_file_transfer(&paths, &request.request_id, timeout, &mut progress).await;
+    progress.finish()?;
+    match result {
         Ok(completed) => json_or_text(
             args.output.json,
             json!(request_report(&completed, false)),
@@ -397,9 +401,13 @@ async fn wait_for_file_transfer(
     paths: &skybridge_agent::AgentPaths,
     request_id: &str,
     timeout: Duration,
+    progress: &mut crate::transfer_progress::TransferProgress,
 ) -> std::result::Result<FileTransferControlRequest, FileTransferAttemptFailure> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(FileTransferAttemptFailure::timeout(request_id, timeout));
+        }
         let registry = load_file_transfer_request_registry(paths)
             .await
             .map_err(|error| FileTransferAttemptFailure::registry_unavailable(&error))?;
@@ -408,11 +416,30 @@ async fn wait_for_file_transfer(
             .cloned()
             .ok_or_else(|| FileTransferAttemptFailure::request_missing(request_id))?;
 
+        if tokio::time::Instant::now() >= deadline {
+            return Err(FileTransferAttemptFailure::timeout(request_id, timeout));
+        }
+
         match evaluate_file_transfer_request(&request) {
             FileTransferWaitDecision::Pending => {}
             FileTransferWaitDecision::Complete => return Ok(request),
             FileTransferWaitDecision::Failed(failure) => return Err(failure),
         }
+
+        let stage = if request.status == FileTransferControlRequestStatus::TransferInProgress
+            && request.bytes_transferred == request.source.size_bytes
+        {
+            "waiting for receiver receipt"
+        } else {
+            file_transfer_status_label(request.status)
+        };
+        progress
+            .update(stage, request.bytes_transferred, request.source.size_bytes)
+            .map_err(|_| FileTransferAttemptFailure {
+                code: "progress_output_failed",
+                message: "cannot write transfer progress; transfer outcome is unconfirmed".into(),
+                retryable: false,
+            })?;
 
         agent_runtime_guard::require_active_agent(paths)
             .await

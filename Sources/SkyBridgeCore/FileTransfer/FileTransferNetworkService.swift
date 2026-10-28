@@ -159,6 +159,28 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
         )
     }
 
+    #if os(macOS)
+    func connectToUSB(udid: String, port: Int, deviceId: String, deviceName: String) async throws -> NWConnection {
+        guard let port = UInt16(exactly: port), port > 0 else { throw FileTransferNetworkError.invalidEndpoint }
+        let connection = try await USBMultiplexTransport.open(udid: udid, port: port)
+        do {
+            try Task.checkCancellation()
+            let registered: NWConnection = try await withCheckedThrowingContinuation { continuation in
+                let id = UUID()
+                pendingConnectionAttempts[id] = PendingConnectionAttempt(
+                    connection: connection, deviceId: deviceId, deviceName: deviceName, continuation: continuation
+                )
+                completeConnectionAttempt(id, result: .success(()))
+            }
+            try Task.checkCancellation()
+            return registered
+        } catch {
+            disconnect(connection)
+            throw error
+        }
+    }
+    #endif
+
     private func connect(
         to endpoint: NWEndpoint,
         deviceId: String,

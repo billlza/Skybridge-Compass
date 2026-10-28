@@ -25,10 +25,16 @@ final class LatestTextureDeliveryGate: @unchecked Sendable {
         self.feed = feed
     }
 
-    func submit(texture: MTLTexture?, backing: AnyObject? = nil) {
+    var currentGeneration: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return generation
+    }
+
+    func submit(texture: MTLTexture?, backing: AnyObject? = nil, expectedGeneration: UInt64? = nil) {
         let shouldSchedule: Bool
         lock.lock()
-        guard isAcceptingFrames else {
+        guard isAcceptingFrames, expectedGeneration == nil || expectedGeneration == generation else {
             lock.unlock()
             return
         }

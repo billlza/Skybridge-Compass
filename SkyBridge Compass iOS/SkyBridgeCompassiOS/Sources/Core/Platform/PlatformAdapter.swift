@@ -133,11 +133,23 @@ public final class SkyBridgeiOSCore {
     public func initialize(policy: CryptoProviderFactory.SelectionPolicy = .preferPQC) async throws {
         let requestedConfiguration = try ProtocolSigningIdentityPolicy
             .requiredConfiguration()
-        // Idempotency by policy: callers may invoke initialize multiple times (app launch + connect + settings toggles).
-        // If policy changed, we MUST reconfigure handshakePolicy/provider/signing keys to match paper semantics.
+        let selectedProvider = CryptoProviderFactory.make(policy: policy)
+        _ = try Self.validateRequestedQProvider(selectedProvider, configuration: requestedConfiguration)
+        // Policy alone does not identify a configuration: settings can switch
+        // suite families or signing authority while requirePQC stays unchanged.
         if activeInitializationToken == nil,
            isInitialized,
-           currentSelectionPolicy == policy {
+           currentSelectionPolicy == policy,
+           cryptoProvider?.tier == selectedProvider.tier,
+           cryptoProvider?.activeSuite == selectedProvider.activeSuite,
+           (cryptoProvider as? any QPeriaptRuntimeBoundCryptoProvider)?.qPeriaptAuthProfile
+                == (selectedProvider as? any QPeriaptRuntimeBoundCryptoProvider)?.qPeriaptAuthProfile,
+           signatureProvider?.signatureAlgorithm == (
+                selectedProvider.tier == .classic ? .ed25519 : requestedConfiguration.algorithm
+           ),
+           activeProtocolSigningKeyProtection == (
+                selectedProvider.tier == .classic ? .softwareKeychain : requestedConfiguration.keyProtection
+           ) {
             return
         }
         let token = UUID()
@@ -148,7 +160,7 @@ public final class SkyBridgeiOSCore {
                 token: token,
                 policy: policy,
                 handshakePolicy: Self.handshakePolicy(for: policy),
-                provider: CryptoProviderFactory.make(policy: policy),
+                provider: selectedProvider,
                 requestedConfiguration: requestedConfiguration
             )
         } catch {
@@ -328,6 +340,28 @@ public final class SkyBridgeiOSCore {
         }
     }
 
+    /// A requested Q session must be admitted before identity I/O or a new
+    /// handshake. Old initialized state and explicit provider overrides cannot
+    /// turn a failed Q selection into another algorithm family.
+    private static func validateRequestedQProvider(
+        _ provider: (any CryptoProvider)?,
+        configuration: ProtocolIdentityConfigurationRecord
+    ) throws -> Bool {
+        let mode = try PQCModePolicyStore.standard.snapshot()
+        guard let provider else { throw SkyBridgeError.notInitialized }
+        if provider.tier != .classic {
+            guard provider.supportedSuites.contains(where: {
+                mode.selection.permittedSuiteWireIds.contains($0.wireId)
+            }) else { throw PQCModeSelectionError.unavailableRuntime }
+        }
+        guard provider.tier == .qperiaptPQC else { return false }
+        let snapshot = QPeriaptHandshakeAdmissionSnapshot.capture(
+            provider: provider, protocolIdentityConfiguration: configuration)
+        let candidate = provider is any QPeriaptHandshakeBoundCryptoProvider ? provider : snapshot.bind(provider: provider)
+        guard snapshot.admits(provider: candidate) else { throw PQCModeSelectionError.unavailableRuntime }
+        return true
+    }
+
     private func resolveAndCommitInitialization(
         token: UUID,
         policy: CryptoProviderFactory.SelectionPolicy,
@@ -335,6 +369,8 @@ public final class SkyBridgeiOSCore {
         provider candidateProvider: (any CryptoProvider)?,
         requestedConfiguration: ProtocolIdentityConfigurationRecord
     ) async throws {
+        let modePolicy = try PQCModePolicyStore.standard.snapshot()
+        _ = try Self.validateRequestedQProvider(candidateProvider, configuration: requestedConfiguration)
         let algorithm: ProtocolSigningAlgorithm = candidateProvider?.tier == .classic
             ? .ed25519
             : requestedConfiguration.algorithm
@@ -362,12 +398,14 @@ public final class SkyBridgeiOSCore {
                 reason: "Core initialization was superseded by a newer configuration request"
             )
         }
+        try PQCModePolicyStore.standard.withCurrent(modePolicy) {}
         guard try ProtocolSigningIdentityPolicy.requiredConfiguration()
             == requestedConfiguration else {
             throw SkyBridgeError.handshakeFailed(
                 reason: "Core initialization configuration changed while identity resolution was in progress"
             )
         }
+        _ = try Self.validateRequestedQProvider(candidateProvider, configuration: requestedConfiguration)
 
         // Publish one complete configuration only after every fallible step has
         // succeeded. Failed policy changes preserve the prior coherent state.
@@ -384,8 +422,7 @@ public final class SkyBridgeiOSCore {
         SkyBridgeLogger.shared.info(
             "🧩 HandshakePolicy: requirePQC=\(candidateHandshakePolicy.requirePQC ? "1" : "0"), allowClassicFallback=\(candidateHandshakePolicy.allowClassicFallback ? "1" : "0"), minimumTier=\(candidateHandshakePolicy.minimumTier.rawValue)"
         )
-        if identity.resolutionDisposition == .restoredCommittedAuthority,
-           let descriptor = CommittedIOSProtocolIdentitySnapshot(
+        if let descriptor = CommittedIOSProtocolIdentitySnapshot(
                snapshot: identity.snapshot,
                algorithm: identity.material.algorithm,
                protection: identity.material.keyProtection,
@@ -393,8 +430,16 @@ public final class SkyBridgeiOSCore {
                keyHandle: candidateKeyHandle,
                resolutionDisposition: identity.resolutionDisposition
            ).productEvidenceDescriptor {
-            _ = ProductReleaseEvidenceRecorder.shared
-                .recordProductionIdentityRestored(descriptor)
+            switch identity.resolutionDisposition {
+            case .restoredCommittedAuthority:
+                _ = ProductReleaseEvidenceRecorder.shared
+                    .recordProductionIdentityRestored(descriptor)
+            case .createdAndCommitted, .reconciledCommittedAuthority:
+                _ = ProductReleaseEvidenceRecorder.shared
+                    .noteNonRestoredIdentityResolution(descriptor)
+            case .ephemeralSmoke:
+                break
+            }
         }
     }
 
@@ -1024,6 +1069,7 @@ public final class SkyBridgeiOSCore {
         offeredSuites: [CryptoSuite]? = nil,
         peerSupportedSuites: [CryptoSuite]? = nil,
         localSOAPeerId: Data? = nil,
+        localProtocolDeviceId: String? = nil,
         expectedRemoteSOAPeerId: Data? = nil,
         trustProvider: (any HandshakeTrustProvider)? = nil,
         authenticatedIncomingEstablishedPolicy: PeerSessionArbiter.IncomingEstablishedPolicy = .rejectDuplicate,
@@ -1049,6 +1095,7 @@ public final class SkyBridgeiOSCore {
             }
         }
 
+        _ = try Self.validateRequestedQProvider(provider, configuration: requiredConfiguration)
         let handshakeSuites = try resolvedHandshakeSuites(
             for: provider,
             offeredSuites: offeredSuites,
@@ -1068,6 +1115,7 @@ public final class SkyBridgeiOSCore {
             offeredSuites: handshakeSuites,
             trustProvider: trustProvider,
             localSOAPeerId: localSOAPeerId,
+            localProtocolDeviceId: localProtocolDeviceId,
             expectedRemoteSOAPeerId: expectedRemoteSOAPeerId,
             authenticatedIncomingEstablishedPolicy: authenticatedIncomingEstablishedPolicy,
             soaSessionScope: soaSessionScope
@@ -1083,18 +1131,21 @@ public final class SkyBridgeiOSCore {
         offeredSuites: [CryptoSuite]? = nil,
         peerSupportedSuites: [CryptoSuite]? = nil,
         localSOAPeerId: Data? = nil,
+        localProtocolDeviceId: String? = nil,
         expectedRemoteSOAPeerId: Data? = nil,
         trustProvider: (any HandshakeTrustProvider)? = nil,
         authenticatedIncomingEstablishedPolicy: PeerSessionArbiter.IncomingEstablishedPolicy = .rejectDuplicate,
         soaSessionScope: PeerSessionArbiter.SessionScope = .p2p,
         protocolSigningAlgorithm: ProtocolSigningAlgorithm,
-        protocolSigningKeyProtection: ProtocolSigningKeyProtection? = nil
+        protocolSigningKeyProtection: ProtocolSigningKeyProtection? = nil,
+        lanPlan: LANPQCHandshakePlan? = nil
     ) async throws -> HandshakeDriver {
         let requiredConfiguration = try ProtocolSigningIdentityPolicy.requiredConfiguration()
-        guard isInitialized,
-              let provider = cryptoProvider else {
+        guard isInitialized || lanPlan != nil,
+              let provider = lanPlan?.provider ?? cryptoProvider else {
             throw SkyBridgeError.notInitialized
         }
+        _ = try Self.validateRequestedQProvider(provider, configuration: requiredConfiguration)
         guard protocolSigningAlgorithm == .ed25519 || provider.tier != .classic else {
             throw HandshakeError.failed(.pqcProviderUnavailable)
         }
@@ -1139,6 +1190,7 @@ public final class SkyBridgeiOSCore {
             peerSupportedSuites: peerSupportedSuites
         )
         let cryptoPolicy = HandshakeCryptoPolicyResolver.policy(for: handshakeSuites)
+        try lanPlan?.withCurrent {}
         return HandshakeDriver(
             transport: transport,
             cryptoProvider: provider,
@@ -1147,11 +1199,12 @@ public final class SkyBridgeiOSCore {
             sigAAlgorithm: protocolSigningAlgorithm,
             protocolSigningKeyProtection: requiredProtection,
             identityPublicKey: identity.material.publicKey,
-            policy: handshakePolicy,
+            policy: lanPlan == nil ? handshakePolicy : HandshakePolicy.strictPQC,
             cryptoPolicy: cryptoPolicy,
             offeredSuites: handshakeSuites,
             trustProvider: trustProvider,
             localSOAPeerId: localSOAPeerId,
+            localProtocolDeviceId: localProtocolDeviceId,
             expectedRemoteSOAPeerId: expectedRemoteSOAPeerId,
             authenticatedIncomingEstablishedPolicy: authenticatedIncomingEstablishedPolicy,
             soaSessionScope: soaSessionScope
@@ -1165,17 +1218,20 @@ public final class SkyBridgeiOSCore {
         preferPQC: Bool = true,
         soaMetadata: HandshakeSOAMetadata? = nil,
         localSOAPeerId: Data? = nil,
+        localProtocolDeviceId: String? = nil,
         expectedRemoteSOAPeerId: Data? = nil,
         trustProvider: (any HandshakeTrustProvider)? = nil,
         soaSessionScope: PeerSessionArbiter.SessionScope = .p2p,
-        onDriverCreated: (@Sendable (HandshakeDriver) async -> Void)? = nil
+        onDriverCreated: (@Sendable (HandshakeDriver) async -> Void)? = nil,
+        lanPlan: LANPQCHandshakePlan? = nil
     ) async throws -> SessionKeys {
-        guard isInitialized,
-              let provider = cryptoProvider else {
+        guard isInitialized || lanPlan != nil,
+              let provider = lanPlan?.provider ?? cryptoProvider else {
             throw SkyBridgeError.notInitialized
         }
 
         let requiredConfiguration = try ProtocolSigningIdentityPolicy.requiredConfiguration()
+        _ = try Self.validateRequestedQProvider(provider, configuration: requiredConfiguration)
         let requestedPQCAlgorithm = requiredConfiguration.algorithm
         let peerPQCSignatureAlgorithm = try preferredPQCSignatureAlgorithm(for: deviceId)
         let peerPQCKeyProtection = Self.protocolSigningKeyProtection(
@@ -1189,14 +1245,15 @@ public final class SkyBridgeiOSCore {
             "allowClassicFallback=\(handshakePolicy.allowClassicFallback ? "1" : "0"), " +
             "minimumTier=\(handshakePolicy.minimumTier.rawValue)"
         )
-        let activeHandshakePolicy = handshakePolicy
+        let activeHandshakePolicy = lanPlan == nil ? handshakePolicy : HandshakePolicy.strictPQC
 
         return try await TwoAttemptHandshakeManager.performHandshakeWithPreparation(
             deviceId: deviceId,
             preferPQC: preferPQC,
             policy: activeHandshakePolicy,
             cryptoProvider: provider,
-            pqcSignatureAlgorithm: peerPQCSignatureAlgorithm
+            pqcSignatureAlgorithm: peerPQCSignatureAlgorithm,
+            selectedPQCSuite: lanPlan?.suiteWireId
         ) { preparation in
             SkyBridgeLogger.shared.info(
                 "🤝 Handshake attempt: strategy=\(preparation.strategy.rawValue), sigA=\(preparation.sigAAlgorithm.rawValue), " +
@@ -1248,6 +1305,7 @@ public final class SkyBridgeiOSCore {
                 trustProvider: trustProvider,
                 soaMetadata: attemptSOAMetadata,
                 localSOAPeerId: localSOAPeerId,
+                localProtocolDeviceId: localProtocolDeviceId,
                 expectedRemoteSOAPeerId: expectedRemoteSOAPeerId,
                 soaSessionScope: soaSessionScope
             )
@@ -1257,7 +1315,15 @@ public final class SkyBridgeiOSCore {
             }
             
             let peer = PeerIdentifier(deviceId: deviceId)
-            return try await driver.initiateHandshake(with: peer)
+            try lanPlan?.withCurrent {}
+            let keys = try await driver.initiateHandshake(with: peer)
+            if let lanPlan {
+                return try lanPlan.withCurrent {
+                    guard keys.negotiatedSuite.wireId == lanPlan.suiteWireId else { throw PQCModeSelectionError.invalidCapabilities }
+                    return keys
+                }
+            }
+            return keys
         }
     }
     

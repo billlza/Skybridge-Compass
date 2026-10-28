@@ -15,7 +15,7 @@ const { randomUUID } = require('crypto');
 const { AliyunSMSClient } = require('./lib/aliyun_sms');
 const { createSignalingStateBackend, unique } = require('./lib/signaling_state_backend');
 const { createMediaRelay, createSignedMediaLeaseToken } = require('./lib/media_relay');
-const { RegistryStore } = require('./lib/registry_store');
+const { RegistryStore, validatePresenceTouchResult } = require('./lib/registry_store');
 const { buildIdempotencyFingerprint, clientIPForRequest, normalizeClientIP } = require('./lib/request_security');
 const {
   normalizeAppVersion,
@@ -257,6 +257,7 @@ const GLOBAL_MIN_CLIENT_VERSION = String(process.env.GLOBAL_MIN_CLIENT_VERSION |
 const GLOBAL_MIN_PROTOCOL_VERSION = String(process.env.GLOBAL_MIN_PROTOCOL_VERSION || '0').trim();
 const SIGNALING_ALLOW_BOOTSTRAP_TENANT_POLICY = /^(1|true|yes)$/i.test(process.env.SIGNALING_ALLOW_BOOTSTRAP_TENANT_POLICY || 'false');
 const SIGNALING_ALLOW_BOOTSTRAP_DEVICE_AUTH = /^(1|true|yes)$/i.test(process.env.SIGNALING_ALLOW_BOOTSTRAP_DEVICE_AUTH || 'false');
+const SIGNALING_ALLOW_ACCOUNT_LOGIN_REGISTRATION = /^(1|true|yes)$/i.test(process.env.SIGNALING_ALLOW_ACCOUNT_LOGIN_REGISTRATION || 'false');
 
 const TURN_SHARED_SECRET = String(process.env.TURN_SHARED_SECRET || '').trim();
 const TURN_OPAQUE_TAG_SECRET = String(process.env.TURN_OPAQUE_TAG_SECRET || TURN_SHARED_SECRET || '').trim();
@@ -1453,6 +1454,7 @@ let mediaRelay = MEDIA_RELAY_ENABLED
 let currentTrustProxy = TRUST_PROXY;
 let currentRequireSharedStateForPublicCapabilities = REQUIRE_SHARED_STATE_FOR_PUBLIC_CAPABILITIES;
 let currentAllowBootstrapDeviceAuth = SIGNALING_ALLOW_BOOTSTRAP_DEVICE_AUTH;
+let currentAllowAccountLoginRegistration = SIGNALING_ALLOW_ACCOUNT_LOGIN_REGISTRATION;
 const rooms = new Map();
 const wsMeta = new WeakMap();
 const activeSessionTouchAtBySessionId = new Map();
@@ -4139,9 +4141,45 @@ app.post('/api/devices/enroll/first', rlControl, asyncRoute(async (req, res) => 
 }));
 
 app.post('/api/devices/register-current', rlControl, asyncRoute(async (req, res) => {
-  const context = await loadAuthenticatedDeviceContext(req, { requireRegisteredDevice: false });
+  const context = await loadAuthenticatedDeviceContext(req, {
+    requireRegisteredDevice: false, rejectRevokedRegisteredDevice: true
+  });
   await assertPublicCapabilityAvailable('register_current_device', context.tenantId);
   const deviceName = typeof req.body?.deviceName === 'string' ? req.body.deviceName.slice(0, 128) : '';
+  if (currentAllowAccountLoginRegistration) {
+    if (!registrySupportsMethod(registryStore, 'registerAccountDevice')) {
+      throw makeError('registry_not_configured', 503);
+    }
+    let device;
+    try {
+      device = await registryStore.registerAccountDevice({
+        p_tenant_id: context.tenantId,
+        p_user_id: context.user.id,
+        p_device_id: context.binding.deviceId,
+        p_protocol_signing_algorithm: context.binding.protocolSigningAlgorithm,
+        p_protocol_public_key_fingerprint: context.binding.protocolPublicKeyFingerprint,
+        p_device_name: deviceName
+      });
+    } catch (error) {
+      const code = identityRotationRegistryErrorCode(error);
+      const status = new Map([
+        ['bad_device_binding', 400], ['device_revoked', 403], ['device_frozen', 403],
+        ['current_identity_mismatch', 409], ['new_identity_already_owned', 409]
+      ]).get(code);
+      if (status) throw makeError(code, status);
+      throw makeError('account_registration_unavailable', 503);
+    }
+    if (device?.tenant_id !== context.tenantId || device?.user_id !== context.user.id
+      || device?.device_id !== context.binding.deviceId || device?.status !== 'active'
+      || device?.protocol_signing_algorithm !== context.binding.protocolSigningAlgorithm
+      || device?.protocol_public_key_fingerprint !== context.binding.protocolPublicKeyFingerprint) {
+      throw makeError('account_registration_unconfirmed', 503);
+    }
+    // Match the existing registration receipt: activated marks a previously absent record,
+    // while device.status is the authoritative post-registration activation state.
+    res.json({ registered: true, activated: !context.deviceRecord, device });
+    return;
+  }
   const canReadRegisteredDevices = registryCanReadRegisteredDevices();
   const existing = canReadRegisteredDevices
     ? await registryStore.getRegisteredDevice({
@@ -4167,6 +4205,56 @@ app.post('/api/devices/register-current', rlControl, asyncRoute(async (req, res)
     p_device_name: deviceName
   });
   res.json({ registered: true, activated: !existing, device: result });
+}));
+
+app.post('/api/devices/remove', rlControl, asyncRoute(async (req, res) => {
+  const context = await loadAuthenticatedDeviceContext(req, { requireRegisteredDevice: true });
+  await assertPublicCapabilityAvailable('remove_account_device', context.tenantId);
+  if (context.deviceRecord?.synthetic) throw makeError('device_not_registered', 403);
+  const target = normalizeIdentityBinding(req.body?.target, { requirePublicKey: false });
+  if (!target) throw makeError('bad_target_binding', 400);
+  if (!registrySupportsMethod(registryStore, 'removeAccountDevice')) {
+    throw makeError('registry_not_configured', 503);
+  }
+  let device;
+  try {
+    device = await registryStore.removeAccountDevice({
+      p_tenant_id: context.tenantId, p_user_id: context.user.id,
+      p_caller_device_id: context.binding.deviceId,
+      p_caller_signing_algorithm: context.binding.protocolSigningAlgorithm,
+      p_caller_fingerprint: context.binding.protocolPublicKeyFingerprint,
+      p_target_device_id: target.deviceId,
+      p_target_signing_algorithm: target.protocolSigningAlgorithm,
+      p_target_fingerprint: target.protocolPublicKeyFingerprint
+    });
+  } catch (error) {
+    const code = identityRotationRegistryErrorCode(error);
+    const status = new Map([
+      ['bad_device_binding',400], ['device_not_registered',403], ['device_not_active',403],
+      ['device_revoked',403], ['device_frozen',403], ['current_identity_mismatch',409],
+      ['target_device_not_found',404], ['target_identity_mismatch',409]
+    ]).get(code);
+    if (status) throw makeError(code,status);
+    throw makeError('account_removal_unavailable',503);
+  }
+  if (device?.tenant_id !== context.tenantId || device?.user_id !== context.user.id
+    || device?.device_id !== target.deviceId || device?.status !== 'revoked'
+    || device?.protocol_signing_algorithm !== target.protocolSigningAlgorithm
+    || device?.protocol_public_key_fingerprint !== target.protocolPublicKeyFingerprint) {
+    throw makeError('account_removal_unconfirmed',503);
+  }
+  // A committed revocation remains authoritative even if Redis cleanup fails.
+  // Report the partial outcome explicitly; an active caller can retry idempotently.
+  try {
+    await signalingState.deleteEphemeral('presence',presenceKey(context.tenantId,context.user.id,target.deviceId));
+  } catch {
+    throw makeError('account_removal_cleanup_pending',503);
+  }
+  res.set('Cache-Control','no-store');
+  res.json({ removed: true, target: {
+    deviceId: target.deviceId, protocolSigningAlgorithm: target.protocolSigningAlgorithm,
+    protocolPublicKeyFingerprint: target.protocolPublicKeyFingerprint, status: 'revoked'
+  }});
 }));
 
 app.post('/api/devices/identity-rotation/challenge', rlControl, asyncRoute(async (req, res) => {
@@ -4580,6 +4668,14 @@ function accountDeviceFromRegistryRow(row, presence, callerBinding) {
       ? safeEpochMs(live.updatedAt)
       : (safeEpochMs(row.last_presence_at) ?? safeEpochMs(row.last_seen_at)),
     presenceUpdatedAt: live ? safeEpochMs(live.updatedAt) : null,
+    // Routing hints belong only to this exact active identity's live heartbeat.
+    // Never reconstruct a listener from durable registry metadata.
+    lanControlRoute: row.status === 'active' && live
+      && Number.isInteger(live.lanControlPort) && live.lanControlPort > 0 && live.lanControlPort <= 65535
+      && stringArrayFromRegistry(live.lanAddresses).length > 0
+      && Number.isSafeInteger(live.expiresAt) && live.expiresAt > now()
+      ? { addresses: [...live.lanAddresses], port: live.lanControlPort, expiresAt: live.expiresAt }
+      : null,
     online: Boolean(live),
     isCaller: String(row.device_id) === callerBinding.deviceId
       && rowAlgorithm === callerBinding.protocolSigningAlgorithm
@@ -4650,6 +4746,7 @@ app.post('/api/presence/register', rlPresence, asyncRoute(async (req, res) => {
       osVersion: report.osVersion,
       appVersion,
       lanAddresses: report.lanAddresses,
+      lanControlPort: report.lanControlPort,
       capabilities: report.capabilities,
       publicAddress,
       updatedAt: heartbeatAt,
@@ -4685,7 +4782,8 @@ app.post('/api/presence/register', rlPresence, asyncRoute(async (req, res) => {
         p_public_address: publicAddress,
         p_capabilities: report.capabilities
       });
-      persisted = Boolean(result && result.updated === true);
+      // Injected registry adapters share the same result contract as the RPC store.
+      persisted = validatePresenceTouchResult(result).updated;
       persistReason = persisted ? 'written' : 'device_not_active';
       // Both outcomes are settled for throttling purposes: a device without an active row is
       // re-checked at the normal persist interval, not on every heartbeat.
@@ -5218,6 +5316,7 @@ function createRuntime(options = {}) {
     trustProxy = TRUST_PROXY,
     requireSharedStateForPublicCapabilities = REQUIRE_SHARED_STATE_FOR_PUBLIC_CAPABILITIES,
     allowBootstrapDeviceAuth = SIGNALING_ALLOW_BOOTSTRAP_DEVICE_AUTH,
+    allowAccountLoginRegistration = SIGNALING_ALLOW_ACCOUNT_LOGIN_REGISTRATION,
     allowLegacyQueryToken = DEFAULT_WS_ALLOW_LEGACY_QUERY_TOKEN
   } = options;
   if (signalingStateOverride) {
@@ -5232,6 +5331,7 @@ function createRuntime(options = {}) {
   currentTrustProxy = trustProxy;
   currentRequireSharedStateForPublicCapabilities = requireSharedStateForPublicCapabilities;
   currentAllowBootstrapDeviceAuth = allowBootstrapDeviceAuth;
+  currentAllowAccountLoginRegistration = allowAccountLoginRegistration === true;
   currentAllowLegacyQueryToken = allowLegacyQueryToken === true;
   app.set('trust proxy', trustProxy ? 1 : false);
   rooms.clear();

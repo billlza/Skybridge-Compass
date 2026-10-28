@@ -13,6 +13,22 @@ import SkyBridgeCore
 /// subsystem owns a matching CloudKit subscription, which `RemoteNotificationRouter` enforces.
 @available(macOS 14.0, *)
 final class RemoteNotificationAppDelegate: NSObject, NSApplicationDelegate {
+    /// Explicit Quit waits for owned audio output cleanup and format restoration.
+    /// Ordinary window closure keeps the existing background services available.
+    var audioPlaybackShutdown: (@MainActor () async -> Bool)?
+    private var audioShutdownPending = false
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let shutdown = audioPlaybackShutdown else { return .terminateNow }
+        guard !audioShutdownPending else { return .terminateLater }
+        audioShutdownPending = true
+        Task { @MainActor in
+            let mayTerminate = await shutdown()
+            audioShutdownPending = false
+            sender.reply(toApplicationShouldTerminate: mayTerminate)
+        }
+        return .terminateLater
+    }
 
     /// The product keeps discovery and remote-control services available from its status item after
     /// the single main window closes. Explicit Quit still follows the normal termination path.

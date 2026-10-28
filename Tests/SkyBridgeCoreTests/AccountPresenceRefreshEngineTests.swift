@@ -218,3 +218,77 @@ final class AccountPresenceRefreshEngineTests: XCTestCase {
 private final class ListCounter: @unchecked Sendable {
     var value = 0
 }
+
+
+extension AccountPresenceRefreshEngineTests {
+    private func routedSnapshot() throws -> AccountDeviceListSnapshot {
+        let data = Data("""
+        {"generatedAt":1000,"callerDeviceId":"current","devices":[
+          {"deviceId":"peer","status":"active","protocolSigningAlgorithm":"Ed25519",
+           "protocolPublicKeyFingerprint":"\(String(repeating: "a", count: 64))","online":true,
+           "lanControlRoute":{"addresses":["10.0.0.5"],"port":51173,"expiresAt":11000}}]}
+        """.utf8)
+        return try JSONDecoder().decode(AccountDeviceListSnapshot.self, from: data)
+    }
+
+    func testSlowAccountListDoesNotRestartRouteTTLWhenItArrives() async throws {
+        var current = ContinuousClock.now
+        let response = try routedSnapshot()
+        let engine = AccountPresenceRefreshEngine(routeClock: { current }, registerPresence: {}, listAccountDevices: {
+            current = current.advanced(by: .seconds(11)); return response
+        }, trustedDeviceIDs: { [] }, classifyFailure: { _ in .transport }, onStateChange: { _ in })
+        defer { engine.stop() }
+        engine.start(); await engine.waitForCurrentRefresh()
+        XCTAssertNil(engine.state.accountDevices?.devices.first?.lanControlRoute)
+        XCTAssertEqual(engine.state.accountDevices?.devices.first?.online, true)
+    }
+
+    private actor RouteSleepGate {
+        private var sleeper: CheckedContinuation<Void, Never>?
+        private var observer: CheckedContinuation<Void, Never>?
+        func sleep() async throws {
+            try Task.checkCancellation()
+            await withCheckedContinuation { continuation in
+                sleeper = continuation; observer?.resume(); observer = nil
+            }
+            try Task.checkCancellation()
+        }
+        func waitForSleep() async {
+            if sleeper != nil { return }
+            await withCheckedContinuation { observer = $0 }
+        }
+        func wake() { let current = sleeper; sleeper = nil; current?.resume() }
+    }
+
+    func testRouteExpiresWhileAnotherAccountRequestHangsEvenWithoutWallClockAdvance() async throws {
+        var current = ContinuousClock.now
+        let response = try routedSnapshot()
+        let sleeper = RouteSleepGate()
+        var calls = 0
+        var pending: CheckedContinuation<AccountDeviceListSnapshot, Error>?
+        let engine = AccountPresenceRefreshEngine(now: { Date(timeIntervalSince1970: 1000) }, routeClock: { current },
+            registerPresence: {}, listAccountDevices: {
+                calls += 1
+                if calls == 1 { return response }
+                return try await withCheckedThrowingContinuation { pending = $0 }
+            }, trustedDeviceIDs: { [] }, classifyFailure: { _ in .transport }, onStateChange: { _ in },
+            sleepOperation: { _ in try await sleeper.sleep() })
+        defer {
+            engine.stop(); pending?.resume(throwing: CancellationError())
+            Task { await sleeper.wake() }
+        }
+        engine.start(); await engine.waitForCurrentRefresh(); await sleeper.waitForSleep()
+        XCTAssertNotNil(engine.state.accountDevices?.devices.first?.lanControlRoute)
+        engine.triggerRefresh()
+        for _ in 0..<100 where pending == nil { await Task.yield() }
+        let pendingRequest = try XCTUnwrap(pending)
+        current = current.advanced(by: .seconds(11))
+        await sleeper.wake(); await sleeper.waitForSleep()
+        XCTAssertNil(engine.state.accountDevices?.devices.first?.lanControlRoute)
+        XCTAssertEqual(engine.state.accountDevices?.devices.first?.online, true)
+        pending = nil
+        pendingRequest.resume(throwing: EngineTestError.list)
+        await engine.waitForCurrentRefresh()
+        engine.stop(); await sleeper.wake()
+    }
+}

@@ -382,7 +382,15 @@ extension CrossNetworkConnectionManager {
         }
         do {
             try requireCurrentWebRTCFileTransferOperationOwner(operationOwner)
-            let reader = try await WebRTCOutboundFileReader.open(url: url)
+            let reader = try await WebRTCOutboundFileReader.open(
+                url: url,
+                validateLifetime: { @MainActor [weak self] in
+                    guard let self else { throw CancellationError() }
+                    try Task.checkCancellation()
+                    try self.requireCurrentWebRTCFileTransferOperationOwner(operationOwner)
+                    try cancellationFlag.check()
+                }
+            )
             fileReader = reader
             try requireCurrentWebRTCFileTransferOperationOwner(operationOwner)
             let fileSize = reader.fileSize

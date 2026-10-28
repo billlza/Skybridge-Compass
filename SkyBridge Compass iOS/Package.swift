@@ -64,6 +64,9 @@ let package = Package(
                 .product(name: "SkyBridgeQPeriaptRuntime", package: "SkyBridgeRoot"),
                 .product(name: "OQSRAII", package: "SkyBridgeRoot"),
                 .product(name: "SkyBridgeRealtimeMedia", package: "SkyBridgeRoot"),
+                .product(name: "SkyBridgeAudioFile", package: "SkyBridgeRoot"),
+                .product(name: "SkyBridgeOpus", package: "SkyBridgeRoot"),
+                .product(name: "SkyBridgeAppleTransport", package: "SkyBridgeRoot"),
                 .product(name: "SkyBridgeWebRTCRuntime", package: "SkyBridgeRoot"),
                 .product(name: "SkyBridgeMessagePersistence", package: "SkyBridgeRoot"),
                 .product(name: "SkyBridgeCameraKit", package: "SkyBridgeCameraKit")

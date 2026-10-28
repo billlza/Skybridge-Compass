@@ -453,7 +453,8 @@
 "settings.advanced.performance.shadowQuality.format" = "シャドウ品質: %@";
 "settings.advanced.performance.postProcessing.format" = "後処理: %@";
 "settings.advanced.performance.showRealtimeFPS" = "リアルタイムFPSを表示";
-"settings.advanced.performance.showRealtimeFPS.help" = "トップナビにMetalレンダリングFPSを表示。未取得時は占位 — FPS";
+"settings.advanced.performance.showRealtimeFPS.help" = "天気の背景（雨・雲・もや）が実際に画面に表示されたフレーム数を1秒単位で表示します。他のUIやリモートセッションは含みません。測定できない場合は — FPS と表示します。";
+"metric.frameRate.paused" = "一時停止中";
 "settings.advanced.hardware.enableAcceleration" = "ハードウェアアクセラレーションを有効化";
 "settings.advanced.memory.optimize" = "メモリ使用を最適化";
 "settings.advanced.backgroundScanning" = "バックグラウンドスキャン";
@@ -675,7 +676,7 @@
 "remote.connectionMode.near" = "近距離";
 "remote.connectionMode.far" = "遠距離";
 "remote.connectionMode.auto.description" = "最適なモードを自動選択（同一ネットワークでは近距離を優先）";
-"remote.connectionMode.near.description" = "近距離ハードウェアミラーリング — 同一ネットワークで低遅延（ScreenCaptureKit + HEVC + QUIC）";
+"remote.connectionMode.near.description" = "同じネットワーク内のデバイスを表示・操作";
 "remote.connectionMode.far.description" = "手動 RDP（制限付きプレビュー）— FreeRDP 3.30 ソフトウェア GDI、厳密な証明書検証、チャネルリダイレクトなし";
 "common.unknown" = "不明";
 "profile.title" = "プロフィール";
@@ -1127,7 +1128,7 @@
 "discovery.accountDevices.registration.pending" = "承認待ち";
 "discovery.accountDevices.registration.frozen" = "凍結中";
 "discovery.accountDevices.action.useConnectionCode" = "コードで接続";
-"discovery.accountDevices.hint.online" = "この端末はオンラインですが同じ LAN にありません。相手側で接続コードを生成して入力してください";
+"discovery.accountDevices.hint.online" = "この端末はオンラインですが、利用可能な直接接続経路がまだ見つかりません。相手側で接続コードを生成して入力してください";
 "discovery.accountDevices.copyAddress" = "アドレスをコピー";
 "discovery.accountDevices.copyDeviceId" = "端末 ID をコピー";
 "discovery.accountDevices.failure.notAuthenticated" = "未サインイン";
@@ -1146,3 +1147,86 @@
 "dashboard.accountDevices.summary" = "%d 台 · %d 台オンライン";
 "dashboard.accountDevices.viewAll" = "すべて表示";
 "dashboard.accountDevices.empty" = "同じアカウントでサインインした他の端末がここに表示されます";
+
+"remoteControl.securityNotice.inputController" = "入力操作中";
+
+"remoteControl.securityNotice.observer" = "閲覧のみ";
+
+"remoteControl.securityNotice.transferInput" = "入力操作を引き継ぐ";
+
+"remoteControl.securityNotice.approveView" = "閲覧を許可";
+
+"info.appleSilicon" = "Appleシリコン";
+"info.optimizationEnabled" = "最適化有効";
+"info.pCore" = "高性能コア";
+"info.eCore" = "高効率コア";
+"info.multiCoreOpt" = "マルチコア最適化";
+"info.reqAppleSilicon" = "Appleシリコンが必要です";
+"info.deviceUnsupported" = "非対応のデバイス";
+"info.standardMode" = "標準モード";
+
+"remoteControl.securityNotice.localInputController" = "この Mac がキーボードとマウスの操作権を持っています。リモート閲覧は継続します。";
+
+// Saved pairing identity status
+"discovery.trustedDevices.section" = "信頼済みデバイス";
+"discovery.pendingPairings.section" = "確認が必要なペアリング記録";
+"discovery.pendingPairings.explanation" = "これらの記録は現在、接続の本人確認に使えません。端末がアカウントから削除されたわけではありません。アカウント端末を選ぶか、現在の接続用 QR コードを読み取ってください。";
+
+// Account device removal
+"accountDevices.remove.action" = "アカウントから削除";
+"accountDevices.remove.title" = "アカウントのデバイスを削除";
+"accountDevices.remove.message" = "「%@」をアカウントから削除しますか？このデバイスはアカウントのデバイスサービスを利用できなくなります。ローカルファイルと保存済みのペアリングは保持されます。";
+"accountDevices.remove.confirm" = "削除";
+"accountDevices.remove.cancel" = "キャンセル";
+"accountDevices.remove.selfRemoved" = "このデバイスは削除されました。アカウントのデバイス同期を停止しました。";
+"accountDevices.remove.failed" = "削除を確認できませんでした。更新してデバイスの状態を確認してから再試行してください。";
+
+"accountDevices.myDevices" = "自分のデバイス";
+
+/* Weather dashboard labels and relative time. */
+"weather.metric.humidity" = "湿度";
+"weather.metric.windSpeed" = "風速";
+"weather.metric.visibility" = "視程";
+"weather.metric.aqi" = "AQI";
+"weather.status.loading" = "天気情報を取得中…";
+"weather.status.loadingHint" = "初回の読み込みには数秒かかります";
+"weather.status.error" = "天気情報を取得できませんでした";
+"weather.action.retry" = "再試行";
+"weather.time.justNow" = "たった今";
+"weather.time.minutesAgo" = "%d分前";
+"weather.time.hoursAgo" = "%d時間前";
+
+"remote.session.hostStopped" = "接続先が画面共有を停止しました。";
+
+"remote.session.permissionRevoked" = "接続先が画面共有の許可を取り消しました。";
+
+"remote.session.captureFailed" = "接続先の画面キャプチャに失敗し、共有が終了しました。";
+
+"audio.output.source_format" = "音源の PCM 形式";
+
+"audio.authorization.renewal.waiting" = "再生中はアカウントの認可の自動更新を試みます。";
+"audio.authorization.renewal.checking" = "今回の再生認可を更新するため、アカウントのデバイスを確認しています。";
+"audio.authorization.renewal.retry_pending" = "認可をまだ更新できません。元の有効期限内で再生を続け、後で自動的に再試行します。";
+"audio.authorization.renewal.unavailable" = "認可を更新できませんでした。現在の有効期限までのみ再生を続けられます。";
+"audio.authorization.renewal.failed" = "再生認可が無効になりました。再生を停止しています。";
+
+"audio.output.endpoint_unavailable" = "選択した出力を現在使用できません。接続を確認し、システムのサウンド設定で利用可能な出力を選んでください。";
+
+"audio.output.format_mismatch" = "この出力では現在、音源のサンプルレート、チャンネル数、PCM 表現、またはビット深度を使用できません。表示された形式に対応する出力を選んでください。";
+
+"audio.output.mixing_required" = "現在の出力経路はシステムミキシングを許可するため、厳密な再生の条件を満たしません。音源と同じ形式で排他的に出力できる機器を選んでください。";
+
+"audio.output.unsupported_layout" = "出力のチャンネル配置が音源と一致しないか、厳密な再生でまだ対応していません。配置が一致する出力を選んでください。";
+
+"audio.output.unsupported_topology" = "現在の出力チャンネル構成は、厳密な再生でまだ対応していません。別の出力機器を使用してください。";
+
+"audio.output.processing_active" = "音量ゲイン、ミュート、またはモノラル処理が有効なため、厳密な再生を開始できません。システムと機器のサウンド設定を確認してください。";
+
+"audio.output.device_busy" = "この出力への排他的アクセスを取得できませんでした。他の音声再生を停止してから再試行してください。";
+
+"audio.output.variable_buffer_size" = "この出力は可変バッファを使用しており、厳密な再生でまだ対応していません。別の出力機器を選んでください。";
+
+"audio.output.property_unavailable" = "この機器の厳密な出力チェックを完了できませんでした。機器を再接続してから再試行してください。";
+
+/* Reconnect the current USB accessory through a fresh authenticated session. */
+"connection.usb.retryTimeout" = "USB 接続がタイムアウトしました。スマートフォンで SkyBridge を開き、接続をやり直してください。";

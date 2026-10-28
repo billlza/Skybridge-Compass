@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import pathlib
+import plistlib
 import tempfile
 import unittest
 from unittest import mock
@@ -133,6 +134,117 @@ class NativeVendorProvenanceTests(unittest.TestCase):
 
     def test_verify_accepts_record_bound_to_exact_lock_and_artifacts(self) -> None:
         self.verify(self.record())
+
+    def framework_fixture(self) -> tuple[pathlib.Path, dict[str, object]]:
+        framework = self.artifact_root / "ios-arm64/Example.framework"
+        framework.mkdir(parents=True)
+        binary = framework / "Example"
+        binary.write_bytes(b"framework metadata unit fixture; not a native SDK")
+        (framework / "Info.plist").write_bytes(plistlib.dumps({
+            "CFBundleExecutable": "Example", "CFBundlePackageType": "FMWK"
+        }))
+        metadata = {
+            "path": binary.relative_to(self.repository_root).as_posix(),
+            "size": binary.stat().st_size, "sha256": PROVENANCE.sha256_file(binary),
+            "architectures": ["arm64"], "platforms": ["ios"], "deployment_targets": ["17.0"],
+            "install_name": "@rpath/Example.framework/Example",
+            "dependencies": ["@rpath/Example.framework/Example", "/usr/lib/libSystem.B.dylib"],
+        }
+        return binary, metadata
+
+    def test_flat_framework_receives_dylib_metadata_validation(self) -> None:
+        binary, metadata = self.framework_fixture()
+        record = self.record()
+        record["binaries"].append(metadata)
+        with mock.patch.object(PROVENANCE, "dylib_metadata", return_value=metadata) as native_metadata:
+            self.verify(record)
+        native_metadata.assert_called_once_with(binary.resolve(), self.repository_root.resolve())
+
+    def test_omitted_framework_binary_is_rejected(self) -> None:
+        self.framework_fixture()
+        with self.assertRaisesRegex(PROVENANCE.ProvenanceError, "records differ from artifact tree"):
+            self.verify(self.record())
+
+    def versioned_framework_fixture(self) -> tuple[pathlib.Path, dict[str, object]]:
+        binary, metadata = self.framework_fixture()
+        framework = binary.parent
+        version = framework / "Versions/A"
+        resources = version / "Resources"
+        resources.mkdir(parents=True)
+        binary.rename(version / binary.name)
+        (framework / "Info.plist").unlink()
+        (resources / "Info.plist").write_bytes(plistlib.dumps({
+            "CFBundleExecutable": "Example", "CFBundlePackageType": "FMWK",
+            "CFBundleSupportedPlatforms": ["MacOSX"]
+        }))
+        (framework / "Versions/Current").symlink_to("A", target_is_directory=True)
+        (framework / "Example").symlink_to("Versions/Current/Example")
+        (framework / "Resources").symlink_to("Versions/Current/Resources", target_is_directory=True)
+        binary = version / "Example"
+        metadata["path"] = binary.relative_to(self.repository_root).as_posix()
+        metadata["platforms"] = ["macos"]
+        return binary, metadata
+
+    def test_versioned_framework_real_binary_gets_native_metadata_checks(self) -> None:
+        binary, metadata = self.versioned_framework_fixture()
+        record = self.record()
+        record["binaries"].append(metadata)
+        with mock.patch.object(PROVENANCE, "dylib_metadata", return_value=metadata) as native_metadata:
+            self.verify(record)
+        native_metadata.assert_called_once_with(binary.resolve(), self.repository_root.resolve())
+
+    def test_omitted_versioned_framework_real_binary_is_rejected(self) -> None:
+        self.versioned_framework_fixture()
+        with self.assertRaisesRegex(PROVENANCE.ProvenanceError, "records differ from artifact tree"):
+            self.verify(self.record())
+
+    def test_framework_metadata_cannot_change_platform_or_dependencies(self) -> None:
+        _, metadata = self.framework_fixture()
+        record = self.record()
+        record["binaries"].append(metadata)
+        for changes in [{"platforms": ["ios-simulator"]}, {"dependencies": ["/tmp/host-library.dylib"]}]:
+            with self.subTest(changes=changes), mock.patch.object(PROVENANCE, "dylib_metadata", return_value=metadata | changes):
+                with self.assertRaisesRegex(PROVENANCE.ProvenanceError, "binary differs"):
+                    self.verify(record)
+
+    def test_framework_missing_or_conflicting_info_is_rejected(self) -> None:
+        binary, _ = self.framework_fixture()
+        info = binary.parent / "Info.plist"
+        info.unlink()
+        with self.assertRaisesRegex(PROVENANCE.ProvenanceError, "Info.plist"):
+            self.verify(self.record())
+        for payload in [b"not a plist", plistlib.dumps({"CFBundleExecutable": "Other", "CFBundlePackageType": "FMWK"})]:
+            with self.subTest(payload=payload):
+                info.write_bytes(payload)
+                with self.assertRaisesRegex(PROVENANCE.ProvenanceError, "Info.plist"):
+                    self.verify(self.record())
+
+    def test_universal_framework_metadata_is_checked_per_architecture(self) -> None:
+        binary, _ = self.framework_fixture()
+        identifier = "@rpath/Example.framework/Example"
+        for conflict in [None, "identifier", "dependency"]:
+            def native_output(*args):
+                if args == ("lipo", "-archs", str(binary)):
+                    return "arm64 x86_64"
+                if args == ("otool", "-l", str(binary)):
+                    return "cmd LC_BUILD_VERSION\n platform 7\n minos 17.0\n"
+                if len(args) == 5 and args[0:2] == ("otool", "-arch") and args[2] in {"arm64", "x86_64"} and args[4] == str(binary):
+                    name = identifier + ("-other" if conflict == "identifier" and args[2] == "x86_64" else "")
+                    if args[3] == "-D":
+                        return str(binary) + ":\n" + name + "\n"
+                    if args[3] == "-L":
+                        dependency = "/tmp/other.dylib" if conflict == "dependency" and args[2] == "x86_64" else "/usr/lib/libSystem.B.dylib"
+                        return str(binary) + ":\n\t" + name + " (compatibility version 1.0.0)\n\t" + dependency + " (compatibility version 1.0.0)\n"
+                raise AssertionError("unexpected native inspection command: " + repr(args))
+            with self.subTest(conflict=conflict), mock.patch.object(PROVENANCE, "run", side_effect=native_output):
+                if conflict:
+                    with self.assertRaisesRegex(PROVENANCE.ProvenanceError, "differ between architectures"):
+                        PROVENANCE.dylib_metadata(binary, self.repository_root)
+                else:
+                    actual = PROVENANCE.dylib_metadata(binary, self.repository_root)
+                    self.assertEqual(actual["architectures"], ["arm64", "x86_64"])
+                    self.assertEqual(actual["install_name"], identifier)
+                    self.assertEqual(actual["dependencies"], [identifier, "/usr/lib/libSystem.B.dylib"])
 
     def test_source_override_that_differs_from_lock_is_rejected(self) -> None:
         record = self.record()
@@ -315,6 +427,107 @@ class NativeVendorProvenanceTests(unittest.TestCase):
         duplicate.write_text('{"schema_version": 1, "schema_version": 1}\n', encoding="utf-8")
         with self.assertRaisesRegex(PROVENANCE.ProvenanceError, "duplicate JSON key"):
             PROVENANCE.read_json_object(duplicate, "fixture")
+
+
+class VersionedFrameworkProvenanceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary_directory.cleanup)
+        self.root = pathlib.Path(self.temporary_directory.name) / "sdk"
+        self.framework = self.root / "macos-arm64/Example.framework"
+        self.version = self.framework / "Versions/A"
+        for name in ["Headers", "Modules", "Resources"]:
+            (self.version / name).mkdir(parents=True)
+        (self.version / "Example").write_bytes(b"qualified code bytes")
+        (self.version / "Headers/Example.h").write_text("int example(void);\n")
+        self.metadata = {"CFBundleSupportedPlatforms": ["MacOSX"],
+                         "CFBundleExecutable": "Example", "CFBundlePackageType": "FMWK"}
+        self.write_metadata(self.metadata)
+        (self.framework / "Versions/Current").symlink_to("A", target_is_directory=True)
+        for name in ["Example", "Headers", "Modules", "Resources"]:
+            (self.framework / name).symlink_to("Versions/Current/" + name,
+                                             target_is_directory=name != "Example")
+
+    def write_metadata(self, value) -> None:
+        (self.version / "Resources/Info.plist").write_bytes(plistlib.dumps(value))
+
+    def test_standard_macos_framework_is_hashed_with_its_aliases(self) -> None:
+        first = PROVENANCE.tree_digest(self.root)
+        self.assertEqual(first, PROVENANCE.tree_digest(self.root))
+        self.assertEqual(first[1], 8)  # Three real files and five canonical aliases.
+        (self.framework / "Headers").unlink()
+        without_alias = PROVENANCE.tree_digest(self.root)
+        self.assertNotEqual(first[0], without_alias[0])
+        self.assertEqual(without_alias[1], 7)
+
+    def test_payload_and_header_changes_change_digest(self) -> None:
+        before = PROVENANCE.tree_digest(self.root)[0]
+        (self.version / "Example").write_bytes(b"different code")
+        after_code = PROVENANCE.tree_digest(self.root)[0]
+        self.assertNotEqual(before, after_code)
+        (self.version / "Headers/Example.h").write_text("void example(void);\n")
+        self.assertNotEqual(after_code, PROVENANCE.tree_digest(self.root)[0])
+
+    def test_absolute_parent_and_noncanonical_targets_are_rejected(self) -> None:
+        link = self.framework / "Example"
+        for target in [str(self.version / "Example"), "../outside", "Versions/A/Example",
+                       "Versions/Current/Headers/Example.h"]:
+            with self.subTest(target=target):
+                link.unlink()
+                link.symlink_to(target)
+                with self.assertRaises(PROVENANCE.ProvenanceError):
+                    PROVENANCE.tree_digest(self.root)
+
+    def test_current_cannot_point_to_another_version_or_itself(self) -> None:
+        link = self.framework / "Versions/Current"
+        for target in ["B", "Current", "../outside"]:
+            with self.subTest(target=target):
+                link.unlink()
+                link.symlink_to(target)
+                with self.assertRaises(PROVENANCE.ProvenanceError):
+                    PROVENANCE.tree_digest(self.root)
+
+    def test_real_payload_cannot_be_a_link_even_inside_framework(self) -> None:
+        real = self.version / "Example"
+        real.unlink()
+        real.symlink_to("Headers/Example.h")
+        with self.assertRaises(PROVENANCE.ProvenanceError):
+            PROVENANCE.tree_digest(self.root)
+
+    def test_unknown_internal_link_is_rejected(self) -> None:
+        (self.version / "Headers/extra.h").symlink_to("Example.h")
+        with self.assertRaises(PROVENANCE.ProvenanceError):
+            PROVENANCE.tree_digest(self.root)
+
+    def test_non_macos_or_wrong_executable_metadata_is_rejected(self) -> None:
+        for replacement in [{"CFBundleSupportedPlatforms": ["iPhoneOS"]},
+                            {"CFBundleExecutable": "Other"}, {"CFBundlePackageType": "APPL"}]:
+            with self.subTest(replacement=replacement):
+                self.write_metadata({**self.metadata, **replacement})
+                with self.assertRaises(PROVENANCE.ProvenanceError):
+                    PROVENANCE.tree_digest(self.root)
+
+    def test_invalid_metadata_is_reported_as_provenance_failure(self) -> None:
+        self.write_metadata(["not a framework dictionary"])
+        with self.assertRaises(PROVENANCE.ProvenanceError):
+            PROVENANCE.tree_digest(self.root)
+
+    def test_oversized_metadata_is_rejected(self) -> None:
+        self.write_metadata({**self.metadata, "excess": "x" * (1024 * 1024)})
+        with self.assertRaises(PROVENANCE.ProvenanceError):
+            PROVENANCE.tree_digest(self.root)
+
+    def test_missing_payload_is_rejected(self) -> None:
+        (self.version / "Example").unlink()
+        with self.assertRaises(PROVENANCE.ProvenanceError):
+            PROVENANCE.tree_digest(self.root)
+
+    def test_linked_version_directory_is_rejected(self) -> None:
+        other = self.framework / "Versions/B"
+        self.version.rename(other)
+        self.version.symlink_to("B", target_is_directory=True)
+        with self.assertRaises(PROVENANCE.ProvenanceError):
+            PROVENANCE.tree_digest(self.root)
 
 
 if __name__ == "__main__":

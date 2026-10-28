@@ -85,7 +85,7 @@ final class ControlledHostSessionPolicyTests: XCTestCase {
         XCTAssertEqual(background.targetFrameRate, Policy.backgroundKeepAliveFrameRate)
         XCTAssertFalse(
             background.audioEnabled,
-            "系统音频采集是进程内单例，后台主机要音频必然有一台拿不到"
+            "后台主机不参与当前音频播放"
         )
         XCTAssertTrue(background.allowsAdaptiveResolution)
     }

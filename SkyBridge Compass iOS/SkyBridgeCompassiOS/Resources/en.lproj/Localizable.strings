@@ -317,7 +317,7 @@
 "取消连接" = "Cancel Connection";
 "连接摄像头" = "Connect";
 "摄像头连接失败" = "Camera Connection Failed";
-"fileTransfer.receiptDeliveryUnknown" = "File saved or sent, but delivery confirmation is unknown. Do not retransmit automatically.";
+"fileTransfer.receiptDeliveryUnknown" = "Delivery confirmation is unknown. Check the file on the receiving device before retransmitting.";
 "fileTransfer.committedFileReleaseFailed" = "File was saved, but internal transfer cleanup failed. Restart the app before receiving more files.";
 
 /* Account Devices (账号设备) */
@@ -361,3 +361,166 @@
 "%d 分钟前" = "%d min ago";
 "%d 小时前" = "%d h ago";
 "%d 天前" = "%d d ago";
+
+/* Account device registration and hardware metadata */
+"本机身份与历史登记不一致，需要重新验证设备。" = "This device’s identity differs from its historical registration. Verify the device again.";
+"本机尚未登记，需由已登记设备批准。" = "This device is not registered. Approval from a registered device is required.";
+"本机登记正在等待批准。" = "This device’s registration is awaiting approval.";
+"本机登记已冻结。" = "This device’s registration is frozen.";
+"暂时无法确认本机的登记状态。" = "This device’s registration status could not be confirmed.";
+"型号尚未上报" = "Model not reported";
+
+// Background appearance
+"settings.background_style" = "Background style";
+"settings.background_style.classic" = "Classic Starfield";
+"settings.background_style.light" = "Luminous Sky";
+"settings.background_style.description" = "Switch the background, glass and text colors together. Weather effects stay enabled as configured.";
+"选择接收设备" = "Choose recipient";
+"文件操作失败" = "File operation failed";
+"请先选择接收设备，再选择文件。" = "Choose a recipient before selecting files.";
+"等待中" = "Pending";
+
+// Account device removal
+"accountDevices.remove.action" = "Remove from account";
+"accountDevices.remove.title" = "Remove account device";
+"accountDevices.remove.message" = "Remove “%@” from your account? This device will lose access to account device services. Local files and saved pairings are retained.";
+"accountDevices.remove.confirm" = "Remove";
+"accountDevices.remove.cancel" = "Cancel";
+"accountDevices.remove.selfRemoved" = "This device was removed. Account device synchronization has stopped.";
+"accountDevices.remove.failed" = "Removal was not confirmed. Refresh and check the device before retrying.";
+
+"accountDevices.myDevices" = "My Devices";
+
+"pairing.verification.help" = "Compare the six-digit pairing code on both devices. Allow pairing only when the codes match exactly.";
+
+"pairing.candidate.waiting" = "Waiting for confirmation on the other device";
+"pairing.candidate.info" = "This code is for comparison only. No trust has been granted. After you allow pairing on the other device, this device will ask you to approve the request.";
+
+"fileTransfer.error.approvalDenied" = "The receiving device did not approve this file transfer.";
+"fileTransfer.error.receiverUnavailable" = "The receiving device cannot handle the file request right now. Check its connection and file reception status.";
+"fileTransfer.error.capabilitiesNotReady" = "The receiving device’s file transfer capabilities have not been confirmed. Wait for the device connection to finish.";
+"fileTransfer.error.sessionNotReady" = "The secure connection is not ready or has changed. Reconnect the devices before trying again.";
+"fileTransfer.error.approvalProtocolUnsupported" = "The devices use incompatible file approval protocols. Check the app versions on both devices.";
+"fileTransfer.error.approvalResponseInvalid" = "The receiving device returned an invalid approval response. The transfer has stopped.";
+"fileTransfer.error.approvalRequestMismatch" = "The approval response does not match this file transfer. The transfer has stopped.";
+"fileTransfer.error.approvalAuthenticationFailed" = "The receiving device’s file approval could not be authenticated. The transfer has stopped.";
+
+"pairing.confirm.waiting.info" = "This device has approved the identity. Compare this code on the other device and wait for pairing to complete.";
+
+// Authenticated remote stream configuration failures.
+"remote.error.invalidConfigurationResponse" = "The response does not match the current sharing request. The connection was stopped.";
+"remote.error.audioUnsupported" = "This host does not support audio redirection. Turn it off before reconnecting.";
+"remote.error.clipboardUnsupported" = "This host does not support remote clipboard sync. Turn it off before reconnecting.";
+"remote.error.audioAndClipboardUnsupported" = "This host does not support audio redirection or remote clipboard sync. Turn both off before reconnecting.";
+"remote.error.configurationUnsupported" = "The host does not support the requested sharing settings. Adjust remote desktop settings before reconnecting.";
+"remote.error.configurationRejected" = "The host rejected the requested sharing settings.";
+
+"remote.session.hostStopped" = "The host stopped screen sharing.";
+
+"remote.session.permissionRevoked" = "The host revoked screen-sharing permission.";
+
+"remote.session.captureFailed" = "The host could not continue screen capture.";
+
+/* Original audio file playback */
+"在电脑上播放音频" = "Play audio on computer";
+"查看音频播放" = "View audio playback";
+"音频播放" = "Audio playback";
+"将原始音频文件发送到这台电脑播放。电脑需确认播放，并连接支持原格式的输出设备。" = "Send the original audio file to this computer for playback. Confirm playback on the computer and connect an output device that supports the original format.";
+"当前播放" = "Current playback";
+"选择音频文件" = "Choose audio file";
+"停止播放" = "Stop playback";
+"资源尚未确认关闭，暂时不能开始新的播放。" = "Resource closure is not yet confirmed. New playback is temporarily unavailable.";
+"重试关闭" = "Retry closing";
+"关闭尚未完成，请稍后重试。" = "Closing is not complete. Please try again shortly.";
+"支持 WAVE，以及接收端已启用的 FLAC 和 ALAC（M4A）原文件；M4A 目前仅支持 ALAC 编码。文件原样发送，在电脑端无损解码；输出需保持原始采样率、精度和声道。请保持应用在前台，进入后台会停止发送。" = "Supports WAVE and original FLAC and ALAC (M4A) files when enabled by the receiver; M4A currently requires ALAC encoding. Files are sent unchanged and decoded losslessly on the computer. Output must preserve the original rate, precision and channels. Keep the app in the foreground; entering the background stops sending.";
+"无法开始播放。请确认设备仍已连接、账户有效，并选择当前播放方式支持的音频文件。" = "Could not start playback. Check that the device is still connected and your account is valid, then choose an audio file supported by the selected playback mode.";
+"原文件格式" = "Original file format";
+"电脑已确认原文件接收和播放完成；此回执不等同于独立的数字音频输出测量。" = "The computer confirmed receipt of the original file and completed playback. This receipt is not an independent measurement of digital audio output.";
+"等待选择音频" = "Waiting for audio selection";
+"正在验证账户设备授权" = "Verifying account device authorization";
+"正在检查原文件" = "Inspecting original file";
+"等待电脑确认播放" = "Waiting for playback approval";
+"正在发送原文件" = "Sending original file";
+"等待电脑准备原格式输出" = "Waiting for output in the original format";
+"等待电脑确认播放完成" = "Waiting for playback completion";
+"正在停止并关闭资源" = "Stopping and closing resources";
+"电脑已确认播放完成" = "Computer confirmed playback complete";
+"播放已停止" = "Playback stopped";
+"电脑未同意本次播放" = "Computer declined this playback";
+"账户或播放授权已失效" = "Account or playback authorization expired or was revoked";
+"电脑输出设备不支持原格式" = "Computer output does not support the original format";
+"电脑输出中断" = "Computer audio output interrupted";
+"连接已变化，请重新开始" = "Connection changed; start again";
+"等待超时，播放已停止" = "Wait timed out; playback stopped";
+"文件校验未通过" = "File verification failed";
+"音频文件格式暂不支持" = "Audio file format is not yet supported";
+"播放未完成" = "Playback did not complete";
+
+// System audio playback
+"选择原文件或系统音频传送到这台电脑。电脑需确认播放，并连接支持收到格式的输出设备。" = "Send an original file or system audio to this computer. Confirm playback on the computer and connect an output device that supports the received format.";
+"原文件" = "Original file";
+"这台电脑尚未提供原文件播放能力。" = "This computer does not currently offer original-file playback.";
+"系统音频" = "System audio";
+"传送系统音频" = "Send system audio";
+"无法开始系统音频传送。请确认设备仍已连接、账户有效，且系统支持音频采集。" = "Could not start sending system audio. Check that the device is still connected, the account is authorized, and the system supports audio capture.";
+"这台电脑尚未提供系统音频接收能力。" = "This computer does not currently offer system-audio reception.";
+"系统音频采集需要支持此功能的 iOS 27 或更新版本设备。" = "System-audio capture requires a supported device running iOS 27 or later.";
+"当前设备暂时无法使用系统音频采集。可继续使用原文件播放。" = "System-audio capture is currently unavailable on this device. You can still play original audio files.";
+"保留系统实际交付的采样，不代表音乐文件的原始格式。部分应用或受保护内容可能无法采集。" = "Preserves the samples delivered by the system, which may differ from the music file’s original format. Some apps or protected content may not allow capture.";
+"请求 48 kHz 双声道，实际格式在采集后显示。电脑准备好前的声音不会发送。系统采集期间可切换应用，仅传送音频。" = "Requests 48 kHz stereo; the actual format appears after capture begins. Audio before the computer is ready is not sent. You can switch apps during system capture. Only audio is transmitted.";
+"结束采集并完成播放" = "End capture and finish playback";
+"立即停止" = "Stop immediately";
+"系统交付格式" = "System-delivered format";
+"已发送数据" = "Data sent";
+"电脑已确认采集音频接收和播放完成；此回执不等同于独立的数字音频输出测量。" = "The computer confirmed receipt and completed playback of the captured audio. This receipt is not an independent measurement of digital audio output.";
+"等待开始系统音频采集" = "Waiting to start system-audio capture";
+"等待系统采集授权" = "Waiting for system capture permission";
+"正在识别系统交付格式" = "Checking the system-delivered format";
+"等待电脑准备接收音频" = "Waiting for the computer to receive audio";
+"正在传送系统音频" = "Sending system audio";
+"正在结束采集并发送剩余音频" = "Ending capture and sending the remaining audio";
+"等待电脑确认音频校验" = "Waiting for the computer to verify the audio";
+"音频校验未通过" = "Audio verification failed";
+"音频缓冲已满，传送已停止" = "The audio buffer is full. Sending has stopped.";
+"系统交付格式暂不支持" = "The system-delivered format is not supported";
+"系统音频采集已中断" = "System-audio capture was interrupted";
+
+// Device connection actions
+"设备操作" = "Device actions";
+"设备能力（高级）" = "Device capabilities (advanced)";
+
+/* Playback-owned account authorization */
+"登录凭据已过期，请重新登录以更新设备状态。" = "Your sign-in credentials have expired. Sign in again to refresh device status.";
+"audio.authorization.expiry" = "Account authorization valid until";
+"audio.authorization.renewal.waiting" = "Account authorization will be renewed automatically when available during playback.";
+"audio.authorization.renewal.checking" = "Verifying account devices to renew this playback authorization.";
+"audio.authorization.renewal.retry_pending" = "Authorization could not be updated yet. Playback continues within its original validity period; another attempt is scheduled.";
+"audio.authorization.renewal.unavailable" = "Authorization could not be updated. Playback can continue only until the current expiry.";
+"audio.authorization.renewal.failed" = "Playback authorization is no longer valid. Stopping playback.";
+
+/* Bluetooth file playback */
+"蓝牙" = "Bluetooth";
+"通过蓝牙播放文件" = "Play a file over Bluetooth";
+"支持 WAVE 和 FLAC。蓝牙会有损压缩并转换音频格式，实际格式会显示在播放状态中。请保持当前设备连接，开始后查看后台播放状态。" = "Supports WAVE and FLAC. Bluetooth applies lossy compression and converts the audio format. The actual format is shown in playback status. Keep the current device connection and check background playback status after starting.";
+"传送格式" = "Sent format";
+"电脑已确认压缩音频接收和播放完成。" = "The computer confirmed receipt and playback of the compressed audio.";
+"正在连接电脑蓝牙" = "Connecting to the computer over Bluetooth";
+"正在通过蓝牙传送音频" = "Sending audio over Bluetooth";
+"选择音源和传输方式，电脑确认后开始播放。" = "Choose a source and transport. Playback starts after the computer approves.";
+
+/* Original-file background execution */
+"正在准备音频" = "Preparing audio";
+"当前播放需保持 SkyBridge 在前台。" = "Keep SkyBridge in the foreground for this playback.";
+"正在申请后台播放，请稍候。" = "Requesting background playback. Please wait.";
+"后台播放已就绪，可以切换应用；系统取消任务时会停止播放。" = "Background playback is ready. You can switch apps; playback stops if the system cancels the task.";
+"正在结束后台播放任务。" = "Finishing the background playback task.";
+"后台播放任务已结束。" = "The background playback task has ended.";
+"后台播放任务已结束，请查看播放结果。" = "The background task has ended. Check the playback result.";
+"电脑播放进度" = "Computer playback progress";
+"支持 WAVE，以及接收端已启用的 FLAC 和 ALAC（M4A）原文件；M4A 目前仅支持 ALAC 编码。文件原样发送，在电脑端无损解码；输出需保持原始采样率、精度和声道。开始后请查看后台播放状态。" = "Supports WAVE and FLAC or ALAC (M4A) when enabled by the receiver. M4A currently supports ALAC only. Original bytes are sent for lossless decoding on the computer, preserving sample rate, precision and channels at output. Check background playback status after starting.";
+
+"系统已结束后台播放，请重新开始。" = "The system ended background playback. Start again to continue.";
+"后台播放未能完成，请重新开始。" = "Background playback could not finish. Please start again.";
+
+"系统已结束后台播放，正在停止。" = "The system ended background playback. Stopping.";
+"后台播放未能继续，正在结束任务。" = "Background playback could not continue. Finishing the task.";

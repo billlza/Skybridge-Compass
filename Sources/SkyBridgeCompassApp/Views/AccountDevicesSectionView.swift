@@ -12,13 +12,15 @@ struct AccountDevicesSectionView: View {
     @EnvironmentObject private var authModel: AuthenticationViewModel
     @ObservedObject private var presence = PresenceService.shared
     @ObservedObject private var unifiedDeviceManager = UnifiedOnlineDeviceManager.shared
+    @State private var removalSelection: AccountDeviceRecord?
+    @State private var selectionScope: UInt64 = 0
 
-    let onConnect: (OnlineDevice) -> Void
-    let onOpenConnectionCode: () -> Void
+    var onConnect: ((OnlineDevice) -> Void)? = nil
+    var onOpenConnectionCode: (() -> Void)? = nil
     /// 正在建立连接的在线设备 id（与本地扫描页共用同一份在途状态）。
-    let connectingDeviceIDs: Set<UUID>
+    var connectingDeviceIDs: Set<UUID> = []
     /// 最近一次连接失败的用户可读原因；本页触发的失败必须在本页可见，不能只在本地扫描页显示。
-    let connectionErrorMessage: String?
+    var connectionErrorMessage: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -30,6 +32,11 @@ struct AccountDevicesSectionView: View {
             )
 
             toolbar
+
+            if let snapshot = presence.accountDevices,
+               let issue = AccountDevicePresentation.registrationIssueText(for: snapshot) {
+                noticeRow(icon: "person.crop.circle.badge.exclamationmark", color: .orange, text: issue)
+            }
 
             if let failure = presence.lastListFailure, presence.accountDevices != nil {
                 noticeRow(
@@ -63,7 +70,27 @@ struct AccountDevicesSectionView: View {
                 noticeRow(icon: "exclamationmark.octagon.fill", color: .red, text: connectionErrorMessage)
             }
 
+            if presence.lastRemovalFailure != nil {
+                noticeRow(icon: "exclamationmark.triangle.fill", color: .red,
+                          text: LocalizationManager.shared.localizedString("accountDevices.remove.failed"))
+            }
+            if presence.callerRemoved {
+                noticeRow(icon: "person.crop.circle.badge.xmark", color: .orange,
+                          text: LocalizationManager.shared.localizedString("accountDevices.remove.selfRemoved"))
+            }
             content
+        }
+        .alert(LocalizationManager.shared.localizedString("accountDevices.remove.title"),
+               isPresented: Binding(get: { removalSelection != nil }, set: { if !$0 { removalSelection = nil } }),
+               presenting: removalSelection) { record in
+            Button(LocalizationManager.shared.localizedString("accountDevices.remove.confirm"), role: .destructive) {
+                let scope = selectionScope; removalSelection = nil
+                Task { await presence.removeDevice(record, expectedScope: scope) }
+            }
+            Button(LocalizationManager.shared.localizedString("accountDevices.remove.cancel"), role: .cancel) { removalSelection = nil }
+        } message: { record in
+            Text(String(format: LocalizationManager.shared.localizedString("accountDevices.remove.message"),
+                        AccountDevicePresentationPolicy.displayName(for: record)))
         }
     }
 
@@ -71,7 +98,7 @@ struct AccountDevicesSectionView: View {
 
     private var toolbar: some View {
         HStack(spacing: 12) {
-            nebulaChip
+            if onConnect != nil || onOpenConnectionCode != nil { nebulaChip }
             Spacer()
             if let updatedAt = presence.lastSuccessfulListAt {
                 Text(
@@ -130,6 +157,7 @@ struct AccountDevicesSectionView: View {
                 LazyVStack(spacing: 12) {
                     ForEach(devices) { record in
                         let lanDevice = lanReachableDevice(for: record)
+                        VStack(alignment: .leading, spacing: 6) {
                         AccountDeviceRow(
                             record: record,
                             lanDevice: lanDevice,
@@ -137,6 +165,12 @@ struct AccountDevicesSectionView: View {
                             onConnect: onConnect,
                             onOpenConnectionCode: onOpenConnectionCode
                         )
+                        Button(LocalizationManager.shared.localizedString("accountDevices.remove.action"), role: .destructive) {
+                            selectionScope = presence.removalScope; removalSelection = record
+                        }
+                        .disabled(presence.removingDeviceId != nil || !snapshot.devices.contains { $0.isCaller && $0.status == "active" })
+                        .accessibilityIdentifier("account-device-remove-\(record.deviceId)")
+                        }
                     }
                 }
             }
@@ -184,7 +218,8 @@ struct AccountDevicesSectionView: View {
 
     /// 是否已登录（访客模式不算）。用于区分「未登录」与「已登录但服务未运行」。
     private var isSignedIn: Bool {
-        authModel.currentSession != nil && !authModel.isGuestMode
+        if onConnect == nil && onOpenConnectionCode == nil { return presence.isActive }
+        return authModel.currentSession != nil && !authModel.isGuestMode
     }
 
     /// 局域网内发现、协议指纹一致且有可连接控制路由的在线行（否则 nil）。
@@ -233,8 +268,8 @@ private struct AccountDeviceRow: View {
     let record: AccountDeviceRecord
     let lanDevice: OnlineDevice?
     let isConnecting: Bool
-    let onConnect: (OnlineDevice) -> Void
-    let onOpenConnectionCode: () -> Void
+    let onConnect: ((OnlineDevice) -> Void)?
+    let onOpenConnectionCode: (() -> Void)?
 
     private var connectivity: AccountDevicePresentationPolicy.Connectivity {
         AccountDevicePresentationPolicy.connectivity(for: record, isLANReachable: lanDevice != nil)
@@ -334,7 +369,7 @@ private struct AccountDeviceRow: View {
         case .thisDevice, .offline:
             EmptyView()
         case .lanReachable:
-            if let lanDevice {
+            if let lanDevice, let onConnect {
                 if isConnecting {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
@@ -350,11 +385,13 @@ private struct AccountDeviceRow: View {
                 }
             }
         case .online:
+            if let onOpenConnectionCode {
             Button(LocalizationManager.shared.localizedString("discovery.accountDevices.action.useConnectionCode")) {
                 onOpenConnectionCode()
             }
             .buttonStyle(.bordered)
             .help(LocalizationManager.shared.localizedString("discovery.accountDevices.hint.online"))
+            }
         }
     }
 

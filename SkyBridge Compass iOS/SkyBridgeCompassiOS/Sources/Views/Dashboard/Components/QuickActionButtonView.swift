@@ -15,8 +15,6 @@ public struct QuickActionButtonView: View {
     let color: Color
     let action: () -> Void
     
-    @State private var isPressed = false
-    
     public init(title: String, icon: String, color: Color, action: @escaping () -> Void) {
         self.title = title
         self.icon = icon
@@ -25,19 +23,10 @@ public struct QuickActionButtonView: View {
     }
     
     public var body: some View {
-        Button(action: {
-            let generator = UIImpactFeedbackGenerator(style: .medium)
-            generator.impactOccurred()
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
-                isPressed = true
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
-                    isPressed = false
-                }
-                action()
-            }
-        }) {
+        Button {
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            action()
+        } label: {
             HStack(spacing: 10) {
                 Image(systemName: icon)
                     .font(.system(size: 20, weight: .semibold))
@@ -47,25 +36,9 @@ public struct QuickActionButtonView: View {
                 Text(title)
                     .font(.subheadline)
                     .fontWeight(.medium)
-                    .foregroundColor(.white)
+                    .foregroundStyle(.primary)
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
-            .background(.ultraThinMaterial)
-            .clipShape(Capsule())
-            .overlay(
-                Capsule()
-                    .stroke(
-                        LinearGradient(
-                            colors: [.white.opacity(0.4), .clear, color.opacity(0.3)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 1
-                    )
-            )
-            .shadow(color: color.opacity(isPressed ? 0.3 : 0.05), radius: isPressed ? 12 : 8, x: 0, y: isPressed ? 6 : 3)
-            .scaleEffect(isPressed ? 0.92 : 1.0)
+            .liquidGlassCapsule(paddingH: 20, paddingV: 14)
         }
         .buttonStyle(.plain)
     }

@@ -1,247 +1,45 @@
-# SkyBridge Compass iOS
+# SkyBridge Compass iOS：唯一阅读入口
 
-SkyBridge Compass 的 iOS 版本 - 跨平台设备管理与远程控制应用
+日常启动、架构导航和历史教训集中于本页；[BUILD.md](BUILD.md) 负责构建、签名、测试与发布流程，[FEATURE_PARITY.md](FEATURE_PARITY.md) 负责能力差异，[RiskAuditChecklist.md](RiskAuditChecklist.md) 保留风险检查。重复的 Quickstart、项目总结、文件清单和完成快照已合并。
 
-## 项目概述
+## 工程与验证入口
 
-这是 SkyBridge Compass Pro 的 iOS 版本，和 macOS 端共享核心协议契约；已验证能力与实验性能力会按路径分别标注，避免把所有链路都描述成同一安全/鲁棒性水位。当前支持：
+打开本目录的 `SkyBridgeCompass-iOS.xcodeproj`，选择 `SkyBridgeCompass-iOS` scheme。按实际可用设备选择 destination，不照抄旧文档固定的模拟器名称/OS。使用现有签名身份与配置，不为了启动而修改 bundle 身份。
 
-- **后量子密码学 (PQC) 能力路径**：仅在 symbol probe、compile gate、runtime self-test、信任材料与协商 suite 都满足时用于握手/通信；否则按策略走 liboqs 或 non-PQC compatibility path
-- **跨平台 P2P 连接**：iOS ↔ macOS ↔ 其他设备
-- **设备发现与管理**
-- **远程桌面查看与控制**（触摸优化）
-- **安全文件传输**（适用于已认证的 P2P / WebRTC 路径；兼容链路需额外验证）
-- **跨设备剪贴板同步**
-- **CloudKit 同步**
-- **iOS Widget 支持**
+XCTest target 为 `SkyBridgeCompassiOSTests`。XCUITest bundle/scheme 是否启用，以当前工程和实际执行结果为准；旧报告的 UI smoke 不能证明现有 scheme 已运行这些测试。`swift build/test` 只证明其覆盖的 package 路径，不替代完整 App、签名包或真机验收。
 
-## 系统要求
+共享边界以 [CoreLayering](../Docs/CoreLayering.md)、[ADR-0001](../Docs/ADR-0001-SkyBridge-Core-Transport-Matrix.md) 和 [ADR-0003](../Docs/ADR-0003-Native-Runtimes-and-Operator-Contract.md) 为准。当前工程已消费根包产品（如 `OQSRAII`、`SkyBridgeWebRTCRuntime`）；“完全自包含、不要引用根包”是旧描述。不要恢复平行 vendor/local package 或用软链接复制核心。
 
-- **iOS 17.0+**（运行目标）  
-- **iOS 26+ SDK**（仅当你要启用 Apple CryptoKit PQC：ML‑KEM/ML‑DSA；iOS 27 beta 走同一编译条件）
-- **iPadOS 17.0+**
-- **Xcode 26.5+**（正式发布/CI 基线；Xcode 27 beta 仅用于手动 OS 27 兼容验证）
-- **Swift 6.3+**
+| 位置 | 阅读用途 |
+|---|---|
+| `SkyBridgeCompassiOS/Sources/App`、`Views`、`Managers`、`ViewModels` | App 生命周期、页面和业务状态；以现存目录为准 |
+| `SkyBridgeCompassiOS/Sources/Core` 与根包 `Sources` | 平台特有代码和共享边界，不能按同名文件推定重复 |
+| `Widgets`、`SkyBridgeCompassiOSTests` | 扩展与测试 |
+| 根目录 `Config/native-dependencies.lock.json` | native 依赖与版本来源 |
+| 根目录 `Sources/Vendor/liboqs.xcframework` | 唯一 liboqs 产物，由仓库配方/provenance 验证 |
 
-## 技术栈
+## 协议、配置和故障判断
 
-### 核心技术
-- Swift 6.3 (Strict Concurrency)
-- SwiftUI + UIKit
-- Network Framework (P2P 通信)
-- CryptoKit + liboqs (后量子加密)
-- CloudKit (云端同步)
-- WidgetKit (小组件)
+- Apple PQC 需要 symbol probe、显式 compile gate、runtime self-test、所需信任/KEM 材料及实际协商结果；SDK 大版本、文件名或 provider 类型存在都不够。Info.plist 权限描述不能打开编译期 PQC。严格策略失败应显式报告，不能为连通而放宽身份/套件校验。
+- PQC 只在 runtime-negotiated suite 已证明时声明。核对信任材料与协商 suite 是连接验收的一部分；发布说明中的安全结论也应在 runtime-negotiated suite 与信任/KEM 材料证明后声明。
+- Identity pinning 使用 `IdentityPublicKeys.authoritativeProtocolFingerprint()` 的规范化协议身份；不能把裸公钥、wire blob 的任意 SHA-256 当作同一个指纹。
+- `missingPeerKEMPublicKey` 要核对既有配对/信任同步和选中对端，不先生成替代身份。源码对齐、连接建立、双向文件完整性和真实远程输入分别验收。
+- WebRTC 是传输，PQC/应用授权依然按应用协议验证。TURN 返回的 URI/授权策略和签名 QR 的处理以当前实现为准；旧静态 fallback 环境变量不能视为默认操作建议。
+- 客户端配置只使用适合公开客户端的后端 URL/标识；服务端密钥不进入客户端包、客户端 Keychain 或日志。后端配置缺失与配对/网络权限失败应分开诊断。
+- Bonjour/local-network 权限、同网段可达性和运行中的真实 device roster 需分别观察；优先使用可用的直接 USB 进行设备操作，不能用 Wi-Fi 成功冒充 USB 成功。
 
-### 共享模块
-**注意**：iOS 版本是 **自包含（self-contained）** 的——不再通过符号链接/父目录 SwiftPM 引用去“复用 macOS 工程的 SkyBridgeCore”，核心逻辑内置在 `SkyBridgeCompassiOS/Sources/Core`。
-但需明确：协议层（握手、wire、信令、QR、文件传输，约 60 个同名文件）目前是**从 macOS 端手工复制后独立演化**的，部分文件已实质分叉（如 `TwoAttemptHandshakeManager`），两端线格式兼容性当前依赖人工纪律 + parity 测试而非类型系统。这是跨平台稳定协议边界的最大回归风险，缓解计划见 [`Docs/CoreLayering.md`](../Docs/CoreLayering.md)（短期 CI 哈希比对防漂移；长期让 iOS 直接消费 `SkyBridgeProtocolCore`）。
+## 已提取的旧工程教训
 
-### iOS 专属
-- **SkyBridgeUI_iOS**: iOS 优化的用户界面
-  - 触摸交互
-  - iPhone / iPad 自适应布局
-  - iOS 原生控件集成
-  - 手势识别
+- 旧说明曾把创建符号链接、`open Package.swift` 和完整 iOS App 构建混在一起。应以真实 `.xcodeproj`、scheme、target 和依赖图为准；SwiftPM library 通过不能证明 App 通过。
+- 2026-01-16 的构建记录提到 ambiguous `.shared`、重复 `SkyBridgeLogger`、`#Preview` 返回/环境对象、引号问题。保留这些故障线索；按实际符号和编译器诊断修复，不把不同类型同名静态成员一概当根因，也不机械批量改成 `.instance`。
+- 目录迁移会使硬编码 Desktop 路径失效。检查实际路径和包 target，不恢复旧软链接布局，不靠清空全部 DerivedData 或重建身份来“修复”。
+- 旧文档同时宣称全部 PQC、跨端和测试完成，又把真实 liboqs 和测试列为未来任务。那些勾选、百分比和生产就绪措辞均撤出现行说明；保留的设计目标不算实测。
+- 本地网络/Bonjour 权限、真机发现、Widget entitlement、前后台行为与双向文件/远程输入需要分别观察。模拟器 smoke 和文件存在不能替代设备验收。
 
-## 项目结构
+## 历史验收的保留范围
 
-```
-SkyBridge Compass iOS/
-├── Package.swift                   # Swift Package 配置
-├── SkyBridgeCompassiOS/           # iOS 主应用
-│   ├── Sources/
-│   │   ├── App/                   # 应用入口
-│   │   ├── Views/                 # 视图层
-│   │   ├── ViewModels/            # 视图模型
-│   │   └── Services/              # iOS 专属服务
-│   ├── UI/                        # iOS UI 组件库
-│   └── Resources/                 # 资源文件
-├── Widgets/                       # iOS Widget Extension
-└── Tests/                         # 测试
-```
+2026-03-14 的原记录报告主 scheme simulator build/test、35 项 XCTest、最小 XCUITest smoke 和 identity pinning 对齐通过。本次未重跑这些检查；该数字不作为当前源码测试数、真机/发布验收或全功能完成证明。旧 scheme/test-plan 误指向问题及最小 smoke 的覆盖限制保留于此。
 
-## 与 macOS 版本的互通性
+PQC-only 是否可建联、CloudKit、剪贴板、Widget、跨网/断点续传等能力要按当前代码路径与对应证据判断，不从旧表格复活已失效的完成主张。签名包设备验收、App Store 导出、实际上传和正式发布各有独立结果，按 [BUILD.md](BUILD.md) 与 [发布事务](../Docs/ops/ios-app-store-release-transaction.md) 执行。
 
-### PQC 握手协议
-目标是让 iOS 和 macOS 使用相同的后量子密码学协议。当前仓库中随附的 **Xcode 工程** 只保留 `SKYBRIDGE_APPLE_PQC_SDK_CONDITION` 接入口；只有通过 Apple PQC symbol probe 的构建 lane 才会显式传入 `HAS_APPLE_PQC_SDK`，避免把 SDK 大版本当成 CryptoKit PQC 可用证明。
-
-- **密钥交换**: ML-KEM-768 / Kyber768
-- **签名验证**: ML-DSA-65 / Dilithium3
-- **混合加密**: X-Wing (Kyber768 + X25519)
-
-说明：
-- 当前仓库的 **论文 / 冻结 artifact 基线** 仍围绕上面这组套件展开。
-- 即便 Apple 原生 PQC API 后续暴露了更高档位或更优实现，当前分支也先把它视为 **实现演进**；只有在重新跑完整 artifact 和论文表格后，才把它升级为论文中的主结论或主基线。
-
-#### 当前“实际协商”的 suite（你现在跑起来看到的）
-- **在随仓库提交的 `SkyBridgeCompass-iOS.xcodeproj` 中**：
-  - 使用通过 Apple PQC symbol probe 的构建入口时，会显式传入 `SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK`
-  - 运行时满足 `#available(iOS 26.0, *)` 时，优先尝试 Apple PQC provider
-- **仍可能看到 Classic**：
-  - 使用旧 SDK 构建
-  - 改用未运行 Apple PQC symbol probe 或未显式传入该 build setting 的其它构建入口
-  - 或虽然 provider 可用，但缺少对端 KEM 公钥信任材料
-
-#### 为什么“有 ApplePQCCryptoProvider 还不一定能走 PQC suite”
-PQC 握手（按 macOS SkyBridgeCore 的设计）需要 **对端的 KEM 身份公钥**（TrustRecord.kemPublicKeys）用于 initiator 端 `kemEncapsulate()`，以及 responder 端用本地 KEM 身份私钥 `kemDecapsulate()`。
-
-macOS 端已经有 `TrustSyncService/TrustRecord`；iOS 端目前还没有完整的 TrustRecord 同步/持久化链路，所以即使启用了 Apple PQC provider，也可能会因为缺少对端 KEM 公钥而无法进行 PQC-only attempt，最终回落到 Classic。
-
-#### Identity pinning 契约
-`HandshakeTrustProvider.trustedFingerprint(for:)` 返回的必须是**规范化协议身份指纹**：
-
-- 输入为：`protocol signing algorithm tag + raw protocol public key bytes`
-- 输出为：**64 字符小写十六进制**
-- 参考实现：`IdentityPublicKeys.authoritativeProtocolFingerprint()`
-
-不要把裸 `protocolPublicKey` 直接做 `SHA256` 当成 pinning 指纹，也不要把 `IdentityPublicKeys` 的 wire blob 当成裸公钥处理。iOS 端当前镜像实现已与 macOS 核心对齐到这条契约。
-
-### P2P 通信
-使用 Network Framework 的 P2P 功能：
-
-1. **本地网络发现**: Bonjour + NWBrowser
-2. **跨网络连接**: WebRTC ICE（`turns:5349` 优先，`turn:3478` 兜底）
-3. **加密通道**: TLS 1.3/WebRTC + 应用层加密；PQC 只在 runtime-negotiated suite 与信任/KEM 材料证明后声明
-
-### TURN（iOS + macOS 互通）策略
-
-- 客户端通过 `/api/turn/credentials` 获取短期 TURN 凭据（带本机 `X-Device-Id` 标识）。
-- iOS 端会把服务端返回的 **多个 TURN URI** 全量注入 ICE（不再只取单个 URI）。
-- 生产模式默认要求服务端返回 `mode=shared_secret_hmac`。
-- 客户端默认 **fail-closed** 为 STUN-only；只有显式设置 `SKYBRIDGE_ALLOW_STATIC_TURN_FALLBACK=true` 才允许本地静态 TURN 应急回滚。
-
-### 局域网二维码策略
-
-- 新版局域网配对二维码会附带设备侧签名，扫码端仅在签名校验通过后才允许自动连接。
-- 旧版未签名二维码仍可被识别，但会被当作 **未认证引导** 并阻止自动连接；建议让对方升级后重新生成。
-
-### 数据同步
-- CloudKit 同步设备列表和信任关系
-- 离线消息队列
-- 剪贴板实时同步
-
-## 构建与运行
-
-### 1. 克隆并初始化
-
-```bash
-cd "/path/to/SkyBridge Compass iOS"
-```
-
-### 2. 使用 Xcode 打开
-
-```bash
-open SkyBridgeCompass-iOS.xcodeproj
-```
-
-### 3. 选择目标设备
-- 选择 iPhone 或 iPad 模拟器
-- 或连接真机（需要开发者账号）
-
-### 4. 运行
-- ⌘R 运行
-- ⌘U 运行测试
-
-### 5. 当前自动化测试入口
-
-- `SkyBridgeCompassiOSTests`：单元 / 集成层 XCTest
-- `SkyBridgeCompassiOSUITests`：XCUITest smoke（启动、游客入站、主 tab 导航、配对/文件/远程入口）
-
-推荐直接使用：
-
-```bash
-xcodebuild test \
-  -project "SkyBridgeCompass-iOS.xcodeproj" \
-  -scheme "SkyBridgeCompass-iOS" \
-  -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2'
-```
-
-## 🔑 Supabase 配置
-
-如果你在登录/注册时看到 **“Supabase 配置缺失（SUPABASE_URL / SUPABASE_ANON_KEY）”**：
-
-- **推荐**：在登录页点击 **“Supabase 配置”**，填写并保存（写入 Keychain，优先级最高）
-- **读取优先级**：Keychain → `Info.plist` → `SupabaseConfig.plist`（仅 SwiftPM：打开 `Package.swift` 运行时）
-
-注意：`SUPABASE_SERVICE_ROLE_KEY` 属于服务端密钥，**不建议放在客户端**；如需调试，请仅在本地 Keychain 配置并避免提交到仓库。
-
-## Nebula 配置
-
-iOS 端已与 macOS 对齐同一组 Nebula 键：
-
-- `NEBULA_BASE_URL`
-- `NEBULA_CLIENT_ID`
-- `NEBULA_CLIENT_SECRET`（可选，仅兼容旧后端）
-
-读取优先级：
-
-- Keychain
-- 环境变量
-- `Info.plist`
-
-建议默认只配置 `NEBULA_BASE_URL` 和 `NEBULA_CLIENT_ID`；不要把长期 `NEBULA_CLIENT_SECRET` 打进客户端包体。
-
-## 核心功能实现状态
-
-- [x] 项目结构创建
-- [ ] 设备发现（本地 + iCloud）
-- [ ] PQC runtime-negotiated 握手与加密通信证明
-- [ ] 远程桌面查看（触摸控制）
-- [ ] 文件传输（Files app 集成）
-- [ ] 剪贴板同步
-- [ ] iOS Widget
-- [ ] CloudKit 同步
-- [ ] 多语言支持
-
-## 开发指南
-
-### iOS 与 macOS 差异
-
-1. **UI 框架**
-   - iOS: UIKit / SwiftUI for iOS
-   - 触摸手势替代鼠标点击
-   - 适配不同屏幕尺寸
-
-2. **后台运行**
-   - iOS 后台限制更严格
-   - 使用 Background Tasks Framework
-   - P2P 连接需要特殊权限
-
-3. **系统集成**
-   - Files app 替代 Finder
-   - UIPasteboard 替代 NSPasteboard
-   - 无菜单栏，使用 Tab Bar
-
-### 版本兼容性
-
-```swift
-// iOS 17-26 兼容性示例
-if #available(iOS 26, *) {
-    // 使用 iOS 26 新特性
-    useCKSyncEngine()
-} else {
-    // 回退到 iOS 17 兼容方式
-    useLegacyCKDatabase()
-}
-```
-
-## 安全性
-
-- 端到端加密；PQC 只在 runtime-negotiated suite 已证明时声明
-- 零知识认证
-- 设备信任链验证
-- 安全飞地 (Secure Enclave) 集成
-- 生物识别认证 (Face ID / Touch ID)
-
-## 贡献
-
-详见主项目 README 和 IEEE 论文
-
-## 许可
-
-与 macOS 版本相同
-
----
-
-**注意**: 本项目与 macOS 版本共享核心代码，确保任何修改都保持跨平台兼容性。
+合并前原文及其身份见 [合并映射](</Users/bill/document-audits/20260926-235911-consolidation/deletion-map.json>) 与 [单一恢复包](</Users/bill/document-audits/20260926-235911-consolidation/before-documents.tar.gz>)。本次只整理文档，没有修改产品代码、工程配置、身份或测试。许可与主 macOS 项目相同，原许可证保留。

@@ -149,6 +149,84 @@
       "header_overlays": {
         "Sources/Vendor/WebRTCM150AudioDeviceHeader/WebRTC/RTCAudioDevice.h": "8b4bdd60ab38c0a092da4b1ad6064946a77b0ffe95c2e116a1643c8d8ca3d83d"
       }
+    },
+    "libflac": {
+      "sources": [
+        {
+          "name": "libflac",
+          "version": "1.5.0",
+          "ref": "1.5.0",
+          "commit": "1507800de4b70e21be71f38caa0d9079d0bc6e45",
+          "repository": "https://github.com/xiph/flac.git",
+          "git_tree": "1619ad4585b61ce5ef86fe1cf97a66bf569a949d",
+          "source_archive_sha256": "bea9c521afb6685d1b0708a55371d74e9b70e837419cee73a95706f137de6228"
+        }
+      ],
+      "build_inputs": {
+        "architectures": "macos-arm64,ios-arm64,ios-simulator-arm64,ios-simulator-x86_64",
+        "macos_deployment_target": "14.0",
+        "ios_deployment_target": "17.0",
+        "ios_sdk": "27.1",
+        "ios_simulator_sdk": "27.1",
+        "build_type": "Release",
+        "linkage": "static",
+        "ogg": "false",
+        "cxx": "false",
+        "programs": "false",
+        "examples": "false",
+        "docs": "false",
+        "testing": "true",
+        "fortify_source": "2",
+        "stack_protector": "strong",
+        "werror": "true",
+        "test_patch": "Scripts/Patches/libflac-1.5.0-crc-fixture-alignment.patch@a9cc31d1c061281eed68c1696c9c8b7d77c8772e6bdf3f68b626ce56ac1f25a8",
+        "license_sha256": "7866ee98760fc1f0156b4fe6bf530257e02be487ab3fd94e2b63799dd32d6b2c",
+        "official_release_archive_sha256": "f2c1c76592a82ffff8413ba3c4a1299b6c7ab06c734dee03fd88630485c2b920"
+      },
+      "toolchain": {
+        "xcode": "Xcode 27.1; Build version 27A9275",
+        "macos_sdk": "27.0",
+        "clang": "Apple clang version 21.0.0 (clang-2100.3.34.2)",
+        "cmake": "cmake version 4.3.3",
+        "ninja": "1.13.2"
+      }
+    },
+    "alac": {
+      "sources": [
+        {
+          "name": "ffmpeg-alac",
+          "version": "8.1.3",
+          "ref": "n8.1.3",
+          "commit": "1041abdc962f4cc4f394aa8de9dc5236c0c3b9e7",
+          "repository": "https://github.com/FFmpeg/FFmpeg.git",
+          "git_tree": "4617f177ba2b559e393d7ca16cb8bba1bbde6ed2",
+          "source_archive_sha256": "801838344d51651d45ab3ce6502a2627da7746492475711ff2adfb723aeaf7b6"
+        }
+      ],
+      "build_inputs": {
+        "source_lock_sha256": "53c6da34a3abfb5fc19358ce71647b10dcae02f4103dbb96eb9b57e7aadcb074",
+        "provider_recipe_sha256": "141f80d1f29df3654adbaf3ed1ecfdc919756212f5721bdd5b30276f4cfd2107",
+        "framework_recipe_sha256": "951908e395c62e44f61b2c7219a2a7bd5484b595b204abf308162b5f65586429",
+        "bridge_sha256": "a57fdcebba08c760a00deee349ac9b63fcc4e34c689a8596c69a4545a7fd77be",
+        "bridge_header_sha256": "64937077427af9c918231db0383fcfefaca6fe7edd98c7e82ca11c82f071061c",
+        "architectures": "macos-arm64,ios-arm64,ios-simulator-arm64,ios-simulator-x86_64",
+        "macos_deployment_target": "14.0",
+        "ios_deployment_target": "17.0",
+        "ios_sdk": "27.1",
+        "ios_simulator_sdk": "27.1",
+        "linkage": "dynamic-framework-with-private-codec-objects",
+        "codec": "alac-only",
+        "native_exports": "six-sbalac-entry-points",
+        "werror": "true",
+        "build_jobs": "1"
+      },
+      "toolchain": {
+        "xcode": "Xcode 27.1; Build version 27A9275",
+        "macos_sdk": "27.0",
+        "clang": "Apple clang version 21.0.0 (clang-2100.3.34.2)",
+        "cmake": "cmake version 4.3.3",
+        "ninja": "1.13.2"
+      }
     }
   }
 }

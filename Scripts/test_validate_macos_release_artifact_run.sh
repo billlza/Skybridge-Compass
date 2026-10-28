@@ -68,6 +68,7 @@ write_payloads() {
     HEAD_REPOSITORY_VALUE="${HEAD_REPOSITORY_VALUE:-${REPOSITORY}}" \
     HEAD_SHA_VALUE="${HEAD_SHA_VALUE:-${HEAD_SHA}}" \
     HEAD_BRANCH_VALUE="${HEAD_BRANCH_VALUE:-${HEAD_BRANCH}}" \
+    ASSOCIATED_PR_VALUE="${ASSOCIATED_PR_VALUE:-false}" \
     ARTIFACT_MODE_VALUE="${ARTIFACT_MODE_VALUE:-valid}" \
     python3 - "${run_json}" "${artifacts_json}" "${ARTIFACT_NAMES[@]}" <<'PY'
 import json
@@ -99,7 +100,8 @@ run = {
     "head_repository": {"full_name": head_repository},
     "head_sha": head_sha,
     "head_branch": head_branch,
-    "pull_requests": [],
+    "pull_requests": ([{"number": 32, "head": {"ref": head_branch, "sha": head_sha}}]
+                      if os.environ["ASSOCIATED_PR_VALUE"] == "true" else []),
 }
 
 artifacts = []
@@ -207,6 +209,15 @@ expect_failure_contains() {
 }
 
 expect_success "valid provenance"
+ASSOCIATED_PR_VALUE=true expect_success "manual dispatch associated with an open PR"
+
+for pr_event in pull_request pull_request_target; do
+  EVENT_VALUE="$pr_event" write_payloads "${TMP_DIR}/run.json" "${TMP_DIR}/artifacts.json"
+  expect_failure_contains "$pr_event trigger rejected" "event mismatch" \
+    run_target "${TMP_DIR}/${pr_event}.json"
+  expect_failure_contains "$pr_event cannot be explicitly selected" "producer run must not be pull_request-scoped" \
+    run_target "${TMP_DIR}/${pr_event}-selected.json" --expected-event "$pr_event"
+done
 
 write_payloads "${TMP_DIR}/run.json" "${TMP_DIR}/artifacts.json"
 expect_failure_contains \

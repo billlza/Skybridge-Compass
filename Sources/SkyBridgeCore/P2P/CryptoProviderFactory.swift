@@ -10,6 +10,7 @@
 //
 
 import Foundation
+import SkyBridgeProtocolCore
 
 #if HAS_APPLE_PQC_SDK
 @available(macOS 14.0, iOS 17.0, *)
@@ -37,6 +38,53 @@ private enum ApplePQCAvailabilityCache {
 /// Provider 工厂 - 单一事实来源
 /// 负责能力探测和 Provider 选择
 public enum CryptoProviderFactory {
+
+    /// Captures existing, admitted runtime instances for this attempt. No key
+    /// absence, network failure, or global preference is a capability oracle.
+    @available(macOS 14.0, iOS 17.0, *)
+    public static func captureLANInventory(identityAlgorithm: ProtocolSigningAlgorithm,
+                                           policy: PQCModePolicySnapshot) throws -> LANPQCProviderInventory {
+        let capability = detectCapability()
+        var providers: [UInt16: any CryptoProvider] = [:]
+        var profile: String?
+        if identityAlgorithm == .mlDSA65, let session = QPeriaptPlatformPolicy.currentRuntimeSession() {
+            providers[0x0012] = QPeriaptCryptoProvider(session: session)
+            profile = session.authProfile
+        }
+        #if HAS_APPLE_PQC_SDK
+        if #available(iOS 26.0, macOS 26.0, *) {
+            if isAppleXWingAvailable() { providers[0x0001] = AppleXWingCryptoProvider() }
+            if capability.hasApplePQC { providers[0x0101] = ApplePQCCryptoProvider() }
+        }
+        #endif
+        if providers[0x0101] == nil, capability.hasLiboqs { providers[0x0101] = OQSPQCProvider() }
+        let permitted = policy.selection.locallyReadySuites(Array(providers.keys))
+        providers = providers.filter { permitted.contains($0.key) }
+        if providers[0x0012] == nil { profile = nil }
+        try SignedKEMRefreshNegotiation.validateCapabilities(suites: permitted,
+            platform: QPeriaptPlatformPolicy.localPlatformName(), osVersion: QPeriaptPlatformPolicy.localOSVersionString(), profile: profile,
+            allowEmpty: true, requireSorted: false)
+        try PQCModePolicyStore.standard.withCurrent(policy) {}
+        return LANPQCProviderInventory(policy: policy, providers: providers, qProfile: profile)
+    }
+
+
+    @available(macOS 14.0, iOS 17.0, *)
+    public static func captureLANHandshakePlan(candidates: [String], pinnedFingerprints: Set<String>) async throws -> LANPQCHandshakePlan {
+        let policy = try PQCModePolicyStore.standard.snapshot()
+        let inventory = try captureLANInventory(identityAlgorithm: try await SettingsManager.shared.committedProtocolIdentityConfiguration().algorithm, policy: policy)
+        if policy.selection.strictlyMatchSelectedMode {
+            return try inventory.selecting([policy.selection.preference.rawValue])
+        }
+        guard let evidence = await PeerKEMBootstrapStore.shared.signedRefreshEvidence(forCandidates: candidates),
+              let fingerprint = evidence.protocolIdentityFingerprint, pinnedFingerprints.contains(fingerprint),
+              let provenance = evidence.negotiation else { throw PQCModeSelectionError.negotiatedEvidenceRequired }
+        let selected = try provenance.select(mode: policy.selection, locallyReadySuites: inventory.suiteWireIds,
+            localQProfile: inventory.qProfile)
+        guard evidence.suiteWireIds.contains(selected) else { throw PQCModeSelectionError.negotiatedEvidenceRequired }
+        return try inventory.selecting([selected])
+    }
+
     // Apple provider path boundary:
     // 1) Apple provider path does not redefine the protocol contract.
     // 2) Apple provider path does not alter the primary evidence base of the paper.
@@ -188,7 +236,7 @@ public enum CryptoProviderFactory {
         }
     }
 
-    private static func isAppleXWingAvailable() -> Bool {
+    static func isAppleXWingAvailable() -> Bool {
         #if HAS_APPLE_PQC_SDK
         return ApplePQCAvailabilityCache.xwing
         #else
@@ -227,7 +275,10 @@ public enum CryptoProviderFactory {
         policy: SelectionPolicy,
         peerSupportedSuites: [CryptoSuite]
     ) -> any CryptoProvider {
-        makeInboundPQCResponderProvider(
+        if let requestedQProvider = makeRequestedQHandshakeProvider(policy: policy) {
+            return requestedQProvider
+        }
+        return makeInboundPQCResponderProvider(
             policy: policy,
             peerSupportedSuites: peerSupportedSuites,
             using: SystemCryptoEnvironment.system
@@ -294,7 +345,10 @@ public enum CryptoProviderFactory {
         policy: SelectionPolicy,
         peerAdvertisedSuites: [CryptoSuite]
     ) -> any CryptoProvider {
-        makeOutboundPQCInitiatorProvider(
+        if let requestedQProvider = makeRequestedQHandshakeProvider(policy: policy) {
+            return requestedQProvider
+        }
+        return makeOutboundPQCInitiatorProvider(
             policy: policy,
             peerAdvertisedSuites: peerAdvertisedSuites,
             using: SystemCryptoEnvironment.system
@@ -346,6 +400,26 @@ public enum CryptoProviderFactory {
 
     public static func handshakeOfferedPQCSuites(using provider: any CryptoProvider) -> [CryptoSuite] {
         provider.supportedSuites.filter { $0.isPQCGroup && $0.isNegotiable }
+    }
+
+    /// Freeze the admitted Q session before native-suite preference can select a different family.
+    /// An explicit Q request with no admitted runtime yields the existing failure-only provider;
+    /// it cannot become X-Wing, ML-KEM, or a classical handshake. Peer agreement is still checked
+    /// against this single-suite provider by the authenticated handshake.
+    private static func makeRequestedQHandshakeProvider(policy: SelectionPolicy) -> (any CryptoProvider)? {
+        guard policy != .classicOnly, QPeriaptPlatformPolicy.isRequested() else { return nil }
+        let provider: any CryptoProvider
+        if let admittedProvider = QPeriaptPlatformPolicy.makeCryptoProvider() {
+            provider = admittedProvider
+        } else {
+            provider = UnavailablePQCProvider()
+        }
+        emitProviderSelectedEvent(
+            provider: provider,
+            capability: capability(environment: SystemCryptoEnvironment.system),
+            policy: .requirePQC
+        )
+        return provider
     }
 
  /// 发射 Provider 选择事件
@@ -526,3 +600,39 @@ public struct MockCryptoEnvironment: CryptoEnvironment, Sendable {
     }
 }
 #endif
+
+/// A local provider owner, not peer trust. The caller supplies an authenticated
+/// SKR intersection (initiator) or verifies MessageA before responder commit.
+@available(macOS 14.0, iOS 17.0, *)
+public struct LANPQCProviderInventory: Sendable {
+    public let policy: PQCModePolicySnapshot
+    fileprivate let providers: [UInt16: any CryptoProvider]
+    public let qProfile: String?
+    public var suiteWireIds: [UInt16] {
+        SignedKEMRefreshNegotiation.preferenceOrder.filter { providers[$0] != nil }
+    }
+    public func provider(for selected: UInt16) throws -> any CryptoProvider {
+        try PQCModePolicyStore.standard.withCurrent(policy) {
+            guard let provider = providers[selected],
+                  provider.supportedSuites.contains(where: { $0.wireId == selected }) else {
+                throw PQCModeSelectionError.unavailableRuntime
+            }
+            return provider
+        }
+    }
+    public func selecting(_ authenticatedIntersection: [UInt16]) throws -> LANPQCHandshakePlan {
+        let selected = try policy.selection.select(fromVerifiedIntersection:
+            authenticatedIntersection.filter { providers[$0] != nil })
+        return LANPQCHandshakePlan(inventory: self, suiteWireId: selected, provider: try provider(for: selected))
+    }
+}
+
+@available(macOS 14.0, iOS 17.0, *)
+public struct LANPQCHandshakePlan: Sendable {
+    public let inventory: LANPQCProviderInventory
+    public let suiteWireId: UInt16
+    public let provider: any CryptoProvider
+    public func withCurrent<T>(_ publish: () throws -> T) throws -> T {
+        try PQCModePolicyStore.standard.withCurrent(inventory.policy, publish)
+    }
+}

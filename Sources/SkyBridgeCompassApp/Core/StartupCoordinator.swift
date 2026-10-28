@@ -212,6 +212,9 @@ public class StartupCoordinator: ObservableObject {
     
  /// 初始化安全服务
     private func initializeSecurityServices() async {
+        // Provider configuration owns an authentication mutation. Resolve it before
+        // restoring the login, rather than first selecting it when the root UI is built.
+        await SupabaseConfiguration.shared.waitForInitialConfigurationAttempt()
         // loadAuthSession uses non-interactive Keychain access; identity material is
         // still provisioned later from authenticated flows that actually need it.
         AuthenticationService.shared.reloadPersistedSessionIfNeeded()

@@ -13,6 +13,9 @@ private struct SkyBridgeLiquidGlassMaterialBackgroundModifier: ViewModifier {
     let fallbackMaterial: Material
     let borderColor: Color
     let nativeStrokeColor: Color
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     func body(content: Content) -> some View {
         content.background {
@@ -20,7 +23,14 @@ private struct SkyBridgeLiquidGlassMaterialBackgroundModifier: ViewModifier {
                 let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 shape
                     .fill(.clear)
-                    .glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
+                    .glassEffect(reduceTransparency || contrast == .increased ? .regular : .clear, in: shape)
+                    // The contrast layer belongs behind the optical surface. Putting a
+                    // filled shape in front of it obscures the refracted scene.
+                    .background(
+                        (colorScheme == .dark ? Color.black : Color.white)
+                            .opacity(reduceTransparency ? 1 : (colorScheme == .dark ? 0.24 : 0.18)),
+                        in: shape
+                    )
                     .overlay(shape.strokeBorder(nativeStrokeColor, lineWidth: 1))
             } else {
                 RoundedRectangle(cornerRadius: fallbackCornerRadius, style: .continuous)
@@ -41,6 +51,9 @@ private struct SkyBridgeLiquidGlassColorBackgroundModifier: ViewModifier {
     let fallbackColor: Color
     let borderColor: Color
     let nativeStrokeColor: Color
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     func body(content: Content) -> some View {
         content.background {
@@ -48,7 +61,12 @@ private struct SkyBridgeLiquidGlassColorBackgroundModifier: ViewModifier {
                 let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 shape
                     .fill(.clear)
-                    .glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
+                    .glassEffect(reduceTransparency || contrast == .increased ? .regular : .clear, in: shape)
+                    .background(
+                        (colorScheme == .dark ? Color.black : Color.white)
+                            .opacity(reduceTransparency ? 1 : (colorScheme == .dark ? 0.24 : 0.18)),
+                        in: shape
+                    )
                     .overlay(shape.strokeBorder(nativeStrokeColor, lineWidth: 1))
             } else {
                 RoundedRectangle(cornerRadius: fallbackCornerRadius, style: .continuous)

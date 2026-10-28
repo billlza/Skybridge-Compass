@@ -14,6 +14,15 @@ function normalizeSupabaseURL(raw) {
   return value;
 }
 
+function validatePresenceTouchResult(result) {
+  if (result === null || typeof result !== 'object' || Array.isArray(result)
+    || !Object.hasOwn(result, 'updated') || typeof result.updated !== 'boolean') {
+    // A missing or malformed response cannot establish that the caller is inactive.
+    throw new Error('registry_malformed_response');
+  }
+  return result;
+}
+
 const REGISTERED_DEVICE_LIST_COLUMNS = Object.freeze([
   'device_id',
   'protocol_signing_algorithm',
@@ -214,12 +223,13 @@ class RegistryStore {
   }
 
   async touchRegisteredDevicePresence(payload) {
-    return this.request({
+    const result = await this.request({
       path: '/rest/v1/rpc/touch_registered_device_presence_v7',
       method: 'POST',
       useServiceRole: true,
       body: payload
     });
+    return validatePresenceTouchResult(result);
   }
 
   async bootstrapRegisterDevice(payload) {
@@ -228,6 +238,22 @@ class RegistryStore {
       method: 'POST',
       useServiceRole: true,
       body: payload
+    });
+  }
+
+  async registerAccountDevice(payload) {
+    return this.request({
+      path: '/rest/v1/rpc/register_account_device_v9',
+      method: 'POST',
+      useServiceRole: true,
+      body: payload
+    });
+  }
+
+  async removeAccountDevice(payload) {
+    return this.request({
+      path: '/rest/v1/rpc/remove_account_device_v10',
+      method: 'POST', useServiceRole: true, body: payload
     });
   }
 
@@ -356,5 +382,6 @@ class RegistryStore {
 
 module.exports = {
   RegistryStore,
-  REGISTERED_DEVICE_LIST_COLUMNS
+  REGISTERED_DEVICE_LIST_COLUMNS,
+  validatePresenceTouchResult
 };

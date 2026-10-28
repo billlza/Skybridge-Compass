@@ -24,6 +24,8 @@ use crate::{
 
 pub(super) async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
+        #[cfg(target_os = "macos")]
+        Commands::Tui => crate::tui::run().await,
         Commands::Agent(agent) => match agent.command {
             AgentSubcommand::Run => {
                 run_agent(skybridge_agent::AgentRuntimeOptions {
@@ -55,6 +57,11 @@ pub(super) async fn dispatch(cli: Cli) -> Result<()> {
         Commands::Connect(args) => crate::connection_code::connect_code(cli.state_dir, args).await,
         #[cfg(target_os = "macos")]
         Commands::Crossnet(crossnet) => match crossnet.command {
+            CrossnetSubcommand::Approval(args) => {
+                crate::local_approval_commands::command(args).await
+            }
+            CrossnetSubcommand::Desktop(args) => crate::desktop_commands::command(args).await,
+            CrossnetSubcommand::Handshake(args) => crate::handshake_commands::command(args).await,
             CrossnetSubcommand::Preflight(output) => {
                 crate::crossnet_commands::preflight(output.json).await
             }
@@ -65,6 +72,58 @@ pub(super) async fn dispatch(cli: Cli) -> Result<()> {
             }
             CrossnetSubcommand::Status(args) => crate::crossnet_commands::status(args).await,
             CrossnetSubcommand::Navigate(args) => crate::crossnet_commands::navigate(args).await,
+            CrossnetSubcommand::Nearby(args) => crate::crossnet_commands::nearby(args).await,
+            CrossnetSubcommand::ConnectNearby(args) => {
+                crate::crossnet_commands::connect_nearby(args).await
+            }
+            CrossnetSubcommand::Usb(args) => match args.command {
+                crate::CrossnetUSBSubcommand::Inspect(args) => {
+                    let result = skybridge_crossnet_client::usb_inspect(&args.udid).await?;
+                    if args.output.json {
+                        println!("{}", serde_json::to_string_pretty(&result)?);
+                    } else {
+                        println!(
+                            "{} · signed_identity_verified={} · paired={}\n{}",
+                            crate::handshake_commands::safe(&result.peer.name),
+                            result.signature_verified,
+                            result.paired,
+                            result.peer.peer_id
+                        );
+                    }
+                    Ok(())
+                }
+                crate::CrossnetUSBSubcommand::Devices(output) => {
+                    crate::crossnet_commands::usb_devices(output.json).await
+                }
+                crate::CrossnetUSBSubcommand::Peers(output) => {
+                    crate::crossnet_commands::usb_peers(output.json).await
+                }
+                crate::CrossnetUSBSubcommand::Wake(args) => {
+                    crate::usb_commands::command(args).await
+                }
+                crate::CrossnetUSBSubcommand::Connect(args) => {
+                    crate::crossnet_commands::connect_usb(args).await
+                }
+                crate::CrossnetUSBSubcommand::ConnectDevice(args) => {
+                    crate::crossnet_commands::connect_usb_device(args).await
+                }
+            },
+            CrossnetSubcommand::Trust(args) => match args.command {
+                crate::CrossnetTrustSubcommand::Preview(args) => {
+                    crate::crossnet_commands::trust_preview(args).await
+                }
+                crate::CrossnetTrustSubcommand::Recover(args) => {
+                    crate::crossnet_commands::trust_recover(args).await
+                }
+            },
+            CrossnetSubcommand::File(args) => match args.command {
+                crate::CrossnetFileSubcommand::Approval(args) => {
+                    crate::file_approval_commands::command(args).await
+                }
+                crate::CrossnetFileSubcommand::Send(args) => {
+                    crate::crossnet_commands::send_file(args).await
+                }
+            },
             CrossnetSubcommand::Devices(output) => {
                 crate::crossnet_commands::devices(output.json).await
             }
@@ -97,6 +156,8 @@ pub(super) async fn dispatch(cli: Cli) -> Result<()> {
                 crate::android_commands::bridge_query(args, "code").await
             }
         },
+        #[cfg(windows)]
+        Commands::App(app) => crate::app_commands::run(app).await,
         Commands::Session(session) => match session.command {
             SessionSubcommand::Ls(output) => session_ls(cli.state_dir, output.json).await,
             SessionSubcommand::Inspect(args) => session_inspect(cli.state_dir, args).await,
@@ -178,6 +239,6 @@ pub(super) async fn dispatch(cli: Cli) -> Result<()> {
         Commands::Internal(internal) => match internal.command {
             InternalSubcommand::VerifyMldsa(args) => crate::internal_commands::verify_mldsa(args),
         },
-        Commands::Version => crate::cli_metadata::version(),
+        Commands::Version(_) => crate::cli_metadata::version(),
     }
 }

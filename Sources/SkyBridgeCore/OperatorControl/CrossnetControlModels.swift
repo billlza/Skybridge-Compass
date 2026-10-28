@@ -245,6 +245,8 @@ public enum CrossnetControlFailure: Error, Equatable, Sendable {
     /// is not an auth, tenant, or code-format problem (for example no signaling
     /// route, or an admission lease the app could not obtain).
     case sessionMutationRejected(String)
+    case peerPQCSuiteUnavailable
+    case usbDeviceUnavailable
     /// The requested destination is not part of the typed navigation vocabulary.
     case navigationDestinationInvalid
     /// The navigation coordinator ran but the UI did not confirm presenting the
@@ -290,6 +292,10 @@ public enum CrossnetControlFailure: Error, Equatable, Sendable {
             return "session_runtime_apply_failed"
         case .sessionMutationRejected:
             return "session_mutation_rejected"
+        case .peerPQCSuiteUnavailable:
+            return "peer_pqc_suite_unavailable"
+        case .usbDeviceUnavailable:
+            return "usb_device_unavailable"
         case .navigationDestinationInvalid:
             return "navigation_destination_invalid"
         case .navigationApplyFailed:
@@ -335,6 +341,10 @@ public enum CrossnetControlFailure: Error, Equatable, Sendable {
             return "crossnet-control session mutation did not read back from the Mac app runtime"
         case .sessionMutationRejected(let reason):
             return "crossnet-control session mutation was refused by the Mac app: \(Self.sanitized(reason))"
+        case .peerPQCSuiteUnavailable:
+            return "The peer does not provide the selected PQC suite. Review both devices' suite settings; no fallback was performed."
+        case .usbDeviceUnavailable:
+            return "The selected device is not connected over USB. Reconnect the selected device and refresh USB inventory; no network fallback was performed."
         case .navigationDestinationInvalid:
             return "unknown crossnet-control navigation destination"
         case .navigationApplyFailed:
@@ -1045,7 +1055,7 @@ enum CrossnetControlSettingsProjectionPolicy {
             guard seenSettingIDs.insert(setting.id).inserted else {
                 throw CrossnetControlFailure.internalError("settings_projection_duplicate_id")
             }
-            guard allowedSettingIDs.contains(setting.id) else {
+            guard allowedSettingIDs.contains(setting.id) || OperatorPreferenceContract.booleanIDs.contains(setting.id) else {
                 throw CrossnetControlFailure.internalError("settings_projection_not_allowlisted")
             }
             guard setting.mutable == false else {
@@ -1061,6 +1071,13 @@ enum CrossnetControlSettingsProjectionPolicy {
     }
 
     private static func validateValueDomain(_ setting: CrossnetControlSettingSnapshot) throws {
+        if OperatorPreferenceContract.booleanIDs.contains(setting.id) {
+            guard case .bool = setting.value else {
+                throw CrossnetControlFailure.internalError("settings_projection_invalid_value")
+            }
+            try validateNote(nil, for: setting)
+            return
+        }
         switch setting.id {
         case "logging.verbose",
              "ui.show_realtime_fps",
@@ -1241,10 +1258,14 @@ enum CrossnetControlSettingsMutationPolicy {
         if protocolIdentityBoundSettingIDs.contains(id) {
             throw CrossnetControlFailure.settingImmutable(protocolIdentityRejectionReason)
         }
-        guard mutableSettingIDs.contains(id) else {
+        guard mutableSettingIDs.contains(id) || OperatorPreferenceContract.booleanIDs.contains(id) else {
             throw CrossnetControlFailure.settingNotFound
         }
 
+        if OperatorPreferenceContract.booleanIDs.contains(id) {
+            guard let value = params.bool("value") else { throw CrossnetControlFailure.settingInvalidValue }
+            return CrossnetControlSettingsMutationRequest(id: id, value: .bool(value))
+        }
         let value = try mutableValue(for: id, params: params)
         return CrossnetControlSettingsMutationRequest(id: id, value: value)
     }

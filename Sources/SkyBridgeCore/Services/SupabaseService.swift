@@ -14,7 +14,7 @@ public final class SupabaseService: BaseManager {
  // MARK: - 配置
     
  /// Supabase项目配置
-    public struct Configuration: Sendable {
+    public struct Configuration: Sendable, Equatable {
         public let url: URL
         public let anonKey: String
         

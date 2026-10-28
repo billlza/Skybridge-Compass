@@ -166,86 +166,30 @@ public struct DeviceDiscoveryPanelView: View {
             }
         }
         .padding(20)
-        .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .dashboardGlassSurface(cornerRadius: 18)
         .overlay(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(themeConfiguration.borderColor, lineWidth: 1)
         )
     }
 
- /// 异步过滤设备列表，支持名称、IP和服务搜索
     @MainActor
     private func filterDevices(with searchText: String) async {
         isSearching = true
-
-        let filtered = await withTaskGroup(of: [DiscoveredDevice].self) { group in
-            group.addTask { @MainActor in
-                self.mapOnlineToDiscovered(self.appModel.onlineDevices)
-            }
-
-            var result: [DiscoveredDevice] = []
-            for await devices in group {
-                if searchText.isEmpty {
-                    result = devices
-                } else {
-                    let lowercasedSearch = searchText.lowercased()
-                    result = devices.filter { device in
-                        device.name.lowercased().contains(lowercasedSearch) ||
-                        (device.ipv4?.contains(lowercasedSearch) == true) ||
-                        (device.ipv6?.contains(lowercasedSearch) == true) ||
-                        device.services.contains { service in
-                            service.lowercased().contains(lowercasedSearch)
-                        }
-                    }
-                }
-            }
-            return result
-        }
-
-        filteredDevices = sortDevicesBySignalStrength(filtered)
+        filteredDevices = DashboardDeviceProjection.filter(
+            appModel.discoveredDevices,
+            searchText: searchText,
+            sortBySignalStrength: settingsManager.sortBySignalStrength
+        )
         isSearching = false
-    }
-
-    @MainActor
-    private func mapOnlineToDiscovered(_ online: [OnlineDevice]) -> [DiscoveredDevice] {
-        online.map { od in
-            DiscoveredDevice(
-                id: od.id,
-                name: od.name,
-                ipv4: od.ipv4,
-                ipv6: od.ipv6,
-                services: od.services,
-                portMap: od.portMap,
-                connectionTypes: od.connectionTypes,
-                uniqueIdentifier: od.uniqueIdentifier,
-                signalStrength: od.signalStrength,
-                source: od.sources.first ?? .unknown,
-                isLocalDevice: od.isLocalDevice,
-                deviceId: od.uniqueIdentifier,
-                pubKeyFP: od.protocolFingerprint,
-                macSet: od.macAddress.map { Set([$0]) } ?? []
-            )
-        }
-    }
-
-    private func sortDevicesBySignalStrength(_ devices: [DiscoveredDevice]) -> [DiscoveredDevice] {
-        let settings = SettingsManager.shared
-        guard settings.sortBySignalStrength else { return devices }
-        func score(for d: DiscoveredDevice) -> Int {
-            return Int(d.signalStrength ?? 0)
-        }
-        return devices.sorted { a, b in
-            let sa = score(for: a)
-            let sb = score(for: b)
-            if sa != sb { return sa > sb }
-            return a.name.localizedCompare(b.name) == .orderedAscending
-        }
     }
 
     @MainActor
     private func connectToDevice(_ device: DiscoveredDevice) async {
         logger.info("正在连接到设备: \(device.name)")
-        if let onlineDevice = appModel.onlineDevices.first(where: { $0.id == device.id }) {
+        if DashboardDeviceProjection.isSkyBridgePeer(device) {
+            await appModel.connectDiscoveredPeer(to: device)
+        } else if let onlineDevice = appModel.onlineDevices.first(where: { $0.id == device.id }) {
             await appModel.connect(to: onlineDevice)
         } else {
             await appModel.connect(to: device)

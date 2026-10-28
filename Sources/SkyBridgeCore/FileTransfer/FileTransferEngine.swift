@@ -644,7 +644,7 @@ public class FileTransferEngine: ObservableObject {
             
         } catch {
             let primaryError = error
-            connection.connection.cancel()
+            connection.connection?.cancel()
             var reportedError = primaryError
             if let ioHandle = inboundIOHandle {
                 do {
@@ -1075,14 +1075,14 @@ public class FileTransferEngine: ObservableObject {
  // MARK: - 网络通信方法（完整实现 - 利用macOS 26.x Network Framework改进）
     
  /// 获取NWConnection（从P2PConnection提取）- 符合Swift 6.2.1的并发安全要求
-    private func getNWConnection(from connection: P2PConnection) -> NWConnection {
- // P2PConnection包含一个NWConnection属性，直接访问
-        return connection.connection
+    private func getNWConnection(from connection: P2PConnection) throws -> NWConnection {
+        guard let network = connection.connection else { throw FileTransferEngineError.unsupportedTransport }
+        return network
     }
     
  /// 发送文件元数据 - 利用macOS 26.x的改进网络性能
     private func sendFileMetadata(_ metadata: FileTransferMetadata, to connection: P2PConnection) async throws {
-        let nwConnection = getNWConnection(from: connection)
+        let nwConnection = try getNWConnection(from: connection)
         
         logger.info("📤 发送文件元数据")
         
@@ -1124,7 +1124,7 @@ public class FileTransferEngine: ObservableObject {
     
  /// 接收文件元数据 - 利用macOS 26.x的改进网络性能
     private func receiveFileMetadata(from connection: P2PConnection) async throws -> FileTransferMetadata {
-        let nwConnection = getNWConnection(from: connection)
+        let nwConnection = try getNWConnection(from: connection)
         
         logger.info("📥 接收文件元数据")
         
@@ -1185,7 +1185,7 @@ public class FileTransferEngine: ObservableObject {
     
  /// 等待传输确认
     private func waitForTransferAcknowledgment(from connection: P2PConnection) async throws {
-        let nwConnection = getNWConnection(from: connection)
+        let nwConnection = try getNWConnection(from: connection)
         
         logger.debug("⏳ 等待传输确认")
         
@@ -1202,7 +1202,7 @@ public class FileTransferEngine: ObservableObject {
     
  /// 发送传输确认
     private func sendTransferAcknowledgment(to connection: P2PConnection) async throws {
-        let nwConnection = getNWConnection(from: connection)
+        let nwConnection = try getNWConnection(from: connection)
         
         logger.debug("📤 发送传输确认")
         
@@ -1217,7 +1217,7 @@ public class FileTransferEngine: ObservableObject {
         metadata: FileTransferMetadata,
         expectedChunkIndex: Int
     ) async throws -> FileChunkPacket {
-        let nwConnection = getNWConnection(from: connection)
+        let nwConnection = try getNWConnection(from: connection)
         
  // 接收数据包头（固定大小）
  // 结构：transferId(36字节UUID字符串) + chunkIndex(4字节) + totalChunks(4字节) +
@@ -1321,7 +1321,7 @@ public class FileTransferEngine: ObservableObject {
     
  /// 发送块确认
     private func sendChunkAcknowledgment(_ transferId: String, chunkIndex: Int, to connection: P2PConnection) async throws {
-        let nwConnection = getNWConnection(from: connection)
+        let nwConnection = try getNWConnection(from: connection)
         
  // 发送确认消息：transferId(36字节) + chunkIndex(4字节) + status(1字节: 0x01=ACK)
         var ackData = Data()
@@ -1342,7 +1342,7 @@ public class FileTransferEngine: ObservableObject {
     
  /// 等待块确认 - 完整实现
     private func waitForChunkAcknowledgment(_ transferId: String, chunkIndex: Int, from connection: P2PConnection) async throws {
-        let nwConnection = getNWConnection(from: connection)
+        let nwConnection = try getNWConnection(from: connection)
         
  // 接收确认消息（41字节：transferId 36字节 + chunkIndex 4字节 + status 1字节）
         let ackData = try await receiveData(length: 41, from: nwConnection)
@@ -1372,7 +1372,7 @@ public class FileTransferEngine: ObservableObject {
         from connection: P2PConnection,
         expectedTransferId: String
     ) async throws {
-        let nwConnection = getNWConnection(from: connection)
+        let nwConnection = try getNWConnection(from: connection)
         
         logger.debug("⏳ 等待传输完成确认")
         
@@ -1397,7 +1397,7 @@ public class FileTransferEngine: ObservableObject {
     
  /// 发送最终确认
     private func sendFinalAcknowledgment(to connection: P2PConnection, transferId: String) async throws {
-        let nwConnection = getNWConnection(from: connection)
+        let nwConnection = try getNWConnection(from: connection)
         
         logger.debug("📤 发送最终确认")
         
@@ -1415,7 +1415,7 @@ public class FileTransferEngine: ObservableObject {
     
  /// 等待最终确认
     private func waitForFinalAcknowledgment(from connection: P2PConnection) async throws {
-        let nwConnection = getNWConnection(from: connection)
+        let nwConnection = try getNWConnection(from: connection)
         
         logger.debug("⏳ 等待最终确认")
         
@@ -1431,7 +1431,7 @@ public class FileTransferEngine: ObservableObject {
     
  /// 发送数据包 - 完整实现，利用macOS 26.x的大数据优化
     private func sendChunkPacket(_ packet: FileChunkPacket, to connection: P2PConnection) async throws {
-        let nwConnection = getNWConnection(from: connection)
+        let nwConnection = try getNWConnection(from: connection)
         guard packet.transferId.utf8.count == 36,
               UUID(uuidString: packet.transferId)?.uuidString == packet.transferId,
               packet.chunkIndex >= 0,
@@ -2147,6 +2147,7 @@ public enum FileTransferEngineError: LocalizedError, Sendable {
     case invalidProtocolChunk
     case unsupportedLegacyEncryptedFileSize(maximumBytes: Int64)
     case connectionNotFound
+    case unsupportedTransport
     case transferRejected
     case transferCancelled
     case checksumMismatch
@@ -2184,6 +2185,8 @@ public enum FileTransferEngineError: LocalizedError, Sendable {
             return "旧版传输协议不支持超过 \(formatBytes(maximumBytes)) 的加密文件，请使用新版文件传输"
         case .connectionNotFound:
             return "连接未找到"
+        case .unsupportedTransport:
+            return "此连接尚不支持文件传输"
         case .transferRejected:
             return "传输被拒绝"
         case .transferCancelled:

@@ -67,7 +67,7 @@ final class IdentityResolutionKeychainStormTests: XCTestCase {
         let flush = try sourceSlice(
             of: source,
             from: "private func flushPendingUpdates() async {",
-            to: "let updates = pendingUpdates"
+            to: "let updates = observationBuffer.takePending()"
         )
 
         let gate = try XCTUnwrap(
@@ -75,14 +75,16 @@ final class IdentityResolutionKeychainStormTests: XCTestCase {
             "身份解析必须先过退避闸门，再触碰 Keychain"
         )
         let resolution = try XCTUnwrap(
-            flush.range(of: "SelfIdentityProvider.shared"),
-            "批处理必须仍通过 SelfIdentityProvider 解析本机身份"
+            flush.range(of: "CanonicalBonjourAdvertisementIdentityProvider.current("),
+            "批处理必须通过 CanonicalBonjourAdvertisementIdentityProvider 解析同域的本机协议身份"
         )
         XCTAssertLessThan(
             gate.lowerBound,
             resolution.lowerBound,
             "退避判断必须出现在身份解析之前，否则退避无法阻止 Keychain 访问"
         )
+        XCTAssertTrue(flush.contains("allowCreateDeviceId: false"),
+                      "Discovery must retain the batch until an existing committed authority is available")
         XCTAssertTrue(
             flush.contains("identityResolutionFailureCount += 1"),
             "失败必须累计，否则退避永远停留在首个间隔"

@@ -60,6 +60,7 @@ enum KeychainGenericPasswordAccessibility: Sendable {
 
 enum KeychainGenericPasswordScopeError: Error, LocalizedError, Sendable, Equatable {
     case missingSharedIdentityAccessGroupEntitlement
+    case missingApplicationIdentityAccessGroupEntitlement
     case invalidExplicitSharedIdentityScope
     case missingAuthoritativeWriteAccessGroup
 
@@ -67,6 +68,8 @@ enum KeychainGenericPasswordScopeError: Error, LocalizedError, Sendable, Equatab
         switch self {
         case .missingSharedIdentityAccessGroupEntitlement:
             return "The signed process is missing the shared SkyBridge identity Keychain access-group entitlement"
+        case .missingApplicationIdentityAccessGroupEntitlement:
+            return "The signed process is missing an application Keychain identity matching its bundle"
         case .invalidExplicitSharedIdentityScope:
             return "The explicitly injected shared identity Keychain scope is not an isolated shared-group scope"
         case .missingAuthoritativeWriteAccessGroup:
@@ -191,10 +194,38 @@ enum SkyBridgeSharedIdentityScopeSource: Sendable {
     }
 }
 
-/// Resolves the product's app/extension shared Keychain group once per process.
-/// The app-only access group is deliberately not accepted because it cannot be
-/// the cross-process identity authority.
+/// Resolves application-private and app/extension-shared groups separately.
+/// The shared protocol-identity path never accepts the application-private group.
 enum SkyBridgeKeychainAccessGroupResolver {
+    /// The signed application identifier is always one of the app's effective
+    /// Keychain groups, independently of the ordering of keychain-access-groups.
+    /// Authentication credentials remain in this private group, not the widgets'
+    /// shared protocol-identity group.
+    nonisolated static func requiredApplicationAccessGroup() throws -> String {
+        #if os(macOS)
+        guard let task = SecTaskCreateFromSelf(nil),
+              let identifier = SecTaskCopyValueForEntitlement(task,
+                  "com.apple.application-identifier" as CFString, nil) as? String else {
+            throw KeychainGenericPasswordScopeError.missingApplicationIdentityAccessGroupEntitlement
+        }
+        return try requiredApplicationAccessGroup(from: identifier, bundleIdentifier: Bundle.main.bundleIdentifier)
+        #else
+        throw KeychainGenericPasswordScopeError.missingApplicationIdentityAccessGroupEntitlement
+        #endif
+    }
+
+    nonisolated static func requiredApplicationAccessGroup(from identifier: String?, bundleIdentifier: String?) throws -> String {
+        guard let identifier, let bundleIdentifier, !bundleIdentifier.isEmpty,
+              !identifier.contains("\0"), !bundleIdentifier.contains("\0"),
+              identifier == identifier.trimmingCharacters(in: .whitespacesAndNewlines),
+              bundleIdentifier == bundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines),
+              identifier.utf8.count <= 256, identifier.hasSuffix("." + bundleIdentifier),
+              identifier.count > bundleIdentifier.count + 1 else {
+            throw KeychainGenericPasswordScopeError.missingApplicationIdentityAccessGroupEntitlement
+        }
+        return identifier
+    }
+
     private enum ResolutionState: Sendable {
         case unresolved
         case resolved(String?)

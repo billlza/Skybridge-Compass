@@ -1,5 +1,6 @@
 import XCTest
 import Network
+import SkyBridgeProtocolCore
 @testable import SkyBridgeCore
 
 @MainActor
@@ -287,22 +288,23 @@ final class AuthenticationServiceRefreshTokenTests: XCTestCase {
             displayName: "Replacement",
             issuedAt: replacement.issuedAt
         )
-        try await keychain.storeAuthSession(source)
+        let installed = try await keychain.storeAuthSession(source)
+        let loginID = try XCTUnwrap(installed.loginID)
 
         let firstReplacement = try await keychain.replaceAuthSession(
-            expected: source,
+            expected: source, expectedLoginID: loginID,
             with: replacement
         )
         let exactReplay = try await keychain.replaceAuthSession(
-            expected: source,
+            expected: source, expectedLoginID: loginID,
             with: replacement
         )
         let issuedAtDriftResult = try await keychain.replaceAuthSession(
-            expected: source,
+            expected: source, expectedLoginID: loginID,
             with: issuedAtDriftedReplacement
         )
         let tokenDriftResult = try await keychain.replaceAuthSession(
-            expected: source,
+            expected: source, expectedLoginID: loginID,
             with: tokenDriftedReplacement
         )
         XCTAssertTrue(firstReplacement)
@@ -312,6 +314,238 @@ final class AuthenticationServiceRefreshTokenTests: XCTestCase {
         let persisted = try await keychain.loadAuthSessionStrict()
         XCTAssertEqual(persisted, replacement)
         try await keychain.deleteAuthSession()
+    }
+
+    func testIdenticalCredentialReloginRejectsOldRefreshWitness() async throws {
+        let keychain = KeychainManager.shared
+        let source = AuthSession(accessToken: "fixture-identical-token", refreshToken: nil,
+            userIdentifier: "fixture-identical-user", displayName: "Fixture", issuedAt: .distantPast)
+        let first = try await keychain.storeAuthSession(source)
+        let second = try await keychain.storeAuthSession(source)
+        XCTAssertNotEqual(first.loginID, second.loginID)
+        let accepted = try await keychain.replaceAuthSession(expected: source,
+            expectedLoginID: XCTUnwrap(first.loginID), with: source)
+        XCTAssertFalse(accepted)
+        let after = try await keychain.loadAuthSessionRecordStrict()
+        XCTAssertEqual(after, second)
+        try await keychain.deleteAuthSession()
+    }
+
+    func testNativeCheckpointWritePreservesCredentialRefreshAndRejectsStaleAudioWitness() async throws {
+        let keychain = KeychainManager.shared
+        let source = AuthSession(accessToken: "fixture-audio-token", refreshToken: nil,
+            userIdentifier: "fixture-audio-user", displayName: "Fixture", issuedAt: .distantPast)
+        let refreshed = AuthSession(accessToken: "fixture-audio-refreshed-token", refreshToken: nil,
+            userIdentifier: source.userIdentifier, displayName: source.displayName, issuedAt: .distantPast)
+        let installed = try await keychain.storeAuthSession(source)
+        let loginID = try XCTUnwrap(installed.loginID)
+        let intent = AuthenticationMutationIntent()
+        let witness = try await keychain.loadAudioMembershipCheckpoint(loginID: loginID, intent: intent)
+        let refreshedSuccessfully = try await keychain.replaceAuthSession(expected: source,
+            expectedLoginID: loginID, with: refreshed)
+        XCTAssertTrue(refreshedSuccessfully)
+        let saved = try await keychain.saveAudioMembershipCheckpoint(Data("fixture-checkpoint".utf8),
+            replacing: witness.revision, loginID: loginID, intent: intent)
+        let record = try await keychain.loadAuthSessionRecordStrict()
+        XCTAssertEqual(record?.session, refreshed)
+        XCTAssertEqual(record?.audioRevision, saved.revision)
+        XCTAssertEqual(record?.audioCheckpoint, saved.checkpoint)
+        do {
+            _ = try await keychain.saveAudioMembershipCheckpoint(nil, replacing: witness.revision,
+                loginID: loginID, intent: intent)
+            XCTFail("Stale audio revision overwrote a newer checkpoint")
+        } catch { XCTAssertEqual(error as? ProtectedAccountSessionError, .changed) }
+        let after = try await keychain.loadAuthSessionRecordStrict()
+        XCTAssertEqual(after, record)
+        try await keychain.deleteAuthSession()
+    }
+
+    func testNativeCheckpointAccessRejectsInvalidatedIntentAndNewLogin() async throws {
+        let keychain = KeychainManager.shared
+        let source = AuthSession(accessToken: "fixture-audio-owner", refreshToken: nil,
+            userIdentifier: "fixture-audio-owner-user", displayName: "Fixture", issuedAt: .distantPast)
+        let installed = try await keychain.storeAuthSession(source)
+        let loginID = try XCTUnwrap(installed.loginID)
+        let intent = AuthenticationMutationIntent()
+        let witness = try await keychain.loadAudioMembershipCheckpoint(loginID: loginID, intent: intent)
+        intent.invalidate()
+        do { _ = try await keychain.loadAudioMembershipCheckpoint(loginID: loginID, intent: intent); XCTFail("Old intent read") }
+        catch { XCTAssertEqual(error as? ProtectedAccountSessionError, .changed) }
+        do {
+            _ = try await keychain.saveAudioMembershipCheckpoint(nil, replacing: witness.revision,
+                loginID: loginID, intent: intent)
+            XCTFail("Old intent wrote")
+        } catch { XCTAssertEqual(error as? ProtectedAccountSessionError, .changed) }
+        let replacement = try await keychain.storeAuthSession(source)
+        do {
+            _ = try await keychain.saveAudioMembershipCheckpoint(nil, replacing: witness.revision,
+                loginID: loginID, intent: AuthenticationMutationIntent())
+            XCTFail("Old login wrote")
+        } catch { XCTAssertEqual(error as? ProtectedAccountSessionError, .changed) }
+        let after = try await keychain.loadAuthSessionRecordStrict()
+        XCTAssertEqual(after, replacement)
+        try await keychain.deleteAuthSession()
+    }
+
+    func testNewNativeOwnerCannotRestoreOrOverwriteAnUnresolvedRequest() async throws {
+        let keychain = KeychainManager.shared
+        let source = AuthSession(accessToken: "fixture-journal-token", refreshToken: nil,
+            userIdentifier: "fixture-journal-user", displayName: "Fixture", issuedAt: .distantPast)
+        let installed = try await keychain.storeAuthSession(source)
+        let loginID = try XCTUnwrap(installed.loginID), firstIntent = AuthenticationMutationIntent()
+        let checkpoint = try await keychain.saveAudioMembershipCheckpoint(Data("prior-checkpoint".utf8),
+            replacing: installed.audioRevision, loginID: loginID, intent: firstIntent)
+        let earlier = try await keychain.beginAccountObservation(kind: .devices, expected: source,
+            loginID: loginID, intent: firstIntent)
+        let ownRead = try await keychain.loadAudioMembershipCheckpoint(loginID: loginID, intent: firstIntent)
+        XCTAssertEqual(ownRead, checkpoint)
+
+        let nextIntent = AuthenticationMutationIntent()
+        do {
+            _ = try await keychain.loadAudioMembershipCheckpoint(loginID: loginID, intent: nextIntent)
+            XCTFail("New owner restored an unresolved checkpoint")
+        } catch { XCTAssertEqual(error as? ProtectedAccountSessionError, .verificationRequired) }
+        do {
+            _ = try await keychain.saveAudioMembershipCheckpoint(nil, replacing: checkpoint.revision,
+                loginID: loginID, intent: nextIntent)
+            XCTFail("New owner wrote over an unresolved checkpoint")
+        } catch { XCTAssertEqual(error as? ProtectedAccountSessionError, .verificationRequired) }
+
+        let fresh = try await keychain.beginAccountObservation(kind: .devices, expected: source,
+            loginID: loginID, intent: nextIntent)
+        let prepared = try await keychain.loadAuthSessionRecordStrict()
+        XCTAssertEqual(prepared?.loginID, loginID)
+        XCTAssertNil(prepared?.audioCheckpoint)
+        XCTAssertEqual(prepared?.observations, [fresh.observation])
+        do {
+            _ = try await keychain.finishAccountObservation(earlier)
+            XCTFail("Earlier request settled a replacement's marker")
+        } catch { XCTAssertEqual(error as? ProtectedAccountSessionError, .changed) }
+        let afterLateResult = try await keychain.loadAuthSessionRecordStrict()
+        XCTAssertEqual(afterLateResult, prepared)
+        let settled = try await keychain.finishAccountObservation(fresh)
+        XCTAssertTrue(settled.observations.isEmpty)
+        XCTAssertEqual(settled.loginID, loginID)
+        XCTAssertNil(settled.audioCheckpoint)
+        try await keychain.deleteAuthSession()
+    }
+
+    func testCredentialObservationIsStoredBeforeHTTPAndPreservesTheDeviceRequest() async throws {
+        let server = try await RefreshTokenHTTPTestServer(accessTokenProvider: { "" }, blockResponses: true)
+        defer { server.releaseResponses(); server.stop() }
+        let baseURL = server.baseURL
+        server.updateAccessTokenProvider { Self.makeSupabaseAccessToken(baseURL: baseURL, expirationOffset: 3600) }
+        SupabaseService.shared.updateConfiguration(.init(url: baseURL, anonKey: "fixture-key"))
+        let service = AuthenticationService.shared, keychain = KeychainManager.shared
+        try await service.activateGuestSession()
+        _ = await service.signOutAndWait()
+        let source = AuthSession(accessToken: Self.makeSupabaseAccessToken(baseURL: baseURL, expirationOffset: -3600),
+            refreshToken: "fixture-prepared-refresh", userIdentifier: "user-1", displayName: "Fixture", issuedAt: .distantPast)
+        try await service.updateSession(source)
+        let authorization = try service.currentAudioAuthorization()
+        let device = try await service.beginAudioMembershipObservation(for: authorization)
+        let refresh = Task { try await service.validAccessToken() }
+        try await waitForRequestCount(1, server: server)
+        let pending = try await keychain.loadAuthSessionRecordStrict()
+        XCTAssertEqual(pending?.observations.filter { $0.kind == .credential }.count, 1)
+        XCTAssertEqual(pending?.observations.filter { $0.kind == .devices }.count, 1)
+        XCTAssertEqual(pending?.session, source)
+        XCTAssertTrue(authorization.isCurrent)
+        server.releaseResponses()
+        _ = try await refresh.value
+        let refreshed = try await keychain.loadAuthSessionRecordStrict()
+        XCTAssertEqual(refreshed?.observations.map(\.kind), [.devices])
+        XCTAssertEqual(refreshed?.loginID, authorization.loginID)
+        XCTAssertEqual(refreshed?.audioRevision, pending?.audioRevision)
+        _ = try await device.finish(refreshed?.audioRevision, .unchanged)
+        await device.abandon()
+        let settled = try await keychain.loadAuthSessionRecordStrict()
+        XCTAssertEqual(settled?.observations, [])
+        XCTAssertTrue(try service.currentAudioAuthorization() === authorization)
+        try await service.activateGuestSession()
+        let cleanup = await service.signOutAndWait()
+        XCTAssertEqual(cleanup, .localOnly)
+    }
+
+    func testCanonicalLoadRetriesLeftoverLegacyRetirementWithoutChangingLogin() async throws {
+        let keychain = KeychainManager.shared
+        let legacyService = "com.skybridge.compass.authsession"
+        let source = AuthSession(accessToken: "fixture-retirement-token", refreshToken: nil,
+            userIdentifier: "fixture-retirement-user", displayName: "Fixture", issuedAt: .distantPast)
+        let legacyBytes = try JSONEncoder().encode(source)
+        // XCTest and the command's explicit environment select the existing
+        // in-memory backend. This is the state left after a canonical commit
+        // succeeds but retiring its old legacy record is interrupted/fails.
+        defer {
+            do { try keychain.deleteAPIKey(service: legacyService, account: "primary") }
+            catch { XCTFail("Synthetic legacy cleanup failed: \(error)") }
+        }
+        _ = try await keychain.storeAuthSession(source)
+        for cleared in [false, true] {
+            if cleared { try await keychain.deleteAuthSession() }
+            let expected = try await keychain.loadAuthSessionRecordStrict()
+            XCTAssertTrue(keychain.importKey(data: legacyBytes, service: legacyService, account: "primary"))
+            XCTAssertEqual(try keychain.exportKeyStrict(service: legacyService, account: "primary"), legacyBytes)
+            let restored = try await keychain.loadAuthSessionRecordStrict()
+            XCTAssertEqual(restored, expected, "Retirement must preserve the canonical record and login")
+            XCTAssertNil(try keychain.exportKeyStrict(service: legacyService, account: "primary"),
+                         "Legacy retirement was not retried; cleared=\(cleared)")
+        }
+        try await keychain.deleteAuthSession()
+    }
+
+    func testInvalidatedIntentCannotInstallClearOrRevoke() async throws {
+        let keychain = KeychainManager.shared
+        let source = AuthSession(accessToken: "fixture-intent-token", refreshToken: nil,
+            userIdentifier: "fixture-intent-user", displayName: "Fixture", issuedAt: .distantPast)
+        let current = try await keychain.storeAuthSession(source)
+        let intent = AuthenticationMutationIntent(); intent.invalidate()
+        for action in 0..<3 {
+            do {
+                switch action {
+                case 0: _ = try await keychain.storeAuthSession(source, intent: intent)
+                case 1: try await keychain.deleteAuthSession(intent: intent)
+                default: try await keychain.revokeAudioAuthorization(expected: source,
+                    loginID: XCTUnwrap(current.loginID), intent: intent)
+                }
+                XCTFail("Stale intent performed mutation \(action)")
+            } catch { XCTAssertEqual(error as? ProtectedAccountSessionError, .changed) }
+        }
+        let after = try await keychain.loadAuthSessionRecordStrict()
+        XCTAssertEqual(after, current)
+        try await keychain.deleteAuthSession()
+    }
+
+    func testKnownRefreshRejectionPersistsAudioRevocation() async throws {
+        let server = try await RefreshTokenHTTPTestServer(accessTokenProvider: { "unused" },
+            failure: (status: 400, code: "session_expired"))
+        defer { server.stop() }
+        SupabaseService.shared.updateConfiguration(.init(url: server.baseURL, anonKey: "fixture-key"))
+        let service = AuthenticationService.shared
+        try await service.activateGuestSession()
+        _ = await service.signOutAndWait()
+        let source = AuthSession(accessToken: Self.makeSupabaseAccessToken(baseURL: server.baseURL, expirationOffset: -3600),
+            refreshToken: "fixture-rejected-refresh", userIdentifier: "user-1", displayName: "Fixture", issuedAt: .distantPast)
+        try await service.updateSession(source)
+        let authorization = try service.currentAudioAuthorization()
+        do { _ = try await service.validAccessToken(); XCTFail("Known rejection was accepted") }
+        catch {
+            guard case let SupabaseService.SupabaseError.httpStatus(status, _) = error else {
+                XCTFail("Original HTTP failure was lost: \(error)"); throw error
+            }
+            XCTAssertEqual(status, 400)
+        }
+        XCTAssertFalse(authorization.isCurrent)
+        XCTAssertNil(service.audioAuthorizationSnapshot)
+        let loaded = try await KeychainManager.shared.loadAuthSessionRecordStrict()
+        let record = try XCTUnwrap(loaded)
+        XCTAssertEqual(record.loginID, authorization.loginID)
+        XCTAssertTrue(record.audioRevoked)
+        XCTAssertNil(record.audioCheckpoint)
+        XCTAssertEqual(server.requestCount, 1)
+        try await service.activateGuestSession()
+        let cleanup = await service.signOutAndWait()
+        XCTAssertEqual(cleanup, .localOnly)
     }
 
     func testGuestSessionDeletionCannotDeleteFollowingAuthenticatedSession() async throws {
@@ -575,11 +809,16 @@ private final class RefreshTokenHTTPTestServer: @unchecked Sendable {
     private var _responsesReleased: Bool
     private var accessTokenProvider: @Sendable () -> String
     private let responseGate: DispatchGroup?
+    private let failureStatus: Int?
+    private let failureBody: Data?
 
     init(
         accessTokenProvider: @escaping @Sendable () -> String,
-        blockResponses: Bool = false
+        blockResponses: Bool = false,
+        failure: (status: Int, code: String)? = nil
     ) async throws {
+        failureStatus = failure?.status
+        failureBody = try failure.map { try JSONSerialization.data(withJSONObject: ["error_code": $0.code]) }
         self.accessTokenProvider = accessTokenProvider
         self._responsesReleased = !blockResponses
         if blockResponses {
@@ -674,7 +913,8 @@ private final class RefreshTokenHTTPTestServer: @unchecked Sendable {
 
             let body = self.makeResponseBody()
             self.responseGate?.wait()
-            var response = Data("HTTP/1.1 200 OK\r\n".utf8)
+            let statusLine = self.failureStatus.map { "HTTP/1.1 \($0) Fixture Error\r\n" } ?? "HTTP/1.1 200 OK\r\n"
+            var response = Data(statusLine.utf8)
             response.append(Data("Content-Type: application/json\r\n".utf8))
             response.append(Data("Content-Length: \(body.count)\r\n".utf8))
             response.append(Data("Connection: close\r\n\r\n".utf8))
@@ -692,6 +932,7 @@ private final class RefreshTokenHTTPTestServer: @unchecked Sendable {
         let accessToken = accessTokenProvider()
         lock.unlock()
 
+        if let failureBody { return failureBody }
         let payload: [String: Any] = [
             "access_token": accessToken,
             "refresh_token": "refresh-token-next",

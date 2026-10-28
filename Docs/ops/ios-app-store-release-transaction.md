@@ -1,6 +1,6 @@
 # iOS / iPadOS App Store release transaction
 
-This runbook publishes iOS `1.0.2 (2)` from the **same** `xcarchive` that passed
+This runbook publishes iOS `1.0.2 (3)` from the **same** `xcarchive` that passed
 physical iPhone/iPad acceptance. It deliberately separates four gates:
 
 1. create one clean-source production archive and a `release-testing` IPA;
@@ -18,7 +18,12 @@ Store Connect authentication.
 
 Start from the frozen, committed, clean release revision:
 
+`SKYBRIDGE_BUILD_JOBS` optionally sets the common Xcode/SwiftPM concurrency limit.
+It accepts canonical decimal integers from 1 through 64. Leaving it unset keeps
+the existing tool defaults; empty and invalid values fail before archive work.
+
 ```bash
+export SKYBRIDGE_BUILD_JOBS=2
 bash Scripts/build_ios_release_candidate.sh
 bash Scripts/finalize_ios_release_archive_identity.sh
 ```
@@ -26,7 +31,7 @@ bash Scripts/finalize_ios_release_archive_identity.sh
 The second command creates
 `.sandbox-home/release-candidate/ios-release-archive-identity.json`. It verifies:
 
-- App and Widget are both `1.0.2 (2)`;
+- App and Widget are both `1.0.2 (3)`;
 - source commit, source-input digest, repository, Release configuration,
   `HAS_APPLE_PQC_SDK`, and production surface match the candidate acceptance;
 - the release-testing IPA still matches its formal product proof;
@@ -58,7 +63,7 @@ from `ios-release-archive-identity.json`:
     "debugSymbolsVerified": true,
     "sourceInputDigest": "<identity value>",
     "releaseVersion": "1.0.2",
-    "releaseBuild": "2"
+    "releaseBuild": "3"
   }
 }
 ```
@@ -166,7 +171,7 @@ The export options are fixed to:
 
 The verifier then checks the App and Widget signature chains, Apple Distribution
 team/identity, non-device-bound App Store profiles, profile/certificate binding,
-profile expiry, production entitlements, exact `1.0.2 (2)`, source provenance,
+profile expiry, production entitlements, exact `1.0.2 (3)`, source provenance,
 production compilation surface, and absence of binary test hooks. It also
 recomputes the accepted archive identity and requires App/Widget dSYMs whose
 UUIDs match their executables. Success writes
@@ -207,5 +212,5 @@ Do not claim App Store release completion until all of these are current:
 - protected export environment and externally supplied API identity available;
 - verified App Store export from the same archive;
 - explicit upload approval;
-- App Store Connect processing succeeds and the processed `1.0.2 (2)` build is
+- App Store Connect processing succeeds and the processed `1.0.2 (3)` build is
   inspected before TestFlight distribution or review submission.

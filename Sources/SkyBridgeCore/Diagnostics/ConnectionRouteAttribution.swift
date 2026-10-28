@@ -9,6 +9,8 @@ import OSLog
 /// expensive path" a fact instead of an assumption.
 @available(macOS 14.0, iOS 17.0, *)
 public enum ConnectionTransportRoute: String, Sendable, Codable, CaseIterable {
+    /// A control session carried by the exact authenticated USB device route.
+    case usbDirect
     /// On-link session established through the LAN stack (Bonjour/QUIC control channel).
     case localDirect
     /// Peer-to-peer session whose selected candidate pair contains no relay candidate.
@@ -26,8 +28,17 @@ public enum ConnectionTransportRoute: String, Sendable, Codable, CaseIterable {
 
     public var isDirect: Bool {
         switch self {
-        case .localDirect, .peerToPeerDirect: true
+        case .usbDirect, .localDirect, .peerToPeerDirect: true
         case .relayed, .unknown: false
+        }
+    }
+
+    /// USB cannot substitute for a broken network path and must not dilute the
+    /// network relay budget. Unknown observations also carry no such evidence.
+    var contributesToNetworkBudget: Bool {
+        switch self {
+        case .localDirect, .peerToPeerDirect, .relayed: true
+        case .usbDirect, .unknown: false
         }
     }
 }
@@ -136,7 +147,7 @@ public final class ConnectionRouteAttributionRecorder: ObservableObject {
                 previous=\(previous?.rawValue ?? "-", privacy: .public)
                 """
             )
-        case .localDirect, .peerToPeerDirect:
+        case .usbDirect, .localDirect, .peerToPeerDirect:
             logger.info(
                 """
                 ✅ 会话路径归因: session=\(Self.redact(key), privacy: .public) \
@@ -151,7 +162,7 @@ public final class ConnectionRouteAttributionRecorder: ObservableObject {
 
         appendSmokeAttribution(sessionKey: key, route: route)
 
-        guard route != .unknown else { return }
+        guard route.contributesToNetworkBudget else { return }
         appendConclusiveSample(route)
     }
 
@@ -231,7 +242,7 @@ public final class ConnectionRouteAttributionRecorder: ObservableObject {
     public nonisolated static func relayedShare(
         in routes: [ConnectionTransportRoute]
     ) -> Double? {
-        let conclusive = routes.filter { $0 != .unknown }
+        let conclusive = routes.filter(\.contributesToNetworkBudget)
         guard conclusive.count >= budgetMinimumSampleCount else { return nil }
         let relayed = conclusive.filter(\.isRelayed).count
         return Double(relayed) / Double(conclusive.count)

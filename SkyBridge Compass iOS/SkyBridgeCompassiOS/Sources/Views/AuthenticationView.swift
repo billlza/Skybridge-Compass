@@ -46,6 +46,7 @@ struct AuthenticationView: View {
     }
 
     @EnvironmentObject private var authManager: AuthenticationManager
+    @EnvironmentObject private var localizationManager: LocalizationManager
     @State private var selectedMethod: AuthMethod = .email
     @State private var email = ""
     @State private var password = ""
@@ -182,7 +183,7 @@ struct AuthenticationView: View {
         VStack(spacing: 16) {
             iOSBrandIcon(size: 92)
             
-            Text("SkyBridge Compass")
+            Text(localizationManager.localizedString("应用标题"))
                 .font(.system(size: 32, weight: .bold))
                 .foregroundColor(.white)
             
@@ -1385,6 +1386,7 @@ struct AuthenticationView_Previews: PreviewProvider {
             AuthenticationView(isRegistering: true)
                 .environmentObject(AuthenticationManager.instance)
         }
+        .environmentObject(LocalizationManager.instance)
     }
 }
 #endif

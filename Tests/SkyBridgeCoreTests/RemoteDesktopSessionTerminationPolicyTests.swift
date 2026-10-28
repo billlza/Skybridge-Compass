@@ -60,7 +60,14 @@ final class RemoteDesktopSessionTerminationPolicyTests: XCTestCase {
             second: "previousPeer.connection.cancel()"
         )
         XCTAssertTrue(body.contains("reason: \"p2p_superseded_by_new_session\""))
-        XCTAssertTrue(body.contains("RemoteControlSecurityNoticeCenter.shared.endNotice"))
+        XCTAssertTrue(body.contains("endSecurityNotice(for: previousPeer)"))
+        let exactNoticeCleanup = try sourceSlice(
+            in: source,
+            from: "private func endSecurityNotice(for peer: PeerConnection)",
+            to: "    private func sendStreamConfigurationAcknowledgement("
+        )
+        XCTAssertTrue(exactNoticeCleanup.contains("endNotice(id: noticeID)"))
+        XCTAssertFalse(exactNoticeCleanup.contains("sessionId: peer.id"))
     }
 
     func testInternalCleanupDoesNotNotifyBeforeSessionIsVisible() {

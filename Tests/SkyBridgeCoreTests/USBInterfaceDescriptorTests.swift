@@ -35,18 +35,22 @@ final class USBInterfaceDescriptorTests: XCTestCase {
 
     func testUSBCManagerInitializerDoesNotImplicitlyScanUSB() throws {
         let source = try readSource("Sources/SkyBridgeCore/Connection/USBCConnectionManager.swift")
-        let initializer = try extractBody(
-            named: "public init()",
-            from: source
-        )
-        XCTAssertFalse(
-            initializer.contains("scanForUSBDevices"),
-            "USBCConnectionManager construction must stay cheap; USB enumeration is only allowed from explicit scan call sites."
-        )
-        XCTAssertTrue(
-            source.contains("connectionQueue.async {\n                let snapshot = Self.enumerateUSBDevicesSnapshot()"),
-            "USB enumeration should run on the dedicated USB queue and publish results back to MainActor only after enumeration completes."
-        )
+        for signature in ["public convenience init()", "init(androidPreparationFactory:"] {
+            let initializer = try extractBody(named: signature, from: source)
+            XCTAssertFalse(
+                initializer.contains("scanForUSBDevices"),
+                "USBCConnectionManager construction must stay cheap; USB enumeration is only allowed from explicit scan call sites."
+            )
+        }
+        let scan = try extractBody(named: "public func scanForUSBDevices() async", from: source)
+        XCTAssertTrue(scan.contains("try await readUSBInventory(hostOnly: false)"))
+        let read = try extractBody(named: "private func readUSBInventory(hostOnly:", from: source)
+        let queued = try XCTUnwrap(read.range(of: "connectionQueue.async {"))
+        let enumeration = try XCTUnwrap(read.range(of: "try Self.enumerateUSBDevicesSnapshot()"))
+        XCTAssertLessThan(queued.lowerBound, enumeration.lowerBound,
+            "USB enumeration must stay on the dedicated queue before MainActor publication.")
+        XCTAssertTrue(read.contains("continuation.resume(with: Result {"),
+            "Enumeration failures must reach the caller, not masquerade as an empty scan.")
     }
 
     func testUSBDiscoveryMonitoringOwnsExactlyOneInitialScan() throws {
@@ -91,7 +95,8 @@ final class USBInterfaceDescriptorTests: XCTestCase {
     private func extractBody(named signature: String, from source: String) throws -> String {
         guard let signatureRange = source.range(of: signature),
               let openingBrace = source[signatureRange.upperBound...].firstIndex(of: "{") else {
-            throw XCTSkip("Signature not found: \(signature)")
+            XCTFail("Signature not found: \(signature)")
+            throw NSError(domain: "USBInterfaceDescriptorTests", code: 1)
         }
 
         var depth = 0

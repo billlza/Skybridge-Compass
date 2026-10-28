@@ -5,6 +5,24 @@ import CryptoKit
 import LocalAuthentication
 import os
 import OSLog
+import SkyBridgeProtocolCore
+
+public typealias AuthSessionRecord = ProtectedAccountSessionStore<AuthSession>.Snapshot
+
+/// Only the Keychain executor can create or consume an observation owner. A copied
+/// durable UUID does not recover a response owner after a process interruption.
+final class AuthSessionObservation: Sendable {
+    let observation: ProtectedAccountObservation
+    let loginID: UUID
+    let source: AuthSession
+    let intent: AuthenticationMutationIntent
+    let requiresCredentialRecovery: Bool
+    fileprivate init(observation: ProtectedAccountObservation, loginID: UUID, source: AuthSession,
+                     intent: AuthenticationMutationIntent, requiresCredentialRecovery: Bool) {
+        self.observation = observation; self.loginID = loginID; self.source = source
+        self.intent = intent; self.requiresCredentialRecovery = requiresCredentialRecovery
+    }
+}
 
 public enum KeychainError: Error, LocalizedError, Sendable {
     case itemNotFound
@@ -74,6 +92,7 @@ public actor KeychainManager {
     private var interactiveUnlockCompleted = false
     private var lastInteractiveUnlockFailureAt: Date = .distantPast
     private let interactiveUnlockCooldown: TimeInterval = 12 * 60 * 60
+    private var accountObservations: [UUID: AuthSessionObservation] = [:]
 
     private init() {}
 
@@ -1437,78 +1456,269 @@ extension KeychainManager {
     private nonisolated static let authSessionService = "com.skybridge.compass.authsession"
     private nonisolated static let authSessionAccount = "primary"
 
-    /// Persist an authentication session on the KeychainManager actor.
-    ///
-    /// Security.framework calls are synchronous. Keeping this method actor-isolated
-    /// preserves write ordering while allowing MainActor callers to suspend instead
-    /// of blocking the UI during `SecItemUpdate`.
-    public func storeAuthSession(_ session: AuthSession) throws {
-        let data = try JSONEncoder().encode(session)
-        if Self.useInMemoryKeychain {
-            let key = Self.authSessionService + "|" + Self.authSessionAccount
-            Self.inMemoryLock.lock()
-            Self.inMemoryStore[key] = data
-            Self.inMemoryLock.unlock()
-            return
-        }
+    private nonisolated static let protectedAuthSessionService = "com.skybridge.compass.authsession.v2"
+    #if DEBUG || SKYBRIDGE_TESTING
+    private nonisolated static let inMemoryAuthSessionStorage = InMemoryProtectedAccountSessionStorage()
+    #endif
 
-        let status = upsertGenericPassword(
-            service: Self.authSessionService,
-            account: Self.authSessionAccount,
-            data: data,
-            accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        )
-        if status != errSecSuccess {
-            throw NSError(domain: "Keychain", code: Int(status))
+    private func protectedAuthSessionStore() throws -> ProtectedAccountSessionStore<AuthSession> {
+        #if DEBUG || SKYBRIDGE_TESTING
+        if Self.useInMemoryKeychain {
+            return ProtectedAccountSessionStore(storage: Self.inMemoryAuthSessionStorage)
         }
+        #endif
+        return ProtectedAccountSessionStore(storage: try DataProtectionAccountSessionStorage(
+            service: Self.protectedAuthSessionService, account: Self.authSessionAccount,
+            accessGroup: SkyBridgeKeychainAccessGroupResolver.requiredApplicationAccessGroup()))
+    }
+
+    /// Explicit login creates a new durable lifetime, including identical tokens.
+    /// Native I/O remains on this actor's background serial executor.
+    @discardableResult
+    public func storeAuthSession(_ session: AuthSession) throws -> AuthSessionRecord {
+        try installAuthSession(session, requireCurrent: {})
+    }
+
+    @discardableResult
+    func storeAuthSession(_ session: AuthSession, intent: AuthenticationMutationIntent) throws -> AuthSessionRecord {
+        try installAuthSession(session, requireCurrent: intent.requireCurrent)
+    }
+
+    private func installAuthSession(_ session: AuthSession, requireCurrent: () throws -> Void) throws -> AuthSessionRecord {
+        try requireCurrent()
+        let store = try protectedAuthSessionStore()
+        let previous = try store.load()
+        try requireCurrent()
+        let installed = try store.install(session, replacing: previous)
+        accountObservations.removeAll()
+        try deleteLegacyAuthSession()
+        return installed
     }
 
     public func loadAuthSession() -> AuthSession? {
-        do {
-            return try loadAuthSessionStrict()
-        } catch {
+        do { return try loadAuthSessionStrict() }
+        catch {
             logger.error("Auth session Keychain load failed: \(error.localizedDescription, privacy: .private)")
             return nil
         }
     }
 
     public func loadAuthSessionStrict() throws -> AuthSession? {
-        guard let data = try loadKeyDataStrict(
-            service: Self.authSessionService,
-            account: Self.authSessionAccount
-        ) else {
-            return nil
+        try loadAuthSessionRecordStrict()?.session
+    }
+
+    public func loadAuthSessionRecordStrict() throws -> AuthSessionRecord? {
+        try loadAuthSessionRecord(requireCurrent: {})
+    }
+
+    func loadAuthSessionRecordStrict(intent: AuthenticationMutationIntent) throws -> AuthSessionRecord? {
+        try loadAuthSessionRecord(requireCurrent: intent.requireCurrent)
+    }
+
+    private func loadAuthSessionRecord(requireCurrent: () throws -> Void) throws -> AuthSessionRecord? {
+        let store = try protectedAuthSessionStore()
+        let record = try store.loadMigratingLegacy({
+            try requireCurrent()
+            guard let data = try loadKeyDataStrict(service: Self.authSessionService,
+                                                   account: Self.authSessionAccount) else { return nil }
+            let session: AuthSession
+            do { session = try JSONDecoder().decode(AuthSession.self, from: data) }
+            catch { throw NSError(domain: "Keychain", code: Int(errSecDecode),
+                                  userInfo: [NSUnderlyingErrorKey: error]) }
+            return session
+        }, requireCurrent: requireCurrent)
+        // A canonical tombstone or malformed canonical item never reaches legacy
+        // loading. A previous canonical commit may have outlived interrupted or
+        // failed legacy retirement. Retry that idempotent cleanup on every valid
+        // canonical load without replacing the record or renewing its lifetime.
+        if record != nil {
+            try requireCurrent()
+            try deleteLegacyAuthSession()
         }
-        do {
-            return try JSONDecoder().decode(AuthSession.self, from: data)
-        } catch {
-            throw NSError(
-                domain: "Keychain",
-                code: Int(errSecDecode),
-                userInfo: [NSUnderlyingErrorKey: error]
-            )
+        return record
+    }
+
+    func beginAccountObservation(kind: ProtectedAccountObservation.Kind, expected: AuthSession,
+                                 loginID: UUID, intent: AuthenticationMutationIntent) throws -> AuthSessionObservation {
+        let store = try protectedAuthSessionStore()
+        let observation = ProtectedAccountObservation(kind: kind)
+        for attempt in 0..<2 {
+            try intent.requireCurrent()
+            guard let current = try store.load(), current.loginID == loginID, current.session == expected else {
+                throw ProtectedAccountSessionError.changed
+            }
+            let owned = Set(accountObservations.values.filter {
+                $0.loginID == loginID && $0.intent === intent
+            }.map { $0.observation.id })
+            let unresolvedCredential = current.version == 1 || current.observations.contains {
+                $0.kind == .credential && !owned.contains($0.id)
+            }
+            try intent.requireCurrent()
+            do {
+                _ = try store.beginObservation(observation, owned: owned, replacing: current)
+                let ticket = AuthSessionObservation(observation: observation, loginID: loginID,
+                    source: expected, intent: intent, requiresCredentialRecovery: unresolvedCredential)
+                accountObservations[observation.id] = ticket
+                return ticket
+            } catch ProtectedAccountSessionError.changed {
+                if attempt == 1 { throw ProtectedAccountSessionError.changed }
+            }
+        }
+        throw ProtectedAccountSessionError.changed
+    }
+
+    /// An explicit no-write CAS conflict may reconcile once with this same owner.
+    /// Every other failure consumes it and leaves its durable marker unresolved.
+    func finishAccountObservation(_ ticket: AuthSessionObservation, replacement: AuthSession? = nil,
+                                  temporaryFailure: Bool = false,
+                                  checkpoint: ProtectedAudioCheckpointUpdate = .unchanged,
+                                  expectedAudioRevision: UUID? = nil) throws -> AuthSessionRecord {
+        guard accountObservations[ticket.observation.id] === ticket else {
+            throw ProtectedAccountSessionError.changed
+        }
+        accountObservations.removeValue(forKey: ticket.observation.id)
+        let store = try protectedAuthSessionStore()
+        for attempt in 0..<2 {
+            try ticket.intent.requireCurrent()
+            guard let current = try store.load(), current.loginID == ticket.loginID,
+                  current.observations.contains(ticket.observation),
+                  ticket.observation.kind != .credential || current.session == ticket.source,
+                  expectedAudioRevision == nil || current.audioRevision == expectedAudioRevision else {
+                throw ProtectedAccountSessionError.changed
+            }
+            try ticket.intent.requireCurrent()
+            do {
+                return try store.finishObservation(ticket.observation, replacementSession: replacement,
+                    checkpoint: checkpoint,
+                    keepUnverifiedCredential: temporaryFailure && ticket.requiresCredentialRecovery,
+                    replacing: current)
+            } catch ProtectedAccountSessionError.changed {
+                if attempt == 1 { throw ProtectedAccountSessionError.changed }
+            }
+        }
+        throw ProtectedAccountSessionError.changed
+    }
+
+    func abandonAccountObservation(_ ticket: AuthSessionObservation) {
+        if accountObservations[ticket.observation.id] === ticket {
+            accountObservations.removeValue(forKey: ticket.observation.id)
         }
     }
 
-    /// Atomically replaces the persisted authentication session only when the
-    /// exact source session is still authoritative. Actor isolation keeps the
-    /// read/compare/write sequence indivisible with respect to sign-out and
-    /// account-switch writes. An already-installed exact replacement is an
-    /// idempotent success; every other divergence remains fail-closed.
-    public func replaceAuthSession(
-        expected: AuthSession,
-        with replacement: AuthSession
-    ) throws -> Bool {
-        let current = try loadAuthSessionStrict()
-        if current == replacement { return true }
-        guard current == expected else { return false }
-        try storeAuthSession(replacement)
-        return true
+    /// An exact source AND durable login are required. The one bounded conflict
+    /// retry accepts only the same login and source/replacement credentials, while
+    /// preserving the latest checkpoint or rejection written by another owner.
+    public func replaceAuthSession(expected: AuthSession, expectedLoginID: UUID,
+                                   with replacement: AuthSession) throws -> Bool {
+        try replaceAuthSession(expected: expected, expectedLoginID: expectedLoginID,
+                               with: replacement, requireCurrent: {})
     }
 
-    public func deleteAuthSession() throws {
+    func replaceAuthSession(expected: AuthSession, expectedLoginID: UUID,
+                            with replacement: AuthSession, intent: AuthenticationMutationIntent) throws -> Bool {
+        try replaceAuthSession(expected: expected, expectedLoginID: expectedLoginID,
+                               with: replacement, requireCurrent: intent.requireCurrent)
+    }
+
+    private func replaceAuthSession(expected: AuthSession, expectedLoginID: UUID,
+                                    with replacement: AuthSession, requireCurrent: () throws -> Void) throws -> Bool {
+        let store = try protectedAuthSessionStore()
+        for attempt in 0..<2 {
+            try requireCurrent()
+            guard let current = try store.load(), current.loginID == expectedLoginID else { return false }
+            if current.session == replacement { return true }
+            guard current.session == expected else { return false }
+            try requireCurrent()
+            do { _ = try store.refresh(replacement, replacing: current); return true }
+            catch ProtectedAccountSessionError.changed {
+                if attempt == 1 { return false }
+            }
+        }
+        return false
+    }
+
+    func revokeAudioAuthorization(expected: AuthSession, loginID: UUID,
+                                  intent: AuthenticationMutationIntent) throws {
+        let store = try protectedAuthSessionStore()
+        for attempt in 0..<2 {
+            try intent.requireCurrent()
+            guard let current = try store.load(), current.loginID == loginID,
+                  current.session == expected else { throw ProtectedAccountSessionError.changed }
+            if current.audioRevoked { return }
+            try intent.requireCurrent()
+            do { _ = try store.revokeAudio(replacing: current); return }
+            catch ProtectedAccountSessionError.changed {
+                if attempt == 1 { throw ProtectedAccountSessionError.changed }
+            }
+        }
+        throw ProtectedAccountSessionError.changed
+    }
+
+    func loadAudioMembershipCheckpoint(loginID: UUID, intent: AuthenticationMutationIntent) throws
+        -> AudioMembershipPersistenceSnapshot {
+        try intent.requireCurrent()
+        guard let record = try protectedAuthSessionStore().load(), record.loginID == loginID,
+              record.session?.isAuthenticatedForProtectedServices == true else {
+            throw ProtectedAccountSessionError.changed
+        }
+        guard !record.audioRevoked else { throw ProtectedAccountSessionError.audioRevoked }
+        try requireOwnedAudioObservations(record, loginID: loginID, intent: intent)
+        try intent.requireCurrent()
+        return AudioMembershipPersistenceSnapshot(revision: record.audioRevision, checkpoint: record.audioCheckpoint)
+    }
+
+    func saveAudioMembershipCheckpoint(_ bytes: Data?, replacing revision: UUID, loginID: UUID,
+                                       intent: AuthenticationMutationIntent) throws -> AudioMembershipPersistenceSnapshot {
+        let store = try protectedAuthSessionStore()
+        // A credential-only refresh can race the write. Retry once only while
+        // both the durable login and audio revision remain exactly unchanged.
+        for attempt in 0..<2 {
+            try intent.requireCurrent()
+            guard let record = try store.load(), record.loginID == loginID, record.audioRevision == revision,
+                  record.session?.isAuthenticatedForProtectedServices == true else {
+                throw ProtectedAccountSessionError.changed
+            }
+            guard !record.audioRevoked else { throw ProtectedAccountSessionError.audioRevoked }
+            try requireOwnedAudioObservations(record, loginID: loginID, intent: intent)
+            try intent.requireCurrent()
+            do {
+                let saved = try store.saveAudioCheckpoint(bytes, replacing: record)
+                return AudioMembershipPersistenceSnapshot(revision: saved.audioRevision, checkpoint: saved.audioCheckpoint)
+            } catch ProtectedAccountSessionError.changed {
+                if attempt == 1 { throw ProtectedAccountSessionError.changed }
+            }
+        }
+        throw ProtectedAccountSessionError.changed
+    }
+
+    private func requireOwnedAudioObservations(_ record: AuthSessionRecord, loginID: UUID,
+                                               intent: AuthenticationMutationIntent) throws {
+        guard record.version == 2, record.observations.allSatisfy({ observation in
+            guard let owner = accountObservations[observation.id] else { return false }
+            return owner.loginID == loginID && owner.intent === intent
+        }) else { throw ProtectedAccountSessionError.verificationRequired }
+    }
+
+    public func deleteAuthSession() throws { try clearAuthSession(requireCurrent: {}) }
+
+    func deleteAuthSession(intent: AuthenticationMutationIntent) throws {
+        try clearAuthSession(requireCurrent: intent.requireCurrent)
+    }
+
+    private func clearAuthSession(requireCurrent: () throws -> Void) throws {
+        try requireCurrent()
+        let store = try protectedAuthSessionStore()
+        let current = try store.load()
+        try requireCurrent()
+        _ = try store.clear(replacing: current)
+        accountObservations.removeAll()
+        try deleteLegacyAuthSession()
+    }
+
+    private func deleteLegacyAuthSession() throws {
         try deleteAPIKey(service: Self.authSessionService, account: Self.authSessionAccount)
     }
+
 }
 
 final class KeychainSerialExecutor: SerialExecutor, @unchecked Sendable {

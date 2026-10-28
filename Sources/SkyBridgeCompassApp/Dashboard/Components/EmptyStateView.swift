@@ -27,10 +27,6 @@ public struct EmptyStateView: View {
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity, minHeight: 200)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(red: 20/255, green: 25/255, blue: 45/255))
-        )
+        .dashboardGlassSurface(cornerRadius: 12)
     }
 }
-

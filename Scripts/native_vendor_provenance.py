@@ -8,9 +8,11 @@ import hashlib
 import json
 import os
 import pathlib
+import plistlib
 import re
 import subprocess
 import tempfile
+from xml.parsers.expat import ExpatError
 from typing import Any
 
 
@@ -106,6 +108,51 @@ def locked_family_sha256(family: str, locked_family: dict[str, Any]) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
+def versioned_framework_link(root: pathlib.Path, link: pathlib.Path) -> str:
+    """Accept only the standard, relative A-version macOS framework aliases.
+
+    The literal link is hashed separately; its real payload is also traversed and
+    hashed. Arbitrary aliases, linked payloads, cycles and escapes remain invalid.
+    """
+    framework = next((parent for parent in link.parents if parent.suffix == ".framework"), None)
+    if framework is None or not framework.is_relative_to(root):
+        raise ProvenanceError(f"symlinks are forbidden outside versioned frameworks: {link}")
+    suffix = link.relative_to(framework).as_posix()
+    aliases = {name: f"Versions/Current/{name}"
+               for name in [framework.stem, "Headers", "Modules", "Resources"]}
+    aliases["Versions/Current"] = "A"
+    target = os.readlink(link)
+    if suffix not in aliases or target != aliases[suffix]:
+        raise ProvenanceError(f"symlinks are forbidden outside canonical framework aliases: {link}")
+    version = framework / "Versions/A"
+    info = version / "Resources/Info.plist"
+    try:
+        if (framework / "Versions").is_symlink() or version.is_symlink() or not version.is_dir():
+            raise ValueError("version must be a real directory")
+        expected = framework.resolve(strict=True) / "Versions/A"
+        if suffix != "Versions/Current":
+            expected /= suffix
+        if link.resolve(strict=True) != expected:
+            raise ValueError("alias does not resolve to its own direct payload")
+        if not (expected.is_file() if suffix == framework.stem else expected.is_dir()):
+            raise ValueError("alias payload has the wrong type")
+        if info.is_symlink() or (version / "Resources").is_symlink():
+            raise ValueError("framework metadata must be real files")
+        with info.open("rb") as stream:
+            contents = stream.read(1024 * 1024 + 1)
+        if len(contents) > 1024 * 1024:
+            raise ValueError("framework metadata exceeds the size limit")
+        metadata = plistlib.loads(contents)
+        if (not isinstance(metadata, dict)
+                or metadata.get("CFBundleSupportedPlatforms") != ["MacOSX"]
+                or metadata.get("CFBundleExecutable") != framework.stem
+                or metadata.get("CFBundlePackageType") != "FMWK"):
+            raise ValueError("alias is not part of a declared macOS framework")
+    except (OSError, RuntimeError, ValueError, plistlib.InvalidFileException, ExpatError) as error:
+        raise ProvenanceError(f"invalid versioned framework alias: {link}: {error}") from error
+    return target
+
+
 def tree_digest(path: pathlib.Path) -> tuple[str, int]:
     if not path.is_dir() or path.is_symlink():
         raise ProvenanceError(f"artifact root must be a real directory: {path}")
@@ -113,7 +160,13 @@ def tree_digest(path: pathlib.Path) -> tuple[str, int]:
     count = 0
     for candidate in sorted(path.rglob("*"), key=lambda item: item.as_posix()):
         if candidate.is_symlink():
-            raise ProvenanceError(f"symlinks are forbidden in native artifacts: {candidate}")
+            target = versioned_framework_link(path, candidate)
+            digest.update(candidate.relative_to(path).as_posix().encode("utf-8"))
+            digest.update(b"\0symlink\0")
+            digest.update(target.encode("utf-8"))
+            digest.update(b"\n")
+            count += 1
+            continue
         if not candidate.is_file():
             continue
         relative = candidate.relative_to(path).as_posix()
@@ -420,22 +473,69 @@ def mach_o_platforms(path: pathlib.Path) -> list[str]:
 def dylib_metadata(
     path: pathlib.Path, repository_root: pathlib.Path, recorded_path: str | None = None
 ) -> dict[str, Any]:
-    load_lines = run("otool", "-L", str(path)).splitlines()[1:]
-    dependencies = [line.strip().split(" ", 1)[0] for line in load_lines if line.strip()]
-    identifier_lines = run("otool", "-D", str(path)).splitlines()[1:]
-    identifiers = [line.strip() for line in identifier_lines if line.strip()]
-    if len(identifiers) != 1:
-        raise ProvenanceError(f"expected exactly one dylib install name: {path}")
+    architectures = run("lipo", "-archs", str(path)).split()
+    if not architectures or len(set(architectures)) != len(architectures):
+        raise ProvenanceError(f"invalid dylib architecture inventory: {path}")
+    identifiers: list[str] = []
+    per_architecture_dependencies: list[list[str]] = []
+    # Universal libraries have a separate header/install-name block for every architecture.
+    # Query each slice explicitly; never treat the next architecture's header as a dependency.
+    for architecture in architectures:
+        load_lines = run("otool", "-arch", architecture, "-L", str(path)).splitlines()[1:]
+        dependencies = [line.strip().split(" (compatibility version", 1)[0] for line in load_lines if line.strip()]
+        names = [line.strip() for line in run("otool", "-arch", architecture, "-D", str(path)).splitlines()[1:] if line.strip()]
+        if len(names) != 1:
+            raise ProvenanceError(f"expected one dylib install name per architecture: {path}")
+        identifiers.append(names[0])
+        per_architecture_dependencies.append(dependencies)
+    if len(set(identifiers)) != 1 or any(value != per_architecture_dependencies[0] for value in per_architecture_dependencies):
+        raise ProvenanceError(f"dylib install name or dependencies differ between architectures: {path}")
     return {
         "path": recorded_path or relative_to_repository(path, repository_root),
         "size": path.stat().st_size,
         "sha256": sha256_file(path),
-        "architectures": run("lipo", "-archs", str(path)).split(),
+        "architectures": architectures,
         "platforms": mach_o_platforms(path),
         "deployment_targets": mach_o_minos(path),
         "install_name": identifiers[0],
-        "dependencies": dependencies,
+        "dependencies": per_architecture_dependencies[0],
     }
+
+
+def native_binary_kind(path: pathlib.Path) -> str | None:
+    """Recognize archives/dylibs and the real executable of a dynamic framework.
+
+    Canonical versioned framework aliases are validated by tree_digest and are not duplicate
+    binary records. The real executable must agree with its bounded, regular Info.plist and receives the
+    same Mach-O platform, architecture, install-name and dependency checks as a dylib.
+    """
+    info = None
+    if path.parent.suffix == ".framework" and path.name == path.parent.stem:
+        info = path.parent / "Info.plist"
+    elif (path.parent.name == "A" and path.parent.parent.name == "Versions"
+          and path.parent.parent.parent.suffix == ".framework"
+          and path.name == path.parent.parent.parent.stem):
+        info = path.parent / "Resources/Info.plist"
+    if info is not None:
+        if not info.is_file() or info.is_symlink():
+            raise ProvenanceError(f"framework requires a bounded regular Info.plist: {path}")
+        with info.open("rb") as stream:
+            contents = stream.read(1024 * 1024 + 1)
+        if len(contents) > 1024 * 1024:
+            raise ProvenanceError(f"framework requires a bounded regular Info.plist: {path}")
+        try:
+            payload = plistlib.loads(contents)
+        except (ValueError, plistlib.InvalidFileException, ExpatError) as error:
+            raise ProvenanceError(f"invalid framework Info.plist: {path}") from error
+        if not isinstance(payload, dict) or payload.get("CFBundleExecutable") != path.name or \
+                payload.get("CFBundlePackageType") != "FMWK":
+            raise ProvenanceError(f"framework executable disagrees with Info.plist: {path}")
+        return "dylib"
+    if path.suffix == ".dylib":
+        return "dylib"
+    if path.suffix == ".a":
+        return "archive"
+    return None
 
 
 def archive_metadata(
@@ -500,14 +600,15 @@ def create_record(args: argparse.Namespace) -> dict[str, Any]:
             "file_count": file_count,
         }
         for candidate in sorted(path.rglob("*"), key=lambda item: item.as_posix()):
-            if not candidate.is_file():
+            if candidate.is_symlink() or not candidate.is_file():
                 continue
             recorded_path = (
                 pathlib.PurePosixPath(relative) / candidate.relative_to(path).as_posix()
             ).as_posix()
-            if candidate.suffix == ".dylib":
+            kind = native_binary_kind(candidate)
+            if kind == "dylib":
                 binaries.append(dylib_metadata(candidate, repository_root, recorded_path))
-            elif candidate.suffix == ".a":
+            elif kind == "archive":
                 binaries.append(archive_metadata(candidate, repository_root, recorded_path))
     recipe_path = pathlib.Path(args.recipe).resolve()
     return {
@@ -616,7 +717,7 @@ def verify_record(
         if digest != root.get("tree_sha256") or file_count != root.get("file_count"):
             raise ProvenanceError(f"artifact tree differs from provenance: {label}")
         for candidate in artifact_path.rglob("*"):
-            if candidate.is_file() and candidate.suffix in {".a", ".dylib"}:
+            if not candidate.is_symlink() and candidate.is_file() and native_binary_kind(candidate) is not None:
                 expected_binary_paths.add(
                     (
                         pathlib.PurePosixPath(root["path"])
@@ -636,11 +737,12 @@ def verify_record(
         binary_path = safe_repository_path(binary["path"], repository_root, "binary")
         if not binary_path.is_file() or binary_path.is_symlink():
             raise ProvenanceError(f"missing native binary: {binary['path']}")
-        if binary_path.suffix not in {".a", ".dylib"}:
+        kind = native_binary_kind(binary_path)
+        if kind is None:
             raise ProvenanceError(f"unsupported native binary type: {binary['path']}")
         actual = (
             dylib_metadata(binary_path, repository_root)
-            if binary_path.suffix == ".dylib"
+            if kind == "dylib"
             else archive_metadata(binary_path, repository_root)
         )
         if actual != binary:

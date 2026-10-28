@@ -8,6 +8,7 @@
 //
 
 import Foundation
+import SkyBridgeProtocolCore
 
 enum PQCProviderPreferenceStorageKeys {
     static let preferXWingHybrid = "Settings.PreferXWingHybrid"
@@ -20,6 +21,53 @@ enum PQCProviderPreferenceStorageKeys {
 /// 负责能力探测和 Provider 选择
 @available(iOS 17.0, *)
 public enum CryptoProviderFactory {
+
+    /// Captures existing, admitted runtime instances for this attempt. No key
+    /// absence, network failure, or global preference is a capability oracle.
+    @available(iOS 17.0, *)
+    public static func captureLANInventory(identityAlgorithm: ProtocolSigningAlgorithm,
+                                           policy: PQCModePolicySnapshot) throws -> LANPQCProviderInventory {
+        let capability = detectCapability()
+        var providers: [UInt16: any CryptoProvider] = [:]
+        var profile: String?
+        if identityAlgorithm == .mlDSA65, let session = QPeriaptIOSRuntime.currentSession {
+            providers[0x0012] = QPeriaptCryptoProvider(session: session)
+            profile = session.authProfile
+        }
+        #if HAS_APPLE_PQC_SDK
+        if #available(iOS 26.0, macOS 26.0, *) {
+            if capability.hasAppleXWing { providers[0x0001] = AppleXWingCryptoProvider() }
+            if capability.hasApplePQC { providers[0x0101] = ApplePQCCryptoProvider() }
+        }
+        #endif
+        if providers[0x0101] == nil, capability.hasLiboqs { providers[0x0101] = OQSPQCCryptoProvider() }
+        let permitted = policy.selection.locallyReadySuites(Array(providers.keys))
+        providers = providers.filter { permitted.contains($0.key) }
+        if providers[0x0012] == nil { profile = nil }
+        try SignedKEMRefreshNegotiation.validateCapabilities(suites: permitted,
+            platform: "iOS", osVersion: "iOS \(ProcessInfo.processInfo.operatingSystemVersion.majorVersion).\(ProcessInfo.processInfo.operatingSystemVersion.minorVersion)", profile: profile,
+            allowEmpty: true, requireSorted: false)
+        try PQCModePolicyStore.standard.withCurrent(policy) {}
+        return LANPQCProviderInventory(policy: policy, providers: providers, qProfile: profile)
+    }
+
+
+    @available(iOS 17.0, *)
+    public static func captureLANHandshakePlan(candidates: [String], pinnedFingerprints: Set<String>) async throws -> LANPQCHandshakePlan {
+        let policy = try PQCModePolicyStore.standard.snapshot()
+        let inventory = try captureLANInventory(identityAlgorithm: try ProtocolSigningIdentityPolicy.requiredConfiguration().algorithm, policy: policy)
+        if policy.selection.strictlyMatchSelectedMode {
+            return try inventory.selecting([policy.selection.preference.rawValue])
+        }
+        guard let evidence = await KEMTrustStore.shared.signedRefreshEvidence(forAny: candidates),
+              let fingerprint = evidence.protocolIdentityFingerprint, pinnedFingerprints.contains(fingerprint),
+              let provenance = evidence.negotiation else { throw PQCModeSelectionError.negotiatedEvidenceRequired }
+        let selected = try provenance.select(mode: policy.selection, locallyReadySuites: inventory.suiteWireIds,
+            localQProfile: inventory.qProfile)
+        guard evidence.suiteWireIds.contains(selected) else { throw PQCModeSelectionError.negotiatedEvidenceRequired }
+        return try inventory.selecting([selected])
+    }
+
     // Apple provider path boundary:
     // 1) Apple provider path does not redefine the protocol contract.
     // 2) Apple provider path does not alter the primary evidence base of the paper.
@@ -198,16 +246,9 @@ public enum CryptoProviderFactory {
         let baseProvider = make(policy: policy)
 
         if baseProvider.tier == .qperiaptPQC {
-            let peerSupportsQPeriapt = peerSupportedSuites.contains {
-                $0 == .qperiaptABI2PolicyBound
-            }
-            if peerSupportsQPeriapt {
-                return baseProvider
-            }
-            return selectStandardProvider(
-                capability: detectCapability(),
-                policy: policy
-            )
+            // Preserve the user's single-suite policy. The authenticated
+            // handshake rejects peers with no Q intersection.
+            return baseProvider
         }
 
         #if HAS_APPLE_PQC_SDK
@@ -247,9 +288,11 @@ public enum CryptoProviderFactory {
         capability: Capability,
         policy: SelectionPolicy
     ) -> any CryptoProvider {
-        if isQPeriaptSelectionAllowed(for: policy),
-           capability.hasQPeriapt,
-           let provider = QPeriaptIOSRuntime.makeCryptoProvider() {
+        if isQPeriaptSelectionAllowed(for: policy), QPeriaptIOSRuntime.isRequested() {
+            guard capability.hasQPeriapt,
+                  let provider = QPeriaptIOSRuntime.makeCryptoProvider() else {
+                return UnavailablePQCProvider()
+            }
             return provider
         }
         return selectStandardProvider(capability: capability, policy: policy)
@@ -404,5 +447,41 @@ internal struct UnavailablePQCProvider: CryptoProvider, Sendable {
     
     func generateKeyPair(for usage: KeyUsage) async throws -> KeyPair {
         throw CryptoProviderError.pqcNotAvailable
+    }
+}
+
+/// A local provider owner, not peer trust. The caller supplies an authenticated
+/// SKR intersection (initiator) or verifies MessageA before responder commit.
+@available(iOS 17.0, *)
+public struct LANPQCProviderInventory: Sendable {
+    public let policy: PQCModePolicySnapshot
+    fileprivate let providers: [UInt16: any CryptoProvider]
+    public let qProfile: String?
+    public var suiteWireIds: [UInt16] {
+        SignedKEMRefreshNegotiation.preferenceOrder.filter { providers[$0] != nil }
+    }
+    public func provider(for selected: UInt16) throws -> any CryptoProvider {
+        try PQCModePolicyStore.standard.withCurrent(policy) {
+            guard let provider = providers[selected],
+                  provider.supportedSuites.contains(where: { $0.wireId == selected }) else {
+                throw PQCModeSelectionError.unavailableRuntime
+            }
+            return provider
+        }
+    }
+    public func selecting(_ authenticatedIntersection: [UInt16]) throws -> LANPQCHandshakePlan {
+        let selected = try policy.selection.select(fromVerifiedIntersection:
+            authenticatedIntersection.filter { providers[$0] != nil })
+        return LANPQCHandshakePlan(inventory: self, suiteWireId: selected, provider: try provider(for: selected))
+    }
+}
+
+@available(iOS 17.0, *)
+public struct LANPQCHandshakePlan: Sendable {
+    public let inventory: LANPQCProviderInventory
+    public let suiteWireId: UInt16
+    public let provider: any CryptoProvider
+    public func withCurrent<T>(_ publish: () throws -> T) throws -> T {
+        try PQCModePolicyStore.standard.withCurrent(inventory.policy, publish)
     }
 }

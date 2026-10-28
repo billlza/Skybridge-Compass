@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn host_catalog_excludes_commands_absent_from_the_non_mac_parser() {
+    let portable = capabilities_for_host("linux");
+    assert!(!portable.is_empty());
+    assert!(portable.iter().all(|capability| {
+        capability.runtime_target != OperatorRuntimeTarget::MacAppRuntime
+            && !capability.id.starts_with("crossnet.")
+    }));
+    assert!(
+        portable
+            .iter()
+            .any(|capability| capability.id == "file.transfer.send")
+    );
+    let mac = capabilities_for_host("macos");
+    assert!(
+        mac.iter()
+            .any(|capability| capability.id == "crossnet.connect")
+    );
+    assert!(portable.iter().all(|capability| mac.contains(capability)));
+}
+
+#[test]
 fn operator_capability_contract_covers_requested_surface_without_fake_success() {
     let capabilities = operator_capabilities();
     let ids = capabilities
@@ -462,7 +483,14 @@ fn operator_capability_matrix_keeps_ios_out_of_rust_runtime_control() {
                     .contains("live signed-app socket smoke")
                     || capability
                         .authority_boundary
-                        .contains("real-device cross-platform"),
+                        .contains("real-device cross-platform")
+                    || (capability.runtime_target == OperatorRuntimeTarget::WindowsAppRuntime
+                        && capability
+                            .authority_boundary
+                            .contains("Native Windows app-bound pipe smoke remains pending")
+                        && capability
+                            .verification_gate
+                            .contains("native Windows app-bound pipe smoke")),
                 "{} must state which live evidence is still missing",
                 capability.id
             );
@@ -607,4 +635,35 @@ fn operator_capability_verification_gates_cite_evidence_that_exists() {
 fn operator_capability_contract_renders_text_and_json() -> Result<()> {
     print_operator_capabilities(false)?;
     print_operator_capabilities(true)
+}
+
+#[test]
+fn windows_app_catalog_is_host_scoped_and_keeps_native_proof_pending() {
+    let windows = capabilities_for_host("windows");
+    let app = windows
+        .iter()
+        .filter(|cap| cap.id.starts_with("app."))
+        .collect::<Vec<_>>();
+    assert_eq!(app.len(), 7);
+    assert!(
+        app.iter()
+            .all(|cap| cap.runtime_target == OperatorRuntimeTarget::WindowsAppRuntime)
+    );
+    for id in [
+        "app.settings.set",
+        "app.remote_desktop.start",
+        "app.remote_desktop.stop",
+    ] {
+        assert_eq!(
+            app.iter().find(|cap| cap.id == id).unwrap().status,
+            OperatorCapabilityStatus::PendingLiveProof
+        );
+    }
+    for host in ["macos", "linux"] {
+        assert!(
+            capabilities_for_host(host)
+                .iter()
+                .all(|cap| !cap.id.starts_with("app."))
+        );
+    }
 }

@@ -105,19 +105,19 @@ struct SettingsView: View {
                     
                     Text(authManager.currentUser?.email ?? t("settings.user.not_logged_in"))
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(LiquidGlass.supportingText)
                     
                     if let nebulaId = authManager.currentUser?.nebulaId, !nebulaId.isEmpty {
                         Text("\(RuntimeLocalization.string("Nebula 标识")): \(nebulaId)")
                             .font(.caption2)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(LiquidGlass.supportingText)
                             .lineLimit(1)
                     }
                     
                     if let deviceID = UIDevice.current.identifierForVendor?.uuidString.prefix(8) {
                         Text("\(t("settings.user.device_id")): \(deviceID)")
                             .font(.caption2)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(LiquidGlass.supportingText)
                     }
                 }
 
@@ -131,6 +131,12 @@ struct SettingsView: View {
                 }
             }
             .padding(.vertical, 8)
+            NavigationLink {
+                ScrollView { AccountDevicesSectionView().padding() }
+                    .navigationTitle(RuntimeLocalization.string("accountDevices.myDevices"))
+            } label: {
+                Label(RuntimeLocalization.string("accountDevices.myDevices"), systemImage: "person.crop.rectangle.stack")
+            }
         }
     }
     
@@ -168,7 +174,7 @@ struct SettingsView: View {
                     Spacer()
                     Text(pqcPolicyStatus.label)
                         .font(.caption)
-                        .foregroundColor(Self.pqcPolicyStatusColor(for: pqcPolicyStatus.tone))
+                        .foregroundStyle(.primary)
                 }
             }
             
@@ -178,7 +184,7 @@ struct SettingsView: View {
             
             LabeledContent {
                 Text("未启用")
-                    .foregroundColor(.secondary)
+                    .foregroundColor(LiquidGlass.supportingText)
             } label: {
                 Label(t("settings.biometric"), systemImage: "faceid")
             }
@@ -191,7 +197,7 @@ struct SettingsView: View {
                     hasKeyPair: pqcManager.hasKeyPair
                 )
                 Text(pqcPolicyStatus.detail)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(LiquidGlass.supportingText)
             } label: {
                 Label(t("settings.e2ee"), systemImage: "lock.fill")
             }
@@ -202,10 +208,15 @@ struct SettingsView: View {
     
     private var appearanceSettingsSection: some View {
         Section(t("settings.section.appearance")) {
-            Picker(t("settings.theme"), selection: $themeConfiguration.isDarkMode) {
-                Text(t("settings.theme.light")).tag(false)
-                Text(t("settings.theme.dark")).tag(true)
+            Picker(t("settings.background_style"), selection: $themeConfiguration.isDarkMode) {
+                Text(t("settings.background_style.classic")).tag(true)
+                Text(t("settings.background_style.light")).tag(false)
             }
+            .accessibilityIdentifier("settings.background_style")
+
+            Text(t("settings.background_style.description"))
+                .font(.caption)
+                .foregroundStyle(LiquidGlass.supportingText)
             
             Picker(localizationManager.localized("settings.language"), selection: $localizationManager.currentLanguage) {
                 ForEach(AppLanguage.allCases, id: \.self) { language in
@@ -255,14 +266,14 @@ struct SettingsView: View {
                 Text(t("settings.version"))
                 Spacer()
                 Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "-")
-                    .foregroundColor(.secondary)
+                    .foregroundColor(LiquidGlass.supportingText)
             }
             
             HStack {
                 Text(t("settings.build"))
                 Spacer()
                 Text(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1")
-                    .foregroundColor(.secondary)
+                    .foregroundColor(LiquidGlass.supportingText)
             }
             
             NavigationLink(destination: LicensesView()) {
@@ -381,7 +392,11 @@ struct PQCSecuritySettingsView: View {
     @EnvironmentObject private var authManager: AuthenticationManager
     @StateObject private var pqcManager = PQCCryptoManager.instance
     @State private var errorMessage: String?
+    @StateObject private var managementTrust = TrustedDeviceStore.shared
+    @State private var revokedManagementDeviceIDs: Set<String> = []
     @State private var requestedProviderPreference: PQCProviderPreference = .mlkem
+    @State private var strictlyMatchSelectedMode = true
+    @State private var modePolicyReadable = false
     @State private var isApplyingProviderPreference = false
     @State private var requestedProtocolSigningAlgorithm =
         ProtocolSigningIdentityPolicy.requestedPQCAlgorithm()
@@ -399,6 +414,19 @@ struct PQCSecuritySettingsView: View {
     
     var body: some View {
         List {
+            Section("CLI 管理授权") {
+                Text("握手配置与文件审批分别授权。首次需要本机确认；持续授权绑定完整配对身份。此处同时撤销两项授权，包括临时授权。")
+                ForEach(managementTrust.trustedDevices) { device in
+                    Button(role: .destructive) {
+                        do {
+                            try IOSHandshakeConfiguration.revokeManagement(for: device)
+                            revokedManagementDeviceIDs.insert(device.id)
+                        } catch { errorMessage = error.localizedDescription }
+                    } label: {
+                        Text(revokedManagementDeviceIDs.contains(device.id) ? "已撤销：\(device.name)" : "撤销 \(device.name) 的管理授权")
+                    }
+                }
+            }
             Section("加密算法") {
                 let pqcPolicyStatus = SettingsView.pqcPolicyStatusPresentation(
                     enforcePQCHandshake: pqcManager.enforcePQCHandshake,
@@ -417,57 +445,73 @@ struct PQCSecuritySettingsView: View {
                 LabeledContent("Provider", value: pqcManager.providerInfo)
                 LabeledContent("安全层级", value: pqcManager.currentTier.rawValue)
 
-                let selectedProviderAvailability = pqcManager
-                    .providerAvailability(requestedProviderPreference)
-                Picker("首选 KEM / Provider", selection: $requestedProviderPreference) {
-                    ForEach(PQCProviderPreference.allCases) { preference in
-                        let availability = pqcManager.providerAvailability(preference)
-                        Text(
-                            "\(Self.providerPreferenceLabel(preference)) · " +
-                                (availability.isAvailable ? "可用" : "不可用")
-                        )
-                            .tag(preference)
+                Toggle("自动选择（推荐）", isOn: Binding(
+                    get: { !strictlyMatchSelectedMode },
+                    set: { automatic in
+                        do {
+                            try pqcManager.setStrictlyMatchSelectedMode(!automatic)
+                            strictlyMatchSelectedMode = !automatic
+                        } catch { errorMessage = error.localizedDescription }
                     }
-                }
-
-                Button {
-                    applyProviderPreference()
-                } label: {
-                    if isApplyingProviderPreference {
-                        HStack(spacing: 8) {
-                            ProgressView()
-                            Text("正在验证并切换…")
-                        }
-                    } else {
-                        Text("应用首选套件")
-                    }
-                }
-                .disabled(
-                    isApplyingProviderPreference
-                        || isApplyingProtocolIdentity
-                        || !selectedProviderAvailability.isAvailable
-                )
-
-                Text(selectedProviderAvailability.detail)
+                ))
+                .disabled(!modePolicyReadable || isApplyingProviderPreference || isApplyingProtocolIdentity)
+                Text("设备直连时自动选择双方支持的安全连接方式，通常无需调整。关闭后仅允许指定算法。")
                     .font(.footnote)
-                    .foregroundColor(
-                        selectedProviderAvailability.isAvailable
-                            ? .secondary
-                            : .orange
+                    .foregroundStyle(.secondary)
+
+                if strictlyMatchSelectedMode {
+                    let selectedProviderAvailability = pqcManager
+                        .providerAvailability(requestedProviderPreference)
+                    Picker("指定算法（高级）", selection: $requestedProviderPreference) {
+                        ForEach(PQCProviderPreference.allCases) { preference in
+                            let availability = pqcManager.providerAvailability(preference)
+                            Text(
+                                "\(Self.providerPreferenceLabel(preference)) · " +
+                                    (availability.isAvailable ? "可用" : "不可用")
+                            )
+                                .tag(preference)
+                        }
+                    }
+
+                    Button {
+                        applyProviderPreference()
+                    } label: {
+                        if isApplyingProviderPreference {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                Text("正在验证并切换…")
+                            }
+                        } else {
+                            Text("应用首选套件")
+                        }
+                    }
+                    .disabled(
+                        isApplyingProviderPreference
+                            || isApplyingProtocolIdentity
+                            || !selectedProviderAvailability.isAvailable
                     )
 
-                if requestedProviderPreference == .qPeriaptBeta {
-                    Text("Q-Periapt ABI2 为策略绑定 Beta 路径，仅在生产策略会话已验证且主协议身份为 ML-DSA-65 时启用；不满足条件会拒绝并回滚。")
+                    Text(selectedProviderAvailability.detail)
                         .font(.footnote)
                         .foregroundColor(
-                            requestedProtocolSigningAlgorithm == .mlDSA65
+                            selectedProviderAvailability.isAvailable
                                 ? .secondary
                                 : .orange
                         )
-                } else if requestedProviderPreference == .xwingHybrid {
-                    Text("X-Wing 将 ML-KEM-768 与 X25519 组合；仅在本机 Apple PQC 运行时自检通过时启用。")
-                        .font(.footnote)
-                        .foregroundColor(.secondary)
+
+                    if requestedProviderPreference == .qPeriaptBeta {
+                        Text("Q-Periapt ABI2 为策略绑定 Beta 路径，仅在生产策略会话已验证且主协议身份为 ML-DSA-65 时启用；不满足条件会拒绝并回滚。")
+                            .font(.footnote)
+                            .foregroundColor(
+                                requestedProtocolSigningAlgorithm == .mlDSA65
+                                    ? .secondary
+                                    : .orange
+                            )
+                    } else if requestedProviderPreference == .xwingHybrid {
+                        Text("X-Wing 将 ML-KEM-768 与 X25519 组合；仅在本机 Apple PQC 运行时自检通过时启用。")
+                            .font(.footnote)
+                            .foregroundColor(LiquidGlass.supportingText)
+                    }
                 }
             }
 
@@ -483,7 +527,7 @@ struct PQCSecuritySettingsView: View {
                 if !Self.mlDSA87SoftwareAvailable {
                     Text("ML-DSA-87 需要 iOS 26+ 与包含 Apple PQC 的正式构建。")
                         .font(.footnote)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(LiquidGlass.supportingText)
                 }
 
                 Toggle(
@@ -498,7 +542,7 @@ struct PQCSecuritySettingsView: View {
                             ?? "此设备当前不能创建 Secure Enclave ML-DSA 密钥。"
                     )
                         .font(.footnote)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(LiquidGlass.supportingText)
                 }
 
                 Button {
@@ -540,26 +584,26 @@ struct PQCSecuritySettingsView: View {
                 } else if !protocolIdentityRuntimeIsActive {
                     Text("这是已配置意图；运行时恢复密钥并完成签名自检后才会标记为已激活。")
                         .font(.footnote)
-                        .foregroundColor(.orange)
+                        .foregroundStyle(.primary)
                 }
 
                 if activeProtocolSigningAlgorithm == .mlDSA87 {
                     if protocolIdentityRuntimeIsActive {
                         Text("本机 ML-DSA-87 主身份已恢复并通过签名自检。")
                             .font(.footnote)
-                            .foregroundColor(.orange)
+                            .foregroundStyle(.primary)
                     } else {
                         Text("已配置 ML-DSA-87 主身份；运行时恢复密钥并完成签名自检后才会激活。")
                             .font(.footnote)
-                            .foregroundColor(.orange)
+                            .foregroundStyle(.primary)
                     }
                     Text("跨网络会话要求对端精确绑定原始 87 公钥；尚未重新批准的连接会明确拒绝。其他路径若使用独立的 65 兼容身份，也不会冒充 87。")
                         .font(.footnote)
-                        .foregroundColor(.orange)
+                        .foregroundStyle(.primary)
                 }
                 Text("Secure Enclave 仅约束所选主身份的本机私钥驻留；不宣称对端硬件证明，该精确密钥槽失败时不会回退到软件密钥。")
                     .font(.footnote)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(LiquidGlass.supportingText)
             }
             
             Section("密钥状态") {
@@ -581,7 +625,7 @@ struct PQCSecuritySettingsView: View {
                         Text("生成时间")
                         Spacer()
                         Text(keyGenDate.formatted())
-                            .foregroundColor(.secondary)
+                            .foregroundColor(LiquidGlass.supportingText)
                     }
                 }
             }
@@ -621,14 +665,14 @@ struct PQCSecuritySettingsView: View {
                 }
                 Text("原语级 microbench（encap/sign/verify/seal-open）固定为 warmup=10、N=1000、batches=3，导出 schema v3 JSON 到 artifact 管线。")
                     .font(.footnote)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(LiquidGlass.supportingText)
 
                 NavigationLink(destination: RealNetworkE2EBenchView()) {
                     Label(RuntimeLocalization.string("真实网络端到端微研究"), systemImage: "antenna.radiowaves.left.and.right")
                 }
                 Text("在 iPhone/iPad 上作为 client，连接到 Mac 上的测试 server，对比 classic(687B) 与 PQC(12,002B) 的端到端时延与失败类型，并导出 CSV 到 Artifacts 管线。")
                     .font(.footnote)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(LiquidGlass.supportingText)
             }
         }
         .scrollContentBackground(.hidden)
@@ -637,6 +681,13 @@ struct PQCSecuritySettingsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task {
             requestedProviderPreference = PQCCryptoManager.currentProviderPreference()
+            do {
+                strictlyMatchSelectedMode = try pqcManager.strictlyMatchesSelectedMode()
+                modePolicyReadable = true
+            } catch {
+                modePolicyReadable = false
+                errorMessage = error.localizedDescription
+            }
             refreshProtocolIdentityPresentation()
         }
         .alert(
@@ -1012,14 +1063,14 @@ struct TrustedDevicesView: View {
                 Section {
                     Text("暂无受信任设备。你可以在设备验证成功后自动加入，或在下面从已发现设备发起设备确认码配对。")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(LiquidGlass.supportingText)
                 }
             } else {
                 Section("受信任设备") {
                     if activeTrustedDevices.isEmpty {
                         Text("暂无有效受信任设备。")
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(LiquidGlass.supportingText)
                 } else {
                     ForEach(activeTrustedDevices) { dev in
                         VStack(alignment: .leading, spacing: 8) {
@@ -1075,7 +1126,7 @@ struct TrustedDevicesView: View {
                 let candidates = discoveryManager.discoveredDevices.filter { !$0.isTrusted }
                 if candidates.isEmpty {
                     Text("当前没有可添加的设备")
-                        .foregroundColor(.secondary)
+                        .foregroundColor(LiquidGlass.supportingText)
                 } else {
                     ForEach(candidates) { dev in
                         Button {
@@ -1089,10 +1140,10 @@ struct TrustedDevicesView: View {
                                 }
                                 Text("设备确认码配对")
                                     .font(.caption)
-                                    .foregroundColor(.secondary)
+                                    .foregroundColor(LiquidGlass.supportingText)
                                 Text(dev.platform.displayName)
                                     .font(.caption)
-                                    .foregroundColor(.secondary)
+                                    .foregroundColor(LiquidGlass.supportingText)
                             }
                         }
                         .disabled(pairingDeviceIds.contains(dev.id))
@@ -1186,14 +1237,14 @@ struct TrustedDevicesView: View {
                 if let ip = dev.ipAddress { Text(ip) }
                 if let status {
                     Text(status)
-                        .foregroundColor(.orange)
+                        .foregroundStyle(.primary)
                 }
             }
             .font(.caption)
-            .foregroundColor(.secondary)
+            .foregroundColor(LiquidGlass.supportingText)
             Text("\(RuntimeLocalization.string("设备标识")): \(dev.id)")
                 .font(.caption2)
-                .foregroundColor(.secondary)
+                .foregroundColor(LiquidGlass.supportingText)
                 .lineLimit(1)
         }
     }
@@ -1273,7 +1324,7 @@ struct PerformanceSettingsView: View {
                         Text("最大连接并发")
                         Spacer()
                         Text("\(settings.maxConcurrentConnections)")
-                            .foregroundColor(.secondary)
+                            .foregroundColor(LiquidGlass.supportingText)
                     }
                 }
 
@@ -1307,7 +1358,7 @@ struct PerformanceSettingsView: View {
                         Text("文件传输并发")
                         Spacer()
                         Text("\(settings.fileTransferMaxConcurrentTransfers)")
-                            .foregroundColor(.secondary)
+                            .foregroundColor(LiquidGlass.supportingText)
                     }
                 }
 
@@ -1395,21 +1446,21 @@ struct ClipboardSettingsView: View {
                 if settings.clipboardContentSizeWasMigrated {
                     Text("旧版的大剪贴板设置已迁移到 750 KiB 安全上限；更大内容请使用文件传输。")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(LiquidGlass.supportingText)
                 }
 
                 HStack {
                     Text("状态")
                     Spacer()
                     Text(clipboard.syncStatus.displayName)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(LiquidGlass.supportingText)
                 }
 
                 HStack {
                     Text("已连接设备")
                     Spacer()
                     Text("\(connectionManager.activeConnections.count)")
-                        .foregroundColor(.secondary)
+                        .foregroundColor(LiquidGlass.supportingText)
                 }
 
                 if let last = clipboard.lastSyncTime {
@@ -1417,7 +1468,7 @@ struct ClipboardSettingsView: View {
                         Text("上次同步")
                         Spacer()
                         Text(last.formatted(date: .abbreviated, time: .standard))
-                            .foregroundColor(.secondary)
+                            .foregroundColor(LiquidGlass.supportingText)
                     }
                 }
             } header: {
@@ -1429,23 +1480,23 @@ struct ClipboardSettingsView: View {
             Section("按设备状态") {
                 if connectionManager.activeConnections.isEmpty {
                     Text("暂无已连接设备")
-                        .foregroundColor(.secondary)
+                        .foregroundColor(LiquidGlass.supportingText)
                 } else {
                     ForEach(connectionManager.activeConnections) { conn in
                         let id = conn.device.id
                         VStack(alignment: .leading, spacing: 4) {
                             Text(conn.device.name)
                             HStack(spacing: 8) {
-                                Text(id).font(.caption2).foregroundColor(.secondary).lineLimit(1)
+                                Text(id).font(.caption2).foregroundColor(LiquidGlass.supportingText).lineLimit(1)
                                 if let last = clipboard.deviceLastSync[id] {
                                     Text("上次同步 \(last, style: .relative)")
                                         .font(.caption2)
-                                        .foregroundColor(.secondary)
+                                        .foregroundColor(LiquidGlass.supportingText)
                                 }
                                 if let mime = clipboard.deviceLastMimeType[id] {
                                     Text(mime)
                                         .font(.caption2)
-                                        .foregroundColor(.secondary)
+                                        .foregroundColor(LiquidGlass.supportingText)
                                 }
                             }
                         }
@@ -1457,7 +1508,7 @@ struct ClipboardSettingsView: View {
                 if let (data, mime) = clipboard.getCurrentClipboardContent() {
                     Text("\(RuntimeLocalization.string("MIME 类型")): \(mime)")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(LiquidGlass.supportingText)
 
                     if mime.hasPrefix("text/"), let text = String(data: data, encoding: .utf8) {
                         Text(text)
@@ -1475,11 +1526,11 @@ struct ClipboardSettingsView: View {
                         }
                     } else {
                         Text("非文本内容（暂不展示预览）")
-                            .foregroundColor(.secondary)
+                            .foregroundColor(LiquidGlass.supportingText)
                     }
                 } else {
                     Text("暂无可读取内容")
-                        .foregroundColor(.secondary)
+                        .foregroundColor(LiquidGlass.supportingText)
                 }
             }
 
@@ -1507,25 +1558,25 @@ struct ClipboardSettingsView: View {
                                     .foregroundColor(entry.direction == .outgoing ? .blue : .green)
                                 Text(entry.mimeType)
                                     .font(.caption)
-                                    .foregroundColor(.secondary)
+                                    .foregroundColor(LiquidGlass.supportingText)
                                 Spacer()
                                 Text(ByteCountFormatter.string(fromByteCount: Int64(entry.sizeBytes), countStyle: .file))
                                     .font(.caption2)
-                                    .foregroundColor(.secondary)
+                                    .foregroundColor(LiquidGlass.supportingText)
                                 Text(entry.createdAt, style: .time)
                                     .font(.caption2)
-                                    .foregroundColor(.secondary)
+                                    .foregroundColor(LiquidGlass.supportingText)
                             }
                             if let preview = entry.textPreview, !preview.isEmpty {
                                 Text(preview)
                                     .font(.footnote)
-                                    .foregroundColor(.secondary)
+                                    .foregroundColor(LiquidGlass.supportingText)
                                     .lineLimit(2)
                             }
                             if let deviceId = entry.deviceId {
                                 Text("设备: \(deviceId)")
                                     .font(.caption2)
-                                    .foregroundColor(.secondary)
+                                    .foregroundColor(LiquidGlass.supportingText)
                                     .lineLimit(1)
                             }
                         }
@@ -1580,7 +1631,7 @@ struct CloudSyncSettingsView: View {
                         .font(.caption)
                     } else {
                         Text("尚未完成同步")
-                            .foregroundColor(.secondary)
+                            .foregroundColor(LiquidGlass.supportingText)
                     }
 
                     Button("立即同步") {
@@ -1630,7 +1681,7 @@ struct SupabaseSettingsView: View {
                 Section("状态") {
                     Text(status)
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(LiquidGlass.supportingText)
                 }
             }
 
@@ -1794,13 +1845,13 @@ struct LogsView: View {
 
                             Text(entry.category)
                                 .font(.caption)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(LiquidGlass.supportingText)
 
                             Spacer()
 
                             Text(entry.timestamp, style: .time)
                                 .font(.caption2)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(LiquidGlass.supportingText)
                         }
 
                         Text(entry.message)

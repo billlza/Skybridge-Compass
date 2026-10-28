@@ -23,6 +23,23 @@ final class LocalDevicePresenceReportBuilderTests: XCTestCase {
         XCTAssertEqual(report.capabilities, ["clipboard", "file_transfer", "remote_desktop"])
     }
 
+    func testOnlyReadyMainListenerWithCurrentAddressesIsPublished() throws {
+        let type = BonjourInteropContract.controlServiceType
+        for (listener, addresses, expected) in [
+            (ServiceAdvertisementSnapshot(serviceType: type), ["10.0.0.5"], nil),
+            (ServiceAdvertisementSnapshot(serviceType: type, port: 51164, state: .starting), ["10.0.0.5"], nil),
+            (ServiceAdvertisementSnapshot(serviceType: type, port: 51173, state: .ready), ["10.0.0.5"], UInt16(51173)),
+            (ServiceAdvertisementSnapshot(serviceType: type, port: 51173, state: .ready), [], nil),
+            (ServiceAdvertisementSnapshot(serviceType: "_skybridge-xfer._tcp", port: 51173, state: .ready), ["10.0.0.5"], nil)
+        ] {
+            let report = try LocalDevicePresenceReportBuilder.makeReport(
+                presentation: presentation(name: "Mac"), hardwareModel: nil, lanAddresses: addresses,
+                operatingSystemVersion: OperatingSystemVersion(majorVersion: 26, minorVersion: 0, patchVersion: 0),
+                listener: listener)
+            XCTAssertEqual(report.lanControlPort, expected)
+        }
+    }
+
     func testFallsBackToHardwareModelThenPlatformModelWhenTheHostHasNoName() throws {
         let fromHardware = try LocalDevicePresenceReportBuilder.makeReport(
             presentation: presentation(name: nil),

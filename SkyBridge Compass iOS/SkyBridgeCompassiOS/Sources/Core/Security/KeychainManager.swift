@@ -10,6 +10,8 @@ import Foundation
 import Dispatch
 import Security
 import CryptoKit
+import os
+import SkyBridgeProtocolCore
 
 // MARK: - Keychain Error
 
@@ -20,6 +22,7 @@ public enum KeychainError: Error, LocalizedError, Sendable {
     case unexpectedError(OSStatus)
     case encodingError
     case decodingError
+    case ambiguousAccessGroup
     case incompleteKeyMaterial(String)
     case immutableStateCorrupt(String)
     case immutableStateCycleRejected
@@ -32,6 +35,7 @@ public enum KeychainError: Error, LocalizedError, Sendable {
         case .unexpectedError(let status): return "钥匙串错误: \(status)"
         case .encodingError: return "编码错误"
         case .decodingError: return "解码错误"
+        case .ambiguousAccessGroup: return "多个钥匙串访问组包含同名条目，已停止操作"
         case .incompleteKeyMaterial(let reason): return "密钥材料不完整: \(reason)"
         case .immutableStateCorrupt(let reason): return "不可变状态损坏: \(reason)"
         case .immutableStateCycleRejected:
@@ -66,7 +70,28 @@ public actor KeychainManager {
         keychainExecutor.asUnownedSerialExecutor()
     }
     
-    private init() {}
+    private init() {
+#if DEBUG || SKYBRIDGE_TESTING
+        accountTestDependencies = nil
+#endif
+    }
+
+    private var accountObservations: [UUID: IOSAuthSessionObservation] = [:]
+#if DEBUG || SKYBRIDGE_TESTING
+    private struct AccountTestDependencies: Sendable {
+        let storage: any ProtectedAccountSessionStorage
+        let loadLegacy: @Sendable () throws -> Data?
+        let deleteLegacy: @Sendable () throws -> Void
+    }
+    private let accountTestDependencies: AccountTestDependencies?
+    init(accountStorage: any ProtectedAccountSessionStorage,
+         loadLegacy: @escaping @Sendable () throws -> Data?,
+         deleteLegacy: @escaping @Sendable () throws -> Void) {
+        accountTestDependencies = AccountTestDependencies(storage: accountStorage,
+            loadLegacy: loadLegacy, deleteLegacy: deleteLegacy)
+    }
+#endif
+
     
     // MARK: - Test Mode Support
     
@@ -128,7 +153,8 @@ public actor KeychainManager {
             kSecValueData as String: data,
             kSecAttrAccessible as String: accessibility
         ]
-        let updateStatus = SecItemUpdate(query as CFDictionary, updateAttributes as CFDictionary)
+        let scope = try IOSLegacyKeychainScope.current()
+        let updateStatus = try scope.update(query, updateAttributes)
         if updateStatus == errSecSuccess {
             return
         }
@@ -139,7 +165,7 @@ public actor KeychainManager {
         var addQuery = query
         addQuery[kSecAttrAccessible as String] = accessibility
         addQuery[kSecValueData as String] = data
-        let status = SecItemAdd(addQuery as CFDictionary, nil)
+        let status = try scope.add(addQuery)
         guard status == errSecSuccess else {
             throw KeychainError.unexpectedError(status)
         }
@@ -169,7 +195,7 @@ public actor KeychainManager {
         ]
         
         var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        let status = try IOSLegacyKeychainScope.current().copyMatching(query, &item)
         if status == errSecItemNotFound {
             return nil
         }
@@ -285,6 +311,26 @@ public actor KeychainManager {
         accessGroup: String
     ) -> String {
         "scoped|\(accessGroup)|\(service)|\(account)"
+    }
+
+    /// Optional metadata follows the same namespace and test-backend rules as
+    /// the key bytes. Missing metadata is legitimate; native I/O errors are not.
+    nonisolated func keyCreationDate(account: String) throws -> Date? {
+        if Self.useInMemoryKeychain { return nil }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: account,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: CFTypeRef?
+        let status = try IOSLegacyKeychainScope.current().copyMatching(query, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess else { throw KeychainError.unexpectedError(status) }
+        guard let attributes = result as? [String: Any] else { throw KeychainError.decodingError }
+        guard let value = attributes[kSecAttrCreationDate as String] else { return nil }
+        guard let date = value as? Date else { throw KeychainError.decodingError }
+        return date
     }
 
     // MARK: - Q-Periapt immutable persistence
@@ -494,7 +540,7 @@ public actor KeychainManager {
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
         var item: CFTypeRef?
-        switch SecItemCopyMatching(query as CFDictionary, &item) {
+        switch try IOSLegacyKeychainScope.current().copyMatching(query, &item) {
         case errSecItemNotFound:
             return nil
         case errSecSuccess:
@@ -528,7 +574,7 @@ public actor KeychainManager {
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
             kSecValueData as String: data
         ]
-        switch SecItemAdd(query as CFDictionary, nil) {
+        switch try IOSLegacyKeychainScope.current().add(query) {
         case errSecSuccess:
             return .inserted
         case errSecDuplicateItem:
@@ -593,7 +639,7 @@ public actor KeychainManager {
             kSecAttrAccount as String: account
         ]
         
-        let status = SecItemDelete(query as CFDictionary)
+        let status = try IOSLegacyKeychainScope.current().delete(query)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw KeychainError.unexpectedError(status)
         }
@@ -903,29 +949,26 @@ public actor KeychainManager {
             return
         }
         
-        // 在真实 Keychain 中，需要遍历并删除
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "SkyBridge.SymmetricKey",
-            kSecMatchLimit as String: kSecMatchLimitAll,
-            kSecReturnAttributes as String: true
-        ]
-        
-        var items: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &items)
-        
-        guard status == errSecSuccess,
-              let itemList = items as? [[String: Any]] else {
-            return
-        }
-        
-        for item in itemList {
-            guard let account = item[kSecAttrAccount as String] as? String,
-                  account.hasPrefix("Session.") else {
-                continue
+        do {
+            let scope = try IOSLegacyKeychainScope.current()
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: "SkyBridge.SymmetricKey",
+                kSecMatchLimit as String: kSecMatchLimitAll,
+                kSecReturnAttributes as String: true
+            ]
+            var items: CFTypeRef?
+            let status = try scope.copyMatching(query, &items)
+            if status == errSecItemNotFound { return }
+            guard status == errSecSuccess else { throw KeychainError.unexpectedError(status) }
+            guard let itemList = items as? [[String: Any]] else { throw KeychainError.decodingError }
+            for item in itemList {
+                guard let account = item[kSecAttrAccount as String] as? String,
+                      account.hasPrefix("Session.") else { continue }
+                try deleteKeyStrict(service: "SkyBridge.SymmetricKey", account: account)
             }
-            
-            _ = deleteKey(service: "SkyBridge.SymmetricKey", account: account)
+        } catch {
+            SkyBridgeLogger.shared.error("Keychain session cleanup failed: \(error.localizedDescription)")
         }
     }
 }
@@ -966,7 +1009,7 @@ private extension KeychainManager {
         ]
 
         var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        let status = try IOSLegacyKeychainScope.current().copyMatching(query, &result)
         guard status == errSecSuccess else {
             if status == errSecItemNotFound {
                 throw KeychainError.itemNotFound
@@ -1000,7 +1043,8 @@ private extension KeychainManager {
             kSecValueData as String: data,
             kSecAttrAccessible as String: accessibility
         ]
-        let updateStatus = SecItemUpdate(updateQuery as CFDictionary, updateAttributes as CFDictionary)
+        let scope = try IOSLegacyKeychainScope.current()
+        let updateStatus = try scope.update(updateQuery, updateAttributes)
         if updateStatus == errSecSuccess {
             return
         }
@@ -1011,7 +1055,7 @@ private extension KeychainManager {
         var addQuery = updateQuery
         addQuery[kSecValueData as String] = data
         addQuery[kSecAttrAccessible as String] = accessibility
-        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        let addStatus = try scope.add(addQuery)
         guard addStatus == errSecSuccess else {
             throw KeychainError.unexpectedError(addStatus)
         }
@@ -1028,18 +1072,7 @@ private extension KeychainManager {
     }
     
     func deleteGenericPassword(account: String) {
-        if Self.useInMemoryKeychain {
-            let key = "GenericPassword|" + account
-            Self.inMemoryLock.lock()
-            Self.inMemoryStore.removeValue(forKey: key)
-            Self.inMemoryLock.unlock()
-            return
-        }
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: account
-        ]
-        SecItemDelete(query as CFDictionary)
+        deleteGenericPasswordSync(account: account)
     }
 }
 
@@ -1117,7 +1150,7 @@ public extension KeychainManager {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: account
         ]
-        let status = SecItemDelete(query as CFDictionary)
+        let status = try IOSLegacyKeychainScope.current().delete(query)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw KeychainError.unexpectedError(status)
         }
@@ -1273,54 +1306,465 @@ public extension KeychainManager {
         _ = deleteKey(service: "SkyBridge.Nebula", account: "ClientSecret")
     }
     
-    func storeAuthSession(_ session: AuthSession) throws {
-        let data = try JSONEncoder().encode(session)
-        try saveGenericPasswordSync(
-            account: "auth.session",
-            data: data,
-            accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        )
+    private nonisolated static let protectedAuthSessionService = "com.skybridge.compass.ios.authsession.v2"
+    private nonisolated static let authSessionAccount = "primary"
+#if DEBUG || SKYBRIDGE_TESTING
+    private nonisolated static let inMemoryAuthSessionStorage = IOSInMemoryAccountSessionStorage()
+#endif
+
+    private func protectedAuthSessionStore() throws -> ProtectedAccountSessionStore<AuthSession> {
+#if DEBUG || SKYBRIDGE_TESTING
+        if let accountTestDependencies {
+            return ProtectedAccountSessionStore(storage: accountTestDependencies.storage)
+        }
+        if Self.useInMemoryKeychain {
+            return ProtectedAccountSessionStore(storage: Self.inMemoryAuthSessionStorage)
+        }
+#endif
+        // The build expands this exact app-private group. Security.framework checks
+        // the signed entitlement on every operation; a plist value grants no access.
+        let group = try Self.requiredAccountAccessGroup()
+        return ProtectedAccountSessionStore(storage: try DataProtectionAccountSessionStorage(
+            service: Self.protectedAuthSessionService, account: Self.authSessionAccount, accessGroup: group))
     }
 
-    /// Atomically replaces a persisted authentication session only when it is still the
-    /// exact session that initiated a token refresh. Keeping the comparison and write in
-    /// this actor prevents a late refresh from overwriting a newer login or logout state.
-    /// An already-installed exact replacement is an idempotent success; every other
-    /// divergence remains fail-closed.
-    func replaceAuthSession(expected: AuthSession, with replacement: AuthSession) throws -> Bool {
-        let current = try loadAuthSessionStrict()
-        if current == replacement {
-            return true
-        }
-        guard current == expected else {
-            return false
-        }
-        try storeAuthSession(replacement)
-        return true
-    }
-    
-    func loadAuthSession() throws -> AuthSession? {
-        try loadAuthSessionStrict()
+    private nonisolated static func requiredAccountAccessGroup() throws -> String {
+        try requiredAccountAccessGroup(
+            Bundle.main.object(forInfoDictionaryKey: "SkyBridgeAccountKeychainAccessGroup") as? String,
+            bundleIdentifier: Bundle.main.bundleIdentifier)
     }
 
-    func loadAuthSessionStrict() throws -> AuthSession? {
-        let data: Data
-        do {
-            data = try loadGenericPasswordSync(account: "auth.session")
-        } catch KeychainError.itemNotFound {
-            return nil
+    internal nonisolated static func requiredAccountAccessGroup(_ group: String?, bundleIdentifier: String?) throws -> String {
+        guard let group, let bundleIdentifier, !bundleIdentifier.isEmpty,
+              group.utf8.count <= 256, !group.contains("\0"), !bundleIdentifier.contains("\0"),
+              group == group.trimmingCharacters(in: .whitespacesAndNewlines),
+              bundleIdentifier == bundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines),
+              group.hasSuffix("." + bundleIdentifier),
+              let prefix = group.split(separator: ".", maxSplits: 1).first, prefix.utf8.count == 10,
+              prefix.utf8.allSatisfy({ (65...90).contains($0) || (48...57).contains($0) }),
+              group == String(prefix) + "." + bundleIdentifier else {
+            throw ProtectedAccountSessionError.invalidRecord
         }
+        return group
+    }
+
+    private func loadProtectedAuthSession(_ store: ProtectedAccountSessionStore<AuthSession>) throws -> IOSAuthSessionRecord? {
+        do { return try store.load() }
+        catch is DecodingError { throw KeychainError.decodingError }
+    }
+
+    /// Explicit login creates a new durable lifetime, including identical tokens.
+    /// Native I/O remains on this actor's background serial executor.
+    @discardableResult
+    internal func storeAuthSession(_ session: AuthSession) throws -> IOSAuthSessionRecord {
+        try installAuthSession(session, requireCurrent: {})
+    }
+
+    @discardableResult
+    internal func storeAuthSession(_ session: AuthSession, intent: IOSAuthenticationIntent) throws -> IOSAuthSessionRecord {
+        try installAuthSession(session, requireCurrent: intent.requireCurrent)
+    }
+
+    private func installAuthSession(_ session: AuthSession, requireCurrent: () throws -> Void) throws -> IOSAuthSessionRecord {
+        try requireCurrent()
+        let store = try protectedAuthSessionStore()
+        let previous = try loadProtectedAuthSession(store)
+        try requireCurrent()
+        let installed = try store.install(session, replacing: previous)
+        accountObservations.removeAll()
+        try deleteLegacyAuthSession()
+        return installed
+    }
+
+    internal func loadAuthSession() throws -> AuthSession? { try loadAuthSessionStrict() }
+
+    internal func loadAuthSessionStrict() throws -> AuthSession? {
+        try loadAuthSessionRecordStrict()?.session
+    }
+
+    internal func loadAuthSessionRecordStrict() throws -> IOSAuthSessionRecord? {
+        try loadAuthSessionRecord(requireCurrent: {})
+    }
+
+    internal func loadAuthSessionRecordStrict(intent: IOSAuthenticationIntent) throws -> IOSAuthSessionRecord? {
+        try loadAuthSessionRecord(requireCurrent: intent.requireCurrent)
+    }
+
+    private func loadAuthSessionRecord(requireCurrent: () throws -> Void) throws -> IOSAuthSessionRecord? {
+        let store = try protectedAuthSessionStore()
+        let record: IOSAuthSessionRecord?
         do {
-            return try JSONDecoder().decode(AuthSession.self, from: data)
-        } catch {
+            record = try store.loadMigratingLegacy({
+                try requireCurrent()
+                return try loadLegacyAuthSession()
+            }, requireCurrent: requireCurrent)
+        } catch is DecodingError {
             throw KeychainError.decodingError
         }
+        // A canonical tombstone or malformed canonical item never reaches legacy
+        // loading. A previous canonical commit may have outlived interrupted or
+        // failed legacy retirement. Retry that idempotent cleanup on every valid
+        // canonical load without replacing the record or renewing its lifetime.
+        if record != nil {
+            try requireCurrent()
+            try deleteLegacyAuthSession()
+        }
+        return record
     }
-    
-    func deleteAuthSession() throws {
-        try deleteGenericPasswordSyncStrict(account: "auth.session")
+
+    internal func beginAccountObservation(kind: ProtectedAccountObservation.Kind, expected: AuthSession,
+                                 loginID: UUID, intent: IOSAuthenticationIntent) throws -> IOSAuthSessionObservation {
+        let store = try protectedAuthSessionStore()
+        let observation = ProtectedAccountObservation(kind: kind)
+        for attempt in 0..<2 {
+            try intent.requireCurrent()
+            guard let current = try loadProtectedAuthSession(store), current.loginID == loginID, current.session == expected else {
+                throw ProtectedAccountSessionError.changed
+            }
+            let owned = Set(accountObservations.values.filter {
+                $0.loginID == loginID && $0.intent === intent
+            }.map { $0.observation.id })
+            let unresolvedCredential = current.version == 1 || current.observations.contains {
+                $0.kind == .credential && !owned.contains($0.id)
+            }
+            try intent.requireCurrent()
+            do {
+                _ = try store.beginObservation(observation, owned: owned, replacing: current)
+                let ticket = IOSAuthSessionObservation(observation: observation, loginID: loginID,
+                    source: expected, intent: intent, requiresCredentialRecovery: unresolvedCredential)
+                accountObservations[observation.id] = ticket
+                return ticket
+            } catch ProtectedAccountSessionError.changed {
+                if attempt == 1 { throw ProtectedAccountSessionError.changed }
+            }
+        }
+        throw ProtectedAccountSessionError.changed
+    }
+
+    /// An explicit no-write CAS conflict may reconcile once with this same owner.
+    /// Every other failure consumes it and leaves its durable marker unresolved.
+    internal func finishAccountObservation(_ ticket: IOSAuthSessionObservation, replacement: AuthSession? = nil,
+                                  temporaryFailure: Bool = false,
+                                  checkpoint: ProtectedAudioCheckpointUpdate = .unchanged,
+                                  expectedAudioRevision: UUID? = nil) throws -> IOSAuthSessionRecord {
+        guard accountObservations[ticket.observation.id] === ticket else {
+            throw ProtectedAccountSessionError.changed
+        }
+        accountObservations.removeValue(forKey: ticket.observation.id)
+        let store = try protectedAuthSessionStore()
+        for attempt in 0..<2 {
+            try ticket.intent.requireCurrent()
+            guard let current = try loadProtectedAuthSession(store), current.loginID == ticket.loginID,
+                  current.observations.contains(ticket.observation),
+                  ticket.observation.kind != .credential || current.session == ticket.source,
+                  expectedAudioRevision == nil || current.audioRevision == expectedAudioRevision else {
+                throw ProtectedAccountSessionError.changed
+            }
+            try ticket.intent.requireCurrent()
+            do {
+                return try store.finishObservation(ticket.observation, replacementSession: replacement,
+                    checkpoint: checkpoint,
+                    keepUnverifiedCredential: temporaryFailure && ticket.requiresCredentialRecovery,
+                    replacing: current)
+            } catch ProtectedAccountSessionError.changed {
+                if attempt == 1 { throw ProtectedAccountSessionError.changed }
+            }
+        }
+        throw ProtectedAccountSessionError.changed
+    }
+
+    internal func abandonAccountObservation(_ ticket: IOSAuthSessionObservation) {
+        if accountObservations[ticket.observation.id] === ticket {
+            accountObservations.removeValue(forKey: ticket.observation.id)
+        }
+    }
+
+    /// An exact source AND durable login are required. The one bounded conflict
+    /// retry accepts only the same login and source/replacement credentials, while
+    /// preserving the latest checkpoint or rejection written by another owner.
+    internal func replaceAuthSession(expected: AuthSession, expectedLoginID: UUID,
+                                   with replacement: AuthSession) throws -> Bool {
+        try replaceAuthSession(expected: expected, expectedLoginID: expectedLoginID,
+                               with: replacement, requireCurrent: {})
+    }
+
+    internal func replaceAuthSession(expected: AuthSession, expectedLoginID: UUID,
+                            with replacement: AuthSession, intent: IOSAuthenticationIntent) throws -> Bool {
+        try replaceAuthSession(expected: expected, expectedLoginID: expectedLoginID,
+                               with: replacement, requireCurrent: intent.requireCurrent)
+    }
+
+    private func replaceAuthSession(expected: AuthSession, expectedLoginID: UUID,
+                                    with replacement: AuthSession, requireCurrent: () throws -> Void) throws -> Bool {
+        let store = try protectedAuthSessionStore()
+        for attempt in 0..<2 {
+            try requireCurrent()
+            guard let current = try loadProtectedAuthSession(store), current.loginID == expectedLoginID else { return false }
+            if current.session == replacement { return true }
+            guard current.session == expected else { return false }
+            try requireCurrent()
+            do { _ = try store.refresh(replacement, replacing: current); return true }
+            catch ProtectedAccountSessionError.changed {
+                if attempt == 1 { return false }
+            }
+        }
+        return false
+    }
+
+    internal func revokeAudioAuthorization(expected: AuthSession, loginID: UUID,
+                                  intent: IOSAuthenticationIntent) throws {
+        let store = try protectedAuthSessionStore()
+        for attempt in 0..<2 {
+            try intent.requireCurrent()
+            guard let current = try loadProtectedAuthSession(store), current.loginID == loginID,
+                  current.session == expected else { throw ProtectedAccountSessionError.changed }
+            if current.audioRevoked { return }
+            try intent.requireCurrent()
+            do { _ = try store.revokeAudio(replacing: current); return }
+            catch ProtectedAccountSessionError.changed {
+                if attempt == 1 { throw ProtectedAccountSessionError.changed }
+            }
+        }
+        throw ProtectedAccountSessionError.changed
+    }
+
+    internal func loadAudioMembershipCheckpoint(loginID: UUID, intent: IOSAuthenticationIntent) throws
+        -> AudioMembershipPersistenceSnapshot {
+        try intent.requireCurrent()
+        guard let record = try loadProtectedAuthSession(protectedAuthSessionStore()),
+              record.loginID == loginID, record.session != nil else {
+            throw ProtectedAccountSessionError.changed
+        }
+        guard !record.audioRevoked else { throw ProtectedAccountSessionError.audioRevoked }
+        try requireOwnedAudioObservations(record, loginID: loginID, intent: intent)
+        try intent.requireCurrent()
+        return .init(revision: record.audioRevision, checkpoint: record.audioCheckpoint)
+    }
+
+    internal func saveAudioMembershipCheckpoint(_ bytes: Data?, replacing revision: UUID,
+                                                loginID: UUID, intent: IOSAuthenticationIntent) throws
+        -> AudioMembershipPersistenceSnapshot {
+        let store = try protectedAuthSessionStore()
+        // Only an explicit no-write CAS conflict may retry once. A credential
+        // refresh can change the root revision, but never the login/audio witness.
+        for attempt in 0..<2 {
+            try intent.requireCurrent()
+            guard let record = try loadProtectedAuthSession(store), record.loginID == loginID,
+                  record.audioRevision == revision, record.session != nil else {
+                throw ProtectedAccountSessionError.changed
+            }
+            guard !record.audioRevoked else { throw ProtectedAccountSessionError.audioRevoked }
+            try requireOwnedAudioObservations(record, loginID: loginID, intent: intent)
+            try intent.requireCurrent()
+            do {
+                let saved = try store.saveAudioCheckpoint(bytes, replacing: record)
+                return .init(revision: saved.audioRevision, checkpoint: saved.audioCheckpoint)
+            } catch ProtectedAccountSessionError.changed {
+                if attempt == 1 { throw ProtectedAccountSessionError.changed }
+            }
+        }
+        throw ProtectedAccountSessionError.changed
+    }
+
+    private func requireOwnedAudioObservations(_ record: IOSAuthSessionRecord, loginID: UUID,
+                                               intent: IOSAuthenticationIntent) throws {
+        guard record.version == 2, record.observations.allSatisfy({ observation in
+            guard let owner = accountObservations[observation.id] else { return false }
+            return owner.loginID == loginID && owner.intent === intent
+        }) else { throw ProtectedAccountSessionError.verificationRequired }
+    }
+
+    internal func deleteAuthSession() throws { try clearAuthSession(requireCurrent: {}) }
+
+    internal func deleteAuthSession(intent: IOSAuthenticationIntent) throws {
+        try clearAuthSession(requireCurrent: intent.requireCurrent)
+    }
+
+    private func clearAuthSession(requireCurrent: () throws -> Void) throws {
+        try requireCurrent()
+        let store = try protectedAuthSessionStore()
+        let current = try loadProtectedAuthSession(store)
+        try requireCurrent()
+        _ = try store.clear(replacing: current)
+        accountObservations.removeAll()
+        try deleteLegacyAuthSession()
+    }
+
+    private func loadLegacyAuthSession() throws -> AuthSession? {
+        let data: Data
+#if DEBUG || SKYBRIDGE_TESTING
+        if let accountTestDependencies {
+            guard let bytes = try accountTestDependencies.loadLegacy() else { return nil }
+            return try decodeLegacyAuthSession(bytes)
+        }
+#endif
+        if Self.useInMemoryKeychain {
+            do { data = try loadGenericPasswordSync(account: "auth.session") }
+            catch KeychainError.itemNotFound { return nil }
+        } else {
+            // The old writer inserted an item with no service into the default
+            // app-private group. Do not search or retire other accessible groups.
+            guard let legacy = try loadImmutableKeyStrict(service: "", account: "auth.session",
+                accessGroup: Self.requiredAccountAccessGroup()) else { return nil }
+            data = legacy
+        }
+        return try decodeLegacyAuthSession(data)
+    }
+
+    private func decodeLegacyAuthSession(_ data: Data) throws -> AuthSession {
+        guard data.count <= ProtectedAccountSessionStore<AuthSession>.maximumSessionBytes else {
+            throw ProtectedAccountSessionError.capacity
+        }
+        do { return try JSONDecoder().decode(AuthSession.self, from: data) }
+        catch { throw KeychainError.decodingError }
+    }
+
+    private func deleteLegacyAuthSession() throws {
+#if DEBUG || SKYBRIDGE_TESTING
+        if let accountTestDependencies { try accountTestDependencies.deleteLegacy(); return }
+#endif
+        if Self.useInMemoryKeychain { try deleteGenericPasswordSyncStrict(account: "auth.session"); return }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "", kSecAttrAccount as String: "auth.session",
+            kSecAttrAccessGroup as String: try Self.requiredAccountAccessGroup(),
+            kSecAttrSynchronizable as String: false,
+        ]
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw KeychainError.unexpectedError(status)
+        }
+    }
+
+}
+
+/// Native boundary for the two namespaces used before App Groups admission.
+/// Explicit immutable identity and account-session stores retain their own scopes.
+@available(iOS 17.0, *)
+struct IOSLegacyKeychainScope: Sendable {
+    let applicationGroup: String
+    let sharedIdentityGroup: String
+
+    private nonisolated init(applicationGroup: String, sharedIdentityGroup: String) {
+        self.applicationGroup = applicationGroup
+        self.sharedIdentityGroup = sharedIdentityGroup
+    }
+
+    nonisolated static func current() throws -> Self {
+        let application = try KeychainManager.requiredAccountAccessGroup(
+            Bundle.main.object(forInfoDictionaryKey: "SkyBridgeAccountKeychainAccessGroup") as? String,
+            bundleIdentifier: Bundle.main.bundleIdentifier)
+        let prefix = application.prefix(10)
+        return Self(applicationGroup: application,
+                    sharedIdentityGroup: String(prefix) + ".group.com.skybridge.compass")
+    }
+
+    /// A new entitlement must never enlarge a legacy query. Read both original
+    /// groups before returning one result; an inaccessible group is not absence.
+    /// Identity migration explicitly asks for all records so its existing
+    /// reconciliation policy can inspect conflicts and exact persistent refs.
+    nonisolated func copyMatching(_ query: [String: Any], _ result: inout CFTypeRef?) throws -> OSStatus {
+        result = nil
+        try validateUnscopedInput(query)
+        let limit: String
+        if let value = query[kSecMatchLimit as String] {
+            guard let string = value as? String else { throw KeychainError.unexpectedError(errSecParam) }
+            limit = string
+        } else {
+            limit = kSecMatchLimitOne as String
+        }
+        guard limit == kSecMatchLimitOne as String || limit == kSecMatchLimitAll as String else {
+            throw KeychainError.unexpectedError(errSecParam)
+        }
+        let all = limit == kSecMatchLimitAll as String
+        var matches: [CFTypeRef] = []
+        for group in [applicationGroup, sharedIdentityGroup] {
+            var scoped = query
+            scoped[kSecAttrAccessGroup as String] = group
+            var found: CFTypeRef?
+            let status = SecItemCopyMatching(scoped as CFDictionary, &found)
+            if status == errSecItemNotFound { continue }
+            guard status == errSecSuccess else { return status }
+            guard let found else { throw KeychainError.decodingError }
+            if all {
+                guard let rows = found as? [AnyObject], !rows.isEmpty else { throw KeychainError.decodingError }
+                matches.append(contentsOf: rows)
+            } else {
+                matches.append(found)
+            }
+        }
+        guard !matches.isEmpty else { return errSecItemNotFound }
+        if all {
+            result = matches as NSArray
+        } else {
+            guard matches.count == 1 else { throw KeychainError.ambiguousAccessGroup }
+            result = matches[0]
+        }
+        return errSecSuccess
+    }
+
+    /// Keep a legacy shared record in its existing namespace. Never update both
+    /// groups or reinterpret a group conflict as a missing item to be re-created.
+    nonisolated func update(_ query: [String: Any], _ updateAttributes: [String: Any]) throws -> OSStatus {
+        guard updateAttributes[kSecAttrAccessGroup as String] == nil else {
+            throw KeychainError.unexpectedError(errSecParam)
+        }
+        guard let group = try matchingGroup(query) else { return errSecItemNotFound }
+        var updateQuery = query
+        updateQuery[kSecAttrAccessGroup as String] = group
+        return SecItemUpdate(updateQuery as CFDictionary, updateAttributes as CFDictionary)
+    }
+
+    nonisolated func add(_ query: [String: Any]) throws -> OSStatus {
+        SecItemAdd(try privateInsert(query) as CFDictionary, nil)
+    }
+
+    nonisolated func add(_ query: [String: Any], result: inout CFTypeRef?) throws -> OSStatus {
+        SecItemAdd(try privateInsert(query) as CFDictionary, &result)
+    }
+
+    nonisolated func delete(_ query: [String: Any]) throws -> OSStatus {
+        guard let group = try matchingGroup(query) else { return errSecItemNotFound }
+        var scoped = query
+        scoped[kSecAttrAccessGroup as String] = group
+        return SecItemDelete(scoped as CFDictionary)
+    }
+
+    private nonisolated func privateInsert(_ query: [String: Any]) throws -> [String: Any] {
+        try validateUnscopedInput(query)
+        var scoped = query
+        scoped[kSecAttrAccessGroup as String] = applicationGroup
+        return scoped
+    }
+
+    private nonisolated func matchingGroup(_ query: [String: Any]) throws -> String? {
+        var lookup = query
+        lookup.removeValue(forKey: kSecReturnData as String)
+        lookup.removeValue(forKey: kSecReturnRef as String)
+        lookup.removeValue(forKey: kSecReturnPersistentRef as String)
+        lookup[kSecReturnAttributes as String] = true
+        lookup[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = try copyMatching(lookup, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess else { throw KeychainError.unexpectedError(status) }
+        guard let attributes = result as? [String: Any],
+              let group = attributes[kSecAttrAccessGroup as String] as? String,
+              group == applicationGroup || group == sharedIdentityGroup else {
+            throw KeychainError.decodingError
+        }
+        return group
+    }
+
+    private nonisolated func validateUnscopedInput(_ query: [String: Any]) throws {
+        // Explicitly scoped stores use Security.framework directly. Reject a
+        // conflicting caller scope instead of silently overriding it.
+        guard query[kSecAttrAccessGroup as String] == nil else {
+            throw KeychainError.unexpectedError(errSecParam)
+        }
     }
 }
+
 
 final class IOSKeychainSerialExecutor: SerialExecutor, @unchecked Sendable {
     private let queue: DispatchQueue
@@ -1337,3 +1781,24 @@ final class IOSKeychainSerialExecutor: SerialExecutor, @unchecked Sendable {
         }
     }
 }
+
+#if DEBUG || SKYBRIDGE_TESTING
+/// Uses the existing test-only Keychain mode. Device admission uses the signed
+/// Data Protection Keychain, never this controlled storage adapter.
+final class IOSInMemoryAccountSessionStorage: ProtectedAccountSessionStorage, Sendable {
+    private let value = OSAllocatedUnfairLock<ProtectedAccountSessionValue?>(initialState: nil)
+    func load() throws -> ProtectedAccountSessionValue? { value.withLock { $0 } }
+    func insert(_ replacement: ProtectedAccountSessionValue) throws -> Bool {
+        value.withLock { value in
+            guard value == nil else { return false }
+            value = replacement; return true
+        }
+    }
+    func replace(expectedRevision: UUID, with replacement: ProtectedAccountSessionValue) throws -> Bool {
+        value.withLock { value in
+            guard value?.revision == expectedRevision else { return false }
+            value = replacement; return true
+        }
+    }
+}
+#endif

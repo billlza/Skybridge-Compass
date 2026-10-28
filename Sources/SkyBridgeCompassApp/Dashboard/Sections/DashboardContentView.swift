@@ -100,7 +100,7 @@ public struct DashboardContentView: View {
             )
             
             StatCard(
-                title: LocalizationManager.shared.localizedString("dashboard.activeSessions"), 
+                title: LocalizationManager.shared.localizedString("dashboard.remoteSessions"),
                 value: "\(appModel.metrics.activeSessions)",
                 icon: "display",
                 color: .green

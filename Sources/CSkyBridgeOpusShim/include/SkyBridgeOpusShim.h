@@ -8,11 +8,14 @@ extern "C" {
 #endif
 
 int skybridge_opus_encoder_set_bitrate(OpusEncoder *encoder, opus_int32 bitrate);
+int skybridge_opus_encoder_set_vbr(OpusEncoder *encoder, opus_int32 enabled);
+int skybridge_opus_encoder_set_vbr_constraint(OpusEncoder *encoder, opus_int32 enabled);
 int skybridge_opus_encoder_set_complexity(OpusEncoder *encoder, opus_int32 complexity);
 int skybridge_opus_encoder_set_inband_fec(OpusEncoder *encoder, opus_int32 enabled);
 int skybridge_opus_encoder_set_packet_loss_perc(OpusEncoder *encoder, opus_int32 percent);
 int skybridge_opus_encoder_set_dtx(OpusEncoder *encoder, opus_int32 enabled);
 int skybridge_opus_encoder_set_signal(OpusEncoder *encoder, opus_int32 signal);
+int skybridge_opus_encoder_get_lookahead(OpusEncoder *encoder, opus_int32 *samples_per_channel);
 
 #ifdef __cplusplus
 }

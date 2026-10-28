@@ -1,3 +1,5 @@
+> **历史背景，非现行实现说明。** 原文保留供来源审计和回归读取；当前协议、平台范围与验收从 [现行文档入口](README.md) 开始，旧版本、旧示例及完成措辞不代表当前候选。
+
 # SkyBridge Compass: Cross-Platform Device Discovery and PQC Encryption Design
 
 **Version:** 1.0

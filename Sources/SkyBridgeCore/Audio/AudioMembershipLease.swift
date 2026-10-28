@@ -1,0 +1,4 @@
+import SkyBridgeProtocolCore
+
+public typealias AudioMembershipLeaseFailure = SkyBridgeProtocolCore.AudioMembershipLeaseFailure
+public typealias AudioMembershipLease = SkyBridgeProtocolCore.AudioMembershipLease

@@ -5,7 +5,6 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parent.parent
 ORCHESTRATOR = ROOT / "Scripts/run_formal_product_evidence_session.sh"
 LIFECYCLE_ORCHESTRATOR = ROOT / "Scripts/run_formal_ios_identity_lifecycle.sh"
@@ -29,6 +28,7 @@ class FormalProductEvidenceSessionContractTests(unittest.TestCase):
         cls.lifecycle = LIFECYCLE_ORCHESTRATOR.read_text(encoding="utf-8")
         cls.all_orchestrator = ALL_ORCHESTRATOR.read_text(encoding="utf-8")
         cls.ios_capture = IOS_CAPTURE.read_text(encoding="utf-8")
+        cls.ios_log_reader = (ROOT / "Scripts/ios_product_oslog_capture.py").read_text(encoding="utf-8")
         cls.ios_extractor = IOS_EXTRACTOR.read_text(encoding="utf-8")
         cls.identity_extractor = IDENTITY_EXTRACTOR.read_text(encoding="utf-8")
         cls.ios_installation = IOS_INSTALLATION.read_text(encoding="utf-8")
@@ -83,8 +83,13 @@ class FormalProductEvidenceSessionContractTests(unittest.TestCase):
             self.assertLess(install, verify)
             self.assertLess(verify, launch)
             self.assertIn("--launch-persistent-identifier", source)
+            self.assertIn('IOS_PRODUCT_LAUNCH_ARGS=("$IOS_REMOTE_APP_PATH")', source)
+            self.assertIn('"remoteApplicationPath"', source)
+            self.assertIn('"${IOS_PRODUCT_LAUNCH_ARGS[@]}"', source)
+            self.assertIn('[[ "$IOS_LAUNCH_PERSISTENT_IDENTIFIER" != "unknown" ]]', source)
             self.assertIn("--installation-binding", source)
             self.assertIn("ios-postinstall-prelaunch-processes.json", source)
+            self.assertIn("skybridge_ios_require_postinstall_app_absence", source)
         for required in (
             "launchServicesIdentifier",
             "devicectl.device.install.app",
@@ -114,7 +119,11 @@ class FormalProductEvidenceSessionContractTests(unittest.TestCase):
         ):
             self.assertIn(required, self.orchestrator)
         self.assertNotIn("extract-lifecycle", self.orchestrator)
-        for forbidden in ("security delete", "delete-generic-password", "SecItemDelete"):
+        for forbidden in (
+            "security delete",
+            "delete-generic-password",
+            "SecItemDelete",
+        ):
             self.assertNotIn(forbidden, self.lifecycle)
 
     def test_top_level_all_transaction_keeps_private_identity_ephemeral(self) -> None:
@@ -126,7 +135,7 @@ class FormalProductEvidenceSessionContractTests(unittest.TestCase):
             '"p2p|real-device-p2p-remote-smoke-public-redacted"',
             '"webrtc|real-device-webrtc-smoke-public-redacted"',
             '"file-transfer|real-device-file-transfer-smoke-public-redacted"',
-            'id1:[0-9a-f]{32}',
+            "id1:[0-9a-f]{32}",
             '/bin/rm -rf "$LIFECYCLE_RUNTIME"',
             'mv "$PUBLIC_STAGING" "$PUBLIC_EVIDENCE_ROOT"',
         ):
@@ -148,24 +157,35 @@ class FormalProductEvidenceSessionContractTests(unittest.TestCase):
             "validate-proof",
         ):
             self.assertIn(required, self.identity_extractor)
-        self.assertIn("raw stable production identity reference", (
-            ROOT / "Scripts/real_device_smoke_redaction.sh"
-        ).read_text(encoding="utf-8"))
+        self.assertIn(
+            "raw stable production identity reference",
+            (ROOT / "Scripts/real_device_smoke_redaction.sh").read_text(
+                encoding="utf-8"
+            ),
+        )
 
     def test_current_ios_capture_is_exact_pid_and_archive_bound(self) -> None:
         for required in (
-            "processIdentifier == $IOS_PROCESS_ID",
-            'subsystem == \\"com.skybridge.compass.release-evidence\\"',
-            'category == \\"ProductSession\\"',
             "bind-launch",
+            '--process-id "$IOS_PROCESS_ID"',
+            '--start-epoch "$LAUNCH_START_EPOCH"',
         ):
             self.assertIn(required, self.ios_capture)
         for required in (
+            "processIdentifier == {process_id}",
+            'subsystem == "com.skybridge.compass.release-evidence"',
+            'category == "ProductSession"',
+        ):
+            self.assertIn(required, self.ios_log_reader)
+        for required in (
             'row.get("processID") != identity["processIdentifier"]',
-            '!= identity["executablePath"]',
+            'installation.get("remoteApplicationPath") != str(executable.parent)',
+            "PRODUCT_IMAGE_PATH.fullmatch(value)",
             '"iosReleaseArchive": binding',
             '"releaseArchiveBindingVerified": True',
             "IDENTITY_EVENT_NAMES",
+            'row.get("processImageUUID")',
+            '"appExecutableUUIDs"',
         ):
             self.assertIn(required, self.ios_extractor)
 
@@ -188,7 +208,7 @@ class FormalProductEvidenceSessionContractTests(unittest.TestCase):
 
     def test_candidate_bit_is_derived_after_all_fixed_validators(self) -> None:
         validate_log = self.manifest_builder.index(
-            "validate_artifact_log(artifact_dir, kind)"
+            "validate_artifact_log("
         )
         validate_install = self.manifest_builder.index("validate_installation_capture(")
         validate_identity = self.manifest_builder.index(
@@ -202,10 +222,12 @@ class FormalProductEvidenceSessionContractTests(unittest.TestCase):
 
     def test_both_ios_identifiers_are_public_redaction_tokens(self) -> None:
         materialize = self.orchestrator[
-            self.orchestrator.index("skybridge_smoke_materialize_public_artifacts"):
+            self.orchestrator.index("skybridge_smoke_materialize_public_artifacts") :
         ]
         self.assertIn('"$IOS_DEVICE_ID" "$IOS_DEVICE_UDID"', materialize)
-        check = materialize[materialize.index("skybridge_smoke_check_public_artifacts"):]
+        check = materialize[
+            materialize.index("skybridge_smoke_check_public_artifacts") :
+        ]
         self.assertIn('"$IOS_DEVICE_ID" "$IOS_DEVICE_UDID"', check)
 
     def test_old_smoke_front_doors_remain_explicitly_diagnostic(self) -> None:

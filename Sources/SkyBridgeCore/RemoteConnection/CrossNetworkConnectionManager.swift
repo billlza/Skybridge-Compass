@@ -361,6 +361,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     var webrtcSecureEnvelopeSendCounterBySessionId: [String: UInt64] = [:]
     var webrtcSecureEnvelopeReplayWindowBySessionId: [String: WebRTCAppSecureReplayWindow] = [:]
     var webrtcSecureEnvelopeKeyFingerprintBySessionId: [String: String] = [:]
+    private var webrtcBoundSessionConsumerGatesBySessionId:
+        [String: WebRTCBoundSessionConsumerGate] = [:]
     private var activeWebRTCClipboardSessionId: String?
     private var activeWebRTCClipboardToken: UUID?
     private var trustInvalidationCancellables = Set<AnyCancellable>()
@@ -414,6 +416,54 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 userID: context.userID
             )
         )
+    }
+
+    static func currentAudioAccountContext() throws -> AudioAccountContext {
+        let authorization = try AuthenticationService.shared.currentAudioAuthorization()
+        let snapshot = currentSignalServerAuthoritySnapshot()
+        let identity = try CrossNetworkTenantIdentifierPolicy.resolveAuthenticatedIdentity(
+            accessToken: snapshot.accessToken,
+            explicitTenantID: ProcessInfo.processInfo.environment["SKYBRIDGE_TENANT_ID"],
+            sessionTenantID: snapshot.sessionTenantID, sessionUserIdentifier: snapshot.sessionUserIdentifier)
+        return AudioAccountContext(authorization: authorization, account: try AudioAccountIdentity(
+            authority: SkyBridgeServerConfig.signalingServerURL, tenantID: identity.tenantID, userID: identity.userID))
+    }
+
+    /// Freeze one authority and credential for this GET, with epoch checks around
+    /// refresh. A later login/configuration change cannot lend its token to this request.
+    static func makeAudioAccountClient(_ expected: AudioAccountContext) async throws -> SignalServerClient {
+        func check() throws {
+            let current = try currentAudioAccountContext()
+            guard current.authorization === expected.authorization, expected.authorization.isCurrent,
+                  current.account == expected.account else { throw AudioMembershipLeaseFailure.accountChanged }
+        }
+        try check()
+        let context = try await currentAuthenticatedSignalServerRequestContext()
+        try check()
+        guard context.tenantID == expected.account.tenantID, context.userID == expected.account.userID else {
+            throw AudioMembershipError.scopeMismatch
+        }
+        return SignalServerClient(baseURLProvider: { expected.account.authority },
+            authenticatedRequestContextProvider: { context }, tenantIDProvider: { context.tenantID })
+    }
+
+    /// Freeze the ordinary presence request too. A nil audio epoch is not an
+    /// authentication-operation witness, but it must remain absent across the
+    /// credential await rather than borrowing a newly published audio epoch.
+    private static func makePresenceAccountClient(expected: AudioAccountContext?) async throws -> SignalServerClient {
+        if let expected { return try await makeAudioAccountClient(expected) }
+        let authority = SkyBridgeServerConfig.signalingServerURL
+        func check() throws {
+            guard AuthenticationService.shared.audioAuthorizationSnapshot == nil,
+                  SkyBridgeServerConfig.signalingServerURL == authority else {
+                throw AudioMembershipLeaseFailure.accountChanged
+            }
+        }
+        try check()
+        let context = try await currentAuthenticatedSignalServerRequestContext()
+        try check()
+        return SignalServerClient(baseURLProvider: { authority },
+            authenticatedRequestContextProvider: { context }, tenantIDProvider: { context.tenantID })
     }
 
     public init() {
@@ -882,12 +932,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             }
 
             guard let token = activeWebRTCClipboardToken else { return }
-            clipboard.enable(for: token)
-            clipboard.onLocalClipboardChanged = { [weak self] data, mimeType in
+            clipboard.enable(for: token) { [weak self] data, mimeType in
                 guard let self else { return }
                 Task { @MainActor [weak self] in
                     guard let self,
-                          self.activeWebRTCClipboardSessionId == sessionID else { return }
+                          self.activeWebRTCClipboardSessionId == sessionID,
+                          self.activeWebRTCClipboardToken == token,
+                          self.webrtcSessionsBySessionId[sessionID] === session else { return }
                     await self.sendWebRTCClipboardPayload(
                         data: data,
                         mimeType: mimeType,
@@ -907,8 +958,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     private func stopWebRTCClipboardSyncIfNeeded(for sessionID: String) {
         guard activeWebRTCClipboardSessionId == sessionID else { return }
         let clipboard = ClipboardRedirectionManager.shared
-        clipboard.onLocalClipboardChanged = nil
-        clipboard.disable()
+        if let token = activeWebRTCClipboardToken { clipboard.disable(for: token) }
         activeWebRTCClipboardSessionId = nil
         activeWebRTCClipboardToken = nil
     }
@@ -1238,6 +1288,140 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             && lhs.sessionObjectIdentifier == rhs.sessionObjectIdentifier
             && lhs.controlTaskToken == rhs.controlTaskToken
             && isSameWebRTCSecureSession(lhs.keys, rhs.keys)
+    }
+
+    func currentWebRTCBoundSessionOperationOwner(
+        sessionID: String
+    ) -> WebRTCBoundSessionOperationOwner? {
+        guard let session = webrtcSessionsBySessionId[sessionID],
+              let keys = webrtcSessionKeysBySessionId[sessionID],
+              let controlRecord = webrtcControlTasksBySessionId[sessionID],
+              controlRecord.sessionObjectIdentifier == ObjectIdentifier(session) else {
+            return nil
+        }
+        return WebRTCBoundSessionOperationOwner(
+            identity: WebRTCBoundSessionSecureOwnerIdentity(
+                sessionID: sessionID,
+                sessionObjectIdentifier: ObjectIdentifier(session),
+                controlTaskToken: controlRecord.token,
+                keyIncarnationDigest: Self.webRTCBoundSessionKeyIncarnationDigest(for: keys)
+            ),
+            session: session,
+            keys: keys
+        )
+    }
+
+    func isCurrentWebRTCBoundSessionOperationOwner(
+        _ owner: WebRTCBoundSessionOperationOwner
+    ) -> Bool {
+        guard let currentOwner = currentWebRTCBoundSessionOperationOwner(
+            sessionID: owner.identity.sessionID
+        ) else {
+            return false
+        }
+        return currentOwner.identity == owner.identity
+            && currentOwner.session === owner.session
+            && Self.isSameWebRTCSecureSession(currentOwner.keys, owner.keys)
+    }
+
+    func armWebRTCBoundSessionConsumer(
+        owner: WebRTCBoundSessionOperationOwner,
+        expectedRecordKind: BoundSessionWebRTCRecordKindV1,
+        consumer: @escaping WebRTCBoundSessionConsumerGate.Consumer
+    ) throws {
+        try requireCurrentWebRTCBoundSessionOperationOwner(owner)
+        var gate = webrtcBoundSessionConsumerGatesBySessionId[owner.identity.sessionID]
+            ?? WebRTCBoundSessionConsumerGate()
+        try gate.arm(
+            ownerIdentity: owner.identity,
+            expectedRecordKind: expectedRecordKind,
+            consumer: consumer
+        )
+        webrtcBoundSessionConsumerGatesBySessionId[owner.identity.sessionID] = gate
+    }
+
+    func invalidateWebRTCBoundSessionConsumer(
+        owner: WebRTCBoundSessionOperationOwner
+    ) throws {
+        try requireCurrentWebRTCBoundSessionOperationOwner(owner)
+        guard var gate = webrtcBoundSessionConsumerGatesBySessionId[owner.identity.sessionID]
+        else {
+            return
+        }
+        gate.invalidate()
+        webrtcBoundSessionConsumerGatesBySessionId[owner.identity.sessionID] = gate
+    }
+
+    func sendWebRTCBoundSessionRecord(
+        _ exactRecord: Data,
+        recordKind: BoundSessionWebRTCRecordKindV1,
+        owner: WebRTCBoundSessionOperationOwner
+    ) async throws {
+        try requireCurrentWebRTCBoundSessionOperationOwner(owner)
+        try BoundSessionWebRTCCarrierPolicyV1.validateRecordEnvelope(
+            exactRecord,
+            expectedRecordKind: recordKind
+        )
+        let counter = try reserveWebRTCSecurePayloadCounter(
+            with: owner.keys,
+            sessionID: owner.identity.sessionID
+        )
+        let carrierPayload = try WebRTCControlChannelCodec.encryptBoundSessionRecord(
+            exactRecord,
+            recordKind: recordKind,
+            with: owner.keys,
+            counter: counter
+        )
+        try requireCurrentWebRTCBoundSessionOperationOwner(owner)
+        try await owner.session.sendFramedPayloadAsync(
+            carrierPayload,
+            maxChunkBytes: 1_024,
+            maxBufferedAmountBytes: 256 * 1_024
+        )
+        try requireCurrentWebRTCBoundSessionOperationOwner(owner)
+    }
+
+    func sendWebRTCBoundSessionRecord(
+        _ record: BoundSessionOutboundRecord,
+        owner: WebRTCBoundSessionOperationOwner
+    ) async throws {
+        try await sendWebRTCBoundSessionRecord(
+            record.exactBytes,
+            recordKind: record.kind,
+            owner: owner
+        )
+    }
+
+    private func requireCurrentWebRTCBoundSessionOperationOwner(
+        _ owner: WebRTCBoundSessionOperationOwner
+    ) throws {
+        guard isCurrentWebRTCBoundSessionOperationOwner(owner) else {
+            throw CancellationError()
+        }
+        try Task.checkCancellation()
+    }
+
+    private func consumeWebRTCBoundSessionRecord(
+        _ exactRecord: Data,
+        header: BoundSessionWebRTCCarrierHeaderV1,
+        owner: WebRTCBoundSessionOperationOwner
+    ) async throws {
+        try requireCurrentWebRTCBoundSessionOperationOwner(owner)
+        guard var gate = webrtcBoundSessionConsumerGatesBySessionId[owner.identity.sessionID]
+        else {
+            throw WebRTCBoundSessionCarrierIntegrationError.consumerNotArmed
+        }
+        let consumer = try gate.takeConsumer(
+            ownerIdentity: owner.identity,
+            recordKind: header.recordKind
+        )
+        // Commit the one-shot removal before invoking the product adapter.
+        // The awaited callback may arm the next Rust typestate. Remove this
+        // one-shot registration first so concurrent duplicate delivery cannot
+        // re-enter the transition while the actor is suspended.
+        webrtcBoundSessionConsumerGatesBySessionId[owner.identity.sessionID] = gate
+        try await consumer(header.recordKind, exactRecord)
+        try requireCurrentWebRTCBoundSessionOperationOwner(owner)
     }
 
     private func isCurrentWebRTCRemoteControlSession(
@@ -2775,6 +2959,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         currentPathSignalingWebSocketPathBySessionId.removeValue(forKey: sessionID)
         webrtcSessionKeysBySessionId.removeValue(forKey: sessionID)
         clearWebRTCSecureEnvelopeState(for: sessionID)
+        webrtcBoundSessionConsumerGatesBySessionId.removeValue(forKey: sessionID)
         webrtcRekeyInProgressSessionIds.remove(sessionID)
         webrtcRemoteDesktopHeartbeatAtBySessionId.removeValue(forKey: sessionID)
         webrtcRemoteVideoFormatsBySessionId.removeValue(forKey: sessionID)
@@ -2877,7 +3062,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         _ ciphertext: Data,
         with keys: SessionKeys,
         sessionID: String,
-        allowedPacketTypes: Set<WebRTCAppSecurePacketType> = Set(WebRTCAppSecurePacketType.allCases)
+        allowedPacketTypes: Set<WebRTCAppSecurePacketType> =
+            WebRTCAppSecurePacketType.genericApplicationTypes
     ) throws -> WebRTCAppSecureOpenedPayload {
         let opened = try WebRTCControlChannelCodec.decryptAppPayload(
             ciphertext,
@@ -2934,13 +3120,41 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     }
 
     nonisolated private static func webRTCSecureEnvelopeKeyFingerprint(for keys: SessionKeys) -> String {
-        var input = Data("SkyBridge-WebRTC-App-State-v1|".utf8)
-        input.append(Data(keys.sessionId.utf8))
-        input.append(0)
-        input.append(Data(keys.role.rawValue.utf8))
-        input.append(0)
-        input.append(keys.transcriptHash)
-        return SHA256.hash(data: input).map { String(format: "%02x", $0) }.joined()
+        webRTCSecureKeyIncarnationDigest(
+            for: keys,
+            domain: "SkyBridge-WebRTC-App-State-v2"
+        ).map { String(format: "%02x", $0) }.joined()
+    }
+
+    nonisolated private static func webRTCBoundSessionKeyIncarnationDigest(
+        for keys: SessionKeys
+    ) -> Data {
+        webRTCSecureKeyIncarnationDigest(
+            for: keys,
+            domain: "SkyBridge-WebRTC-BoundSession-Owner-v1"
+        )
+    }
+
+    nonisolated private static func webRTCSecureKeyIncarnationDigest(
+        for keys: SessionKeys,
+        domain: String
+    ) -> Data {
+        var hasher = SHA256()
+        func updateLengthPrefixed(_ field: Data) {
+            var byteCount = UInt64(field.count).bigEndian
+            withUnsafeBytes(of: &byteCount) { bytes in
+                hasher.update(bufferPointer: bytes)
+            }
+            hasher.update(data: field)
+        }
+        updateLengthPrefixed(Data(domain.utf8))
+        updateLengthPrefixed(Data(keys.sessionId.utf8))
+        updateLengthPrefixed(Data(keys.negotiatedSuite.rawValue.utf8))
+        updateLengthPrefixed(Data(keys.role.rawValue.utf8))
+        updateLengthPrefixed(keys.transcriptHash)
+        updateLengthPrefixed(keys.sendKey)
+        updateLengthPrefixed(keys.receiveKey)
+        return Data(hasher.finalize())
     }
 
     private func resolvedCrossNetworkDisplayName(
@@ -3767,6 +3981,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcPendingRemoteStreamConfigurationBySessionId.removeAll()
         webrtcRemoteSecurityIdentityBySessionId.removeAll()
         webrtcBootstrapReplyFingerprintBySessionId.removeAll()
+        webrtcBoundSessionConsumerGatesBySessionId.removeAll()
         webrtcRekeyInProgressSessionIds.removeAll()
         webrtcPendingStreamRefreshSessionIds.removeAll()
         webrtcAwaitingStreamConfigurationSessionIds.removeAll()
@@ -4015,14 +4230,94 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     public func registerDevicePresence(
         report: AccountDevicePresenceReport
     ) async throws -> SignalServerClient.PresenceRegisterResponseBody {
+        // Capture before identity loading can suspend. A request without an audio
+        // epoch must never borrow one published while that request is in flight.
+        let context = AuthenticationService.shared.audioAuthorizationSnapshot != nil
+            ? try Self.currentAudioAccountContext() : nil
         let binding = try await presenceLocalBinding()
-        return try await signalServer.registerPresence(binding: binding, report: report)
+        let provider = AudioAccountMembershipProvider.shared
+        return try await provider.observeOptionalRequest(context: context, allowTemporaryFailure: true) { observation in
+            let response: SignalServerClient.PresenceRegisterResponseBody
+            do {
+                let client = try await Self.makePresenceAccountClient(expected: context)
+                response = try await client.registerPresence(binding: binding, report: report)
+            } catch {
+                if let context, case .deviceNotActive = SignalServerClient.presenceFailure(for: error) {
+                    guard let observation else { throw ProtectedAccountSessionError.invalidRecord }
+                    try await provider.revoke(identity: AudioProtocolIdentity(binding), context: context,
+                                              observation: observation)
+                }
+                throw error
+            }
+            if let context {
+                guard let observation else { throw ProtectedAccountSessionError.invalidRecord }
+                // Apply the completed fact before presentation cancellation.
+                try await provider.observeHeartbeat(response, context: context, caller: AudioProtocolIdentity(binding),
+                                                    observation: observation)
+            }
+            return response
+        }
     }
 
     /// 拉取本账号（JWT 的 tenant+user）下的全部设备及实时在线状态。
     public func listAccountDevices() async throws -> AccountDeviceListSnapshot {
+        // Capture even when no audio request exists yet: one can start while
+        // this GET is suspended, and must observe this request's negative reply.
+        let context = AuthenticationService.shared.audioAuthorizationSnapshot != nil
+            ? try Self.currentAudioAccountContext() : nil
         let binding = try await presenceLocalBinding()
-        return try await signalServer.listAccountDevices(binding: binding)
+        let provider = AudioAccountMembershipProvider.shared
+        return try await provider.observeOptionalRequest(context: context, allowTemporaryFailure: true) { observation in
+            let startedWall = Int64(Date().timeIntervalSince1970 * 1_000)
+            let startedMonotonic = ContinuousClock.now
+            let response: AccountDeviceListSnapshot
+            do {
+                let client = try await Self.makePresenceAccountClient(expected: context)
+                response = try await client.listAccountDevices(binding: binding)
+            } catch {
+                if let context, case .deviceNotActive = SignalServerClient.presenceFailure(for: error) {
+                    guard let observation else { throw ProtectedAccountSessionError.invalidRecord }
+                    try await provider.revoke(identity: AudioProtocolIdentity(binding), context: context,
+                                              observation: observation)
+                }
+                throw error
+            }
+            if let context {
+                guard let observation else { throw ProtectedAccountSessionError.invalidRecord }
+                try await provider.observeFreshRegistry(response, context: context, caller: AudioProtocolIdentity(binding),
+                    startedWall: startedWall, receivedWall: Int64(Date().timeIntervalSince1970 * 1_000),
+                    startedMonotonic: startedMonotonic, receivedMonotonic: .now, observation: observation)
+            }
+            return response
+        }
+    }
+
+    public func removeAccountDevice(_ target: AccountDeviceRecord, expectedAccountScope: String) async throws {
+        let context = AuthenticationService.shared.audioAuthorizationSnapshot != nil
+            ? try Self.currentAudioAccountContext() : nil
+        let binding = try await presenceLocalBinding()
+        let provider = AudioAccountMembershipProvider.shared
+        // A lost removal response cannot establish that the side effect did not occur.
+        try await provider.observeOptionalRequest(context: context, allowTemporaryFailure: false) { observation in
+            do {
+                let client = try await Self.makePresenceAccountClient(expected: context)
+                try await client.removeAccountDevice(binding: binding, target: target, expectedAccountScope: expectedAccountScope)
+            } catch {
+                if let context, case .deviceNotActive = SignalServerClient.presenceFailure(for: error) {
+                    guard let observation else { throw ProtectedAccountSessionError.invalidRecord }
+                    try await provider.revoke(identity: AudioProtocolIdentity(binding), context: context,
+                                              observation: observation)
+                }
+                throw error
+            }
+            if let context, let algorithm = ProtocolSigningAlgorithm(rawValue: target.protocolSigningAlgorithm) {
+                guard let observation else { throw ProtectedAccountSessionError.invalidRecord }
+                // The client has validated the exact removal receipt.
+                try await provider.revoke(identity: AudioProtocolIdentity(
+                    deviceID: target.deviceId, algorithm: algorithm, fingerprint: target.protocolPublicKeyFingerprint),
+                    context: context, observation: observation)
+            }
+        }
     }
 
     /// 身份未就绪是一种独立的失败类别（不是网络故障，也不是未登录）。
@@ -7002,21 +7297,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             return didCleanup
         }
 
-        func receiveSome(max: Int) async throws -> Data {
-            try await inbound.next(max: max)
-        }
-
-        func receiveExactly(_ length: Int) async throws -> Data {
-            var buffer = Data()
-            buffer.reserveCapacity(length)
-            while buffer.count < length {
-                try Task.checkCancellation()
-                let remaining = length - buffer.count
-                let chunk = try await receiveSome(max: min(65536, remaining))
-                buffer.append(chunk)
-            }
-            try Task.checkCancellation()
-            return buffer
+        let stagedFrameReader = WebRTCStagedFramedPayloadReader { maximumByteCount in
+            try await inbound.next(max: maximumByteCount)
         }
 
         let transport = DirectHandshakeTransport(sendRaw: { data in
@@ -7118,6 +7400,48 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         with: Result {
                             try WebRTCControlChannelCodec.decryptAppPayload(
                                 ciphertext,
+                                with: keys
+                            )
+                        }
+                    )
+                }
+            }
+            guard self.isCurrentWebRTCControlLoopSecureOwner(
+                sessionID: sessionID,
+                session: session,
+                controlTaskToken: controlTaskToken,
+                keys: keys
+            ) else {
+                throw CancellationError()
+            }
+            return try validateWebRTCSecureOpenedPayload(
+                opened,
+                with: keys,
+                sessionID: sessionID
+            )
+        }
+
+        func decryptBoundSessionCarrier(
+            _ carrierPayload: Data,
+            header: BoundSessionWebRTCCarrierHeaderV1,
+            with keys: SessionKeys
+        ) async throws -> WebRTCAppSecureOpenedPayload {
+            guard self.isCurrentWebRTCControlLoopSecureOwner(
+                sessionID: sessionID,
+                session: session,
+                controlTaskToken: controlTaskToken,
+                keys: keys
+            ) else {
+                throw CancellationError()
+            }
+            let opened = try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<WebRTCAppSecureOpenedPayload, Error>) in
+                webRTCControlCryptoQueue.async {
+                    continuation.resume(
+                        with: Result {
+                            try WebRTCControlChannelCodec.decryptBoundSessionCarrier(
+                                carrierPayload,
+                                admittedHeader: header,
                                 with: keys
                             )
                         }
@@ -9355,18 +9679,26 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     lastFailFastMediaFallbacks = failFastMediaFallbacks
                     lastRealtimeAudioEndpointStableKey = realtimeAudioEndpointStableKey
                     lastDirectEncoderStartAt = .distantPast
+                    // 系统音频采集在进程内是独占的（单一采样游标）。另一路会话正在占用时必须
+                    // 明确退让：抢过去会让对方的音频静默中断，且两端都看不到任何错误。
+                    var nativeAudioCaptureGranted = shouldUseNativeAudioTrack
 #if canImport(WebRTCAudioDeviceBridge)
                     if shouldUseNativeAudioTrack {
-                        SBWebRTCSystemAudioDevice.shared().activateRecordedAudioOwner(
-                            withToken: nativeAudioOwnerToken
-                        )
+                        nativeAudioCaptureGranted = SBWebRTCSystemAudioDevice.shared()
+                            .activateRecordedAudioOwner(withToken: nativeAudioOwnerToken)
+                        if !nativeAudioCaptureGranted {
+                            self.appendWebRTCSessionDiagnostic(
+                                "audioTxNativeCaptureDenied session=\(sessionID) reason=system_audio_owned_by_another_session",
+                                sessionID: sessionID
+                            )
+                        }
                     } else {
                         SBWebRTCSystemAudioDevice.shared().retireRecordedAudioOwner(
                             withToken: nativeAudioOwnerToken
                         )
                     }
 #endif
-                    session.setOutgoingSystemAudioTrackEnabled(shouldUseNativeAudioTrack)
+                    session.setOutgoingSystemAudioTrackEnabled(nativeAudioCaptureGranted)
                     func storeEncodedFrame(
                         _ data: Data,
                         width: Int,
@@ -11645,7 +11977,6 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         logger.info("🤝 WebRTC 控制通道：启动入站握手/消息循环 session=\(sessionID, privacy: .public)")
 
-        let maxInboundFrameBytes = WebRTCFramedPayloadPolicy.maximumPayloadByteCount
         var lastInboundFrameLength = 0
         var lastDecodedFrameLength = 0
         var lastHandshakeDriverState = "none"
@@ -11654,7 +11985,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         do {
             while true {
                 try Task.checkCancellation()
-                let lenData = try await receiveExactly(4)
+                let admittedFrame = try await stagedFrameReader.next()
                 guard self.isCurrentWebRTCControlLoopOwner(
                     sessionID: sessionID,
                     session: session,
@@ -11662,23 +11993,61 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 ) else {
                     throw CancellationError()
                 }
-                let totalLen = lenData.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
-                lastInboundFrameLength = Int(totalLen)
-                guard totalLen > 0 && totalLen <= maxInboundFrameBytes else {
-                    logger.warning("⚠️ WebRTC frame length out of range: len=\(Int(totalLen), privacy: .public) max=\(maxInboundFrameBytes, privacy: .public)")
-                    break
-                }
-                let payload = try await receiveExactly(Int(totalLen))
-                try Task.checkCancellation()
-                guard self.isCurrentWebRTCControlLoopOwner(
-                    sessionID: sessionID,
-                    session: session,
-                    controlTaskToken: controlTaskToken
-                ) else {
-                    throw CancellationError()
-                }
+                let payload = admittedFrame.payload
+                lastInboundFrameLength = payload.count
                 if Self.isSmokeRuntimeEnabled {
-                    Self.emitSmokeLog("🧪 mac rx frame totalLen=\(Int(totalLen))")
+                    Self.emitSmokeLog("🧪 mac rx frame totalLen=\(payload.count)")
+                }
+
+                if case .boundSession(let carrierHeader) = admittedFrame.route {
+                    let boundSessionOwner = self.currentWebRTCBoundSessionOperationOwner(
+                        sessionID: sessionID
+                    )
+                    do {
+                        guard let keys = handshakeState.sessionKeys,
+                              let owner = boundSessionOwner,
+                              owner.session === session,
+                              owner.identity.controlTaskToken == controlTaskToken,
+                              Self.isSameWebRTCSecureSession(owner.keys, keys) else {
+                            throw WebRTCBoundSessionCarrierIntegrationError.ownerMismatch
+                        }
+                        let opened = try await decryptBoundSessionCarrier(
+                            payload,
+                            header: carrierHeader,
+                            with: keys
+                        )
+                        lastDecodedFrameLength = opened.payload.count
+                        try await self.consumeWebRTCBoundSessionRecord(
+                            opened.payload,
+                            header: carrierHeader,
+                            owner: owner
+                        )
+                    } catch is CancellationError {
+                        if let boundSessionOwner,
+                           self.isCurrentWebRTCBoundSessionOperationOwner(boundSessionOwner) {
+                            failCurrentControlLoop(
+                                reason: "bound_session_consumer_cancelled",
+                                disconnectKind: .explicit,
+                                statusMessage: "BoundSession transition cancelled"
+                            )
+                            return
+                        }
+                        throw CancellationError()
+                    } catch {
+                        logger.error(
+                            "BoundSession WebRTC carrier rejected: session=\(sessionID, privacy: .public)"
+                        )
+                        failCurrentControlLoop(
+                            reason: "bound_session_carrier_protocol_violation",
+                            disconnectKind: .explicit,
+                            statusMessage: "Invalid BoundSession WebRTC carrier"
+                        )
+                        return
+                    }
+                    // Packet type 6 is consume-only. It must never enter traffic
+                    // padding, handshake, app-control, file, media, or generic
+                    // application routing below.
+                    continue
                 }
 
                 let trafficUnwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx/webrtc")
@@ -11716,6 +12085,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                            let msg = decodeCompatibilityAppMessage(plaintext) {
                             if Self.isSmokeRuntimeEnabled {
                                 switch msg {
+                                case .usbPeerDiscoveryRequest, .usbPeerDiscoveryResponse, .handshakeConfigurationRequest, .handshakeConfigurationResponse:
+                                    Self.emitSmokeLog("mac app message=handshakeConfiguration rejectedChannel=webrtc")
                                 case .pairingIdentityExchange(let payload):
                                     Self.emitSmokeLog("🧪 mac app message=pairingIdentityExchange deviceId=\(payload.deviceId) keys=\(payload.kemPublicKeys.count)")
                                 case .kemRefreshRequest(let payload):
@@ -12532,9 +12903,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 do {
                                     let payload = try JSONDecoder().decode(RemoteClipboardPayload.self, from: rm.payload)
                                     configureWebRTCClipboardSyncIfNeeded(for: sessionID, session: session)
-                                    ClipboardRedirectionManager.shared.setRemoteClipboard(
+                                    guard self.activeWebRTCClipboardSessionId == sessionID,
+                                          let token = self.activeWebRTCClipboardToken else {
+                                        throw RemoteControlError.permissionDenied
+                                    }
+                                    try ClipboardRedirectionManager.shared.setRemoteClipboard(
                                         data: payload.data,
-                                        mimeType: payload.mimeType
+                                        mimeType: payload.mimeType,
+                                        for: token
                                     )
                                 } catch {
                                     self.rejectWebRTCRemoteControlHostPayload(
@@ -13210,6 +13586,16 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 }
             }
         } catch is CancellationError {
+            return
+        } catch let error as BoundSessionWebRTCCarrierErrorV1 {
+            logger.error(
+                "BoundSession WebRTC staged admission rejected: session=\(sessionID, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+            )
+            failCurrentControlLoop(
+                reason: "bound_session_carrier_staged_admission_violation",
+                disconnectKind: .explicit,
+                statusMessage: "Invalid BoundSession WebRTC carrier framing"
+            )
             return
         } catch {
             logger.warning(

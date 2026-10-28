@@ -35,3 +35,22 @@
 "startup.step.weatherServices" = "天气服务";
 "startup.step.appleSiliconOptimization" = "Apple Silicon 优化";
 "startup.step.remoteDesktopServices" = "远程桌面服务";
+
+/* Account device registration and hardware metadata */
+"discovery.accountDevices.caller.identityMismatch" = "本机身份与历史登记不一致，需要重新验证设备。";
+"discovery.accountDevices.caller.notRegistered" = "本机尚未登记，需由已登记设备批准。";
+"discovery.accountDevices.caller.pending" = "本机登记正在等待批准。";
+"discovery.accountDevices.caller.frozen" = "本机登记已冻结。";
+"discovery.accountDevices.caller.unrecognizedStatus" = "暂时无法确认本机的登记状态。";
+"discovery.accountDevices.modelNotReported" = "型号尚未上报";
+
+/* Established connection transport and USB peer identification. */
+"device.discovery.methods" = "发现方式：";
+"connection.current.usb" = "USB 已连接";
+"connection.current.network" = "网络已连接";
+"usb.connection.details" = "连接详情";
+"usb.peer.identifying" = "正在识别线缆上的设备…";
+"usb.peer.pairFirst" = "请先打开手机或平板上的 SkyBridge，通过扫码完成配对。";
+"usb.peer.identificationFailed" = "暂时无法识别线缆上的 SkyBridge 设备：";
+
+"可用的音频选项会显示在手机的设备页面。播放前会检查账户授权和输出格式，并请求本机确认。" = "可用的音频选项会显示在手机的设备页面。播放前会检查账户授权和输出格式，并请求本机确认。";

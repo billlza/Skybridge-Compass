@@ -1,3 +1,4 @@
+import Combine
 import CryptoKit
 import Dispatch
 import Network
@@ -841,9 +842,14 @@ final class RegressionHardeningTests: XCTestCase {
       timeout: .seconds(30),
       sleep: { _ in throw PairingTimerTestError.injectedFailure }
     )
-    for _ in 0..<100 where manager.testOnlyHasPendingPairingApproval {
-      await Task.yield()
-    }
+    let rejected = expectation(description: "Failed timer clears its pairing request")
+    let observation = manager.$pendingPairingTrustRequest
+      .dropFirst()
+      .filter { $0 == nil }
+      .prefix(1)
+      .sink { _ in rejected.fulfill() }
+    defer { observation.cancel() }
+    await fulfillment(of: [rejected], timeout: 5)
 
     XCTAssertFalse(manager.testOnlyHasPendingPairingApproval)
     XCTAssertEqual(manager.testOnlyStandalonePairingTimeoutTaskCount, 0)
@@ -1254,8 +1260,8 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertFalse(harnessSource.contains("control-route-preflight"))
 
     XCTAssertTrue(
-      p2pSource.contains("let endpoints = connectionEndpointCandidates(for: device)"),
-      "PIB-1 OOB binding must use the provenance-bound DNS-SD control route."
+      p2pSource.contains("let endpoints = connectionEndpointCandidates(for: device, selectedTarget: selectedTarget)"),
+      "PIB-1 must use the selected atomic route; ordinary discovery still requires live DNS-SD provenance."
     )
   }
 
@@ -2910,7 +2916,7 @@ final class RegressionHardeningTests: XCTestCase {
         "maximumLength: RemoteDesktopManagerRuntimeLimits.lanReceiveChunkMaxBytes"))
     XCTAssertTrue(receiveChunk.contains("private nonisolated func receiveNextLANChunk"))
     XCTAssertTrue(
-      receiveChunk.contains("self?.receiveNextLANChunk(from: connection, secureContext: secureContext)"))
+      receiveChunk.contains("self?.receiveNextLANChunk(from: connection, secureContext: secureContext, readFence: readFence)"))
     XCTAssertTrue(
       receiveChunk.contains("secureContext: self.makeLANSecureReceiveContextIfAvailable(for: connection)"))
     XCTAssertTrue(receiveChunk.contains("!self.shouldContinueLANBootstrapFramingHandoff"))
@@ -2935,7 +2941,7 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertFalse(source.contains("private var isMetalFeedDeliverySteadyState: Bool"))
     XCTAssertFalse(source.contains("PendingMetalFeedFrame"))
     let rearmIndex = try XCTUnwrap(
-      receiveChunk.range(of: "self?.receiveNextLANChunk(from: connection, secureContext: secureContext)")?
+      receiveChunk.range(of: "self?.receiveNextLANChunk(from: connection, secureContext: secureContext, readFence: readFence)")?
         .lowerBound)
     let secureRegistrationIndex = try XCTUnwrap(
       receiveChunk.range(of: "secureContext.scheduler.scheduleChunk(")?.lowerBound)
@@ -3028,11 +3034,8 @@ final class RegressionHardeningTests: XCTestCase {
       to: "private func handleScheduledSecureLANReceiveResult(",
       in: source
     )
-    let schedulerBody = try sourceSlice(
-      from: "private final class LANSecureReceiveScheduler",
-      to: "// MARK: - RemoteDesktopManager",
-      in: source
-    )
+    let schedulerBody = try remoteDesktopLANReceiveSchedulerSource()
+    XCTAssertTrue(schedulerBody.contains("final class LANSecureReceiveScheduler"))
     let nextFramedPayloadBody = try sourceSlice(
       from: "private func nextFramedPayload()",
       to: "private func arrivalTime(forPayloadEndingAt endOffset: Int) -> Date?",
@@ -3092,7 +3095,7 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(source.contains("private func scheduleSecureLANReceiveApply("))
     XCTAssertTrue(source.contains("await previousApply?.value"))
     let pendingDrainIndex = try XCTUnwrap(
-      schedulerBody.range(of: "if result.hasCompletePayloadPending")?.lowerBound
+      schedulerBody.range(of: "guard result.hasCompletePayloadPending else { break }")?.lowerBound
     )
     let applyScheduleIndex = try XCTUnwrap(
       schedulerBody.range(of: "await completion(.success(result)")?.lowerBound
@@ -3100,9 +3103,12 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertLessThan(
       applyScheduleIndex,
       pendingDrainIndex,
-      "Secure LAN parser must register the current apply before scheduling the next pending drain so drained follow-up events cannot overtake earlier audio/screen events."
+      "Secure LAN parser must register the current apply before the next bounded drain so drained follow-up events cannot overtake earlier audio/screen events."
     )
-    XCTAssertTrue(schedulerBody.contains("private func scheduleDrain("))
+    XCTAssertTrue(schedulerBody.contains("var result = try await work()"))
+    XCTAssertTrue(schedulerBody.contains("while true"))
+    XCTAssertFalse(schedulerBody.contains("private func scheduleDrain("),
+      "Drains must remain in the same ordered job so a queued terminal event cannot overtake them.")
     XCTAssertTrue(schedulerBody.contains("context.pipeline.drain("))
     XCTAssertTrue(secureEntry.contains("let generation = lanSecureReceiveGeneration"))
     XCTAssertTrue(secureEntry.contains("connectionID: connectionID"))
@@ -3164,8 +3170,8 @@ final class RegressionHardeningTests: XCTestCase {
       in: source
     )
     let driverCreatedBody = try sourceSlice(
-      from: "onDriverCreated: { driver in",
-      to: "try ensureLANBootstrapStillActive(for: connection)",
+      from: "onDriverCreated:",
+      to: "guard let establishedDriver = lanHandshakeDriver else",
       in: source
     )
 
@@ -3175,6 +3181,9 @@ final class RegressionHardeningTests: XCTestCase {
     )
     XCTAssertTrue(driverCreatedBody.contains("installLANHandshakeDriver("))
     XCTAssertTrue(driverCreatedBody.contains("startReceiving()"))
+    let install = try XCTUnwrap(driverCreatedBody.range(of: "installLANHandshakeDriver("))
+    let receive = try XCTUnwrap(driverCreatedBody.range(of: "startReceiving()"))
+    XCTAssertLessThan(install.lowerBound, receive.lowerBound)
     XCTAssertTrue(source.contains("private func installLANSecureSessionKeys("))
 
     let installKeysBody = try sourceSlice(
@@ -3196,7 +3205,7 @@ final class RegressionHardeningTests: XCTestCase {
 
     let resetParserBody = try sourceSlice(
       from: "private func resetLANReceiveParserState(",
-      to: "private func isCrossNetworkDevice(",
+      to: "private func resetMetalFeedDeliveryState(",
       in: source
     )
     XCTAssertTrue(resetParserBody.contains("private func resetLANSecureReceivePipelineState("))
@@ -3226,7 +3235,7 @@ final class RegressionHardeningTests: XCTestCase {
     )
     let connectBody = try sourceSlice(
       from: "public func connect(to device: DiscoveredDevice) async throws",
-      to: "let endpoints = connectionEndpointCandidates(for: targetDevice)",
+      to: "let endpoints = connectionEndpointCandidates(for: targetDevice, selectedTarget: selectedTarget)",
       in: source
     )
 
@@ -3265,7 +3274,9 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(trustContextBody.contains("reason=missing_pinned_protocol_identity"))
     XCTAssertTrue(trustContextBody.contains("P2PStoredHandshakeTrustProvider("))
     XCTAssertTrue(source.contains("!PeerIdentityAliasResolver.isEndpointAlias(trimmed)"))
-    XCTAssertTrue(connectBody.contains("hasActiveAuthenticatedSession(for: targetDevice.id)"))
+    XCTAssertTrue(connectBody.contains("if let current = currentAuthenticatedSession("))
+    XCTAssertTrue(connectBody.contains("requireConnectedStatus: true"))
+    XCTAssertTrue(connectBody.contains("try completeReconnectAfterAuthentication(current.receipt)"))
     XCTAssertTrue(connectBody.contains("matchingInFlightConnectKey(for: targetDevice, runtimePeerId: runtimePeerId)"))
     XCTAssertTrue(connectBody.contains("await waitForInFlightConnect(inFlightKey)"))
     XCTAssertTrue(connectBody.contains("reason=missing_authenticated_session"))
@@ -9315,12 +9326,12 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(iosSmoke.contains("normalized.contains(\"missingpeerkempublickey\")"))
     XCTAssertTrue(
       p2pManager.contains(
-        "private func ensureStrictPQCKEMTrustReady(for device: DiscoveredDevice) async throws"))
+        "private func ensureStrictPQCKEMTrustReady(\n        for device: DiscoveredDevice, selectedTarget: IOSSelectedConnectionTarget? = nil\n    ) async throws"))
     XCTAssertTrue(p2pManager.contains("strictPQC trust preflight failed: missing peer KEM"))
-    XCTAssertTrue(p2pManager.contains("try await ensureStrictPQCKEMTrustReady(for: targetDevice)"))
+    XCTAssertTrue(p2pManager.contains("try await ensureStrictPQCKEMTrustReady(for: targetDevice, selectedTarget: selectedTarget)"))
     guard
       let preflightRange = p2pManager.range(
-        of: "try await ensureStrictPQCKEMTrustReady(for: targetDevice)"),
+        of: "try await ensureStrictPQCKEMTrustReady(for: targetDevice, selectedTarget: selectedTarget)"),
       let transportRange = p2pManager.range(
         of: "let (connection, selectedEndpoint) = try await establishReadyConnection")
     else {

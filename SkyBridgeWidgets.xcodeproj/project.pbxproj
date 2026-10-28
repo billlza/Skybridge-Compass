@@ -110,6 +110,7 @@
 		D8C1E54A3EADF9776DC9B6DF /* OperatorControlServerBootstrap.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16358727B11FEF5CD6D7B6C6 /* OperatorControlServerBootstrap.swift */; };
 		DABEA837C02F24603DAE0260 /* SupabaseConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3445ED6C3F4CBF4F08CDBEB5 /* SupabaseConfiguration.swift */; };
 		DC7368391182B2C07B26A81A /* OperatorControlRuntimeFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D81418181B2577092A7AD30 /* OperatorControlRuntimeFactory.swift */; };
+		52ABC743082F4A19B0615D31 /* OperatorNearbyFileRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7530FB72E734B36B029CDB3 /* OperatorNearbyFileRuntime.swift */; };
 		DF057D8E9931418687E6EAAF /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = F4D58C1923FEAD79BD120C04 /* Localizable.strings */; };
 		E02FFD8F6509AEAC92FAC3D7 /* ConcurrentSystemMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31A02FDE90C72D12CAF98806 /* ConcurrentSystemMonitor.swift */; };
 		E1E33C33EF35461B1031B9F9 /* NavigationNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = A838B3029CCDE75BA6832A13 /* NavigationNotifications.swift */; };
@@ -126,6 +127,15 @@
 		C2D035561142D8216CF47A4D /* AccountDevicesPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 417BBFC72E39DE47BD58C081 /* AccountDevicesPanelView.swift */; };
 		E0D6C0B4D4876F5A83B04BAF /* AccountDevicePresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 815A2616693D8D8F76CD42DD /* AccountDevicePresentation.swift */; };
 		F2B0BE87BA55EABB1B973425 /* AccountDevicesSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D462ABA601F27AA921D27C95 /* AccountDevicesSectionView.swift */; };
+		A8BD3FD15341DBB7907F1AFE /* NearFieldControlCanvas.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BE3E686745731252D279F30 /* NearFieldControlCanvas.swift */; };
+		AC7FECF6887AB68C91E310B1 /* NearFieldWorkspaceViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EF77BAE554BBC1D841CA29D /* NearFieldWorkspaceViewModel.swift */; };
+		71D10F4CC0694067DBE52DDF /* RemoteControlPairingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0D5E76733DCD4F00C97BF7F /* RemoteControlPairingView.swift */; };
+		B0F014E3D5EDC1E10163D106 /* OperatorDesktopRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BCBA4C1D196F048DA55FEDC /* OperatorDesktopRuntime.swift */; };
+		B1A3E79F5D7B831648B1BDFD /* OperatorFileApprovalRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 350DFCAA23896A4E7826FBCC /* OperatorFileApprovalRuntime.swift */; };
+		2EBF769A91782CCD9421ECE1 /* OperatorHandshakeRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51D83985556814EEE9931BC5 /* OperatorHandshakeRuntime.swift */; };
+		AC0F23BC256F7E28306233DB /* DashboardDeviceProjection.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE8652B45DA53B71E01CFE75 /* DashboardDeviceProjection.swift */; };
+		7770EB84C922ABE8C792ABAA /* LanDirectConnectionShareView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F18979DD76506D2FF095C166 /* LanDirectConnectionShareView.swift */; };
+		91B7FDEA1097676247105147 /* AndroidUSBConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45B5068CC65AB531E04356F2 /* AndroidUSBConnectionView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -160,6 +170,7 @@
 		16358727B11FEF5CD6D7B6C6 /* OperatorControlServerBootstrap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperatorControlServerBootstrap.swift; sourceTree = "<group>"; };
 		1B2691D9D9A0E7E40DAC0794 /* SkyBridgeCompassWidgetsExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = SkyBridgeCompassWidgetsExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		1D81418181B2577092A7AD30 /* OperatorControlRuntimeFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperatorControlRuntimeFactory.swift; sourceTree = "<group>"; };
+		E7530FB72E734B36B029CDB3 /* OperatorNearbyFileRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperatorNearbyFileRuntime.swift; sourceTree = "<group>"; };
 		271098ACD4DC0594546D9468 /* EventMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventMonitor.swift; sourceTree = "<group>"; };
 		27F1FDDA6E8134F99044B055 /* QuickActionButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionButton.swift; sourceTree = "<group>"; };
 		28A863D8FACC89865E5B02AE /* StartupCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StartupCoordinator.swift; sourceTree = "<group>"; };
@@ -267,6 +278,15 @@
 		417BBFC72E39DE47BD58C081 /* AccountDevicesPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountDevicesPanelView.swift; sourceTree = "<group>"; };
 		815A2616693D8D8F76CD42DD /* AccountDevicePresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountDevicePresentation.swift; sourceTree = "<group>"; };
 		D462ABA601F27AA921D27C95 /* AccountDevicesSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountDevicesSectionView.swift; sourceTree = "<group>"; };
+		4BE3E686745731252D279F30 /* NearFieldControlCanvas.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearFieldControlCanvas.swift; sourceTree = "<group>"; };
+		5EF77BAE554BBC1D841CA29D /* NearFieldWorkspaceViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearFieldWorkspaceViewModel.swift; sourceTree = "<group>"; };
+		B0D5E76733DCD4F00C97BF7F /* RemoteControlPairingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteControlPairingView.swift; sourceTree = "<group>"; };
+		5BCBA4C1D196F048DA55FEDC /* OperatorDesktopRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperatorDesktopRuntime.swift; sourceTree = "<group>"; };
+		350DFCAA23896A4E7826FBCC /* OperatorFileApprovalRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperatorFileApprovalRuntime.swift; sourceTree = "<group>"; };
+		51D83985556814EEE9931BC5 /* OperatorHandshakeRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperatorHandshakeRuntime.swift; sourceTree = "<group>"; };
+		BE8652B45DA53B71E01CFE75 /* DashboardDeviceProjection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardDeviceProjection.swift; sourceTree = "<group>"; };
+		F18979DD76506D2FF095C166 /* LanDirectConnectionShareView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LanDirectConnectionShareView.swift; sourceTree = "<group>"; };
+		45B5068CC65AB531E04356F2 /* AndroidUSBConnectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AndroidUSBConnectionView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -320,6 +340,7 @@
 			children = (
 				453B52513C3C99FB3DD15270 /* DashboardBackgroundView.swift */,
 				2E06A601920A0654D26DC0CF /* DashboardView.swift */,
+				BE8652B45DA53B71E01CFE75 /* DashboardDeviceProjection.swift */,
 				82FF3543520062B6996BF2EC /* Components */,
 				AF250E9FB2DCB4A19E4E26A7 /* Navigation */,
 				B4FAF91F5B79E59E39668B94 /* Sections */,
@@ -391,6 +412,8 @@
 		55FC17AEF69153420C3FC65C /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				F18979DD76506D2FF095C166 /* LanDirectConnectionShareView.swift */,
+				45B5068CC65AB531E04356F2 /* AndroidUSBConnectionView.swift */,
 				D462ABA601F27AA921D27C95 /* AccountDevicesSectionView.swift */,
 				815A2616693D8D8F76CD42DD /* AccountDevicePresentation.swift */,
 				DE3E2F0E44685A79BA4C94DD /* CopyToastView.swift */,
@@ -399,6 +422,9 @@
 				2FB0C73089453C8B07AB53D6 /* EnhancedDeviceDiscoveryView.swift */,
 				C358D8499396F28ADEBAE316 /* LiquidGlassUserArea.swift */,
 				80758AF748C8962CAB9491F5 /* NearFieldMirrorView.swift */,
+				B0D5E76733DCD4F00C97BF7F /* RemoteControlPairingView.swift */,
+				5EF77BAE554BBC1D841CA29D /* NearFieldWorkspaceViewModel.swift */,
+				4BE3E686745731252D279F30 /* NearFieldControlCanvas.swift */,
 				72E3832E6ABD806CA833E1AA /* NotificationBellView.swift */,
 				904A7A42479065B9367A8E4D /* SSHTerminalView.swift */,
 				4B510D8932F4F9C7768456DE /* TrustedDeviceDetailView.swift */,
@@ -427,6 +453,10 @@
 				D22DC77505406627AA516040 /* DashboardDataService.swift */,
 				61B6C5B59BA95D28F13245A6 /* OnlineDeviceConnectionCoordinator.swift */,
 				1D81418181B2577092A7AD30 /* OperatorControlRuntimeFactory.swift */,
+				5BCBA4C1D196F048DA55FEDC /* OperatorDesktopRuntime.swift */,
+				350DFCAA23896A4E7826FBCC /* OperatorFileApprovalRuntime.swift */,
+				51D83985556814EEE9931BC5 /* OperatorHandshakeRuntime.swift */,
+				E7530FB72E734B36B029CDB3 /* OperatorNearbyFileRuntime.swift */,
 				16358727B11FEF5CD6D7B6C6 /* OperatorControlServerBootstrap.swift */,
 				F0BFA79F007535E0ADD84BC2 /* Weather */,
 			);
@@ -722,6 +752,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				7770EB84C922ABE8C792ABAA /* LanDirectConnectionShareView.swift in Sources */,
+				91B7FDEA1097676247105147 /* AndroidUSBConnectionView.swift in Sources */,
 				F2B0BE87BA55EABB1B973425 /* AccountDevicesSectionView.swift in Sources */,
 				E0D6C0B4D4876F5A83B04BAF /* AccountDevicePresentation.swift in Sources */,
 				C2D035561142D8216CF47A4D /* AccountDevicesPanelView.swift in Sources */,
@@ -753,6 +785,7 @@
 				4950910AF6588D333D47018B /* DashboardContentView.swift in Sources */,
 				945DEDF7F8FDBE33F15F2C7A /* DashboardDataService.swift in Sources */,
 				7AC9D3D4188016B890EBE9A0 /* DashboardView.swift in Sources */,
+				AC0F23BC256F7E28306233DB /* DashboardDeviceProjection.swift in Sources */,
 				3685AE9894ADAC0AC97FAE1C /* DashboardViewModel.swift in Sources */,
 				D150ECFD3F644A3C36BC983F /* DeepSpaceBackground.swift in Sources */,
 				508D04834661A08F8BCF47C4 /* DeviceChainViewModel.swift in Sources */,
@@ -780,10 +813,17 @@
 				460A1A9C2CD7B05278490283 /* NavigationItem.swift in Sources */,
 				E1E33C33EF35461B1031B9F9 /* NavigationNotifications.swift in Sources */,
 				7905FFC1F533B585ED3BA250 /* NearFieldMirrorView.swift in Sources */,
+				71D10F4CC0694067DBE52DDF /* RemoteControlPairingView.swift in Sources */,
+				AC7FECF6887AB68C91E310B1 /* NearFieldWorkspaceViewModel.swift in Sources */,
+				A8BD3FD15341DBB7907F1AFE /* NearFieldControlCanvas.swift in Sources */,
 				E93F2D2FEF6DB167B7A65C17 /* NotificationBellView.swift in Sources */,
 				47408F11F55E2E3497CF25CF /* OnlineDeviceConnectionCoordinator.swift in Sources */,
 				56B242EDEDEF0D41AA48BB57 /* OnlineDeviceRow.swift in Sources */,
 				DC7368391182B2C07B26A81A /* OperatorControlRuntimeFactory.swift in Sources */,
+				B0F014E3D5EDC1E10163D106 /* OperatorDesktopRuntime.swift in Sources */,
+				B1A3E79F5D7B831648B1BDFD /* OperatorFileApprovalRuntime.swift in Sources */,
+				2EBF769A91782CCD9421ECE1 /* OperatorHandshakeRuntime.swift in Sources */,
+				52ABC743082F4A19B0615D31 /* OperatorNearbyFileRuntime.swift in Sources */,
 				D8C1E54A3EADF9776DC9B6DF /* OperatorControlServerBootstrap.swift in Sources */,
 				732868A8F7E1C04A5E32E73C /* OrderedCollectionsFallback.swift in Sources */,
 				8B7E29A1DF3C80E7F309FE53 /* PerformanceErrorHandler.swift in Sources */,

@@ -11,7 +11,9 @@ public extension CrossnetControlRuntime {
 
     @MainActor
     static func live(engineVersion: String) -> CrossnetControlRuntime {
-        CrossnetControlRuntime(
+        let desktop = OperatorDesktopRuntime(workspace: .shared,
+            discovery: DeviceDiscoveryManagerOptimized(), presentation: .shared)
+        return CrossnetControlRuntime(
             hello: {
                 // The GUI's authenticated paths refresh an expired token before
                 // resolving tenant identity; the operator gate must match, or a
@@ -21,7 +23,8 @@ public extension CrossnetControlRuntime {
                 return await MainActor.run {
                     CrossnetControlRuntimeProjection.hello(
                         engineVersion: engineVersion,
-                        auth: auth
+                        auth: auth,
+                        additionalMutationMethods: OperatorNearbyFileRuntime.methods + OperatorHandshakeRuntime.methods + OperatorFileApprovalRuntime.methods + OperatorDesktopRuntime.methods + OperatorLocalApprovals.methods
                     )
                 }
             },
@@ -83,7 +86,40 @@ public extension CrossnetControlRuntime {
             },
             statusEvents: {
                 OperatorControlRuntimeFactory.liveStatusEvents()
-            }
+            },
+            nearby: { seconds in
+                try await OperatorNearbyFileRuntime.nearby(scanSeconds: seconds)
+            },
+            connectNearby: { ref in
+                try await OperatorNearbyFileRuntime.connect(deviceRef: ref)
+            },
+            sendFile: { request in
+                try await OperatorNearbyFileRuntime.send(request)
+            },
+            usbDevices: {
+                try await OperatorNearbyFileRuntime.usbDevices()
+            },
+            inspectUSB: { try await P2PDiscoveryService.shared.inspectUSBPeer(udid: $0) },
+            localApproval: { try await OperatorLocalApprovals.execute($0) },
+            usbPeers: {
+                try await OperatorNearbyFileRuntime.usbPeers()
+            },
+            connectUSB: { request in
+                try await OperatorNearbyFileRuntime.connectUSB(request)
+            },
+            connectUSBDevice: { request in
+                try await OperatorNearbyFileRuntime.connectUSBDevice(request)
+            },
+            previewTrustRecovery: { peer, fingerprint, preserved in
+                try await TrustSyncService.shared.previewTrustRecovery(peerID: peer, expectedFingerprint: fingerprint,
+                                                                       preservingSharedPeerID: preserved)
+            },
+            recoverTrust: { request in
+                try await P2PDiscoveryService.shared.recoverUSBTrust(udid: request.usb.udid, authorization: request.authorization)
+            },
+            desktop: { try await desktop.execute($0) },
+            fileApproval: { try await OperatorFileApprovalRuntime.execute($0) },
+            handshakeConfiguration: { try await OperatorHandshakeRuntime.execute($0) }
         )
     }
 }
@@ -151,7 +187,7 @@ enum OperatorControlRuntimeFactory {
         remoteDesktopSettingsManager: RemoteDesktopSettingsManager
     ) -> CrossnetControlSettingsSnapshotResult {
         let display = remoteDesktopSettingsManager.settings.displaySettings
-        return CrossnetControlRuntimeProjection.settingsSnapshot(
+        let legacy = CrossnetControlRuntimeProjection.settingsSnapshot(
             CrossnetControlSettingsRuntimeSnapshot(
                 enableVerboseLogging: settingsManager.enableVerboseLogging,
                 logLevel: settingsManager.logLevel,
@@ -165,6 +201,7 @@ enum OperatorControlRuntimeFactory {
                 remoteDesktopResolution: display.resolution.rawValue
             )
         )
+        return CrossnetControlSettingsSnapshotResult(settings: legacy.settings + OperatorPreferenceAccess.snapshot(settingsManager))
     }
 
     /// Writes one allowlisted setting to the live `SettingsManager`, runs the
@@ -201,7 +238,7 @@ enum OperatorControlRuntimeFactory {
             }
             remoteDesktopSettingsManager.settings.displaySettings.resolution = resolution
         default:
-            throw CrossnetControlFailure.settingInvalidValue
+            try OperatorPreferenceAccess.apply(request, to: settingsManager)
         }
 
         settingsManager.applyRuntimeSettingsSnapshot()
@@ -247,7 +284,7 @@ enum OperatorControlRuntimeFactory {
                 remoteDesktopSettingsManager.settings.displaySettings.resolution.rawValue
             )
         default:
-            throw CrossnetControlFailure.settingNotFound
+            return try OperatorPreferenceAccess.read(id, from: settingsManager)
         }
     }
 

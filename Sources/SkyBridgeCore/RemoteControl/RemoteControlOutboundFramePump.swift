@@ -14,6 +14,13 @@ import SkyBridgeProtocolCore
 struct RemoteMessage: Codable, Sendable {
     let type: MessageType
     let payload: Data
+    let inputControlLease: UUID?
+
+    init(type: MessageType, payload: Data, inputControlLease: UUID? = nil) {
+        self.type = type
+        self.payload = payload
+        self.inputControlLease = inputControlLease
+    }
 
     enum MessageType: String, Codable, Sendable {
         case screenData
@@ -22,11 +29,22 @@ struct RemoteMessage: Codable, Sendable {
         case clipboard
         case streamConfiguration
         case streamConfigurationAck
+        case sessionEnded
+        case streamConfigurationRejected
+        case controlAccess
         case framePresentationAck
         case damageReport
         case cursorUpdate
         case overlayUpdate
     }
+}
+
+/// A local admission latch shared with the main-thread stop action; one latch per pump.
+private final class RemoteControlMediaAdmission: @unchecked Sendable {
+    private let lock = NSLock()
+    private var open = true
+    var isOpen: Bool { lock.lock(); defer { lock.unlock() }; return open }
+    func close() { lock.lock(); open = false; lock.unlock() }
 }
 
 struct RemoteControlSentFrameMetadata: Equatable, Sendable {
@@ -113,6 +131,10 @@ final class RemoteControlFrameSequenceGenerator: @unchecked Sendable {
 }
 
 actor RemoteControlOutboundFramePump {
+    private nonisolated let mediaAdmission = RemoteControlMediaAdmission()
+    private nonisolated let streamCommitBarrier = RemoteControlStreamCommitBarrier()
+    nonisolated func stopAcceptingMedia() { mediaAdmission.close(); streamCommitBarrier.closeAcknowledgementAdmission() }
+
     struct HealthSnapshot: Sendable {
         let lastSentFrameAt: Date
         let waitingForSyncFrame: Bool
@@ -343,6 +365,11 @@ actor RemoteControlOutboundFramePump {
         sessionKeys: SessionKeys?,
         allowsInsecureLegacy: Bool
     ) {
+        if self.sessionKeys?.sessionId != sessionKeys?.sessionId || self.sessionKeys?.sendKey != sessionKeys?.sendKey
+            || self.sessionKeys?.receiveKey != sessionKeys?.receiveKey || self.sessionKeys?.transcriptHash != sessionKeys?.transcriptHash
+            || self.sessionKeys?.role.rawValue != sessionKeys?.role.rawValue || self.sessionKeys?.negotiatedSuite.rawValue != sessionKeys?.negotiatedSuite.rawValue {
+            streamCommitBarrier.reset()
+        }
         sessionEvidenceReference = sessionKeys.flatMap {
             P2PEvidenceReference.sessionIncarnation(
                 sessionID: $0.sessionId,
@@ -398,7 +425,7 @@ actor RemoteControlOutboundFramePump {
     }
 
     func submitDamageReport(_ report: RemoteDesktopDamageReport) async {
-        guard !closed, streamingEnabled, damageTrackingEnabled else {
+        guard mediaAdmission.isOpen, !closed, streamingEnabled, damageTrackingEnabled else {
             latestDamageReport = nil
             return
         }
@@ -411,7 +438,7 @@ actor RemoteControlOutboundFramePump {
     }
 
     func submitFrame(_ frame: ScreenData) async {
-        guard !closed, streamingEnabled else { return }
+        guard mediaAdmission.isOpen, !closed, streamingEnabled else { return }
         let submittedAt = Date()
         noteVideoFrameSubmitted(frame, at: submittedAt)
         if !usesChunkedScreenFrameWire,
@@ -454,7 +481,7 @@ actor RemoteControlOutboundFramePump {
     }
 
     func submitAudioPayload(_ plaintext: Data) async {
-        guard !closed, streamingEnabled else {
+        guard mediaAdmission.isOpen, !closed, streamingEnabled else {
             logAudioQueueClearedIfNeeded(reason: closed ? "closed" : "streaming-disabled")
             return
         }
@@ -506,6 +533,7 @@ actor RemoteControlOutboundFramePump {
     }
 
     func close() {
+        stopAcceptingMedia()
         closed = true
         noteFrameTelemetry(dropped: frameQueue.pendingFrames.count)
         frameQueue.clear()
@@ -1207,7 +1235,7 @@ actor RemoteControlOutboundFramePump {
 
     private func scheduleVideoPaceWakeIfNeeded() {
         guard !videoPaceClock.isScheduled else { return }
-        guard !closed, streamingEnabled, !frameQueue.pendingFrames.isEmpty else { return }
+        guard mediaAdmission.isOpen, !closed, streamingEnabled, !frameQueue.pendingFrames.isEmpty else { return }
         let generation = videoSendGeneration
         let now = Date()
         let delay = isContentProcessedBacklogFull
@@ -1284,7 +1312,7 @@ actor RemoteControlOutboundFramePump {
 
     private func runVideoPaceWake(generation: UInt64, firedAt: Date) async {
         guard generation == videoSendGeneration else { return }
-        guard !closed, streamingEnabled else { return }
+        guard mediaAdmission.isOpen, !closed, streamingEnabled else { return }
         guard !frameQueue.pendingFrames.isEmpty else { return }
         let drainStartedAt = Date()
         noteVideoPaceClockDrain(firedAt: firedAt, drainStartedAt: drainStartedAt)
@@ -1302,7 +1330,7 @@ actor RemoteControlOutboundFramePump {
     }
 
     private func shouldDrainPendingVideoBeforeEnqueue(now: Date = Date()) -> Bool {
-        guard !closed, streamingEnabled else { return false }
+        guard mediaAdmission.isOpen, !closed, streamingEnabled else { return false }
         guard !frameQueue.pendingFrames.isEmpty else { return false }
         guard canScheduleVideoFrameSend else { return false }
         return videoPaceWakeDelay(from: now) == 0
@@ -1326,7 +1354,7 @@ actor RemoteControlOutboundFramePump {
 
     private func scheduleAudioDrainIfNeeded() {
         guard !sendingAudio else { return }
-        guard !closed, streamingEnabled, !audioPayloadQueue.isEmpty else { return }
+        guard mediaAdmission.isOpen, !closed, streamingEnabled, !audioPayloadQueue.isEmpty else { return }
         sendingAudio = true
         let generation = audioDrainGeneration
         audioDrainTask = Task(priority: .userInitiated) { [weak self] in
@@ -1537,12 +1565,35 @@ actor RemoteControlOutboundFramePump {
         }
     }
 
+    func sendStreamAcknowledgement(_ acknowledgement: RemoteDesktopStreamConfigurationAcknowledgement) async throws {
+        guard let expectedKeys = sessionKeys else { throw RemoteControlError.handshakeInitializationFailed("ACK has no secure pump owner") }
+        try await streamCommitBarrier.acknowledge(acknowledgement) { [weak self] in
+            guard let self else { throw CancellationError() }
+            try await self.writeOwnedStreamAcknowledgement(acknowledgement, expectedKeys: expectedKeys)
+        }
+    }
+
+    private func writeOwnedStreamAcknowledgement(_ acknowledgement: RemoteDesktopStreamConfigurationAcknowledgement,
+                                                 expectedKeys: SessionKeys) async throws {
+        try Task.checkCancellation()
+        guard let sessionKeys, sessionKeys.sessionId == expectedKeys.sessionId,
+              sessionKeys.sendKey == expectedKeys.sendKey, sessionKeys.receiveKey == expectedKeys.receiveKey,
+              sessionKeys.transcriptHash == expectedKeys.transcriptHash, sessionKeys.role.rawValue == expectedKeys.role.rawValue,
+              sessionKeys.negotiatedSuite.rawValue == expectedKeys.negotiatedSuite.rawValue else { throw CancellationError() }
+        try await sendControlPayload(acknowledgement, type: .streamConfigurationAck)
+    }
+
+    func committedSessionTermination(reason: RemoteDesktopSessionTermination.Reason) async throws -> RemoteDesktopSessionTermination? {
+        try await streamCommitBarrier.termination(reason: reason)
+    }
+
     func sendControlPayload<T: Encodable & Sendable>(
         _ payload: T,
-        type: RemoteMessage.MessageType
+        type: RemoteMessage.MessageType,
+        inputControlLease: UUID? = nil
     ) async throws {
         let encodedPayload = try JSONEncoder().encode(payload)
-        let message = RemoteMessage(type: type, payload: encodedPayload)
+        let message = RemoteMessage(type: type, payload: encodedPayload, inputControlLease: inputControlLease)
         let framedMessage = try JSONEncoder().encode(message)
         guard framedMessage.count <= maxFramedMessageBytes else {
             throw RemoteControlError.invalidMessageLength(framedMessage.count)
@@ -1569,6 +1620,7 @@ actor RemoteControlOutboundFramePump {
         _ plaintext: Data,
         packetType: RemoteControlSecurePacketType
     ) throws -> Data {
+        if packetType != .control && !mediaAdmission.isOpen { throw CancellationError() }
         let outboundData: Data
         if #available(macOS 14.0, *), let sessionKeys {
             let counter = try secureEnvelopeSendSequencer.nextCounter(for: sessionKeys)

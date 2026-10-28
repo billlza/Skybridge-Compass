@@ -334,6 +334,44 @@ skybridge_ios_require_fresh_app_launch() {
   esac
 }
 
+skybridge_ios_require_postinstall_app_absence() {
+  local ownership_helper="${1:?missing process ownership helper}"
+  local device_id="${2:?missing iOS device id}"
+  local app_path="${3:?missing installed iOS app}"
+  local snapshot="${4:?missing post-install process snapshot}"
+  local timeout_seconds="${5:?missing checkpoint timeout}"
+  local presence_status
+  local checkpoint
+
+  skybridge_ios_process_snapshot "$device_id" "$snapshot" 60 || return 1
+  if python3 "$ownership_helper" ios-presence \
+    --processes-json "$snapshot" --app-path "$app_path"; then
+    # An installation can wake the app in the background. Preserve that
+    # observation and require an explicit close before recording a fresh launch.
+    mv "$snapshot" "${snapshot%.json}-unowned.json" || return 1
+    echo "The installed product is already running. Close only SkyBridge normally."
+    printf 'Type CLOSED after it has exited; a new process snapshot will verify absence: '
+    if ! IFS= read -r -t "$timeout_seconds" checkpoint || [[ "$checkpoint" != "CLOSED" ]]; then
+      echo "post-install close checkpoint was not confirmed" >&2
+      return 1
+    fi
+    skybridge_ios_process_snapshot "$device_id" "$snapshot" 60 || return 1
+    if python3 "$ownership_helper" ios-presence \
+      --processes-json "$snapshot" --app-path "$app_path"; then
+      echo "installed product is still running after the close checkpoint" >&2
+      return 1
+    else
+      presence_status=$?
+    fi
+  else
+    presence_status=$?
+  fi
+  [[ "$presence_status" == "1" ]] || {
+    echo "post-install iOS product absence is unverifiable" >&2
+    return 1
+  }
+}
+
 skybridge_ios_start_console_launch() {
   local device_id="${1:?missing iOS device id}"
   local bundle_id="${2:?missing iOS bundle id}"

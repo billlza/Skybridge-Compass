@@ -691,7 +691,7 @@ public final class DeviceDiscoveryService: ObservableObject {
             optimizedManager?.startScanning()
         }
  // 初始化指纹缓存（ARP/NDP/SSDP），避免阻塞主线程。
-        await refreshFingerprintCaches()
+        guard await refreshFingerprintCaches() else { return }
 
  // 保留旧的浏览器启动逻辑（作为备用）
         await withTaskGroup(of: Void.self) { group in
@@ -1241,15 +1241,33 @@ public final class DeviceDiscoveryService: ObservableObject {
     }
 
  /// 刷新指纹缓存（ARP/NDP/SSDP）。
-    private func refreshFingerprintCaches() async {
+    private func refreshFingerprintCaches() async -> Bool {
         async let arp = netFingerprinting.fetchARPTable()
         async let ndp = netFingerprinting.fetchNDPTable()
-        async let ssdp = ssdpDiscovery.searchOnce()
-        let (a, n, s) = await (arp, ndp, ssdp)
+        let ssdpResult: Result<[(usn: String, location: String)], Error>
+        do {
+            ssdpResult = .success(try await ssdpDiscovery.searchOnce())
+        } catch {
+            ssdpResult = .failure(error)
+        }
+        let (a, n) = await (arp, ndp)
+        guard !Task.isCancelled else { return false }
+        if case .failure(let error) = ssdpResult, error is CancellationError { return false }
         arpCacheIPv4 = a
         ndpCacheIPv6 = n
-        ssdpCache = s
-        logger.info("指纹缓存刷新完成 - ARP: \(a.count), NDP: \(n.count), SSDP: \(s.count)")
+        switch ssdpResult {
+        case .success(let results):
+            ssdpCache = results
+            logger.info("指纹缓存刷新完成 - ARP: \(a.count), NDP: \(n.count), SSDP: \(results.count)")
+        case .failure(let error):
+            // A failed auxiliary probe must not leave stale SSDP evidence or block Bonjour startup.
+            ssdpCache.removeAll()
+            let code = (error as? SSDPDiscovery.Failure)?.diagnosticCode ?? "unexpected_failure"
+            logger.error("SSDP auxiliary discovery failed code=\(code, privacy: .public)")
+            NetworkActivityLogStore.shared.record(category: "discovery", message: "SSDP auxiliary discovery failed code=\(code)")
+            subject.send(DiscoveryState(devices: discoveredDevices, statusDescription: "SSDP 辅助发现失败；其他设备发现继续"))
+        }
+        return true
     }
 
  /// 为指定设备生成候选稳定指纹（不阻塞UI）。

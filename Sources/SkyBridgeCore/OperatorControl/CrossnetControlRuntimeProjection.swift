@@ -72,12 +72,14 @@ public struct CrossnetControlSettingsRuntimeSnapshot: Sendable, Equatable {
 public enum CrossnetControlRuntimeProjection {
     public static func hello(
         engineVersion: String,
-        auth: CrossnetControlAuthState
+        auth: CrossnetControlAuthState,
+        additionalMutationMethods: [String] = []
     ) -> CrossnetControlHelloResult {
         CrossnetControlHelloResult(
             engineVersion: engineVersion,
             authLoaded: auth.authLoaded,
-            tenantBound: auth.tenantBound
+            tenantBound: auth.tenantBound,
+            enabledMutationMethods: CrossnetControlMethods.enabledMutationMethods + additionalMutationMethods
         )
     }
 

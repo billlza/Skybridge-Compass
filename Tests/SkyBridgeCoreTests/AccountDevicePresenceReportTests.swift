@@ -3,6 +3,19 @@ import XCTest
 
 /// 客户端侧的心跳元数据校验必须与服务端 `lib/presence_report.js` 一致（先拒绝，不靠服务端截断）。
 final class AccountDevicePresenceReportTests: XCTestCase {
+    func testListenerPortIsValidatedAndOmittedWhenWithdrawn() throws {
+        for port: UInt16? in [nil, 1, 51173, 65535] {
+            let report = try AccountDevicePresenceReport(deviceName: "Mac", platform: .macOS,
+                deviceModel: nil, osVersion: nil, lanAddresses: ["10.0.0.5"], capabilities: [], lanControlPort: port)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(report)) as? [String: Any])
+            XCTAssertEqual(object["lanControlPort"] as? Int, port.map(Int.init))
+        }
+        XCTAssertThrowsError(try AccountDevicePresenceReport(deviceName: "Mac", platform: .macOS,
+            deviceModel: nil, osVersion: nil, lanAddresses: [], capabilities: [], lanControlPort: 0)) {
+            XCTAssertEqual($0 as? AccountDevicePresenceReportError, .invalidListenerPort)
+        }
+    }
+
     private func report(
         name: String = "Studio Mac",
         model: String? = "Mac16,7",

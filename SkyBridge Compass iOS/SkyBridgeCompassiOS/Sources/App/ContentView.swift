@@ -1,4 +1,5 @@
 import SwiftUI
+import SkyBridgeProtocolCore
 #if canImport(UIKit)
 import QuartzCore
 import UIKit
@@ -15,6 +16,7 @@ struct ContentView: View {
     @StateObject private var inboundFileTransferApproval = InboundFileTransferApprovalService.shared
     @Environment(\.scenePhase) private var scenePhase
     @State private var pairingTrustError: String?
+    @StateObject private var handshakeApproval = HandshakeConfigurationApproval.shared
 
     var body: some View {
         Group {
@@ -96,6 +98,24 @@ struct ContentView: View {
                         ?? RuntimeLocalization.string("idleConnection.notification.defaultDevice")
                 )
             )
+        }
+        .sheet(item: Binding(get: { handshakeApproval.pending }, set: { value in
+            if value == nil, let pending = handshakeApproval.pending { handshakeApproval.resolve(pending.id, decision: .reject) }
+        })) { request in
+            NavigationStack {
+                Form {
+                    Section(request.profile == nil ? "已配对设备请求在 CLI 审批文件" : "已配对设备请求管理握手配置") {
+                        if let profile = request.profile { Text("请求切换到 \(profile.title)") }
+                        else { Text("允许此身份在其 CLI 查看并逐次允许或拒绝它发送的文件。不会自动接收，也不能审批其他设备的文件。") }
+                        Text(request.identity.deviceID).font(.caption).textSelection(.enabled)
+                        Text(request.identity.fingerprint).font(.caption.monospaced()).textSelection(.enabled)
+                        if request.profile != nil { Text("授权仅限 Q-Periapt、X-Wing 和 ML-KEM。不会更换配对身份或启用 Classic；现有连接继续使用原套件。") }
+                    }
+                    Button(request.profile == nil ? "允许 10 分钟" : "仅允许本次") { handshakeApproval.resolve(request.id, decision: .allowOnce) }
+                    Button("始终允许此配对身份") { handshakeApproval.resolve(request.id, decision: .alwaysAllow) }
+                    Button("拒绝", role: .cancel) { handshakeApproval.resolve(request.id, decision: .reject) }
+                }.navigationTitle(request.profile == nil ? "CLI 文件审批授权" : "握手配置授权")
+            }
         }
         .sheet(
             item: Binding(
@@ -721,7 +741,7 @@ private struct PairingTrustRequestSheet: View {
                     LabeledContent(RuntimeLocalization.string("系统"), value: request.osVersion)
                 }
 
-                if request.purpose == .protocolIdentityBinding,
+                if request.purpose != .kemIdentityExchange,
                    let code = request.verificationCode,
                    !code.isEmpty {
                     Section {
@@ -736,7 +756,7 @@ private struct PairingTrustRequestSheet: View {
                     } header: {
                         Text(RuntimeLocalization.string("设备确认码"))
                     } footer: {
-                        Text(RuntimeLocalization.string("请确认 Mac 上显示的 6 位确认码完全一致后再允许。该流程只绑定协议身份；KEM 仍会通过 SKR-1 签名刷新导入。"))
+                        Text(RuntimeLocalization.string("pairing.verification.help"))
                     }
                 }
                 
@@ -751,34 +771,47 @@ private struct PairingTrustRequestSheet: View {
                 }
                 
                 Section {
-                    Button {
-                        onDecision(.alwaysAllow)
-                    } label: {
-                        Text(RuntimeLocalization.string("始终允许"))
+                    if request.purpose.isInformationalComparison {
+                        Text(RuntimeLocalization.string("pairing.candidate.waiting"))
+                    } else {
+                        Button {
+                            onDecision(.alwaysAllow)
+                        } label: {
+                            Text(RuntimeLocalization.string("始终允许"))
+                        }
+                        .accessibilityIdentifier("pairing.alwaysAllow")
+                        
+                        Button {
+                            onDecision(.allowOnce)
+                        } label: {
+                            Text(RuntimeLocalization.string("允许本次"))
+                        }
+                        .accessibilityIdentifier("pairing.allowOnce")
+                        
+                        Button(role: .destructive) {
+                            onDecision(.reject)
+                        } label: {
+                            Text(RuntimeLocalization.string("拒绝"))
+                        }
+                        .accessibilityIdentifier("pairing.reject")
                     }
-                    .accessibilityIdentifier("pairing.alwaysAllow")
-                    
-                    Button {
-                        onDecision(.allowOnce)
-                    } label: {
-                        Text(RuntimeLocalization.string("允许本次"))
-                    }
-                    .accessibilityIdentifier("pairing.allowOnce")
-                    
-                    Button(role: .destructive) {
-                        onDecision(.reject)
-                    } label: {
-                        Text(RuntimeLocalization.string("拒绝"))
-                    }
-                    .accessibilityIdentifier("pairing.reject")
                 } footer: {
-                    Text(request.purpose == .protocolIdentityBinding
-                         ? RuntimeLocalization.string("这是协议身份重新绑定申请。允许后系统会重新固定该设备身份，然后通过 SKR-1 刷新 KEM；不会启用 classic fallback。")
-                         : RuntimeLocalization.string("这是对端发起的配对/受信任申请。若选择“始终允许”，系统会记住该设备并允许后续的 PQC 引导流程。"))
+                    if request.purpose.isInformationalComparison {
+                        Text(RuntimeLocalization.string(
+                            request.purpose == .protocolIdentityBindingFinalAcknowledgement
+                                ? "pairing.confirm.waiting.info" : "pairing.candidate.info"
+                        ))
+                    } else {
+                        Text(request.purpose == .protocolIdentityBinding
+                             ? RuntimeLocalization.string("这是协议身份重新绑定申请。允许后系统会重新固定该设备身份，然后通过 SKR-1 刷新 KEM；不会启用 classic fallback。")
+                             : RuntimeLocalization.string("这是对端发起的配对/受信任申请。若选择“始终允许”，系统会记住该设备并允许后续的 PQC 引导流程。"))
+                    }
                 }
             }
             .accessibilityIdentifier("pairing.sheet")
-            .navigationTitle(RuntimeLocalization.string("受信任申请"))
+            .navigationTitle(RuntimeLocalization.string(
+                request.purpose.isInformationalComparison ? "设备确认码" : "受信任申请"
+            ))
 #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
 #endif

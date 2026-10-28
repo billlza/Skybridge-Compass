@@ -12,6 +12,7 @@ import XCTest
 import CryptoKit
 @testable import SkyBridgeCore
 import SkyBridgeBenchmarkSupport
+import SkyBridgeProtocolCore
 
 // MARK: - Mock Transport
 
@@ -141,6 +142,7 @@ private enum HandshakeDriverTestError: Error {
     case timeoutWaitingForSentMessages
     case timeoutWaitingForProcessingMessageB
     case timeoutWaitingForDriverState
+    case inlineSendFailedAfterFinished
 }
 
 @available(macOS 14.0, iOS 17.0, *)
@@ -765,6 +767,9 @@ final class HandshakeDriverTests: XCTestCase {
         let initiatorTransport = MockDiscoveryTransport()
         let responderTransport = MockDiscoveryTransport()
         let peer = PeerIdentifier(deviceId: "mldsa87-pqc-peer")
+        let initiatorDeviceID = "audio-mldsa87-initiator", responderDeviceID = "audio-mldsa87-responder"
+        let initiatorSOA = PeerSessionArbiter.soaPeerId(from: initiatorDeviceID)
+        let responderSOA = PeerSessionArbiter.soaPeerId(from: responderDeviceID)
         let policy = HandshakePolicy(
             requirePQC: true,
             allowClassicFallback: false,
@@ -806,7 +811,9 @@ final class HandshakeDriverTests: XCTestCase {
                     )
                 ]
             ),
-            kemIdentityStore: initiatorKEMStore
+            kemIdentityStore: initiatorKEMStore, localSOAPeerId: initiatorSOA,
+            localProtocolDeviceId: initiatorDeviceID, expectedRemoteSOAPeerId: responderSOA,
+            sessionArbiter: PeerSessionArbiter()
         )
         let responder = try HandshakeDriver(
             transport: responderTransport,
@@ -838,7 +845,9 @@ final class HandshakeDriverTests: XCTestCase {
                     )
                 ]
             ),
-            kemIdentityStore: responderKEMStore
+            kemIdentityStore: responderKEMStore, localSOAPeerId: responderSOA,
+            localProtocolDeviceId: responderDeviceID, expectedRemoteSOAPeerId: initiatorSOA,
+            sessionArbiter: PeerSessionArbiter()
         )
 
         let handshakeTask = Task {
@@ -877,6 +886,13 @@ final class HandshakeDriverTests: XCTestCase {
               case .established = await responder.getCurrentState() else {
             return XCTFail("Both ML-DSA-87 handshake roles must reach established")
         }
+        let localInitiator = await initiator.getAuthenticatedLocalIdentityBinding(matching: sessionKeys)
+        let localResponder = await responder.getAuthenticatedLocalIdentityBinding()
+        XCTAssertEqual(localInitiator, try ProtocolIdentityBinding(deviceId: initiatorDeviceID,
+            protocolSigningAlgorithm: .mlDSA87, protocolPublicKeyBytes: initiatorPublicKey))
+        XCTAssertEqual(localResponder, try ProtocolIdentityBinding(deviceId: responderDeviceID,
+            protocolSigningAlgorithm: .mlDSA87, protocolPublicKeyBytes: responderPublicKey))
+        await initiator.cancel(); await responder.cancel()
         #else
         throw XCTSkip("Apple PQC SDK was not enabled for this test build")
         #endif
@@ -1004,6 +1020,133 @@ final class HandshakeDriverTests: XCTestCase {
         }
     }
 
+    func testActualLocalBindingsPublishDuringInlineFinishedAndClearOnCancellation() async throws {
+        try await exerciseInlineLocalIdentity(sendFailsAfterFinished: false, mismatchedLocalDeviceID: false)
+    }
+
+    func testActualLocalBindingIsClearedWhenInlineFinishedIsFollowedBySendFailure() async throws {
+        try await exerciseInlineLocalIdentity(sendFailsAfterFinished: true, mismatchedLocalDeviceID: false)
+    }
+
+    func testUnprovenLocalDeviceIDDisablesOnlyLocalAudioIdentity() async throws {
+        try await exerciseInlineLocalIdentity(sendFailsAfterFinished: false, mismatchedLocalDeviceID: true)
+    }
+
+    func testInvalidLocalDeviceIdentifierRetainsDiagnosticWithoutPublishingAudioIdentity() async throws {
+        try await exerciseInlineLocalIdentity(sendFailsAfterFinished: false, mismatchedLocalDeviceID: false,
+                                              invalidLocalDeviceID: true)
+    }
+
+    func testMalformedBuiltPublicIdentityRetainsDiagnosticAfterCancellation() async throws {
+        let driver = try HandshakeDriver(
+            transport: transport, cryptoProvider: ClassicCryptoProvider(), protocolSignatureProvider: ClassicSignatureProvider(),
+            protocolSigningKeyHandle: .softwareKey(identityKeyPair.privateKey.bytes), sigAAlgorithm: .ed25519,
+            identityPublicKey: Data([0x01, 0x20, 0x00, 0xab]), offeredSuites: [.x25519Ed25519], timeout: .seconds(30)
+        )
+        let task = Task { try await driver.initiateHandshake(with: PeerIdentifier(deviceId: "malformed-audio-peer")) }
+        try await waitForSentMessageCount(1, on: transport)
+        let sent = await transport.getSentMessages()
+        let actual = try HandshakeMessageA.decode(from: sent[0].1)
+        XCTAssertThrowsError(try actual.decodedIdentityPublicKeys())
+        let diagnostic = await driver.getLocalIdentityCaptureDiagnostic()
+        let binding = await driver.getAuthenticatedLocalIdentityBinding()
+        XCTAssertEqual(diagnostic, .malformedPublicIdentity); XCTAssertNil(binding)
+        await driver.cancel()
+        do { _ = try await task.value; XCTFail("Cancelled malformed-identity attempt returned keys") }
+        catch let error as HandshakeError {
+            guard case .failed(.cancelled) = error else { return XCTFail("Unexpected handshake failure: \(error)") }
+        }
+        let retained = await driver.getLocalIdentityCaptureDiagnostic()
+        let afterCancellation = await driver.getAuthenticatedLocalIdentityBinding()
+        XCTAssertEqual(retained, .malformedPublicIdentity); XCTAssertNil(afterCancellation)
+    }
+
+    private func exerciseInlineLocalIdentity(sendFailsAfterFinished: Bool, mismatchedLocalDeviceID: Bool,
+                                            invalidLocalDeviceID: Bool = false) async throws {
+        let initiatorTransport = InlineFirstSendTransport(), responderTransport = MockDiscoveryTransport()
+        let initiatorKey = try await provider.generateKeyPair(for: .signing)
+        let responderKey = try await provider.generateKeyPair(for: .signing)
+        let initiatorID = invalidLocalDeviceID ? "invalid local identifier" : "audio-initiator-0001"
+        let responderID = "audio-responder-0002"
+        let initiatorSOA = PeerSessionArbiter.soaPeerId(from: initiatorID)
+        let responderSOA = PeerSessionArbiter.soaPeerId(from: responderID)
+        let initiatorPublicKey = initiatorKey.publicKey.bytes
+        let expectedInitiator: ProtocolIdentityBinding? = invalidLocalDeviceID ? nil : try ProtocolIdentityBinding(
+            deviceId: initiatorID, protocolSigningAlgorithm: .ed25519, protocolPublicKeyBytes: initiatorPublicKey
+        )
+        let expectedResponder = try ProtocolIdentityBinding(deviceId: responderID, protocolSigningAlgorithm: .ed25519,
+                                                          protocolPublicKeyBytes: responderKey.publicKey.bytes)
+        let initiator = try HandshakeDriver(
+            transport: initiatorTransport, cryptoProvider: ClassicCryptoProvider(),
+            protocolSignatureProvider: ClassicSignatureProvider(),
+            protocolSigningKeyHandle: .softwareKey(initiatorKey.privateKey.bytes), sigAAlgorithm: .ed25519,
+            identityPublicKey: encodeIdentityPublicKey(initiatorKey.publicKey.bytes), offeredSuites: [.x25519Ed25519],
+            timeout: .seconds(30), localSOAPeerId: initiatorSOA,
+            localProtocolDeviceId: mismatchedLocalDeviceID ? "unproven-local-0003" : initiatorID,
+            expectedRemoteSOAPeerId: responderSOA, sessionArbiter: PeerSessionArbiter()
+        )
+        let responder = try HandshakeDriver(
+            transport: responderTransport, cryptoProvider: ClassicCryptoProvider(),
+            protocolSignatureProvider: ClassicSignatureProvider(),
+            protocolSigningKeyHandle: .softwareKey(responderKey.privateKey.bytes), sigAAlgorithm: .ed25519,
+            identityPublicKey: encodeIdentityPublicKey(responderKey.publicKey.bytes), offeredSuites: [.x25519Ed25519],
+            timeout: .seconds(30), localSOAPeerId: responderSOA, localProtocolDeviceId: responderID,
+            expectedRemoteSOAPeerId: initiatorSOA, sessionArbiter: PeerSessionArbiter()
+        )
+        let beforeStart = await initiator.getAuthenticatedLocalIdentityBinding()
+        XCTAssertNil(beforeStart)
+        await initiatorTransport.setOnFirstSend { peer, bytes in
+            let messageA = try HandshakeMessageA.decode(from: bytes)
+            XCTAssertEqual(try messageA.decodedIdentityPublicKeys().protocolPublicKey, initiatorPublicKey)
+            let beforeFinishedA = await initiator.getAuthenticatedLocalIdentityBinding()
+            XCTAssertNil(beforeFinishedA)
+            await responder.handleMessage(bytes, from: peer)
+            let responses = await responderTransport.getSentMessages()
+            guard responses.count == 2 else { throw HandshakeDriverTestError.timeoutWaitingForSentMessages }
+            let messageB = try HandshakeMessageB.decode(from: responses[0].1)
+            XCTAssertEqual(try messageB.decodedIdentityPublicKeys().protocolPublicKey, expectedResponder.protocolPublicKeyBytes)
+            let beforeFinishedB = await responder.getAuthenticatedLocalIdentityBinding()
+            XCTAssertNil(beforeFinishedB)
+            await initiator.handleMessage(responses[0].1, from: peer)
+            let awaitingFinished = await initiator.getAuthenticatedLocalIdentityBinding()
+            XCTAssertNil(awaitingFinished)
+            await initiator.handleMessage(responses[1].1, from: peer)
+            let inlineBinding = await initiator.getAuthenticatedLocalIdentityBinding()
+            XCTAssertEqual(inlineBinding, mismatchedLocalDeviceID ? nil : expectedInitiator)
+            let sent = await initiatorTransport.getSentMessages()
+            guard sent.count == 2 else { throw HandshakeDriverTestError.timeoutWaitingForSentMessages }
+            await responder.handleMessage(sent[1].1, from: peer)
+            if sendFailsAfterFinished { throw HandshakeDriverTestError.inlineSendFailedAfterFinished }
+        }
+        do {
+            let keys = try await initiator.initiateHandshake(with: PeerIdentifier(deviceId: responderID))
+            XCTAssertFalse(sendFailsAfterFinished)
+            let binding = await initiator.getAuthenticatedLocalIdentityBinding(matching: keys)
+            XCTAssertEqual(binding, mismatchedLocalDeviceID ? nil : expectedInitiator)
+            let wrongKeys = SessionKeys(sendKey: keys.sendKey, receiveKey: keys.receiveKey,
+                negotiatedSuite: keys.negotiatedSuite, role: keys.role, transcriptHash: Data(repeating: 0xff, count: 32))
+            let wrongEpoch = await initiator.getAuthenticatedLocalIdentityBinding(matching: wrongKeys)
+            XCTAssertNil(wrongEpoch)
+        } catch {
+            if !sendFailsAfterFinished { throw error }
+            let failedBinding = await initiator.getAuthenticatedLocalIdentityBinding()
+            XCTAssertNil(failedBinding)
+        }
+        let responderBinding = await responder.getAuthenticatedLocalIdentityBinding()
+        XCTAssertEqual(responderBinding, expectedResponder)
+        let diagnostic = await initiator.getLocalIdentityCaptureDiagnostic()
+        let expectedDiagnostic: HandshakeDriver.LocalIdentityCaptureDiagnostic? = invalidLocalDeviceID
+            ? .invalidDeviceIdentifier : (mismatchedLocalDeviceID ? .localDeviceSOAMismatch : nil)
+        XCTAssertEqual(diagnostic, expectedDiagnostic)
+        await initiator.cancel(); await responder.cancel()
+        let retainedDiagnostic = await initiator.getLocalIdentityCaptureDiagnostic()
+        XCTAssertEqual(retainedDiagnostic, expectedDiagnostic)
+        let cancelledA = await initiator.getAuthenticatedLocalIdentityBinding()
+        let cancelledB = await responder.getAuthenticatedLocalIdentityBinding()
+        XCTAssertNil(cancelledA); XCTAssertNil(cancelledB)
+        await initiatorTransport.setOnFirstSend(nil)
+    }
+
     func testAuthenticatedRemoteAuthorityRetainedAfterEstablishedHandshake() async throws {
         let initiatorTransport = MockDiscoveryTransport()
         let responderTransport = MockDiscoveryTransport()
@@ -1087,9 +1230,20 @@ final class HandshakeDriverTests: XCTestCase {
         XCTAssertEqual(responderBinding?.authority, responderAuthority)
         XCTAssertNil(initiatorBinding?.authenticatedRemoteSOAPeerId)
         XCTAssertNil(responderBinding?.authenticatedRemoteSOAPeerId)
+        let legacyLocalA = await initiator.getAuthenticatedLocalIdentityBinding()
+        let legacyLocalB = await responder.getAuthenticatedLocalIdentityBinding()
+        XCTAssertNil(legacyLocalA); XCTAssertNil(legacyLocalB)
+        let legacyDiagnosticA = await initiator.getLocalIdentityCaptureDiagnostic()
+        let legacyDiagnosticB = await responder.getLocalIdentityCaptureDiagnostic()
+        XCTAssertNil(legacyDiagnosticA); XCTAssertNil(legacyDiagnosticB)
     }
 
     func testAuthenticatedRemoteAuthorityClearedAfterKeyConfirmationFailure() async throws {
+        let localID = "audio-failed-local-0001", remoteID = "audio-failed-peer-0002"
+        let localSOA = PeerSessionArbiter.soaPeerId(from: localID)
+        let remoteSOA = PeerSessionArbiter.soaPeerId(from: remoteID)
+        let soa = try HandshakeSOAMetadata(initiatorPeerId: remoteSOA, targetPeerId: localSOA,
+                                          attemptId: Data(repeating: 0x34, count: 16))
         let initiatorKeyPair = try await provider.generateKeyPair(for: .signing)
         let initiatorContext = try await HandshakeContext.create(
             role: .initiator,
@@ -1097,13 +1251,19 @@ final class HandshakeDriverTests: XCTestCase {
         )
         let messageA = try await initiatorContext.buildMessageA(
             identityKeyHandle: .softwareKey(initiatorKeyPair.privateKey.bytes),
-            identityPublicKey: encodeIdentityPublicKey(initiatorKeyPair.publicKey.bytes)
+            identityPublicKey: encodeIdentityPublicKey(initiatorKeyPair.publicKey.bytes), extensionsRaw: soa.extensionRaw
         )
 
  // The timeout must never fire; 30s keeps it out of reach on a loaded
  // host. handleMessage completes each transition inline, so no sleeps are
  // needed after the awaited calls.
-        let driver = try makeDriver(timeout: .seconds(30))
+        let driver = try HandshakeDriver(
+            transport: transport, cryptoProvider: ClassicCryptoProvider(), protocolSignatureProvider: ClassicSignatureProvider(),
+            protocolSigningKeyHandle: .softwareKey(identityKeyPair.privateKey.bytes), sigAAlgorithm: .ed25519,
+            identityPublicKey: encodeIdentityPublicKey(identityKeyPair.publicKey.bytes), offeredSuites: [.x25519Ed25519],
+            timeout: .seconds(30), localSOAPeerId: localSOA, localProtocolDeviceId: localID,
+            expectedRemoteSOAPeerId: remoteSOA, sessionArbiter: PeerSessionArbiter()
+        )
         let peer = PeerIdentifier(deviceId: "test-peer")
 
         await driver.handleMessage(messageA.encoded, from: peer)
@@ -1115,6 +1275,8 @@ final class HandshakeDriverTests: XCTestCase {
             "Signature-authenticated authority must remain a private candidate until Finished succeeds."
         )
         XCTAssertNil(bindingBeforeFailure)
+        let localBeforeFailure = await driver.getAuthenticatedLocalIdentityBinding()
+        XCTAssertNil(localBeforeFailure)
 
         let stateBeforeFinished = await driver.getCurrentState()
         guard case .waitingFinished(_, let sessionKeys, _) = stateBeforeFinished else {
@@ -1140,6 +1302,8 @@ final class HandshakeDriverTests: XCTestCase {
         XCTAssertEqual(reason, .keyConfirmationFailed)
         let authorityAfterFailure = await driver.getAuthenticatedRemoteAuthority()
         XCTAssertNil(authorityAfterFailure)
+        let localAfterFailure = await driver.getAuthenticatedLocalIdentityBinding()
+        XCTAssertNil(localAfterFailure)
     }
 
     func testCancellationDuringFinishedArbiterCommitDoesNotLeakEstablishedLease() async throws {

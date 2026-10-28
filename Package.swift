@@ -84,18 +84,10 @@ let smokeIdentityRuntimeProductionSwiftSettings: [SwiftSetting] =
         ? [.define("SKYBRIDGE_RELEASE_EXCLUDES_SMOKE_IDENTITY_RUNTIME")]
         : []
 
-let swiftPMProductRootRPath = "@loader_path/../../.."
-
 func metalResource(_ path: String) -> Resource {
     // Xcode 27 SwiftPM emits missing-creator warnings when processing .metal resources.
     // The app runtime validates copied shader sources through SkyBridgeMetalShaderLibrary.
     .copy(path)
-}
-
-func webRTCTestLinkerSettings() -> [LinkerSetting] {
-    [
-        .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", swiftPMProductRootRPath], .when(platforms: [.macOS]))
-    ]
 }
 
 let package = Package(
@@ -137,8 +129,11 @@ let package = Package(
         ),
         .library(name: "SkyBridgeAppleTransport", targets: ["SkyBridgeAppleTransport"]),
         .library(name: "SkyBridgeOpus", targets: ["SkyBridgeOpus"]),
+        .library(name: "SkyBridgeAudioFile", targets: ["SkyBridgeAudioFile"]),
+        .library(name: "SkyBridgeBootWitness", targets: ["CSkyBridgeBootWitness"]),
         .library(name: "SkyBridgeRealtimeMedia", targets: ["SkyBridgeRealtimeMedia"]),
         .library(name: "SkyBridgeQPeriaptRuntime", targets: ["SkyBridgeQPeriaptRuntime"]),
+        .library(name: "SkyBridgeBoundSessionRuntime", type: .static, targets: ["SkyBridgeBoundSessionRuntime"]),
         .library(name: "SkyBridgeCore", targets: ["SkyBridgeCore"]),
         .library(name: "SkyBridgeUI", targets: ["SkyBridgeUI"]),
         .library(name: "SkyBridgeVisualParity", targets: ["SkyBridgeVisualParity"]),
@@ -159,7 +154,8 @@ let package = Package(
         // Binary dependencies are exact-pinned so a future upstream release cannot silently
         // replace reviewed native bytes during a clean resolve.
         .package(url: "https://github.com/stasel/WebRTC", exact: "150.0.0"),
-        .package(path: "Packages/SkyBridgeCameraKit")
+        .package(path: "Packages/SkyBridgeCameraKit"),
+        .package(path: "Packages/SkyBridgeWeatherRendering")
     ],
     targets: [
         .binaryTarget(
@@ -174,8 +170,30 @@ let package = Package(
             path: "Sources/Vendor/qperiapt.xcframework"
         ),
         .binaryTarget(
+            name: "BoundSessionFFI",
+            path: "Sources/Vendor/boundsession.xcframework"
+        ),
+        .binaryTarget(
             name: "libopus",
             path: "Sources/Vendor/libopus.xcframework"
+        ),
+        .binaryTarget(
+            name: "libflac",
+            path: "Sources/Vendor/libflac.xcframework"
+        ),
+        // Source-locked ALAC-only framework; the codec's private symbols do not enter app scope.
+        .binaryTarget(
+            name: "CSkyBridgeALAC",
+            path: "Sources/Vendor/alac.xcframework"
+        ),
+        // The binary contributes only the pinned static library and FLAC headers. This wrapper
+        // owns its Swift module, avoiding shared binary include/module.modulemap collisions.
+        .target(
+            name: "CSkyBridgeFLAC",
+            dependencies: ["libflac"],
+            path: "Sources/CSkyBridgeFLAC",
+            publicHeadersPath: "include",
+            cSettings: [.unsafeFlags(latestCStandardFlags + ["-Wall", "-Wextra", "-Werror", "-pedantic"])]
         ),
         .target(
             name: "OQSRAII",
@@ -204,6 +222,23 @@ let package = Package(
             dependencies: ["QPeriaptFFI"],
             path: "Sources/CQPeriapt",
             publicHeadersPath: "include"
+        ),
+        .target(
+            name: "CBoundSession",
+            dependencies: ["BoundSessionFFI"],
+            path: "Sources/CBoundSession",
+            publicHeadersPath: "include",
+            cSettings: [
+                .unsafeFlags(
+                    latestCStandardFlags + ["-Wall", "-Wextra", "-Werror", "-pedantic"]
+                )
+            ]
+        ),
+        .target(
+            name: "SkyBridgeBoundSessionRuntime",
+            dependencies: ["CBoundSession"],
+            path: "Sources/SkyBridgeBoundSessionRuntime",
+            swiftSettings: [.enableUpcomingFeature("StrictConcurrency")]
         ),
         .target(
             name: "SkyBridgeQPeriaptRuntime",
@@ -327,16 +362,28 @@ let package = Package(
             ]
         ),
         .target(
+            name: "CSkyBridgeUSBHost",
+            path: "Sources/CSkyBridgeUSBHost",
+            publicHeadersPath: "include",
+            cSettings: [.unsafeFlags(latestCStandardFlags + ["-Wall", "-Wextra", "-Werror"])],
+            linkerSettings: [
+                .linkedFramework("IOKit", .when(platforms: [.macOS])),
+                .linkedFramework("CoreFoundation", .when(platforms: [.macOS]))
+            ]
+        ),
+        .target(
             name: "SkyBridgeAppleTransport",
             dependencies: [
-                "SkyBridgeProtocolCore"
+                "SkyBridgeProtocolCore",
+                .target(name: "CSkyBridgeUSBHost", condition: .when(platforms: [.macOS]))
             ],
             path: "Sources/SkyBridgeAppleTransport",
             swiftSettings: [
                 .enableUpcomingFeature("StrictConcurrency")
             ],
             linkerSettings: [
-                .linkedFramework("Network")
+                .linkedFramework("Network"),
+                .linkedFramework("CoreBluetooth")
             ]
         ),
         .target(
@@ -373,6 +420,21 @@ let package = Package(
             ]
         ),
         .target(
+            name: "CSkyBridgeAudioOutput",
+            path: "Sources/CSkyBridgeAudioOutput",
+            exclude: ["tests"],
+            sources: ["AudioOutput.c"],
+            publicHeadersPath: "include",
+            cSettings: [.unsafeFlags(latestCStandardFlags)],
+            linkerSettings: [.linkedFramework("CoreAudio", .when(platforms: [.macOS]))]
+        ),
+        .target(
+            name: "CSkyBridgeBootWitness",
+            path: "Sources/CSkyBridgeBootWitness",
+            publicHeadersPath: "include",
+            cSettings: [.unsafeFlags(latestCStandardFlags + ["-Wall", "-Wextra", "-Werror"])]
+        ),
+        .target(
             name: "CSkyBridgeOpusShim",
             dependencies: ["libopus"],
             path: "Sources/CSkyBridgeOpusShim",
@@ -390,6 +452,13 @@ let package = Package(
             swiftSettings: [
                 .enableUpcomingFeature("StrictConcurrency")
             ]
+        ),
+        .target(
+            name: "SkyBridgeAudioFile",
+            dependencies: ["SkyBridgeProtocolCore", "CSkyBridgeFLAC", "CSkyBridgeALAC"],
+            path: "Sources/SkyBridgeAudioFile",
+            swiftSettings: [.enableUpcomingFeature("StrictConcurrency")],
+            linkerSettings: [.linkedFramework("AVFAudio")]
         ),
         .target(
             name: "SkyBridgeRealtimeMedia",
@@ -416,6 +485,8 @@ let package = Package(
                 "SkyBridgeWebRTCRuntime",
                 "SkyBridgeOpus",
                 "SkyBridgeRealtimeMedia",
+                .target(name: "CSkyBridgeAudioOutput", condition: .when(platforms: [.macOS])),
+                .target(name: "SkyBridgeAudioFile", condition: .when(platforms: [.macOS])),
                 .target(name: "FreeRDPBridge", condition: .when(platforms: [.macOS])),
                 "WebRTCAudioDeviceBridge",
                 .product(name: "OrderedCollections", package: "swift-collections"),
@@ -424,9 +495,12 @@ let package = Package(
                 .product(name: "SwiftASN1", package: "swift-asn1"),
                 .product(name: "WebRTC", package: "WebRTC"),
                 .product(name: "SkyBridgeCameraKit", package: "SkyBridgeCameraKit"),
+                .product(name: "SkyBridgeWeatherRendering", package: "SkyBridgeWeatherRendering"),
                 "liboqs",
                 "OQSRAII",
                 "SkyBridgeQPeriaptRuntime",
+                "CBoundSession",
+                "SkyBridgeBoundSessionRuntime",
                 "SkyBridgeWidgetShared"
             ] + smokeSupportProductionDependencies,
             path: "Sources/SkyBridgeCore",
@@ -513,12 +587,15 @@ let package = Package(
             name: "SkyBridgeCoreTests",
             dependencies: [
                 "SkyBridgeCore",
+                "SkyBridgeAudioFile",
                 "SkyBridgeProtocolCore",
+                "SkyBridgeAppleTransport",
                 "SkyBridgeWebRTCRuntime",
                 "SkyBridgeQPeriaptRuntime",
                 "SkyBridgeUI",
                 "SkyBridgeOpus",
                 "SkyBridgeRealtimeMedia",
+                "CBoundSession",
                 "CQPeriapt",
                 "OQSRAII",
                 "SkyBridgeBenchmarkSupport",
@@ -529,15 +606,36 @@ let package = Package(
             exclude: [
             ],
             resources: [
+                .copy("Fixtures/AudioStreaming/audio-streaming-v1-vectors.json"),
+                .copy("Fixtures/AudioStreaming/audio-opus-v1-vectors.json"),
+                .copy("Fixtures/AudioStreaming/audio-bluetooth-binding-v1.json"),
+                .copy("Fixtures/AudioStreaming/audio-bluetooth-channel-v1.json"),
+                .copy("Fixtures/AudioStreaming/flac-metadata-v1-vectors.json"),
+                .copy("Fixtures/AudioStreaming/alac-m4a-metadata-v1.json"),
+                .copy("Fixtures/AudioStreaming/alac-packet-index-v1.json"),
+                .copy("Fixtures/AudioStreaming/alac-decoder-v1"),
+                .copy("Fixtures/AudioStreaming/opus-decoder-v1.json"),
+                .copy("Fixtures/AudioStreaming/opus-product-encoder-v1.json"),
+                .copy("Fixtures/AudioStreaming/flac-decoder-v1"),
                 .copy("Fixtures/QPeriaptABI2/signed-policy-vectors.json"),
-                .copy("Fixtures/AppleCompatibilityVectors/inputs.json")
+                .copy("Fixtures/QPeriaptABI2/skr2-golden.json"),
+                .copy("Fixtures/SKR3/skr3-golden.json"),
+                .copy("Fixtures/RemoteSessionEnd/session-ended-v1.json"),
+                .copy("Fixtures/AppleCompatibilityVectors/inputs.json"),
+                .copy("Fixtures/BoundSession/bound-session-run-evidence-v2.txt")
             ],
             swiftSettings: ([
             ] + (enableApplePQCSDK ? [
                 // 与 SkyBridgeCore 保持一致：否则测试中的 `#if HAS_APPLE_PQC_SDK` 分支会与被测模块不一致
                 .define("HAS_APPLE_PQC_SDK")
             ] : [])),
-            linkerSettings: webRTCTestLinkerSettings()
+        ),
+        .testTarget(
+            name: "SkyBridgeCompassAppTests",
+            dependencies: ["SkyBridgeCompassApp", "SkyBridgeCore", "SkyBridgeProtocolCore"],
+            // SwiftPM supplies the test-bundle runtime search paths. Adding
+            // the product-root rpath here or in CoreTests duplicates that entry.
+            path: "Tests/SkyBridgeCompassAppTests"
         ),
         .testTarget(
             name: "SkyBridgeMessagePersistenceTests",
@@ -554,6 +652,11 @@ let package = Package(
             name: "SkyBridgeQPeriaptRuntimeTests",
             dependencies: ["SkyBridgeQPeriaptRuntime"],
             path: "Tests/SkyBridgeQPeriaptRuntimeTests"
+        ),
+        .testTarget(
+            name: "HandshakeBenchRunnerTests",
+            dependencies: ["HandshakeBenchRunner", "SkyBridgeCore"],
+            path: "Tests/HandshakeBenchRunnerTests"
         ),
         .testTarget(
             name: "SkyBridgeBenchTests",
@@ -585,6 +688,7 @@ let package = Package(
                 "SkyBridgeCore",
                 "SkyBridgeUI",
                 "SkyBridgeVisualParity",
+                .product(name: "SkyBridgeWeatherRendering", package: "SkyBridgeWeatherRendering"),
                 .product(name: "OrderedCollections", package: "swift-collections")
             ] + smokeSupportProductionDependencies,
             path: "Sources/SkyBridgeCompassApp",
@@ -680,9 +784,11 @@ let package = Package(
             dependencies: [
                 "SkyBridgeCore",
                 "OQSRAII",
-                "SkyBridgeBenchmarkSupport"
+                "SkyBridgeBenchmarkSupport",
+                "SkyBridgeQPeriaptRuntime"
             ],
             path: "Sources/HandshakeBenchRunner",
+            swiftSettings: (enableApplePQCSDK ? [.define("HAS_APPLE_PQC_SDK")] : []),
             linkerSettings: [
                 .linkedFramework("CryptoKit")
             ]
@@ -765,3 +871,31 @@ let package = Package(
         .v6 // 启用 Swift 6.3 完整语言模式，包括严格并发检查和新特性
     ]
 )
+
+// Runtime framework locations belong to executable consumers. XCTest builds also inject their
+// loader path into executable products. An executable-relative path serves standalone launches
+// without duplicating that loader entry or propagating library-level rpaths to XCTest.
+// Development executables use adjacent frameworks, packaged macOS apps use Contents/Frameworks.
+let audioTargetsByName = Dictionary(uniqueKeysWithValues: package.targets.map { ($0.name, $0) })
+func usesALACFramework(_ name: String, targets: [String: Target]) -> Bool {
+    var visited = Set<String>()
+    func visit(_ name: String) -> Bool {
+        if name == "CSkyBridgeALAC" { return true }
+        guard visited.insert(name).inserted, let target = targets[name] else { return false }
+        return target.dependencies.contains { dependency in
+            switch dependency {
+            case .targetItem(let name, _), .byNameItem(let name, _): return visit(name)
+            case .productItem: return false
+            @unknown default: fatalError("Unrecognized package target dependency kind")
+            }
+        }
+    }
+    return visit(name)
+}
+for target in package.targets where target.type == .executable && usesALACFramework(target.name, targets: audioTargetsByName) {
+    target.linkerSettings = (target.linkerSettings ?? []) + [
+        .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path",
+                      "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"],
+                     .when(platforms: [.macOS]))
+    ]
+}

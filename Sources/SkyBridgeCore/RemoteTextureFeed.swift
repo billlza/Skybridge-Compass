@@ -38,6 +38,7 @@ public final class RemoteTextureFrame {
 public final class RemoteTextureFeed: ObservableObject {
     /// 最新的远端帧及其 backing ownership lease。UI 侧收到更新后触发一次绘制。
     @Published public private(set) var frame: RemoteTextureFrame?
+    @Published public private(set) var presentedFrameCount: UInt64 = 0
 
     /// 保留现有只读 API；需要呈现确认的 UI 必须订阅 `frame`，不能只消费裸纹理。
     public var texture: MTLTexture? { frame?.texture }
@@ -89,6 +90,7 @@ public final class RemoteTextureFeed: ObservableObject {
             return
         }
         lastReportedPresentationSequence = presentedFrame.presentationSequence
+        presentedFrameCount &+= 1
         presentationCompletionHandler()
     }
 
@@ -96,5 +98,6 @@ public final class RemoteTextureFeed: ObservableObject {
         presentationEpoch &+= 1
         nextPresentationSequence = 0
         lastReportedPresentationSequence = 0
+        presentedFrameCount = 0
     }
 }

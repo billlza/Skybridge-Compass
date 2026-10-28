@@ -21,6 +21,17 @@ printf '%s\n' "Test Suite 'All tests' started" >"${TEST_LOG}"
 "${VALIDATOR}" "${BUILD_LOG}" "${TEST_LOG}" >/dev/null
 
 printf '%s\n' \
+  "IOSurfaceClientSetSurfaceNotify failed e00002c7" \
+  "Test Suite 'Selected tests' started" >"${TEST_LOG}"
+"${VALIDATOR}" "${BUILD_LOG}" "${TEST_LOG}" >/dev/null
+
+printf '%s\n' \
+  "Test Suite 'Selected tests' started" \
+  "IOSurfaceClientSetSurfaceNotify failed e00002c7" \
+  "Test Suite 'All tests' started" >"${TEST_LOG}"
+expect_failure
+
+printf '%s\n' \
   "objc[4242]: Class UIAccessibilityLoaderWebShared is implemented in both /System/Library/AccessibilityBundles/WebCore.axbundle/WebCore and /System/Library/AccessibilityBundles/WebKit.axbundle/WebKit. This may cause spurious casting failures and mysterious crashes. One of the duplicates must be removed or renamed." \
   "Test Suite 'All tests' started" >"${TEST_LOG}"
 "${VALIDATOR}" "${BUILD_LOG}" "${TEST_LOG}" >/dev/null

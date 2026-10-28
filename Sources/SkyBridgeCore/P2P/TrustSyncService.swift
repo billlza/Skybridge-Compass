@@ -39,6 +39,7 @@ public enum ProtocolIdentityPinSource: String, Codable, Sendable, Equatable, Has
     case legacyMigration = "legacy-migration"
     case authenticatedHandshake = "authenticated-handshake"
     case pib1OperatorApproval = "pib-1-operator-approval"
+    case manualPairingImport = "manual-pairing-import"
 }
 
 public struct ProtocolIdentityPin: Codable, Sendable, Equatable, Hashable {
@@ -1020,6 +1021,22 @@ public enum TrustSyncError: Error, LocalizedError, Sendable {
 
 typealias PairingAuthorityCommitValidator = @MainActor @Sendable () async -> Bool
 
+/// Expected authority-policy rejections. Reason codes contain no peer identifiers
+/// or key material and can be reported at the pairing boundary.
+enum AuthenticatedRemoteAuthorityRejection: String, Error, LocalizedError, Sendable {
+    case invalidDeviceId = "invalid_device_id"
+    case invalidFingerprint = "invalid_fingerprint"
+    case invalidPublicKey = "invalid_public_key"
+    case ambiguousDirectIdentity = "ambiguous_direct_identity"
+    case conflictingIdentityClaims = "conflicting_identity_claims"
+    case authorityBindingConflict = "authority_binding_conflict"
+    case missingStableIdentity = "missing_stable_identity"
+
+    var errorDescription: String? {
+        "Authenticated remote authority rejected: \(rawValue)"
+    }
+}
+
 public enum CurrentPathTrustConflict: Sendable, Equatable {
     case identityConflict
     case deviceIdMigrationRequired
@@ -1494,6 +1511,22 @@ public final class TrustSyncService: ObservableObject {
         }
     }
 
+    /// An explicit public-key import checks every authority inside the same
+    /// mutation gate that commits the new record. A concurrent pairing or
+    /// revocation cannot be overwritten between the check and persistence.
+    @discardableResult
+    func addTrustRecordIfNeeded(
+        prepare: @escaping @MainActor @Sendable ([TrustRecord]) throws -> TrustRecord?
+    ) async throws -> Bool {
+        try await requireInitialLoadSucceeded()
+        return try await mutationGate.run { [self, prepare] in
+            try Task.checkCancellation()
+            guard let record = try prepare(Array(localCache.values)) else { return false }
+            _ = try await addTrustRecordWithinMutation(record)
+            return true
+        }
+    }
+
     /// Performs read-modify-write inside the mutation admission gate. Callers
     /// that merge KEM keys, capabilities, or authority metadata must use this
     /// path instead of reading `getTrustRecord` before a later async write.
@@ -1669,6 +1702,59 @@ public final class TrustSyncService: ObservableObject {
     public func getActiveTrustRecords() async -> [TrustRecord] {
         await awaitInitialLoadCompletion()
         return activeTrustRecordsSnapshot()
+    }
+
+    /// Cable selection must work before Bonjour discovery and must not turn an
+    /// unreadable trust store into an apparently empty list of paired devices.
+    public func usbPeerChoices() async throws -> [USBPeerChoice] {
+        try await requireInitialLoadSucceeded()
+        guard isLocalStoreAvailable else { throw TrustSyncError.localTrustStoreUnavailable }
+        return await Self.usbPeerChoices(from: activeTrustRecordsSnapshot())
+    }
+
+    public func inspectUSBPeer(identity: HandshakeManagementIdentity, name: String, udid: String) async throws -> USBPeerInspection {
+        try identity.validate()
+        try await requireInitialLoadSucceeded()
+        guard isLocalStoreAvailable else { throw TrustSyncError.localTrustStoreUnavailable }
+        let target = UUID(uuidString: identity.deviceID)
+        let records = localCache.values.filter { record in
+            let raw = record.deviceId.hasPrefix("id:") ? String(record.deviceId.dropFirst(3)) : record.deviceId
+            return UUID(uuidString: raw) == target
+        }
+        let choices = await Self.usbPeerChoices(from: Array(records))
+        let paired = !records.isEmpty && records.allSatisfy(\.isAuthenticationEligible)
+            && choices.count == 1 && choices[0].expected_fingerprint == identity.fingerprint
+        let reason: String? = records.isEmpty ? nil : (paired ? nil : "pairing_identity_needs_verification")
+        return USBPeerInspection(udid: udid, peer: USBPeerChoice(peerID: identity.deviceID,
+            name: name, expectedFingerprint: identity.fingerprint, unavailableReason: reason), paired: paired)
+    }
+
+    static func usbPeerChoices(from records: [TrustRecord]) async -> [USBPeerChoice] {
+        let records = records.filter(\.isAuthenticationEligible)
+        let provider = DefaultHandshakeTrustProvider(trustRecordsSnapshot: records)
+        var grouped: [UUID: [TrustRecord]] = [:]
+        for record in records {
+            // A mutable display alias is not a protocol identity. Only the
+            // record's signed primary identity supplies a selectable peer UUID.
+            let raw = record.deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let identity = raw.hasPrefix("id:") ? String(raw.dropFirst(3)) : raw
+            guard let peerID = UUID(uuidString: identity) else { continue }
+            grouped[peerID, default: []].append(record)
+        }
+        var choices: [USBPeerChoice] = []
+        for (peerID, matches) in grouped {
+            let allowed = await provider.currentPathTrustedFingerprints(for: peerID.uuidString)
+            let current = Set(matches.compactMap(\.currentPathAuthorityFingerprint))
+            let selected = current.intersection(allowed)
+            let ordered = matches.sorted { $0.updatedAt > $1.updatedAt }
+            let name = ordered.compactMap(\.deviceName).first { !$0.isEmpty } ?? peerID.uuidString
+            let fingerprint = selected.count == 1 ? selected.first : nil
+            choices.append(USBPeerChoice(
+                peerID: peerID.uuidString, name: name, expectedFingerprint: fingerprint,
+                unavailableReason: fingerprint == nil ? "pairing_identity_needs_verification" : nil
+            ))
+        }
+        return choices.sorted { ($0.name, $0.peer_id) < ($1.name, $1.peer_id) }
     }
     
  /// 获取信任记录
@@ -1903,15 +1989,44 @@ public final class TrustSyncService: ObservableObject {
         authenticatedProtocolPublicKey: Data? = nil,
         pinSource: ProtocolIdentityPinSource = .authenticatedHandshake
     ) -> TrustRecord? {
+        // Read-only callers need a candidate or no candidate. Durable writes
+        // consume the same resolution's typed rejection instead of losing it.
+        switch authenticatedRemoteAuthorityResolution(
+            existingRecords: existingRecords,
+            deviceId: deviceId,
+            displayName: displayName,
+            preferredCurrentDeviceId: preferredCurrentDeviceId,
+            knownDeviceIds: knownDeviceIds,
+            protocolSigningAlgorithm: protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: protocolPublicKeyFingerprint,
+            authenticatedProtocolPublicKey: authenticatedProtocolPublicKey,
+            pinSource: pinSource
+        ) {
+        case .success(let record): return record
+        case .failure: return nil
+        }
+    }
+
+    nonisolated static func authenticatedRemoteAuthorityResolution(
+        existingRecords: [TrustRecord],
+        deviceId: String,
+        displayName: String? = nil,
+        preferredCurrentDeviceId: String? = nil,
+        knownDeviceIds: [String] = [],
+        protocolSigningAlgorithm: ProtocolSigningAlgorithm,
+        protocolPublicKeyFingerprint: String,
+        authenticatedProtocolPublicKey: Data? = nil,
+        pinSource: ProtocolIdentityPinSource = .authenticatedHandshake
+    ) -> Result<TrustRecord, AuthenticatedRemoteAuthorityRejection> {
         let normalizedDeviceId = deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedDeviceId.isEmpty else { return nil }
+        guard !normalizedDeviceId.isEmpty else { return .failure(.invalidDeviceId) }
 
         let normalizedFingerprint = protocolPublicKeyFingerprint
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         guard normalizedFingerprint.count == 64,
               normalizedFingerprint.allSatisfy(\.isHexDigit) else {
-            return nil
+            return .failure(.invalidFingerprint)
         }
 
         func validatedProtocolPublicKey(_ publicKey: Data?) -> Data? {
@@ -1935,7 +2050,7 @@ public final class TrustSyncService: ObservableObject {
 
         if authenticatedProtocolPublicKey != nil,
            validatedProtocolPublicKey(authenticatedProtocolPublicKey) == nil {
-            return nil
+            return .failure(.invalidPublicKey)
         }
 
         let normalizedDisplayName = LocalDevicePresentation.sanitizedDisplayNameCandidate(displayName)
@@ -1983,16 +2098,18 @@ public final class TrustSyncService: ObservableObject {
         } else {
             targetRecord = nil
         }
-        guard matchingRecords.count <= 1 || targetRecord != nil else { return nil }
+        guard matchingRecords.count <= 1 || targetRecord != nil else {
+            return .failure(.ambiguousDirectIdentity)
+        }
 
-        func conflictsWithAnotherRecord(_ claims: [String]) -> Bool {
+        func conflictingRecords(_ claims: [String]) -> [TrustRecord] {
             let claimedCandidates = Set(
                 claims.flatMap { PeerTrustLookup.lookupCandidates(for: $0) }
             )
-            guard !claimedCandidates.isEmpty else { return false }
+            guard !claimedCandidates.isEmpty else { return [] }
             let claimedCandidatesLower = Set(claimedCandidates.map { $0.lowercased() })
             let targetStorageKey = targetRecord?.deviceId
-            return existingRecords.contains { record in
+            return existingRecords.filter { record in
                 guard !record.isExpired, record.deviceId != targetStorageKey else { return false }
                 let directCandidates = [record.deviceId, record.currentDeviceIdMetadata]
                     .compactMap { $0 }
@@ -2011,12 +2128,29 @@ public final class TrustSyncService: ObservableObject {
             existingIdentityClaims.append(targetRecord.currentDeviceId)
             existingIdentityClaims.append(contentsOf: targetRecord.knownDeviceIdsMetadata ?? [])
         }
-        guard !conflictsWithAnotherRecord(existingIdentityClaims) else { return nil }
+        let identityConflicts = conflictingRecords(existingIdentityClaims)
+        guard identityConflicts.isEmpty else {
+            for record in identityConflicts {
+                let pins = record.currentPathAuthorityPins
+                let sameAlgorithmPinCount = pins.filter { $0.algorithm == protocolSigningAlgorithm }.count
+                let samePin = pins.contains {
+                    $0.algorithm == protocolSigningAlgorithm && $0.fingerprint == normalizedFingerprint
+                }
+                let sameRawKey = authenticatedProtocolPublicKey.map {
+                    record.authenticatedProtocolIdentityBinding(for: protocolSigningAlgorithm)?.publicKey == $0
+                } ?? false
+                let sameLegacyKey = authenticatedProtocolPublicKey.map { record.publicKey == $0 } ?? false
+                SkyBridgeLogger.p2p.warning(
+                    "Authority claim conflict: algorithm=\(protocolSigningAlgorithm.rawValue, privacy: .public) directIdentity=\(directRecordMatchesAuthenticatedIdentity(record), privacy: .public) sameAlgorithmPinCount=\(sameAlgorithmPinCount, privacy: .public) samePin=\(samePin, privacy: .public) sameRawKey=\(sameRawKey, privacy: .public) sameLegacyKey=\(sameLegacyKey, privacy: .public) lifecycle=\(record.lifecycleState.rawValue, privacy: .public) tombstone=\(record.isTombstone, privacy: .public)"
+                )
+            }
+            return .failure(.conflictingIdentityClaims)
+        }
 
         // Retain only non-conflicting remote aliases. Alias claims cannot select
         // an authority record or cause another record's durable alias deletion.
         let retainedKnownDeviceIds = knownDeviceIds.filter {
-            !conflictsWithAnotherRecord([$0])
+            conflictingRecords([$0]).isEmpty
         }
 
         func mergeKnownDeviceIds(existing: [String?]) -> [String]? {
@@ -2042,7 +2176,7 @@ public final class TrustSyncService: ObservableObject {
                 approvedAt: approvedAt,
                 source: pinSource
             )
-            guard v2Update.accepted else { return nil }
+            guard v2Update.accepted else { return .failure(.authorityBindingConflict) }
 
             let preservesLegacyMLDSA65 = targetRecord.protocolSigningAlgorithm == .mlDSA65
                 && protocolSigningAlgorithm != .mlDSA65
@@ -2074,7 +2208,7 @@ public final class TrustSyncService: ObservableObject {
                     approvedAt: approvedAt,
                     source: pinSource
                 )
-            return TrustRecord(
+            return .success(TrustRecord(
                 deviceId: canonicalDeviceId,
                 pubKeyFP: targetRecord.pubKeyFP,
                 publicKey: targetRecord.publicKey,
@@ -2099,11 +2233,11 @@ public final class TrustSyncService: ObservableObject {
                         .map(Optional.some)
                 ),
                 lifecycleState: .active
-            )
+            ))
         }
 
         guard let stableCurrentDeviceId, !stableCurrentDeviceId.isEmpty else {
-            return nil
+            return .failure(.missingStableIdentity)
         }
 
         let approvedAt = Date()
@@ -2115,10 +2249,10 @@ public final class TrustSyncService: ObservableObject {
             approvedAt: approvedAt,
             source: pinSource
         )
-        guard v2Update.accepted else { return nil }
+        guard v2Update.accepted else { return .failure(.authorityBindingConflict) }
         let writesLegacyAuthority = protocolSigningAlgorithm != .mlDSA87
 
-        return TrustRecord(
+        return .success(TrustRecord(
             deviceId: stableCurrentDeviceId,
             pubKeyFP: "",
             publicKey: Data(),
@@ -2144,7 +2278,7 @@ public final class TrustSyncService: ObservableObject {
             currentDeviceId: stableCurrentDeviceId,
             knownDeviceIds: mergeKnownDeviceIds(existing: []),
             lifecycleState: .active
-        )
+        ))
     }
 
     @discardableResult
@@ -2156,7 +2290,9 @@ public final class TrustSyncService: ObservableObject {
         protocolSigningAlgorithm: ProtocolSigningAlgorithm,
         protocolPublicKeyFingerprint: String,
         authenticatedProtocolPublicKey: Data? = nil,
-        pinSource: ProtocolIdentityPinSource = .authenticatedHandshake
+        pinSource: ProtocolIdentityPinSource = .authenticatedHandshake,
+        mirrorRecovery: TrustMirrorRecoveryAuthorization? = nil,
+        protocolTransactionReference: String? = nil
     ) async throws -> Bool {
         try await requireInitialLoadSucceeded()
         return try await mutationGate.run { [self] in
@@ -2168,7 +2304,9 @@ public final class TrustSyncService: ObservableObject {
                 protocolSigningAlgorithm: protocolSigningAlgorithm,
                 protocolPublicKeyFingerprint: protocolPublicKeyFingerprint,
                 authenticatedProtocolPublicKey: authenticatedProtocolPublicKey,
-                pinSource: pinSource
+                pinSource: pinSource,
+                mirrorRecovery: mirrorRecovery,
+                protocolTransactionReference: protocolTransactionReference
             )
         }
     }
@@ -2213,9 +2351,22 @@ public final class TrustSyncService: ObservableObject {
         protocolPublicKeyFingerprint: String,
         authenticatedProtocolPublicKey: Data?,
         pinSource: ProtocolIdentityPinSource,
-        commitValidator: PairingAuthorityCommitValidator? = nil
+        commitValidator: PairingAuthorityCommitValidator? = nil,
+        mirrorRecovery: TrustMirrorRecoveryAuthorization? = nil,
+        protocolTransactionReference: String? = nil
     ) async throws -> Bool {
-        guard let record = Self.resolvedAuthenticatedRemoteAuthorityRecord(
+        if let mirrorRecovery {
+            guard pinSource == .pib1OperatorApproval, let protocolTransactionReference,
+                  !protocolTransactionReference.isEmpty, let authenticatedProtocolPublicKey else {
+                throw TrustMirrorRecoveryPlanError.unverifiedRecord
+            }
+            try await retireVerifiedMirrorAliases(
+                authorization: mirrorRecovery, deviceID: deviceId,
+                algorithm: protocolSigningAlgorithm, fingerprint: protocolPublicKeyFingerprint,
+                publicKey: authenticatedProtocolPublicKey, transactionReference: protocolTransactionReference
+            )
+        }
+        let record = try Self.authenticatedRemoteAuthorityResolution(
             existingRecords: Array(localCache.values),
             deviceId: deviceId,
             displayName: displayName,
@@ -2225,8 +2376,9 @@ public final class TrustSyncService: ObservableObject {
             protocolPublicKeyFingerprint: protocolPublicKeyFingerprint,
             authenticatedProtocolPublicKey: authenticatedProtocolPublicKey,
             pinSource: pinSource
-        ) else {
-            return false
+        ).get()
+        if let mirrorRecovery {
+            try Self.requirePreservedSharedPeerIsNotClaimed(by: record, authorization: mirrorRecovery)
         }
         let signedRecord = try await addTrustRecordWithinMutation(
             record,
@@ -2399,6 +2551,254 @@ public final class TrustSyncService: ObservableObject {
 
     // MARK: - Conflict Resolution
 
+    /// Reads the actual product Keychain and protected mirror. A preview never
+    /// changes authority and cannot authorize a later write without rechecking
+    /// this exact snapshot under the mutation gate.
+    public func previewTrustRecovery(peerID: String, expectedFingerprint: String,
+                                     preservingSharedPeerID: String? = nil) async throws -> TrustRecoveryPreview {
+        try await requireInitialLoadSucceeded()
+        guard UUID(uuidString: peerID) != nil,
+              expectedFingerprint.count == 64,
+              expectedFingerprint.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+              preservingSharedPeerID == nil || (preservingSharedPeerID.flatMap(UUID.init(uuidString:)) != nil
+                && preservingSharedPeerID.flatMap(UUID.init(uuidString:)) != UUID(uuidString: peerID)) else {
+            throw TrustSyncError.decodingError("invalid trust recovery target")
+        }
+        return try await mutationGate.run { [self] in
+            let sources = try trustRecoverySourceSnapshot()
+            let encoder = Self.trustRecoveryEncoder()
+            let snapshotDigest = Self.trustRecoveryDigest(try encoder.encode(sources))
+            let candidates = Set(PeerTrustLookup.lookupCandidates(for: peerID).map { $0.lowercased() })
+            func intersects(_ ids: [String]) -> Bool {
+                ids.flatMap { PeerTrustLookup.lookupCandidates(for: $0) }
+                    .contains { candidates.contains($0.lowercased()) }
+            }
+            var evidence: [TrustRecoveryRecordEvidence] = []
+            var blockers = Set<String>()
+            let preservedCandidates = Set((preservingSharedPeerID.map { PeerTrustLookup.lookupCandidates(for: $0) } ?? []).map { $0.lowercased() })
+            for source in sources {
+                let record = source.record
+                let direct = intersects([record.deviceId, record.currentDeviceIdMetadata].compactMap { $0 })
+                let preserved = [record.deviceId, record.currentDeviceIdMetadata].compactMap { $0 }
+                    .flatMap { PeerTrustLookup.lookupCandidates(for: $0) }.contains { preservedCandidates.contains($0.lowercased()) }
+                let aliases = record.knownDeviceIdsMetadata ?? []
+                guard direct || preserved || intersects(aliases) else { continue }
+                let verified = try await verifyRecordSignature(record)
+                if !verified { blockers.insert("unverified_record_source") }
+                if !direct && !preserved { blockers.insert("cross_device_alias_claim") }
+                if record.isTombstone && !record.isExpired { blockers.insert("active_revocation") }
+                if !record.isTombstone && record.lifecycleState != .active { blockers.insert("inactive_authority") }
+                evidence.append(TrustRecoveryRecordEvidence(
+                    storage: source.storage, record_sha256: source.recordSHA256,
+                    device_id: record.deviceId, current_device_id: record.currentDeviceIdMetadata,
+                    known_device_ids: aliases, direct_identity_match: direct,
+                    local_signature_verified: verified, signature_payload_version: record.signaturePayloadVersion,
+                    version: record.version, tombstone: record.isTombstone, expired: record.isExpired,
+                    lifecycle: record.lifecycleState.rawValue, protocol_pins: record.currentPathAuthorityPins,
+                    protocol_public_key_bytes: record.protocolPublicKey?.count ?? 0,
+                    preserved_shared_peer: preserved
+                ))
+            }
+            if evidence.isEmpty { blockers.insert("no_existing_identity_records") }
+            do {
+                _ = try TrustMirrorRecoveryPlan.resolve(sources: sources, peerID: peerID, fingerprint: expectedFingerprint,
+                                                       preservingSharedPeerID: preservingSharedPeerID)
+            } catch let error as TrustMirrorRecoveryPlanError {
+                blockers.insert(error.rawValue)
+            }
+            return TrustRecoveryPreview(
+                runtime_target: "mac_app_runtime", peer_id: peerID, expected_fingerprint: expectedFingerprint,
+                snapshot_sha256: snapshotDigest, records: evidence, blockers: blockers.sorted(),
+                eligible_for_explicit_recovery: blockers.isEmpty, writes_performed: false,
+                preserving_shared_peer_id: preservingSharedPeerID.flatMap(UUID.init(uuidString:))?.uuidString
+            )
+        }
+    }
+
+    private static func trustRecoveryEncoder() -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .millisecondsSince1970
+        encoder.outputFormatting = [.sortedKeys]
+        return encoder
+    }
+
+    private static func trustRecoveryDigest(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func trustRecoverySourceSnapshot() throws -> [TrustRecoverySourceRecord] {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+        let encoder = Self.trustRecoveryEncoder()
+        var sources: [TrustRecoverySourceRecord] = []
+        for item in try Self.keychainTrustItems(service: KeychainConstants.service) {
+            guard let data = item[kSecValueData as String] as? Data,
+                  let account = item[kSecAttrAccount as String] as? String,
+                  let reference = item[kSecValuePersistentRef as String] as? Data,
+                  let dataProtection = item["skybridgeDataProtectionBackend"] as? Bool else {
+                throw TrustSyncError.decodingError("trust recovery inventory lacks exact storage binding")
+            }
+            let record = try decoder.decode(TrustRecord.self, from: data)
+            guard account == KeychainConstants.recordPrefix + record.deviceId else {
+                throw TrustSyncError.decodingError("trust recovery inventory account mismatch")
+            }
+            sources.append(TrustRecoverySourceRecord(
+                storage: dataProtection ? "data_protection_keychain" : "file_keychain",
+                backingReferenceSHA256: Self.trustRecoveryDigest(reference),
+                recordSHA256: Self.trustRecoveryDigest(try encoder.encode(record)), record: record
+            ))
+        }
+        let mirrorData = try Self.protectedFallbackRecordStore.rawSnapshotOrThrow()
+        let mirrorRecords = try mirrorData.map { try decoder.decode([TrustRecord].self, from: $0) } ?? []
+        for record in mirrorRecords {
+            sources.append(TrustRecoverySourceRecord(
+                storage: "protected_mirror",
+                backingReferenceSHA256: Self.trustRecoveryDigest(Data(record.deviceId.utf8)),
+                recordSHA256: Self.trustRecoveryDigest(try encoder.encode(record)), record: record
+            ))
+        }
+        return sources.sorted {
+            ($0.storage, $0.backingReferenceSHA256, $0.recordSHA256)
+                < ($1.storage, $1.backingReferenceSHA256, $1.recordSHA256)
+        }
+    }
+
+    private static func mirrorRecoveryArchiveStore(_ id: UUID) -> CodablePersistenceStore<TrustMirrorRecoveryArchive> {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+        return CodablePersistenceStore(
+            location: .protectedApplicationSupport(path: "P2PTrust/recovery/\(id.uuidString.lowercased()).json"),
+            encoder: trustRecoveryEncoder(), decoder: decoder, maximumPayloadBytes: 8 * 1_024 * 1_024
+        )
+    }
+
+    private func retireVerifiedMirrorAliases(
+        authorization: TrustMirrorRecoveryAuthorization, deviceID: String,
+        algorithm: ProtocolSigningAlgorithm, fingerprint: String, publicKey: Data,
+        transactionReference: String
+    ) async throws {
+        guard PeerTrustLookup.persistentDeviceId(from: deviceID) == PeerTrustLookup.persistentDeviceId(from: authorization.peerID),
+              fingerprint == authorization.expectedFingerprint else {
+            throw TrustMirrorRecoveryPlanError.changedSnapshot
+        }
+        let encoder = Self.trustRecoveryEncoder()
+        let sources = try trustRecoverySourceSnapshot()
+        guard Self.trustRecoveryDigest(try encoder.encode(sources)) == authorization.snapshotSHA256 else {
+            throw TrustMirrorRecoveryPlanError.changedSnapshot
+        }
+        let plan = try TrustMirrorRecoveryPlan.resolve(sources: sources, peerID: authorization.peerID, fingerprint: fingerprint,
+                                                       preservingSharedPeerID: authorization.preservingSharedPeerID)
+        for source in [plan.authority] + plan.retiring + plan.preserving {
+            guard try await verifyRecordSignature(source.record) else { throw TrustMirrorRecoveryPlanError.unverifiedRecord }
+        }
+        // Check key length/hash and the unchanged authoritative pin BEFORE the
+        // mirror write, using the very same authority resolver as ordinary PIB.
+        let proposed = try Self.authenticatedRemoteAuthorityResolution(
+            existingRecords: [plan.authority.record], deviceId: deviceID,
+            preferredCurrentDeviceId: authorization.peerID, protocolSigningAlgorithm: algorithm,
+            protocolPublicKeyFingerprint: fingerprint, authenticatedProtocolPublicKey: publicKey,
+            pinSource: .pib1OperatorApproval
+        ).get()
+        try Self.requirePreservedSharedPeerIsNotClaimed(by: proposed, authorization: authorization)
+        guard let original = try Self.protectedFallbackRecordStore.rawSnapshotOrThrow(),
+              let rawRecords = try JSONSerialization.jsonObject(with: original) as? [[String: Any]] else {
+            throw TrustMirrorRecoveryPlanError.mirrorChangedDuringRecovery
+        }
+        let retiringIDs = Set(plan.retiring.map { $0.record.deviceId })
+        let remainingRaw = rawRecords.filter { row in
+            guard let id = row["deviceId"] as? String else { return true }
+            return !retiringIDs.contains(id)
+        }
+        guard rawRecords.count - remainingRaw.count == plan.retiring.count else {
+            throw TrustMirrorRecoveryPlanError.mirrorChangedDuringRecovery
+        }
+        let replacement = try JSONSerialization.data(withJSONObject: remainingRaw, options: [.sortedKeys])
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+        let remainingRecords = try decoder.decode([TrustRecord].self, from: replacement)
+        let originalRecords = try decoder.decode([TrustRecord].self, from: original)
+        guard remainingRecords == originalRecords.filter({ !retiringIDs.contains($0.deviceId) }) else {
+            throw TrustMirrorRecoveryPlanError.mirrorChangedDuringRecovery
+        }
+        let archiveStore = Self.mirrorRecoveryArchiveStore(authorization.recoveryID)
+        guard try archiveStore.rawSnapshotOrThrow() == nil else { throw TrustMirrorRecoveryPlanError.reusedRecoveryID }
+        try archiveStore.save(TrustMirrorRecoveryArchive(
+            recoveryID: authorization.recoveryID, peerID: authorization.peerID,
+            protocolFingerprint: fingerprint, snapshotSHA256: authorization.snapshotSHA256,
+            protocolTransactionReference: transactionReference, createdAt: Date(),
+            preservedKeychainAuthority: plan.authority.record, originalMirrorData: original,
+            replacementMirrorSHA256: Self.trustRecoveryDigest(replacement), retiredRecordIDs: retiringIDs.sorted(),
+            preservingSharedPeerID: authorization.preservingSharedPeerID, preservedSharedRecords: plan.preserving
+        ))
+        // Recheck after async signature verification and archive persistence. The
+        // only retirement commit is the existing protected writer's atomic rename.
+        guard Self.trustRecoveryDigest(try encoder.encode(trustRecoverySourceSnapshot())) == authorization.snapshotSHA256,
+              try Self.protectedFallbackRecordStore.rawSnapshotOrThrow() == original else {
+            throw TrustMirrorRecoveryPlanError.changedSnapshot
+        }
+        try Self.protectedFallbackRecordStore.saveRawSnapshot(replacement)
+        try await loadLocalRecords()
+    }
+
+    public func mirrorRecoveryResult(
+        authorization: TrustMirrorRecoveryAuthorization, bindingCompleted: Bool, errorCode: String?
+    ) throws -> TrustMirrorRecoveryResult {
+        let archive = try Self.mirrorRecoveryArchiveStore(authorization.recoveryID).loadOrThrow()
+        var status: String
+        let retiredCount: Int?
+        var sharedPeerPreserved: Bool?
+        if let archive {
+            guard archive.peerID == authorization.peerID, archive.protocolFingerprint == authorization.expectedFingerprint,
+                  archive.snapshotSHA256 == authorization.snapshotSHA256,
+                  archive.preservingSharedPeerID == authorization.preservingSharedPeerID else {
+                throw TrustMirrorRecoveryPlanError.reusedRecoveryID
+            }
+            let current = try Self.protectedFallbackRecordStore.rawSnapshotOrThrow()
+            if let current, Self.trustRecoveryDigest(current) == archive.replacementMirrorSHA256 {
+                retiredCount = archive.retiredRecordIDs.count
+                status = bindingCompleted ? "completed" : "aliases_retired_binding_unconfirmed"
+            } else if current == archive.originalMirrorData {
+                retiredCount = 0; status = "not_applied"
+            } else {
+                retiredCount = nil; status = "mirror_changed_after_archive"
+            }
+            if authorization.preservingSharedPeerID != nil {
+                let currentSources = try trustRecoverySourceSnapshot()
+                sharedPeerPreserved = archive.preservedSharedRecords?.isEmpty == false &&
+                    (archive.preservedSharedRecords ?? []).allSatisfy { previous in
+                        currentSources.contains { $0.storage == previous.storage &&
+                            $0.backingReferenceSHA256 == previous.backingReferenceSHA256 && $0.recordSHA256 == previous.recordSHA256 }
+                    }
+                if sharedPeerPreserved == false { status = "shared_peer_changed_after_archive" }
+            }
+        } else {
+            retiredCount = 0; status = "not_applied"
+        }
+        let completed = bindingCompleted && status == "completed"
+        return TrustMirrorRecoveryResult(
+            runtime_target: "mac_app_runtime", recovery_id: authorization.recoveryID.uuidString,
+            peer_id: authorization.peerID, expected_fingerprint: authorization.expectedFingerprint,
+            success: completed, status: status,
+            retired_mirror_records: retiredCount, keychain_authority_preserved: true,
+            authenticated_connection: false,
+            error_code: completed ? nil : (errorCode ?? "trust_recovery_result_unconfirmed"),
+            preserving_shared_peer_id: authorization.preservingSharedPeerID,
+            shared_peer_records_preserved: sharedPeerPreserved
+        )
+    }
+
+    private static func requirePreservedSharedPeerIsNotClaimed(
+        by record: TrustRecord, authorization: TrustMirrorRecoveryAuthorization
+    ) throws {
+        guard let preservedID = authorization.preservingSharedPeerID else { return }
+        let preserved = Set(PeerTrustLookup.lookupCandidates(for: preservedID).map { $0.lowercased() })
+        let claimed = ([record.deviceId, record.currentDeviceIdMetadata].compactMap { $0 }
+            + (record.knownDeviceIdsMetadata ?? [])).flatMap { PeerTrustLookup.lookupCandidates(for: $0) }
+        guard !claimed.contains(where: { preserved.contains($0.lowercased()) }) else {
+            throw TrustMirrorRecoveryPlanError.crossDeviceClaim
+        }
+    }
+
     /// 解决冲突（revoke 优先；无 authority 冲突时才允许 LWW）
     public func resolveConflict(
         local: TrustRecord,
@@ -2488,11 +2888,9 @@ public final class TrustSyncService: ObservableObject {
             for tombstone in verification.denyOnlyTombstones { merge(tombstone) }
             SkyBridgeLogger.p2p.debug("Loaded \(verification.verifiedRecords.count) verified trust records from Keychain")
         } catch {
-            // errSecParam(-50) 在部分系统/环境下会出现在 synchronizable 查询中；
-            // 对于启动期加载而言，视作“暂无可用 trust records”更合理，避免刷错误日志。
-            if let e = error as? TrustSyncError, case .keychainError(let status) = e, status == errSecParam {
-                SkyBridgeLogger.p2p.debug("Trust records load skipped (errSecParam=-50)")
-            } else if let e = error as? TrustSyncError,
+            // An invalid query is a store failure, not evidence of an empty
+            // Keychain. Only the existing explicit mirror policy applies here.
+            if let e = error as? TrustSyncError,
                       case .keychainError(let status) = e,
                       shouldMirrorTrustRecordAfterKeychainFailure(status) {
                 SkyBridgeLogger.p2p.warning("⚠️ Trust records keychain unavailable (\(status)); loading protected local trust mirror")
@@ -3061,66 +3459,87 @@ public final class TrustSyncService: ObservableObject {
     }
     
  /// 从 Keychain 加载所有记录
-    private func loadAllFromKeychain() throws -> [TrustRecord] {
-        func copyItems(_ inputQuery: [String: Any]) throws -> [[String: Any]] {
-            var query = inputQuery
-            Self.forbidKeychainAuthenticationUI(&query)
-            var result: AnyObject?
-            let status = SecItemCopyMatching(query as CFDictionary, &result)
-            if status == errSecItemNotFound {
-                return []
-            }
-            guard status == errSecSuccess else {
-                throw TrustSyncError.keychainError(status)
-            }
-            guard let items = result as? [[String: Any]] else {
-                throw TrustSyncError.decodingError("Keychain returned an unexpected item shape")
-            }
-            return items
-        }
-
-        let baseQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: KeychainConstants.service,
-            kSecReturnData as String: kCFBooleanTrue as Any,
-            kSecReturnAttributes as String: kCFBooleanTrue as Any,
-            kSecMatchLimit as String: kSecMatchLimitAll
-        ]
-        
-        // 首选：一次性拉取所有（含 synchronizable true/false）。
-        // 在部分系统/环境下，kSecAttrSynchronizableAny 会返回
-        // errSecParam(-50)，因此降级为分别查询同步和非同步项。每条查询
-        // 始终保留 account attribute，防止 payload deviceId 与真实存储键错配。
+    nonisolated static func keychainTrustItems(service: String) throws -> [[String: Any]] {
+        // Password-class items cannot combine MatchLimitAll with ReturnData.
+        // Enumerate attributes/references, then read each exact persistent item.
+        // This is the same backend-bound reference policy used by KeychainManager.
+        #if os(macOS)
+        let dataProtectionModes = [false, true]
+        #else
+        let dataProtectionModes = [true]
+        #endif
         var items: [[String: Any]] = []
-        do {
-            var q = baseQuery
-            q[kSecAttrSynchronizable as String] = kSecAttrSynchronizableAny
-            items = try copyItems(q)
-        } catch let TrustSyncError.keychainError(status) where status == errSecParam {
-            // 降级：分别拉取 non-sync 和 sync 项，并保留两份记录供冲突解析。
-            var nonSync = baseQuery
-            nonSync[kSecAttrSynchronizable as String] = kCFBooleanFalse as Any
-            var sync = baseQuery
-            sync[kSecAttrSynchronizable as String] = kCFBooleanTrue as Any
-            let a: [[String: Any]]
-            do {
-                a = try copyItems(nonSync)
-            } catch let TrustSyncError.keychainError(status) where status == errSecParam {
-                a = []
+        for usesDataProtection in dataProtectionModes {
+            var query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecUseDataProtectionKeychain as String: usesDataProtection,
+                kSecReturnAttributes as String: true,
+                kSecReturnPersistentRef as String: true,
+                kSecMatchLimit as String: kSecMatchLimitAll
+            ]
+            if usesDataProtection {
+                query[kSecAttrSynchronizable as String] = kSecAttrSynchronizableAny
+            } else {
+                query[kSecAttrSynchronizable as String] = false
             }
-            let b: [[String: Any]]
-            do {
-                b = try copyItems(sync)
-            } catch let TrustSyncError.keychainError(status) where status == errSecParam {
-                // 某些环境下 “synchronizable=true” 会返回 errSecParam（例如未启用 iCloud Keychain），视作无同步项即可
-                b = []
-            }
+            Self.forbidKeychainAuthenticationUI(&query)
+            var result: CFTypeRef?
+            let status = SecItemCopyMatching(query as CFDictionary, &result)
+            if status == errSecItemNotFound { continue }
+            guard status == errSecSuccess else { throw TrustSyncError.keychainError(status) }
+            let rows: [[String: Any]]
+            if let array = result as? [[String: Any]] { rows = array }
+            else if let row = result as? [String: Any] { rows = [row] }
+            else { throw TrustSyncError.decodingError("Keychain returned unexpected trust metadata") }
 
-            // Preserve both copies. Conflict resolution must see a tombstone
-            // rather than nondeterministically dropping one by account.
-            items = a + b
+            for row in rows {
+                guard let account = row[kSecAttrAccount as String] as? String,
+                      account.hasPrefix("trust_record_") else { continue }
+                guard row[kSecAttrService as String] as? String == service,
+                      let persistentReference = row[kSecValuePersistentRef as String] as? Data,
+                      !persistentReference.isEmpty else {
+                    throw TrustSyncError.decodingError("Trust item lacks its exact Keychain reference")
+                }
+                let accessGroup = row[kSecAttrAccessGroup as String] as? String
+                let location = LegacySecItemLocation(
+                    actualAccessGroup: accessGroup,
+                    usesDataProtectionKeychain: usesDataProtection,
+                    persistentReference: persistentReference
+                )
+                var single: [String: Any] = [
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecUseDataProtectionKeychain as String: usesDataProtection,
+                    kSecReturnData as String: true,
+                    kSecReturnAttributes as String: true,
+                    kSecMatchLimit as String: kSecMatchLimitOne
+                ]
+                location.applyPersistentReferenceMatch(to: &single)
+                Self.forbidKeychainAuthenticationUI(&single)
+                var loaded: CFTypeRef?
+                let readStatus = SecItemCopyMatching(single as CFDictionary, &loaded)
+                // An item disappearing during this read is not an empty store.
+                guard readStatus == errSecSuccess else { throw TrustSyncError.keychainError(readStatus) }
+                guard let item = loaded as? [String: Any],
+                      item[kSecAttrService as String] as? String == service,
+                      item[kSecAttrAccount as String] as? String == account,
+                      item[kSecAttrAccessGroup as String] as? String == accessGroup,
+                      item[kSecValueData as String] is Data else {
+                    throw TrustSyncError.decodingError("Trust item changed its Keychain binding during read")
+                }
+                // Keep sync/non-sync and backend copies separate. The signed
+                // record merge must observe both, particularly tombstones.
+                var boundItem = item
+                boundItem[kSecValuePersistentRef as String] = persistentReference
+                boundItem["skybridgeDataProtectionBackend"] = usesDataProtection
+                items.append(boundItem)
+            }
         }
-        
+        return items
+    }
+
+    private func loadAllFromKeychain() throws -> [TrustRecord] {
+        let items = try Self.keychainTrustItems(service: KeychainConstants.service)
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .millisecondsSince1970
 

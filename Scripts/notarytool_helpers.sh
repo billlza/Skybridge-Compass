@@ -164,6 +164,7 @@ skybridge_notarytool_submit_and_wait() {
   local -a extra_args=("$@")
   local -a cmd=()
   local argument=""
+  local upload_endpoint="${SKYBRIDGE_NOTARYTOOL_UPLOAD_ENDPOINT-accelerated}"
 
   # This helper owns the result format and completion contract. Keeping these
   # options fixed prevents a caller from turning an upload receipt into success.
@@ -175,6 +176,23 @@ skybridge_notarytool_submit_and_wait() {
         ;;
     esac
   done
+
+  case "${upload_endpoint}" in
+    accelerated) ;;
+    standard)
+      for argument in ${extra_args[@]+"${extra_args[@]}"}; do
+        if [[ "${argument}" == --s3-acceleration ]]; then
+          echo "standard notary upload endpoint conflicts with --s3-acceleration" >&2
+          return 1
+        fi
+      done
+      extra_args+=(--no-s3-acceleration)
+      ;;
+    *)
+      echo "SKYBRIDGE_NOTARYTOOL_UPLOAD_ENDPOINT must be accelerated or standard" >&2
+      return 1
+      ;;
+  esac
 
   if ! command -v xcrun >/dev/null 2>&1 || ! xcrun -f notarytool >/dev/null 2>&1; then
     echo "未找到 xcrun notarytool，无法执行 notarization。" >&2

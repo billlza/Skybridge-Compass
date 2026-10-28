@@ -1,4 +1,9 @@
 import CFNetwork
+import os
+import struct SkyBridgeProtocolCore.AudioAccountIdentity
+import class SkyBridgeProtocolCore.AccountAudioAuthorization
+import enum SkyBridgeProtocolCore.AudioMembershipError
+import enum SkyBridgeProtocolCore.AudioMembershipLeaseFailure
 import struct SkyBridgeProtocolCore.CrossNetworkFileTransferMessage
 import XCTest
 @testable import SkyBridgeCompass_iOS
@@ -232,6 +237,396 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
         let request = try XCTUnwrap(AuthenticatedRequestURLProtocol.requests().first)
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer \(firstToken)")
         XCTAssertEqual(request.value(forHTTPHeaderField: "X-SkyBridge-Tenant-Id"), "tenant-a")
+    }
+
+    func testOwnedSessionResolverSuppliesTheOnlyCredentialSourceForAccountGET() async throws {
+        AuthenticatedRequestURLProtocol.reset()
+        defer { AuthenticatedRequestURLProtocol.reset() }
+        let token = try makeAuthTestJWT(subject: "user-123", tenantID: "tenant-a", expiration: 4_102_444_800)
+        let session = makeAuthTestSession(token: token, userID: "user-123", tenantID: "tenant-a")
+        let intent = IOSAuthenticationIntent()
+        let dependencies = ownerOnlyAuthenticationDependencies {
+            .init(session: session, requireCurrent: { try intent.requireCurrent() })
+        }
+        let urlSession = makeAuthenticatedRequestTestURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        let client = SignalServerClientCompat(urlSession: urlSession, authenticationDependencies: dependencies)
+        let snapshot = try await client.listAccountDevices(binding: makeAuthTestProtocolBinding())
+        XCTAssertEqual(snapshot.accountScope, "tenant-a/user-123")
+        let requests = AuthenticatedRequestURLProtocol.requests()
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.value(forHTTPHeaderField: "Authorization"), "Bearer \(token)")
+        XCTAssertEqual(requests.first?.value(forHTTPHeaderField: "X-SkyBridge-Tenant-Id"), "tenant-a")
+    }
+
+    func testOwnedResolverFailureCannotFallbackToPersistedCredentials() async throws {
+        AuthenticatedRequestURLProtocol.reset()
+        defer { AuthenticatedRequestURLProtocol.reset() }
+        let dependencies = ownerOnlyAuthenticationDependencies { throw IOSAuthenticationSessionError.changed }
+        let urlSession = makeAuthenticatedRequestTestURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        let client = SignalServerClientCompat(urlSession: urlSession, authenticationDependencies: dependencies)
+        do { _ = try await client.listAccountDevices(binding: makeAuthTestProtocolBinding()); XCTFail("Owner failure bypassed") }
+        catch { XCTAssertEqual(error as? IOSAuthenticationSessionError, .changed) }
+        XCTAssertEqual(AuthenticatedRequestURLProtocol.requests().count, 0)
+    }
+
+    func testOwnedSessionRevokedBeforeSubmissionSendsNoHTTP() async throws {
+        AuthenticatedRequestURLProtocol.reset()
+        defer { AuthenticatedRequestURLProtocol.reset() }
+        let token = try makeAuthTestJWT(subject: "user-123", tenantID: "tenant-a", expiration: 4_102_444_800)
+        let session = makeAuthTestSession(token: token, userID: "user-123", tenantID: "tenant-a")
+        let intent = IOSAuthenticationIntent(); intent.invalidate()
+        let dependencies = ownerOnlyAuthenticationDependencies {
+            .init(session: session, requireCurrent: { try intent.requireCurrent() })
+        }
+        let urlSession = makeAuthenticatedRequestTestURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        let client = SignalServerClientCompat(urlSession: urlSession, authenticationDependencies: dependencies)
+        do { _ = try await client.listAccountDevices(binding: makeAuthTestProtocolBinding()); XCTFail("Revoked owner sent request") }
+        catch { XCTAssertEqual(error as? IOSAuthenticationSessionError, .changed) }
+        XCTAssertEqual(AuthenticatedRequestURLProtocol.requests().count, 0)
+    }
+
+    func testOwnedSessionRevokedDuringHTTPRejectsTheCompletedRegistryResponse() async throws {
+        AuthenticatedRequestURLProtocol.reset()
+        defer { AuthenticatedRequestURLProtocol.reset() }
+        let token = try makeAuthTestJWT(subject: "user-123", tenantID: "tenant-a", expiration: 4_102_444_800)
+        let session = makeAuthTestSession(token: token, userID: "user-123", tenantID: "tenant-a")
+        let intent = IOSAuthenticationIntent()
+        let dependencies = ownerOnlyAuthenticationDependencies {
+            .init(session: session, requireCurrent: {
+                // The URLProtocol records the request before delivering its 200
+                // response. This deterministically revokes only after submission.
+                if !AuthenticatedRequestURLProtocol.requests().isEmpty { intent.invalidate() }
+                try intent.requireCurrent()
+            })
+        }
+        let urlSession = makeAuthenticatedRequestTestURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        let client = SignalServerClientCompat(urlSession: urlSession, authenticationDependencies: dependencies)
+        do { _ = try await client.listAccountDevices(binding: makeAuthTestProtocolBinding()); XCTFail("Late registry response escaped") }
+        catch { XCTAssertEqual(error as? IOSAuthenticationSessionError, .changed) }
+        XCTAssertEqual(AuthenticatedRequestURLProtocol.requests().count, 1)
+    }
+
+    func testOwnedResolverCannotIssueFreshMembershipWithExpiredBearer() async throws {
+        AuthenticatedRequestURLProtocol.reset()
+        defer { AuthenticatedRequestURLProtocol.reset() }
+        let token = try makeAuthTestJWT(subject: "user-123", tenantID: "tenant-a", expiration: 1)
+        let session = makeAuthTestSession(token: token, userID: "user-123", tenantID: "tenant-a")
+        let dependencies = ownerOnlyAuthenticationDependencies { .init(session: session, requireCurrent: {}) }
+        let urlSession = makeAuthenticatedRequestTestURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        let client = SignalServerClientCompat(urlSession: urlSession, authenticationDependencies: dependencies)
+        do { _ = try await client.listAccountDevices(binding: makeAuthTestProtocolBinding()); XCTFail("Expired bearer used") }
+        catch {
+            guard case SignalServerClientCompat.ClientError.expiredAuthentication = error else {
+                return XCTFail("Unexpected expired-bearer failure: \(error)")
+            }
+        }
+        XCTAssertEqual(AuthenticatedRequestURLProtocol.requests().count, 0)
+    }
+
+    func testOwnedSessionFailuresKeepStorageBusyAndSignedOutDistinct() {
+        XCTAssertEqual(SignalServerClientCompat.presenceFailure(for: IOSAuthenticationSessionError.missing), .notAuthenticated)
+        XCTAssertEqual(SignalServerClientCompat.presenceFailure(for: IOSAuthenticationSessionError.changed), .notAuthenticated)
+        XCTAssertEqual(SignalServerClientCompat.presenceFailure(for: IOSAuthenticationSessionError.publicationInProgress),
+                       .localAuthenticationUnavailable(code: "authentication_update_in_progress"))
+        XCTAssertEqual(SignalServerClientCompat.presenceFailure(for: KeychainError.unexpectedError(-50)),
+                       .localAuthenticationUnavailable(code: "authentication_storage_unavailable"))
+    }
+
+    private func ownerOnlyAuthenticationDependencies(
+        _ resolve: @escaping @Sendable () async throws -> SignalServerClientCompat.ResolvedAuthenticationSession
+    ) -> SignalServerClientCompat.AuthenticationDependencies {
+        .init(accessTokenOverride: { "" }, tenantIDOverride: { "" },
+              loadPersistedSession: { throw AuthRequestTestError.unexpectedRefresh },
+              refreshSession: { _ in throw AuthRequestTestError.unexpectedRefresh },
+              validateRefreshedAccessToken: { _ in throw AuthRequestTestError.unexpectedRefresh },
+              replacePersistedSession: { _, _ in throw AuthRequestTestError.unexpectedRefresh },
+              resolveSession: resolve)
+    }
+
+    func testFrozenAccountRequestUsesOnlyCapturedAuthorityBearerAndTenant() async throws {
+        AuthenticatedRequestURLProtocol.reset()
+        defer { AuthenticatedRequestURLProtocol.reset() }
+        let token = try makeAuthTestJWT(subject: "user-123", tenantID: "tenant-frozen", expiration: 4_102_444_800)
+        let session = makeAuthTestSession(token: token, userID: "user-123", tenantID: "tenant-frozen")
+        let intent = IOSAuthenticationIntent(), epoch = AccountAudioAuthorization()
+        let account = try AudioAccountIdentity(authority: "https://frozen-audio.example:8443",
+                                               tenantID: "tenant-frozen", userID: "user-123")
+        let frozen = try SignalServerClientCompat.FrozenAccountRequest(account: account,
+            authentication: .init(session: session, requireCurrent: { try intent.requireCurrent() }),
+            audioAuthorization: epoch)
+        let probe = FrozenAuthenticationDependencyProbe()
+        let urlSession = makeAuthenticatedRequestTestURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        let client = SignalServerClientCompat(urlSession: urlSession,
+            authenticationDependencies: try frozenUnusedAuthenticationDependencies(probe),
+            frozenAccountRequest: frozen)
+
+        let snapshot = try await client.listAccountDevices(binding: makeAuthTestProtocolBinding())
+
+        let requests = AuthenticatedRequestURLProtocol.requests()
+        XCTAssertEqual(requests.count, 1)
+        let request = try XCTUnwrap(requests.first)
+        XCTAssertEqual(request.url?.scheme, "https")
+        XCTAssertEqual(request.url?.host, "frozen-audio.example")
+        XCTAssertEqual(request.url?.port, 8443)
+        XCTAssertEqual(request.url?.path, "/api/devices/list")
+        XCTAssertEqual(request.httpMethod, "GET")
+        XCTAssertNil(request.httpBody)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer \(token)")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-SkyBridge-Tenant-Id"), "tenant-frozen")
+        XCTAssertEqual(snapshot.accountScope, "tenant-frozen/user-123")
+        XCTAssertEqual(AuthenticatedRequestURLProtocol.deliveredCompleteBodyCount(), 1)
+        XCTAssertTrue(probe.calls.isEmpty, "Frozen requests must not even read another credential source")
+        XCTAssertTrue(epoch.isCurrent)
+    }
+
+    func testFrozenAccountRequestRejectsTenantOrUserScopeMismatchBeforeHTTP() async throws {
+        AuthenticatedRequestURLProtocol.reset()
+        defer { AuthenticatedRequestURLProtocol.reset() }
+        let token = try makeAuthTestJWT(subject: "user-123", tenantID: "tenant-frozen", expiration: 4_102_444_800)
+        let session = makeAuthTestSession(token: token, userID: "user-123", tenantID: "tenant-frozen")
+        let intent = IOSAuthenticationIntent()
+        let probe = FrozenAuthenticationDependencyProbe()
+        let urlSession = makeAuthenticatedRequestTestURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        for (tenant, user) in [("other-tenant", "user-123"), ("tenant-frozen", "other-user")] {
+            let account = try AudioAccountIdentity(authority: "https://frozen-audio.example",
+                                                   tenantID: tenant, userID: user)
+            do {
+                let frozen = try SignalServerClientCompat.FrozenAccountRequest(account: account,
+                    authentication: .init(session: session, requireCurrent: { try intent.requireCurrent() }),
+                    audioAuthorization: AccountAudioAuthorization())
+                let client = SignalServerClientCompat(urlSession: urlSession,
+                    authenticationDependencies: try frozenUnusedAuthenticationDependencies(probe),
+                    frozenAccountRequest: frozen)
+                _ = try await client.listAccountDevices(binding: makeAuthTestProtocolBinding())
+                XCTFail("Mismatching frozen account reached HTTP: \(tenant)/\(user)")
+            } catch {
+                XCTAssertEqual(error as? AudioMembershipError, .scopeMismatch)
+            }
+        }
+        XCTAssertEqual(AuthenticatedRequestURLProtocol.requests().count, 0)
+        XCTAssertTrue(probe.calls.isEmpty)
+    }
+
+    func testFrozenAudioEpochRevokedAfterCapturePreventsHTTPSubmission() async throws {
+        AuthenticatedRequestURLProtocol.reset()
+        defer { AuthenticatedRequestURLProtocol.reset() }
+        let token = try makeAuthTestJWT(subject: "user-123", tenantID: "tenant-frozen", expiration: 4_102_444_800)
+        let session = makeAuthTestSession(token: token, userID: "user-123", tenantID: "tenant-frozen")
+        let intent = IOSAuthenticationIntent(), epoch = AccountAudioAuthorization()
+        let account = try AudioAccountIdentity(authority: "https://frozen-audio.example",
+                                               tenantID: "tenant-frozen", userID: "user-123")
+        let frozen = try SignalServerClientCompat.FrozenAccountRequest(account: account,
+            authentication: .init(session: session, requireCurrent: { try intent.requireCurrent() }),
+            audioAuthorization: epoch)
+        let probe = FrozenAuthenticationDependencyProbe()
+        let urlSession = makeAuthenticatedRequestTestURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        let client = SignalServerClientCompat(urlSession: urlSession,
+            authenticationDependencies: try frozenUnusedAuthenticationDependencies(probe),
+            frozenAccountRequest: frozen)
+        epoch.revoke()
+
+        do {
+            _ = try await client.listAccountDevices(binding: makeAuthTestProtocolBinding())
+            XCTFail("A frozen value revived a revoked audio epoch")
+        } catch {
+            XCTAssertEqual(error as? AudioMembershipLeaseFailure, .accountChanged)
+        }
+        XCTAssertEqual(AuthenticatedRequestURLProtocol.requests().count, 0)
+        XCTAssertTrue(probe.calls.isEmpty)
+        XCTAssertTrue(intent.isCurrent, "Only audio authority was revoked in this case")
+    }
+
+    func testFrozenAudioEpochRevokedAtCompletedHTTPBoundaryRejectsRegistryResponse() async throws {
+        AuthenticatedRequestURLProtocol.reset()
+        defer { AuthenticatedRequestURLProtocol.reset() }
+        let token = try makeAuthTestJWT(subject: "user-123", tenantID: "tenant-frozen", expiration: 4_102_444_800)
+        let session = makeAuthTestSession(token: token, userID: "user-123", tenantID: "tenant-frozen")
+        let intent = IOSAuthenticationIntent(), epoch = AccountAudioAuthorization()
+        let account = try AudioAccountIdentity(authority: "https://frozen-audio.example",
+                                               tenantID: "tenant-frozen", userID: "user-123")
+        let frozen = try SignalServerClientCompat.FrozenAccountRequest(account: account,
+            authentication: .init(session: session, requireCurrent: {
+                // The marker is set only after URLProtocol hands over the entire
+                // response body. This validation next runs after boundedResponse
+                // has consumed EOF; merely starting a request cannot revoke here.
+                if AuthenticatedRequestURLProtocol.deliveredCompleteBodyCount() == 1 { epoch.revoke() }
+                try intent.requireCurrent()
+            }), audioAuthorization: epoch)
+        let probe = FrozenAuthenticationDependencyProbe()
+        let urlSession = makeAuthenticatedRequestTestURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        let client = SignalServerClientCompat(urlSession: urlSession,
+            authenticationDependencies: try frozenUnusedAuthenticationDependencies(probe),
+            frozenAccountRequest: frozen)
+
+        do {
+            _ = try await client.listAccountDevices(binding: makeAuthTestProtocolBinding())
+            XCTFail("A completed HTTP response escaped its revoked audio epoch")
+        } catch {
+            XCTAssertEqual(error as? AudioMembershipLeaseFailure, .accountChanged)
+        }
+        XCTAssertEqual(AuthenticatedRequestURLProtocol.requests().count, 1)
+        XCTAssertEqual(AuthenticatedRequestURLProtocol.deliveredCompleteBodyCount(), 1)
+        XCTAssertFalse(epoch.isCurrent)
+        XCTAssertTrue(intent.isCurrent)
+        XCTAssertTrue(probe.calls.isEmpty)
+    }
+
+    func testFrozenAccountRequestRejectsExpiredBearerWithoutRefreshingOrSendingHTTP() async throws {
+        AuthenticatedRequestURLProtocol.reset()
+        defer { AuthenticatedRequestURLProtocol.reset() }
+        let token = try makeAuthTestJWT(subject: "user-123", tenantID: "tenant-frozen", expiration: 1)
+        let session = makeAuthTestSession(token: token, refreshToken: "must-not-refresh",
+                                          userID: "user-123", tenantID: "tenant-frozen")
+        let intent = IOSAuthenticationIntent()
+        let account = try AudioAccountIdentity(authority: "https://frozen-audio.example",
+                                               tenantID: "tenant-frozen", userID: "user-123")
+        let probe = FrozenAuthenticationDependencyProbe()
+        let urlSession = makeAuthenticatedRequestTestURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        do {
+            let frozen = try SignalServerClientCompat.FrozenAccountRequest(account: account,
+                authentication: .init(session: session, requireCurrent: { try intent.requireCurrent() }),
+                audioAuthorization: AccountAudioAuthorization())
+            let client = SignalServerClientCompat(urlSession: urlSession,
+                authenticationDependencies: try frozenUnusedAuthenticationDependencies(probe),
+                frozenAccountRequest: frozen)
+            _ = try await client.listAccountDevices(binding: makeAuthTestProtocolBinding())
+            XCTFail("An expired frozen bearer was refreshed or submitted")
+        } catch {
+            guard case SignalServerClientCompat.ClientError.expiredAuthentication = error else {
+                return XCTFail("Unexpected expired frozen bearer error: \(error)")
+            }
+        }
+        XCTAssertEqual(AuthenticatedRequestURLProtocol.requests().count, 0)
+        XCTAssertTrue(probe.calls.isEmpty)
+    }
+
+    func testMalformedBearerExpiryIsNeverClassifiedAsNaturalExpiration() throws {
+        func segment(_ object: [String: Any]) throws -> String {
+            try JSONSerialization.data(withJSONObject: object).base64EncodedString()
+                .replacingOccurrences(of: "=", with: "").replacingOccurrences(of: "+", with: "-")
+                .replacingOccurrences(of: "/", with: "_")
+        }
+        let account = try AudioAccountIdentity(authority: "https://frozen-audio.example",
+            tenantID: "tenant-frozen", userID: "user-123")
+        for expiry in [nil, "not-a-time", NSNull()] as [Any?] {
+            var claims: [String: Any] = ["sub": "user-123", "app_metadata": ["tenant_id": "tenant-frozen"]]
+            if let expiry { claims["exp"] = expiry }
+            let token = try segment(["alg": "ES256"]) + "." + segment(claims) + ".AQID"
+            let session = makeAuthTestSession(token: token, refreshToken: nil,
+                userID: "user-123", tenantID: "tenant-frozen")
+            XCTAssertThrowsError(try SignalServerClientCompat.FrozenAccountRequest(account: account,
+                authentication: .init(session: session, requireCurrent: {}),
+                audioAuthorization: AccountAudioAuthorization())) { error in
+                guard case SignalServerClientCompat.ClientError.invalidAuthenticationClaims = error else {
+                    return XCTFail("Malformed expiry misclassified: \(error)")
+                }
+            }
+        }
+    }
+
+    func testFrozenAccountRequestRejectsNonHTTPSAndAmbiguousAuthoritiesBeforeHTTP() async throws {
+        AuthenticatedRequestURLProtocol.reset()
+        defer { AuthenticatedRequestURLProtocol.reset() }
+        let token = try makeAuthTestJWT(subject: "user-123", tenantID: "tenant-frozen", expiration: 4_102_444_800)
+        let session = makeAuthTestSession(token: token, userID: "user-123", tenantID: "tenant-frozen")
+        let intent = IOSAuthenticationIntent()
+        let probe = FrozenAuthenticationDependencyProbe()
+        let urlSession = makeAuthenticatedRequestTestURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        let authorities = ["http://127.0.0.1:50978", "http://frozen-audio.example", "/relative",
+                           "https:///", "https://user:password@frozen-audio.example",
+                           "https://frozen-audio.example?other=account", "https://frozen-audio.example#fragment"]
+        for authority in authorities {
+            let account = try AudioAccountIdentity(authority: authority, tenantID: "tenant-frozen", userID: "user-123")
+            do {
+                let frozen = try SignalServerClientCompat.FrozenAccountRequest(account: account,
+                    authentication: .init(session: session, requireCurrent: { try intent.requireCurrent() }),
+                    audioAuthorization: AccountAudioAuthorization())
+                let client = SignalServerClientCompat(urlSession: urlSession,
+                    authenticationDependencies: try frozenUnusedAuthenticationDependencies(probe),
+                    frozenAccountRequest: frozen)
+                _ = try await client.listAccountDevices(binding: makeAuthTestProtocolBinding())
+                XCTFail("Invalid frozen authority reached HTTP: \(authority)")
+            } catch {
+                guard case SignalServerClientCompat.ClientError.invalidBaseURL = error else {
+                    XCTFail("Unexpected authority error for \(authority): \(error)")
+                    continue
+                }
+            }
+        }
+        XCTAssertEqual(AuthenticatedRequestURLProtocol.requests().count, 0)
+        XCTAssertTrue(probe.calls.isEmpty)
+    }
+
+    func testFrozenRequestWithoutAudioEpochStillRejectsEndedAuthenticationOwner() async throws {
+        AuthenticatedRequestURLProtocol.reset()
+        defer { AuthenticatedRequestURLProtocol.reset() }
+        let token = try makeAuthTestJWT(subject: "user-123", tenantID: "tenant-frozen", expiration: 4_102_444_800)
+        let session = makeAuthTestSession(token: token, userID: "user-123", tenantID: "tenant-frozen")
+        let intent = IOSAuthenticationIntent()
+        let account = try AudioAccountIdentity(authority: "https://frozen-audio.example",
+                                               tenantID: "tenant-frozen", userID: "user-123")
+        let frozen = try SignalServerClientCompat.FrozenAccountRequest(account: account,
+            authentication: .init(session: session, requireCurrent: { try intent.requireCurrent() }),
+            audioAuthorization: nil)
+        let probe = FrozenAuthenticationDependencyProbe()
+        let urlSession = makeAuthenticatedRequestTestURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        let client = SignalServerClientCompat(urlSession: urlSession,
+            authenticationDependencies: try frozenUnusedAuthenticationDependencies(probe),
+            frozenAccountRequest: frozen)
+        intent.invalidate()
+
+        do {
+            _ = try await client.listAccountDevices(binding: makeAuthTestProtocolBinding())
+            XCTFail("An ended account owner was bypassed when audio authorization was omitted")
+        } catch {
+            XCTAssertEqual(error as? IOSAuthenticationSessionError, .changed)
+        }
+        XCTAssertEqual(AuthenticatedRequestURLProtocol.requests().count, 0)
+        XCTAssertTrue(probe.calls.isEmpty)
+    }
+
+    func testAccountDeviceGETCarriesVersionHeadersAndTheExactAuthenticatedBinding() async throws {
+        AuthenticatedRequestURLProtocol.reset()
+        defer { AuthenticatedRequestURLProtocol.reset() }
+        let token = try makeAuthTestJWT(subject: "user-123", tenantID: "tenant-a", expiration: 4_102_444_800)
+        let session = makeAuthTestSession(token: token, userID: "user-123", tenantID: "tenant-a")
+        let dependencies = SignalServerClientCompat.AuthenticationDependencies(
+            accessTokenOverride: { "" }, tenantIDOverride: { "" },
+            loadPersistedSession: { session },
+            refreshSession: { _ in throw AuthRequestTestError.unexpectedRefresh },
+            validateRefreshedAccessToken: { _ in throw AuthRequestTestError.unexpectedRefresh },
+            replacePersistedSession: { _, _ in throw AuthRequestTestError.unexpectedRefresh }
+        )
+        let urlSession = makeAuthenticatedRequestTestURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        let client = SignalServerClientCompat(urlSession: urlSession, authenticationDependencies: dependencies)
+        let binding = try makeAuthTestProtocolBinding()
+        let snapshot = try await client.listAccountDevices(binding: binding)
+        XCTAssertEqual(AuthenticatedRequestURLProtocol.requests().count, 1)
+        let request = try XCTUnwrap(AuthenticatedRequestURLProtocol.requests().first)
+        XCTAssertEqual(request.httpMethod, "GET")
+        XCTAssertNil(request.httpBody)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer \(token)")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-SkyBridge-Tenant-Id"), "tenant-a")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-SkyBridge-Client-Version"),
+                       try XCTUnwrap(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String))
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-SkyBridge-Protocol-Version"), "1")
+        XCTAssertEqual(snapshot.callerDeviceId, binding.deviceId)
+        let record = try XCTUnwrap(snapshot.devices.first)
+        XCTAssertTrue(record.isCaller)
+        XCTAssertEqual(record.protocolPublicKeyFingerprint, binding.protocolPublicKeyFingerprint)
     }
 
     func testRegisterCurrentDeviceBindsTheExactAuthenticatedAuthority() async throws {
@@ -1176,7 +1571,7 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
         do {
             _ = try await client.requestAdmissionChallenge(binding: makeAuthTestProtocolBinding())
             XCTFail("An expired JWT without a refresh credential must fail closed")
-        } catch SignalServerClientCompat.ClientError.invalidAuthenticationClaims {
+        } catch SignalServerClientCompat.ClientError.expiredAuthentication {
             // Expected.
         } catch {
             XCTFail("Unexpected error: \(error)")
@@ -2666,6 +3061,42 @@ private actor AsyncOneShotTestLatch {
     }
 }
 
+@available(iOS 17.0, *)
+private final class FrozenAuthenticationDependencyProbe: Sendable {
+    private let recorded = OSAllocatedUnfairLock(initialState: [String: Int]())
+
+    func record(_ name: String) { recorded.withLock { $0[name, default: 0] += 1 } }
+    var calls: [String: Int] { recorded.withLock { $0 } }
+}
+
+private enum FrozenAuthenticationDependencyError: Error {
+    case unexpectedAccess(String)
+}
+
+@available(iOS 17.0, *)
+private func frozenUnusedAuthenticationDependencies(_ probe: FrozenAuthenticationDependencyProbe) throws
+    -> SignalServerClientCompat.AuthenticationDependencies {
+    let otherToken = try makeAuthTestJWT(subject: "other-user", tenantID: "other-tenant", expiration: 4_102_444_800)
+    return .init(
+        accessTokenOverride: { probe.record("environment-bearer"); return otherToken },
+        tenantIDOverride: { probe.record("environment-tenant"); return "other-tenant" },
+        loadPersistedSession: {
+            probe.record("persisted-session"); throw FrozenAuthenticationDependencyError.unexpectedAccess("persisted-session")
+        },
+        refreshSession: { _ in
+            probe.record("refresh"); throw FrozenAuthenticationDependencyError.unexpectedAccess("refresh")
+        },
+        validateRefreshedAccessToken: { _ in
+            probe.record("validate-refresh"); throw FrozenAuthenticationDependencyError.unexpectedAccess("validate-refresh")
+        },
+        replacePersistedSession: { _, _ in
+            probe.record("replace-session"); throw FrozenAuthenticationDependencyError.unexpectedAccess("replace-session")
+        },
+        resolveSession: {
+            probe.record("resolver"); throw FrozenAuthenticationDependencyError.unexpectedAccess("resolver")
+        })
+}
+
 private enum AuthRequestTestError: Error {
     case unexpectedRefresh
     case timedOutWaitingForConcurrentLoads
@@ -2959,6 +3390,7 @@ private final class AuthenticatedRequestURLProtocol: URLProtocol, @unchecked Sen
     private static let maximumRequestBodyBytes = 64 * 1_024
     private static let lock = NSLock()
     nonisolated(unsafe) private static var capturedRequests: [URLRequest] = []
+    private static let completeBodyDeliveryCount = OSAllocatedUnfairLock(initialState: 0)
     nonisolated(unsafe) private static var registrationFingerprintOverride: String?
     nonisolated(unsafe) private static var registrationUserIDOverride: String?
     nonisolated(unsafe) private static var rotationChallengeTenantIDOverride: String?
@@ -2975,10 +3407,13 @@ private final class AuthenticatedRequestURLProtocol: URLProtocol, @unchecked Sen
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        let missingAccountVersions = request.url?.path == "/api/devices/list" &&
+            (request.value(forHTTPHeaderField: "X-SkyBridge-Client-Version") == nil ||
+             request.value(forHTTPHeaderField: "X-SkyBridge-Protocol-Version") == nil)
         guard let url = request.url,
               let response = HTTPURLResponse(
                 url: url,
-                statusCode: 200,
+                statusCode: missingAccountVersions ? 426 : 200,
                 httpVersion: "HTTP/1.1",
                 headerFields: ["Content-Type": "application/json"]
               ) else {
@@ -2988,7 +3423,23 @@ private final class AuthenticatedRequestURLProtocol: URLProtocol, @unchecked Sen
         let tenantID = request.value(forHTTPHeaderField: "X-SkyBridge-Tenant-Id") ?? "missing"
         let body: [String: Any]
         var capturedRequest = request
-        if request.url?.path == "/api/devices/identity-rotation/challenge" {
+        if request.url?.path == "/api/devices/list" {
+            // Match the deployed server: GET without version headers is rejected, even
+            // when the same client's version-bearing POST heartbeat is accepted.
+            if missingAccountVersions {
+                body = ["error": "client_version_too_old"]
+            } else {
+                let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+                func value(_ name: String) -> String { query.first { $0.name == name }?.value ?? "missing" }
+                body = ["generatedAt": 2_000_000_000_000 as Int64, "callerDeviceId": value("deviceId"),
+                    "truncated": false, "devices": [[
+                        "deviceId": value("deviceId"), "status": "active",
+                        "protocolSigningAlgorithm": value("protocolSigningAlgorithm"),
+                        "protocolPublicKeyFingerprint": value("protocolPublicKeyFingerprint"),
+                        "online": true, "isCaller": true
+                    ]]]
+            }
+        } else if request.url?.path == "/api/devices/identity-rotation/challenge" {
             do {
                 let requestData = try Self.requestBodyData(from: request)
                 capturedRequest.httpBodyStream = nil
@@ -3084,6 +3535,7 @@ private final class AuthenticatedRequestURLProtocol: URLProtocol, @unchecked Sen
             let data = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: data)
+            Self.completeBodyDeliveryCount.withLock { $0 += 1 }
             if request.url?.path == "/api/devices/register-current" {
                 Self.lock.lock()
                 Self.registrationEvents.append("finish:\(tenantID)")
@@ -3232,6 +3684,7 @@ private final class AuthenticatedRequestURLProtocol: URLProtocol, @unchecked Sen
     static func reset() {
         lock.lock()
         capturedRequests.removeAll(keepingCapacity: false)
+        completeBodyDeliveryCount.withLock { $0 = 0 }
         registrationFingerprintOverride = nil
         registrationUserIDOverride = nil
         rotationChallengeTenantIDOverride = nil
@@ -3286,6 +3739,10 @@ private final class AuthenticatedRequestURLProtocol: URLProtocol, @unchecked Sen
         lock.lock()
         defer { lock.unlock() }
         return capturedRequests
+    }
+
+    static func deliveredCompleteBodyCount() -> Int {
+        completeBodyDeliveryCount.withLock { $0 }
     }
 }
 

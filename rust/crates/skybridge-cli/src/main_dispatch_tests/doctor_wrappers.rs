@@ -103,7 +103,8 @@ async fn doctor_wrappers_cover_control_plane_and_webrtc_entrypoints() -> Result<
         media_admission_token: Some("token".to_owned()),
         output: OutputOptions { json: true },
     })
-    .await?;
+    .await
+    .expect_err("revoked media admission must fail the doctor command");
 
     let artifact_dir = make_test_dir("main-webrtc-wrapper")?;
     std::fs::write(

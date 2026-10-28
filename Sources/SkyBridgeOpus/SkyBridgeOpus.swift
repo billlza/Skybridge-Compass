@@ -41,11 +41,20 @@ public enum SkyBridgeOpusApplication: Sendable {
     }
 }
 
+public enum SkyBridgeOpusBitrateMode: Equatable, Sendable {
+    /// Fixed packet budget for a fixed frame duration; actual byte sizes must still be checked by the transport.
+    case constant
+    /// Libopus's default. This can exceed the nominal byte budget for an individual packet.
+    case constrainedVariable
+    case variable
+}
+
 public struct SkyBridgeOpusConfiguration: Equatable, Sendable {
     public let sampleRate: Int
     public let channels: Int
     public let frameDurationMs: Int
     public let bitrate: Int
+    public let bitrateMode: SkyBridgeOpusBitrateMode
     public let complexity: Int
     public let expectedPacketLossPercent: Int
     public let inBandFECEnabled: Bool
@@ -63,12 +72,14 @@ public struct SkyBridgeOpusConfiguration: Equatable, Sendable {
         inBandFECEnabled: Bool,
         dtxEnabled: Bool = false,
         application: SkyBridgeOpusApplication = .audio,
-        signal: SkyBridgeOpusSignal = .music
+        signal: SkyBridgeOpusSignal = .music,
+        bitrateMode: SkyBridgeOpusBitrateMode = .constrainedVariable
     ) {
         self.sampleRate = sampleRate
         self.channels = channels
         self.frameDurationMs = frameDurationMs
         self.bitrate = bitrate
+        self.bitrateMode = bitrateMode
         self.complexity = complexity
         self.expectedPacketLossPercent = expectedPacketLossPercent
         self.inBandFECEnabled = inBandFECEnabled
@@ -141,6 +152,20 @@ public final class SkyBridgeOpusEncoder {
         self.configuration = configuration
     }
 
+    /// Algorithmic encoder delay in samples at this encoder's configured sample rate.
+    /// Stream framing must carry this value so a finite decode can trim its leading delay.
+    public func lookaheadSamplesPerChannel() throws -> Int {
+        guard let encoder else {
+            throw SkyBridgeOpusError.opusCallFailed(operation: "lookahead-after-destroy", code: OPUS_INVALID_STATE)
+        }
+        var samples: opus_int32 = -1
+        try check(skybridge_opus_encoder_get_lookahead(encoder, &samples), operation: "get-lookahead")
+        guard samples >= 0 else {
+            throw SkyBridgeOpusError.opusCallFailed(operation: "invalid-lookahead", code: OPUS_INTERNAL_ERROR)
+        }
+        return Int(samples)
+    }
+
     public func encode(pcm16Interleaved: Data, maxPacketBytes: Int = 4_096) throws -> Data {
         guard pcm16Interleaved.count % MemoryLayout<Int16>.size == 0 else {
             throw SkyBridgeOpusError.invalidPCMByteCount(pcm16Interleaved.count)
@@ -197,6 +222,8 @@ public final class SkyBridgeOpusEncoder {
             throw SkyBridgeOpusError.opusCallFailed(operation: "configure-after-destroy", code: OPUS_INVALID_STATE)
         }
         try check(skybridge_opus_encoder_set_bitrate(encoder, Int32(configuration.bitrate)), operation: "set-bitrate")
+        try check(skybridge_opus_encoder_set_vbr(encoder, configuration.bitrateMode == .constant ? 0 : 1), operation: "set-vbr")
+        try check(skybridge_opus_encoder_set_vbr_constraint(encoder, configuration.bitrateMode == .variable ? 0 : 1), operation: "set-vbr-constraint")
         try check(skybridge_opus_encoder_set_complexity(encoder, Int32(configuration.complexity)), operation: "set-complexity")
         try check(skybridge_opus_encoder_set_inband_fec(encoder, configuration.inBandFECEnabled ? 1 : 0), operation: "set-fec")
         try check(skybridge_opus_encoder_set_packet_loss_perc(encoder, Int32(configuration.expectedPacketLossPercent)), operation: "set-loss")
@@ -210,6 +237,18 @@ public final class SkyBridgeOpusEncoder {
         }
         guard configuration.channels == 1 || configuration.channels == 2 else {
             throw SkyBridgeOpusError.invalidChannelCount(configuration.channels)
+        }
+        // Validate every fallible integer CTL before mutating the live encoder.
+        // A rejected reconfiguration must retain its prior rate and bitrate mode.
+        guard let bitrate = Int32(exactly: configuration.bitrate),
+              bitrate > 0 || bitrate == OPUS_AUTO || bitrate == OPUS_BITRATE_MAX else {
+            throw SkyBridgeOpusError.opusCallFailed(operation: "set-bitrate", code: OPUS_BAD_ARG)
+        }
+        guard (0...10).contains(configuration.complexity) else {
+            throw SkyBridgeOpusError.opusCallFailed(operation: "set-complexity", code: OPUS_BAD_ARG)
+        }
+        guard (0...100).contains(configuration.expectedPacketLossPercent) else {
+            throw SkyBridgeOpusError.opusCallFailed(operation: "set-loss", code: OPUS_BAD_ARG)
         }
     }
 

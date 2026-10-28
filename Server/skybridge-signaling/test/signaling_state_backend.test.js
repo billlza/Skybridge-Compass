@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 
 const {
   createSignalingStateBackend,
@@ -11,7 +12,7 @@ const {
   }
 } = require('../lib/signaling_state_backend');
 
-function makeBackend() {
+function makeBackend(overrides = {}) {
   return new RedisSignalingStateBackend({
     instanceId: 'unit-test',
     codeTtlMs: 300_000,
@@ -23,7 +24,8 @@ function makeBackend() {
     redisKeyPrefix: 'skybridge:test:',
     redisChannelPrefix: 'skybridge:test:',
     redisConnectTimeoutMs: 1_000,
-    log: console
+    log: console,
+    ...overrides
   });
 }
 
@@ -379,3 +381,35 @@ test('redis upsertEphemeral treats an expired stored record as absent', async ()
   assert.equal(upserted.value, 7);
   assert.equal(JSON.parse(await isolated.get()).value, 7);
 });
+
+
+test('independent Redis instances observe the current account listener, withdrawal and expiry',
+  { skip: !process.env.SIGNALING_TEST_REDIS_URL }, async () => {
+    const prefix = `skybridge:test:account-route:${crypto.randomUUID()}:`;
+    const options = { redisUrl: process.env.SIGNALING_TEST_REDIS_URL, redisKeyPrefix: prefix, redisChannelPrefix: prefix };
+    const writer = makeBackend({ ...options, instanceId: 'route-writer' });
+    const reader = makeBackend({ ...options, instanceId: 'route-reader' });
+    try {
+      await writer.init();
+      await reader.init();
+      const initial = { deviceId: 'desktop', protocolSigningAlgorithm: 'Ed25519',
+        protocolPublicKeyFingerprint: 'a'.repeat(64), lanAddresses: ['10.0.0.5'],
+        lanControlPort: 51164, expiresAt: Date.now() + 60_000 };
+      await writer.upsertEphemeral('presence', 'desktop', () => initial);
+      assert.deepEqual(await reader.getEphemeral('presence', 'desktop'), initial);
+      await writer.updateEphemeral('presence', 'desktop', (record) => {
+        record.lanControlPort = 51173; record.lanAddresses = ['192.168.1.20'];
+      });
+      const moved = await reader.getEphemeral('presence', 'desktop');
+      assert.equal(moved.lanControlPort, 51173);
+      assert.deepEqual(moved.lanAddresses, ['192.168.1.20']);
+      await writer.updateEphemeral('presence', 'desktop', (record) => { record.lanControlPort = null; });
+      assert.equal((await reader.getEphemeral('presence', 'desktop')).lanControlPort, null);
+      await writer.updateEphemeral('presence', 'desktop', (record) => { record.expiresAt = Date.now() - 1; });
+      assert.equal(await reader.getEphemeral('presence', 'desktop'), null);
+    } finally {
+      const cleanup = await Promise.allSettled([writer.close(), reader.close()]);
+      const failures = cleanup.filter((result) => result.status === 'rejected');
+      if (failures.length) throw new AggregateError(failures.map((result) => result.reason), 'Redis test cleanup failed');
+    }
+  });

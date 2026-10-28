@@ -1,0 +1,29 @@
+name: SkyBridgeAppleOperator
+options:
+  bundleIdPrefix: com.skybridge.tools
+  deploymentTarget:
+    iOS: "17.0"
+targets:
+  AppleOperator:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - Tests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.skybridge.tools.apple-operator
+        DEVELOPMENT_TEAM: YKUPL7Z869
+        CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "6.0"
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        GCC_TREAT_WARNINGS_AS_ERRORS: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
+schemes:
+  AppleOperator:
+    build:
+      targets:
+        AppleOperator: [test]
+    test:
+      targets:
+        - AppleOperator

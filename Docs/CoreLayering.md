@@ -7,9 +7,17 @@
    现在也承载跨平台控制面里的轻量 HTTPS bootstrap 客户端与 ICE 配置模型。
    iOS 的 Xcode 与 SwiftPM 入口都必须通过这个 product 消费其公开类型，不能再把该 target 内的源文件直接编译进 App target。
 2. `SkyBridgeAppleTransport`
-   只放 Apple 平台传输实现，目前承载 `NativeWebSocketClient` 与 `WebSocketSignalingClient`。
+   只放 Apple 平台传输实现，承载 `NativeWebSocketClient`、`WebSocketSignalingClient` 与原生 CoC 帧收发 `BluetoothControlFrameTransport`。每条 CoC 的原生流由独立运行循环线程持有，调用方用 `closeAndAwait()` 核对清理及实际线程退出。`BluetoothAudioChannel` 将共享协议层的四步确认和有序加密记录接到该原生流；它消费现有认证会话导出的单次凭证，不产生账户或播放授权。`BluetoothAudioListener` 及其内部原生 driver 在主队列管理加密 PSM、服务广告和有限候选；通过内部桥交出候选后，delegate 不再访问该通道或流，媒体 I/O 继续归独立 worker。发布 owner 必须保留到撤销回调和子通道清理确认，超时不得丢弃。账户和播放授权归 Core 接收会话；当前默认启动没有新增播放能力广告。
 3. `SkyBridgeCore`
    保留现有运行时、Apple 平台服务、PQC 运行时适配、Remote Desktop、发现与 UI 所需集成逻辑，同时通过 typealias 兼容既有导入面。
+   Mac 音频兼容输出 `CoreAudioOpusOutput` 与已有严格输出并列，复用原生 AVAudioEngine，只有显式 Opus 模式可使用。`AudioOpusPlayback` actor 连接已有解码/额度流程与该输出，不创建账户或播放许可，也不注册或广告蓝牙能力。共有的 `AudioOutputCleanupOutcome` 独立承载资源释放状态；原严格接收会话继续使用相同契约。
+   `AudioPlaybackReceiveSession` 通过 `NativeAudioBluetoothPlaybackLink` 接入原生发布/认证子通道，先取得有限账户授权和精确音源许可，再准备输出。播放 actor 与会话分别持有原生执行和取消状态，控制批次按顺序提交；就绪消息实际发出后才读取媒体。服务复用既有单输出和清理恢复机制，并将实际消费者与两项蓝牙能力同时安装。默认入口仍关闭该安装，待 Android 发送端及直连无线验收后再启用；此接线尚未改变 MAIN 丢失即结束子通道的边界。
+
+文件音频的独立组件 `SkyBridgeAudioFile` 依赖 `SkyBridgeProtocolCore` 和窄 C 桥
+`CSkyBridgeFLAC`，承载同一份 Mac/iOS FLAC 解码、完整验证及有界 PCM 读取。
+它不依赖 `SkyBridgeCore`、HAL、账户或传输；Mac 原有类型名通过别名指向该模块。
+iOS 接入时消费根包 product，不复制解码源码或建立 LocalPackage。组件通过测试
+不意味着 iOS 发送会话已经接入，也不意味着输出设备满足严格播放条件。
 
 这样拆层的目的：
 

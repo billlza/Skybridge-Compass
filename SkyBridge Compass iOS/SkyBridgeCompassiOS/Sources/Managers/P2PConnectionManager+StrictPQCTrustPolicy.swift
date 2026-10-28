@@ -356,25 +356,7 @@ extension P2PConnectionManager {
     }
 
     static func suiteSupportsTargetKEM(_ availableSuite: CryptoSuite, target: CryptoSuite) -> Bool {
-        if availableSuite == target {
-            return true
-        }
-
-        let availableCanonical = availableSuite.canonicalKEMSuite
-        let targetCanonical = target.canonicalKEMSuite
-        if availableCanonical == targetCanonical {
-            return true
-        }
-
-        if target.isHybrid {
-            return availableSuite.isHybrid
-        }
-
-        if availableSuite.isHybrid {
-            return target.isHybrid
-        }
-
-        return false
+        availableSuite.canonicalKEMSuite == target.canonicalKEMSuite
     }
 
     static func signedRefreshEvidenceSuites(_ evidence: KEMTrustStore.SignedRefreshEvidence?) -> Set<CryptoSuite> {

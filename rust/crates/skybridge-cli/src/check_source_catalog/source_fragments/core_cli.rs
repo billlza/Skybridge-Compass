@@ -1,5 +1,20 @@
 pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
     ("main.rs", include_str!("../../main.rs")),
+    ("tui.rs", include_str!("../../tui.rs")),
+    ("usb_commands.rs", include_str!("../../usb_commands.rs")),
+    ("tui/catalog.rs", include_str!("../../tui/catalog.rs")),
+    (
+        "file_approval_commands.rs",
+        include_str!("../../file_approval_commands.rs"),
+    ),
+    (
+        "handshake_commands.rs",
+        include_str!("../../handshake_commands.rs"),
+    ),
+    (
+        "transfer_progress.rs",
+        include_str!("../../transfer_progress.rs"),
+    ),
     ("main_tests.rs", include_str!("../../main_tests.rs")),
     (
         "main_tests/control_plane.rs",
@@ -49,7 +64,33 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         "agent_runtime_guard.rs",
         include_str!("../../agent_runtime_guard.rs"),
     ),
+    (
+        "desktop_commands.rs",
+        include_str!("../../desktop_commands.rs"),
+    ),
+    (
+        "local_approval_commands.rs",
+        include_str!("../../local_approval_commands.rs"),
+    ),
     ("android_bridge.rs", include_str!("../../android_bridge.rs")),
+    ("app_commands.rs", include_str!("../../app_commands.rs")),
+    (
+        "app_commands/tests.rs",
+        include_str!("../../app_commands/tests.rs"),
+    ),
+    (
+        "app_control_client.rs",
+        include_str!("../../app_control_client.rs"),
+    ),
+    (
+        "app_control_client/native.rs",
+        include_str!("../../app_control_client/native.rs"),
+    ),
+    (
+        "app_control_client/tests.rs",
+        include_str!("../../app_control_client/tests.rs"),
+    ),
+    ("cli_args/app.rs", include_str!("../../cli_args/app.rs")),
     (
         "android_commands.rs",
         include_str!("../../android_commands.rs"),
@@ -258,6 +299,10 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
     (
         "operator_status.rs",
         include_str!("../../operator_status.rs"),
+    ),
+    (
+        "operator_profile.rs",
+        include_str!("../../operator_profile.rs"),
     ),
     (
         "operator_status/health.rs",

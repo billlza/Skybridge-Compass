@@ -503,7 +503,8 @@
 "settings.advanced.performance.shadowQuality.format" = "阴影质量: %@";
 "settings.advanced.performance.postProcessing.format" = "后处理: %@";
 "settings.advanced.performance.showRealtimeFPS" = "显示实时FPS";
-"settings.advanced.performance.showRealtimeFPS.help" = "在顶部导航显示Metal渲染FPS；无数据时显示占位字符 — FPS";
+"settings.advanced.performance.showRealtimeFPS.help" = "显示天气背景（雨、云和霾）实际呈现到屏幕的每秒平均帧数，不包含其他界面和远程会话；无可用测量时显示 — FPS。";
+"metric.frameRate.paused" = "已暂停";
 "settings.advanced.hardware.enableAcceleration" = "启用硬件加速";
 "settings.advanced.memory.optimize" = "优化内存使用";
 "settings.advanced.backgroundScanning" = "后台扫描";
@@ -731,7 +732,7 @@
 "remote.connectionMode.near" = "近距";
 "remote.connectionMode.far" = "远距";
 "remote.connectionMode.auto.description" = "自动选择最佳连接模式（同网优先近距镜像）";
-"remote.connectionMode.near.description" = "近距硬件镜像 - 同网低延迟（ScreenCaptureKit + HEVC + QUIC）";
+"remote.connectionMode.near.description" = "查看并控制同一网络内的设备";
 "remote.connectionMode.far.description" = "手动 RDP（受限预览）- FreeRDP 3.30 软件 GDI、严格证书校验、无通道重定向";
 "common.unknown" = "未知";
 "profile.title" = "用户资料";
@@ -1278,7 +1279,7 @@
 "discovery.accountDevices.registration.pending" = "待批准";
 "discovery.accountDevices.registration.frozen" = "已冻结";
 "discovery.accountDevices.action.useConnectionCode" = "用连接码连接";
-"discovery.accountDevices.hint.online" = "该设备在线但不在同一局域网：请在对方设备生成智能连接码后输入";
+"discovery.accountDevices.hint.online" = "该设备在线，但尚未发现可用的直连路径。可在对方设备生成连接码后输入";
 "discovery.accountDevices.copyAddress" = "复制地址";
 "discovery.accountDevices.copyDeviceId" = "复制设备 ID";
 "discovery.accountDevices.failure.notAuthenticated" = "未登录";
@@ -1297,3 +1298,73 @@
 "dashboard.accountDevices.summary" = "%d 台设备 · %d 台在线";
 "dashboard.accountDevices.viewAll" = "查看全部";
 "dashboard.accountDevices.empty" = "登录同一账号的其他设备会显示在这里";
+
+"remoteControl.securityNotice.inputController" = "拥有输入权";
+
+"remoteControl.securityNotice.observer" = "仅观看";
+
+"remoteControl.securityNotice.transferInput" = "交接输入权";
+
+"remoteControl.securityNotice.approveView" = "允许观看";
+
+"info.appleSilicon" = "Apple 芯片";
+"info.optimizationEnabled" = "优化已启用";
+"info.pCore" = "性能核心";
+"info.eCore" = "能效核心";
+"info.multiCoreOpt" = "多核优化";
+"info.reqAppleSilicon" = "需要 Apple 芯片";
+"info.deviceUnsupported" = "不支持此设备";
+"info.standardMode" = "标准模式";
+
+"remoteControl.securityNotice.localInputController" = "本机已收回键盘和鼠标控制权，远端仍可观看。";
+
+// Saved pairing identity status
+"discovery.trustedDevices.section" = "已信任设备";
+"discovery.pendingPairings.section" = "待验证的配对记录";
+"discovery.pendingPairings.explanation" = "这些记录暂不能用于验证连接，不表示设备已从账号移除。请选择账号设备或扫描当前设备的二维码连接。";
+
+// Account device removal
+"accountDevices.remove.action" = "从账号移除";
+"accountDevices.remove.title" = "移除账号设备";
+"accountDevices.remove.message" = "将“%@”从账号移除？该设备将无法继续使用账号设备服务。本地文件和已保存的配对不会被删除。";
+"accountDevices.remove.confirm" = "移除";
+"accountDevices.remove.cancel" = "取消";
+"accountDevices.remove.selfRemoved" = "本机已从账号移除，账号设备同步已停止。";
+"accountDevices.remove.failed" = "移除未获确认。请刷新并检查设备状态后重试。";
+
+"accountDevices.myDevices" = "我的设备";
+
+"remote.session.hostStopped" = "对端已停止屏幕共享。";
+
+"remote.session.permissionRevoked" = "对端已撤销屏幕共享授权。";
+
+"remote.session.captureFailed" = "对端屏幕采集失败，共享已结束。";
+
+"audio.output.source_format" = "音源 PCM 格式";
+
+"audio.authorization.renewal.waiting" = "播放期间会自动尝试更新账户授权。";
+"audio.authorization.renewal.checking" = "正在核验账户设备，更新本次播放授权。";
+"audio.authorization.renewal.retry_pending" = "暂时无法更新授权，仍在原有效期内播放，稍后自动重试。";
+"audio.authorization.renewal.unavailable" = "未能更新授权，本次播放只可继续至当前有效期。";
+"audio.authorization.renewal.failed" = "本次播放授权已失效，正在停止播放。";
+
+"audio.output.endpoint_unavailable" = "所选输出当前不可用。请确认设备已连接，并在系统声音设置中选择可用的输出设备。";
+
+"audio.output.format_mismatch" = "此输出当前无法使用音源的采样率、声道数、PCM 表示或位深。请选择支持所示格式的输出设备。";
+
+"audio.output.mixing_required" = "当前输出路径允许系统混音，无法满足本次严格播放。请选择支持独占原格式输出的设备。";
+
+"audio.output.unsupported_layout" = "当前输出的声道布局与音源不匹配，或暂不受严格播放支持。请选择声道布局匹配的输出设备。";
+
+"audio.output.unsupported_topology" = "当前输出的音频通道组织暂不受严格播放支持。请使用其他输出设备。";
+
+"audio.output.processing_active" = "当前声音设置启用了音量增益、静音或单声道处理，无法满足严格播放。请检查系统及设备的声音设置。";
+
+"audio.output.device_busy" = "未能取得这台输出设备的独占使用权。请停止其他音频播放后重试。";
+
+"audio.output.variable_buffer_size" = "当前输出使用可变缓冲，暂不受严格播放支持。请选择其他输出设备。";
+
+"audio.output.property_unavailable" = "无法完成这台声音设备的严格输出检查。请重新连接设备后重试。";
+
+/* Reconnect the current USB accessory through a fresh authenticated session. */
+"connection.usb.retryTimeout" = "USB 连接超时。请在手机上打开 SkyBridge，然后重试连接。";

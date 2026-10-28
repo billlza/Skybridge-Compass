@@ -1253,11 +1253,16 @@ final class FileTransferManagerSecurityTests: XCTestCase {
             contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/FileTransfer/FileTransferListenerService.swift"),
             encoding: .utf8
         )
+        let byteChannelSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/FileTransfer/ClassicFileTransferByteChannel.swift"),
+            encoding: .utf8
+        )
 
         XCTAssertTrue(managerSource.contains("zeroByteDisconnectError: .inboundConnectionClosedBeforeMetadata"))
         XCTAssertTrue(managerSource.contains("throw FileTransferError.inboundInvalidInitialHeader"))
-        XCTAssertTrue(managerSource.contains("operation.receivedByteCount == 0"))
-        XCTAssertTrue(managerSource.contains("return zeroByteDisconnectError"))
+        XCTAssertTrue(managerSource.contains("NetworkClassicFileTransferByteChannel(connection).receive(length: length"))
+        XCTAssertTrue(byteChannelSource.contains("operation.receivedByteCount == 0"))
+        XCTAssertTrue(byteChannelSource.contains("return zeroByteDisconnectError"))
         XCTAssertFalse(
             managerSource.contains(
                 "let payload = try await receiveData(length: header.length, from: connection, zeroByteDisconnectError: .inboundConnectionClosedBeforeMetadata)"
@@ -1366,12 +1371,19 @@ final class FileTransferManagerSecurityTests: XCTestCase {
             ),
             encoding: .utf8
         )
+        let byteChannelSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/FileTransfer/ClassicFileTransferByteChannel.swift"),
+            encoding: .utf8
+        )
 
-        for source in [macSource, iosSource] {
+        for source in [byteChannelSource, iosSource] {
             XCTAssertTrue(source.contains("ClassicTransferSendOperation()"))
             XCTAssertTrue(source.contains("withTaskCancellationHandler"))
             XCTAssertTrue(source.contains("defer { timeoutTask.cancel() }"))
-            XCTAssertTrue(source.contains("timeoutTask?.cancel()"))
+        }
+        XCTAssertTrue(byteChannelSource.contains("defer { timer?.cancel() }"))
+        XCTAssertTrue(iosSource.contains("timeoutTask?.cancel()"))
+        for source in [macSource, iosSource] {
             XCTAssertTrue(source.contains("ClassicTransferAuthenticationContract.isValidHMACSHA256"))
             XCTAssertTrue(source.contains("ClassicTransferReceiptContract.validateSuccessfulFileHash"))
         }

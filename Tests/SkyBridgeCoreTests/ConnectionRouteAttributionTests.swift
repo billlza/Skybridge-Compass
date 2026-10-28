@@ -26,10 +26,29 @@ final class ConnectionRouteAttributionTests: XCTestCase {
     }
 
     func testDirectRoutesAreClassifiedAsDirect() {
+        XCTAssertTrue(ConnectionTransportRoute.usbDirect.isDirect)
+        XCTAssertFalse(ConnectionTransportRoute.usbDirect.isRelayed)
         XCTAssertTrue(ConnectionTransportRoute.localDirect.isDirect)
         XCTAssertTrue(ConnectionTransportRoute.peerToPeerDirect.isDirect)
         XCTAssertFalse(ConnectionTransportRoute.localDirect.isRelayed)
         XCTAssertFalse(ConnectionTransportRoute.peerToPeerDirect.isRelayed)
+    }
+
+    @MainActor
+    func testUSBIsObservableButCannotDiluteNetworkRelayBudget() {
+        let recorder = ConnectionRouteAttributionRecorder()
+        let relayed = Array(repeating: ConnectionTransportRoute.relayed, count: 4)
+        let usb = Array(repeating: ConnectionTransportRoute.usbDirect, count: 20)
+        XCTAssertEqual(ConnectionRouteAttributionRecorder.relayedShare(in: relayed + usb), 1)
+        XCTAssertNil(ConnectionRouteAttributionRecorder.relayedShare(in: usb))
+        for index in 0..<4 { recorder.record(sessionKey: "network-\(index)", route: .relayed) }
+        recorder.record(sessionKey: "usb-peer", route: .usbDirect)
+        XCTAssertEqual(recorder.attributionsBySessionKey["usb-peer"]?.route, .usbDirect)
+        XCTAssertEqual(recorder.conclusiveSampleCount, 4)
+        XCTAssertEqual(recorder.relayedShare, 1)
+        XCTAssertTrue(recorder.isOverRelayBudget)
+        recorder.forget(sessionKey: "usb-peer")
+        XCTAssertNil(recorder.attributionsBySessionKey["usb-peer"])
     }
 
     func testICETransportPathMapsRelayToRelayedAndDirectToPeerToPeer() {

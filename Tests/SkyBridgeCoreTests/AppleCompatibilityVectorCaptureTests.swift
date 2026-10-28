@@ -713,11 +713,11 @@ private extension AppleCompatibilityVectorCaptureTests {
         fileTransferAdmissionPolicyPath:
             "6b5387f6074bbcdae8305c656ab27aeaf2259d86f5e8dc70a602a98a89ab598b",
         fileTransferShippingCallerPath:
-            "9e8a2dbfc0e22eced3b6cd0ddd2e135104318643e3d9dca2d4dc25df87d21c5f",
+            "fe916c7d67fd43d8a8dc69cf5197232e53972e2aabf54eeeb56c3b4247653b53",
         fileTransferMacResponseCallerPath:
-            "cd6920782c95f0d66835329b7049bd04a9aeaa80032fa594d0470be73e59ff7d",
+            "67c05ce758eb661233741e97c924cb1a9f2a8298de86e1b24831b3daa6d08483",
         fileTransferIOSCallerPath:
-            "0e8abdbce52fda3c6904c8eedc7d0ae1fbbf00a0aa0e35757e941439384232f7",
+            "f67dc8a8a6ceafb991fd16ccfe0bae2588b4bd6f7c01b1a04f794b51c9a84d1c",
         cryptoCapabilitiesPath:
             "9e5a861f06b061f6991bd1168ebe3b0ff4156be1ab75489551754a942066ca46",
         handshakePolicyPath:
@@ -727,13 +727,13 @@ private extension AppleCompatibilityVectorCaptureTests {
         hpkeSealedBoxPath:
             "e2943f721252d7751fded95ab3e47b0ecfb6d250aaf325c278244fdcc7fb094b",
         bonjourAdapterPath:
-            "a12564720db40d83561357c1d6608db471495e6772a04edc4f37f7006175da98",
+            "ce974c296a91621c95c067d7255aab63acbc8f5e91a0e68c31b56961ff17dfcf",
         bonjourContractPath:
-            "4d8bbf100a52d92e14a2b38cd2c1738aac4a6970212330b93f15118b36d9cc87",
+            "01ab05b49605cefc2c22c3b7d274c9a168ec5b0aac9cf9a4f427f9350c0e22eb",
         iosBonjourDiscoveryCallerPath:
-            "415a9eb0b03812fa14b6eb6d801a0265c6abe87dc377ab14ed0ff778c7c98780",
+            "55863717ad200c8e3c269c7ec3914ed8a2fd12fbea6026ab856d1723aadbb398",
         iosBonjourFileTransferCallerPath:
-            "74b00f720fb6bb1699b1286973aa214d2fbde068e43974883ee10f3d1401bf89"
+            "8ba89fdfb5012b05aa913f751897ca83b153a23310ce340319dbad39b7ffac61"
     ]
 
     static func buildVectors(from inputs: SemanticInputs) throws -> [Vector] {

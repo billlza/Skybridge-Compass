@@ -56,7 +56,7 @@ public struct DeviceRowView: View {
                         Text(device.name)
                             .font(.subheadline)
                             .fontWeight(.medium)
-                            .foregroundColor(.white)
+                            .foregroundStyle(.primary)
 
                         if let status = connectionStatus {
                             Text(connectionStatusText ?? status.displayName)
@@ -78,15 +78,15 @@ public struct DeviceRowView: View {
                         // 平台
                         Text(device.platform.displayName)
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(LiquidGlass.supportingText)
                         
                         // IP 地址
                         if let ip = device.ipAddress {
                             Text("•")
-                                .foregroundColor(.secondary)
+                                .foregroundColor(LiquidGlass.supportingText)
                             Text(ip)
                                 .font(.caption)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(LiquidGlass.supportingText)
                         }
                     }
 
@@ -117,16 +117,11 @@ public struct DeviceRowView: View {
                 // 箭头
                 Image(systemName: "chevron.right")
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(LiquidGlass.supportingText)
             }
             .padding(.vertical, 10)
             .padding(.horizontal, 12)
-            .background(.ultraThinMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(LinearGradient(colors: [.white.opacity(0.3), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
-            )
+            .liquidGlassCard(cornerRadius: 16, padding: 0)
         }
         .buttonStyle(PlainButtonStyle())
     }
@@ -187,7 +182,7 @@ struct SignalStrengthView: View {
             }
         }
         .symbolRenderingMode(.hierarchical)
-        .foregroundStyle(.secondary)
+        .foregroundStyle(LiquidGlass.supportingText)
         .font(.system(size: 14, weight: .medium))
         .frame(width: 20, alignment: .trailing)
     }
@@ -262,11 +257,11 @@ struct EmptyDevicesView: View {
         VStack(spacing: 12) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 40))
-                .foregroundColor(.secondary)
+                .foregroundColor(LiquidGlass.supportingText)
             
             Text("未发现设备")
                 .font(.subheadline)
-                .foregroundColor(.secondary)
+                .foregroundColor(LiquidGlass.supportingText)
             
             Text("确保设备在同一网络下")
                 .font(.caption)
@@ -304,7 +299,7 @@ struct ConnectionRowView: View {
                 Text(connection.device.name)
                     .font(.subheadline)
                     .fontWeight(.medium)
-                    .foregroundColor(.white)
+                    .foregroundStyle(.primary)
                 
                 HStack(spacing: 4) {
                     Circle()
@@ -312,7 +307,7 @@ struct ConnectionRowView: View {
                         .frame(width: 6, height: 6)
                     Text(statusText ?? connection.status.displayName)
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(LiquidGlass.supportingText)
                 }
             }
             
@@ -359,6 +354,21 @@ struct ConnectionRowView: View {
 
 // MARK: - Device Detail Sheet
 
+/// The payload and presentation lifetime are one state value, so the first
+/// presentation cannot capture an empty target from an independent boolean.
+struct DeviceAudioPlaybackPresentation: Identifiable {
+    let id = UUID()
+    let target: IOSAudioPlaybackTarget
+}
+
+enum DeviceDetailSessionIdentity {
+    static func matches(deviceID: String, sessionDeviceID: String?) -> Bool {
+        guard let selected = PeerIdentityAliasResolver.persistentDeviceId(from: deviceID),
+              let current = PeerIdentityAliasResolver.persistentDeviceId(from: sessionDeviceID) else { return false }
+        return selected == current
+    }
+}
+
 /// 设备详情弹窗
 @available(iOS 17.0, *)
 struct DeviceDetailSheet: View {
@@ -372,46 +382,28 @@ struct DeviceDetailSheet: View {
     @State private var connectError: String?
     @State private var showPQCVerification: Bool = false
     @State private var showMessaging: Bool = false
+    @State private var audioPresentation: DeviceAudioPlaybackPresentation?
     
     var body: some View {
         NavigationStack {
             List {
-                // 设备信息
-                Section(RuntimeLocalization.string("设备信息")) {
-                    LabeledContent(RuntimeLocalization.string("名称"), value: device.name)
-                    LabeledContent(RuntimeLocalization.string("平台"), value: device.platform.displayName)
-                    LabeledContent(RuntimeLocalization.string("系统版本"), value: device.osVersion)
-                    LabeledContent(
-                        RuntimeLocalization.string("连接状态"),
-                        value: effectiveConnectionStatusText ?? RuntimeLocalization.string("未连接")
-                    )
-                    if let ip = device.ipAddress {
-                        LabeledContent(RuntimeLocalization.string("IP 地址"), value: ip)
-                    }
-                    if let err = connectionManager.resolvedConnectionError(for: device), !err.isEmpty {
-                        LabeledContent(RuntimeLocalization.string("断开原因"), value: err)
-                    }
-                }
-                
-                // 功能
-                Section(RuntimeLocalization.string("支持功能")) {
-                    ForEach(device.capabilities, id: \.self) { capability in
-                        HStack {
-                            Image(systemName: capabilityIcon(capability))
-                                .foregroundColor(.cyan)
-                            Text(capabilityName(capability))
-                        }
-                    }
-                }
-                
                 // 操作
                 Section {
+                    if let target = connectionManager.audioPlaybackTarget(for: device.id, name: device.name) {
+                        Button {
+                            audioPresentation = .init(target: target)
+                        } label: {
+                            Label(RuntimeLocalization.string("在电脑上播放音频"), systemImage: "hifispeaker")
+                        }
+                    } else if let active = connectionManager.audioPlayback.target, active.deviceID == device.id {
+                        Button(RuntimeLocalization.string("查看音频播放")) { audioPresentation = .init(target: active) }
+                    }
                     if device.isTrusted {
                         HStack(spacing: 10) {
                             Image(systemName: trustSymbolName)
                                 .foregroundStyle(.green)
                             Text(RuntimeLocalization.string("已受信任（PQC 引导）"))
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(LiquidGlass.supportingText)
                         }
                         Button {
                             showMessaging = true
@@ -457,6 +449,35 @@ struct DeviceDetailSheet: View {
                         .disabled(isConnecting || effectiveConnectionStatus == .connecting)
                     }
                 }
+                // 设备信息
+                Section(RuntimeLocalization.string("设备信息")) {
+                    LabeledContent(RuntimeLocalization.string("名称"), value: device.name)
+                    LabeledContent(RuntimeLocalization.string("平台"), value: device.platform.displayName)
+                    LabeledContent(RuntimeLocalization.string("系统版本"), value: device.osVersion)
+                    LabeledContent(
+                        RuntimeLocalization.string("连接状态"),
+                        value: effectiveConnectionStatusText ?? RuntimeLocalization.string("未连接")
+                    )
+                    if let ip = device.ipAddress {
+                        LabeledContent(RuntimeLocalization.string("IP 地址"), value: ip)
+                    }
+                    if let err = connectionManager.resolvedConnectionError(for: device), !err.isEmpty {
+                        LabeledContent(RuntimeLocalization.string("断开原因"), value: err)
+                    }
+                }
+                
+                // 功能
+                Section {
+                    DisclosureGroup(RuntimeLocalization.string("设备能力（高级）")) {
+                        ForEach(device.capabilities, id: \.self) { capability in
+                            HStack {
+                                Image(systemName: capabilityIcon(capability))
+                                    .foregroundColor(.cyan)
+                                Text(capabilityName(capability))
+                            }
+                        }
+                    }
+                }
             }
             .navigationTitle(device.name)
             .navigationBarTitleDisplayMode(.inline)
@@ -485,6 +506,11 @@ struct DeviceDetailSheet: View {
             }
             .sheet(isPresented: $showMessaging) {
                 DeviceMessagingView(device: device)
+            }
+            .sheet(item: $audioPresentation) { presentation in
+                DeviceAudioPlaybackView(target: presentation.target, service: connectionManager.audioPlayback,
+                    openChannel: { try connectionManager.openAudioChannel(for: presentation.target.deviceID,
+                        requiringRemoteProtocolFingerprint: presentation.target.identity.fingerprint) })
             }
         }
     }
@@ -526,7 +552,8 @@ struct DeviceDetailSheet: View {
     }
 
     private var activeCrossNetworkSnapshot: ActiveSessionSnapshot? {
-        guard let snapshot = crossNetworkManager.activeSessionSnapshot else { return nil }
+        guard let snapshot = crossNetworkManager.activeSessionSnapshot,
+              DeviceDetailSessionIdentity.matches(deviceID: device.id, sessionDeviceID: snapshot.deviceId) else { return nil }
         switch snapshot.phase {
         case .transportReady, .handshakeComplete, .reconnecting:
             return snapshot
@@ -536,13 +563,7 @@ struct DeviceDetailSheet: View {
     }
 
     private var isCrossNetworkConnectedDevice: Bool {
-        guard let snapshot = activeCrossNetworkSnapshot else { return false }
-        let snapshotId = normalizedIdentifier(snapshot.deviceId ?? crossNetworkManager.remoteDeviceId)
-        if snapshotId == normalizedIdentifier(device.id) {
-            return true
-        }
-        return normalizedName(snapshot.deviceName ?? crossNetworkManager.remoteDeviceName)
-            == normalizedName(device.name)
+        activeCrossNetworkSnapshot != nil
     }
 
     private var effectiveConnectionStatusText: String? {
@@ -564,8 +585,7 @@ struct DeviceDetailSheet: View {
 
     private var isCrossNetworkRemoteDesktopActiveForDevice: Bool {
         guard let current = remoteDesktopManager.currentConnection?.device else { return false }
-        return normalizedIdentifier(current.id) == normalizedIdentifier(device.id)
-            || normalizedName(current.name) == normalizedName(device.name)
+        return DeviceDetailSessionIdentity.matches(deviceID: device.id, sessionDeviceID: current.id)
     }
 
     private func connect() {
@@ -611,17 +631,6 @@ struct DeviceDetailSheet: View {
         }
     }
 
-    private func normalizedIdentifier(_ raw: String?) -> String {
-        raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-    }
-
-    private func normalizedName(_ raw: String?) -> String {
-        raw?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-            .replacingOccurrences(of: " ", with: "") ?? ""
-    }
-    
     private func capabilityIcon(_ capability: String) -> String {
         switch capability {
         case "remote_desktop", "remote_desktop_viewer": return "display"

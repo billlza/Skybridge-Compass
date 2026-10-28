@@ -1095,7 +1095,8 @@ struct WebRTCSignalingCurrentPathTests {
             deviceModel: "Mac16,7",
             osVersion: "26.6.0",
             lanAddresses: ["fd12::1", "10.0.0.5"],
-            capabilities: [.remoteDesktop, .clipboard]
+            capabilities: [.remoteDesktop, .clipboard],
+            lanControlPort: 51173
         )
 
         let response = try await makeClient(mode: "presence-register").registerPresence(binding: binding, report: report)
@@ -1121,6 +1122,7 @@ struct WebRTCSignalingCurrentPathTests {
         #expect(body["osVersion"] as? String == "26.6.0")
         #expect(body["lanAddresses"] as? [String] == ["fd12::1", "10.0.0.5"], "reporter order reaches the wire untouched")
         #expect(body["capabilities"] as? [String] == ["clipboard", "remote_desktop"])
+        #expect(body["lanControlPort"] as? Int == 51173)
         #expect(body["appVersion"] == nil, "the server derives appVersion from clientVersion")
 
         let snapshot = try await makeClient(mode: "account-devices-list").listAccountDevices(binding: binding)
@@ -1133,6 +1135,8 @@ struct WebRTCSignalingCurrentPathTests {
         #expect(listRequest.httpMethod == "GET")
         #expect(listRequest.url?.path == "/api/devices/list")
         #expect(listRequest.value(forHTTPHeaderField: "Authorization") == "Bearer token-presence")
+        #expect(listRequest.value(forHTTPHeaderField: "X-SkyBridge-Client-Version") == "1.0.2")
+        #expect(listRequest.value(forHTTPHeaderField: "X-SkyBridge-Protocol-Version") == "1")
         let listURL = try #require(listRequest.url)
         let listComponents = try #require(URLComponents(url: listURL, resolvingAgainstBaseURL: false))
         let queryItems = try #require(listComponents.queryItems)

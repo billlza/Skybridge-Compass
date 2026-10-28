@@ -38,6 +38,7 @@
     "fileTransfer": [
       "file",
       "file_transfer",
+      "classic_approval_v1",
       "classic_resume"
     ],
     "remoteControl": [

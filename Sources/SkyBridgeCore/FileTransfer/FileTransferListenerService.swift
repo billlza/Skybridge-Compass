@@ -41,6 +41,7 @@ public final class FileTransferListenerService: ObservableObject {
     private var inboundAdmission = ClassicTransferInboundAdmission()
     private var inboundConnections: [String: NWConnection] = [:]
     private var inboundTasks: [String: Task<Void, Never>] = [:]
+    var activeInboundConnectionCount: Int { inboundConnections.count }
  /// 上次尝试夺回首选端口的时间；用于限频，避免在首选端口长期被占时反复 churn 监听器。
     private var lastPreferredPortReclaimAttempt: Date?
  /// 夺回首选端口的最小重试间隔。
@@ -568,7 +569,7 @@ public final class FileTransferListenerService: ObservableObject {
         return (error as NSError).code == 48
     }
     
-    private func handleIncoming(_ connection: NWConnection) {
+    func handleIncoming(_ connection: NWConnection) {
         let connectionId = UUID().uuidString
         guard inboundAdmission.reserve(connectionID: connectionId) else {
             log.warning(
@@ -579,6 +580,7 @@ public final class FileTransferListenerService: ObservableObject {
             return
         }
         inboundConnections[connectionId] = connection
+        let byteChannel = NetworkClassicFileTransferByteChannel(connection)
 
         let deviceId: String
         let deviceName: String
@@ -596,7 +598,7 @@ public final class FileTransferListenerService: ObservableObject {
             "file-transfer inbound-accepted endpoint=\(Self.sanitizeForSmoke(endpointDescription))"
         )
 
-        connection.stateUpdateHandler = { [weak self] state in
+        connection.stateUpdateHandler = { [weak self, weak byteChannel] state in
             guard let self else { return }
             let rendered: String
             switch state {
@@ -619,13 +621,16 @@ public final class FileTransferListenerService: ObservableObject {
                 "📥 FileTransfer connection state: state=\(rendered, privacy: .public)"
             )
             switch state {
+            case .cancelled where byteChannel?.isClosingAfterCompletion == true:
+                // Receipt delivery is followed by a bounded native close before the private
+                // audio artifact is handed off. Cancelling its owner here would turn our own
+                // normal close into a failed transfer at the next authority check.
+                break
             case .failed, .cancelled:
                 Task { @MainActor [weak self] in
                     self?.inboundTasks[connectionId]?.cancel()
-                    self?.finishInboundConnection(
-                        connectionId: connectionId,
-                        cancelConnection: false
-                    )
+                    // The receive task releases admission in its terminal defer, after its
+                    // work has drained; the state callback does not own that resource.
                 }
             default:
                 break
@@ -651,13 +656,14 @@ public final class FileTransferListenerService: ObservableObject {
                     "file-transfer inbound-handler-start peer=\(Self.sanitizeForSmoke(deviceId))"
                 )
                 try await self.manager.receiveFile(
-                    from: connection,
+                    from: byteChannel,
                     peerContext: FileTransferPeerContext(
                         declaredSenderDeviceId: nil,
                         endpointHostOrIP: deviceId,
                         peerLabel: deviceName,
                         transferId: "pending"
-                    )
+                    ),
+                    purpose: .general
                 )
             } catch FileTransferError.inboundConnectionClosedBeforeMetadata {
                 self.log.info("📥 FileTransfer inbound connection closed before metadata")

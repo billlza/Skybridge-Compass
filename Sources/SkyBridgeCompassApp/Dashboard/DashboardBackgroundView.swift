@@ -1,5 +1,6 @@
 import SwiftUI
 import SkyBridgeCore
+import SkyBridgeWeatherRendering
 
 /// Lightweight first-frame background shared by the launch screen and Dashboard shell.
 struct LaunchTransitionBackground: View {
@@ -22,16 +23,25 @@ public struct DashboardBackgroundView: View {
     @EnvironmentObject var themeConfiguration: ThemeConfiguration
     @EnvironmentObject var weatherManager: WeatherIntegrationManager
     @EnvironmentObject var weatherSettings: WeatherEffectsSettings
+    @ObservedObject private var settingsManager = SettingsManager.shared
 
     @ObservedObject var hazeClearManager: InteractiveClearManager
     private let enableWeatherEffects: Bool
+    private let glassRegions: [WeatherGlassRegion]
+    private let rainScene: WeatherRainScene?
+    private let frameRateMonitor: WeatherFrameRateMonitor?
 
     public init(
         hazeClearManager: InteractiveClearManager,
-        enableWeatherEffects: Bool = true
+        enableWeatherEffects: Bool = true,
+        glassRegions: [WeatherGlassRegion] = [], rainScene: WeatherRainScene? = nil,
+        frameRateMonitor: WeatherFrameRateMonitor? = nil
     ) {
         self._hazeClearManager = ObservedObject(wrappedValue: hazeClearManager)
         self.enableWeatherEffects = enableWeatherEffects
+        self.glassRegions = glassRegions
+        self.rainScene = rainScene
+        self.frameRateMonitor = frameRateMonitor
     }
 
     public var body: some View {
@@ -41,10 +51,11 @@ public struct DashboardBackgroundView: View {
                 .opacity(themeConfiguration.backgroundIntensity)
                 .ignoresSafeArea(.all)
 
-            // 全页面雾霾背景（仅在雾/霾天气启用）
-            // 说明：该层是 Metal 全屏雾霾，会整体“染灰”UI；对多云/晴天等不应常驻叠加，
-            // 否则会把主题底色与云层效果一起压暗成“灰败”。
-            if weatherManager.currentTheme.condition.needsFogEffect {
+            // Haze owns its complete atmosphere through WeatherEffectView. The existing
+            // additional fog layer is retained only for foggy weather.
+            if enableWeatherEffects, weatherSettings.isEnabled,
+               weatherManager.currentWeather != nil,
+               weatherManager.currentTheme.condition == .foggy {
                 GlobalHazeBackground(clearManager: hazeClearManager)
                     .ignoresSafeArea(.all)
             }
@@ -55,6 +66,7 @@ public struct DashboardBackgroundView: View {
                    weatherSettings.isEnabled,
                    weatherManager.currentWeather != nil {
                     dynamicWeatherEffectView(for: weatherManager.currentTheme.condition)
+                        .environment(\.weatherFrameRateMonitor, settingsManager.showRealtimeFPS ? frameRateMonitor : nil)
                         .ignoresSafeArea(.all)
                         .id(weatherManager.currentTheme.condition) // 🔥 强制视图重建以切换效果
                 }
@@ -69,13 +81,13 @@ public struct DashboardBackgroundView: View {
         case .starryNight:
             StarryBackground()
         case .deepSpace:
-            DeepSpaceBackground(weather: weatherManager.currentWeather)
+            DeepSpaceBackground(weather: weatherSettings.isEnabled ? weatherManager.currentWeather : nil)
                 .environmentObject(themeConfiguration)
         case .aurora:
-            AuroraBackgroundV2(weather: weatherManager.currentWeather)
+            AuroraBackgroundV2(weather: weatherSettings.isEnabled ? weatherManager.currentWeather : nil)
                 .environmentObject(themeConfiguration)
         case .classic:
-            ClassicBackgroundV2(weather: weatherManager.currentWeather)
+            ClassicBackgroundV2(weather: weatherSettings.isEnabled ? weatherManager.currentWeather : nil)
                 .environmentObject(themeConfiguration)
         case .custom:
             CustomBackgroundView()
@@ -87,6 +99,6 @@ public struct DashboardBackgroundView: View {
     @ViewBuilder
     private func dynamicWeatherEffectView(for condition: WeatherCondition) -> some View {
         // ✅ 统一入口：所有天气覆盖层都通过 SkyBridgeCore.WeatherEffectView 渲染
-        WeatherEffectView(theme: weatherManager.currentTheme)
+        WeatherEffectView(theme: weatherManager.currentTheme, glassRegions: glassRegions, rainScene: rainScene)
     }
 }

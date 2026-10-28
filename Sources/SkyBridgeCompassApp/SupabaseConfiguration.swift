@@ -23,6 +23,16 @@ public final class SupabaseConfiguration: ObservableObject {
     public var resolvedConfiguration: SupabaseService.Configuration? {
         currentConfiguration
     }
+
+    /// Settle the initial configuration lookup before restoring a persisted login.
+    /// A later UI owner must not make the first provider selection after that login
+    /// has already published its account authorization. This does not await the
+    /// independent network health check or change the missing-configuration policy.
+    func waitForInitialConfigurationAttempt() async {
+        if let task = keychainAutoConfigurationTask {
+            await task.value
+        }
+    }
     
  // MARK: - 初始化
     

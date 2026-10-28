@@ -1,0 +1,5 @@
+framework module CSkyBridgeALAC {
+    umbrella header "SkyBridgeALACDecoder.h"
+    export *
+    module * { export * }
+}

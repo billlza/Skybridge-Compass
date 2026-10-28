@@ -36,6 +36,22 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         ).authoritativeFingerprint
     }
 
+    @MainActor
+    func testQAndXWingRequireDifferentKEMIdentityMaterial() {
+        XCTAssertFalse(P2PDiscoveryService.suiteSupportsTargetKEM(
+            .xwingMLDSA, target: .qperiaptABI2PolicyBound
+        ))
+        XCTAssertFalse(P2PDiscoveryService.suiteSupportsTargetKEM(
+            .qperiaptABI2PolicyBound, target: .xwingMLDSA
+        ))
+        XCTAssertTrue(P2PDiscoveryService.suiteSupportsTargetKEM(
+            .qperiaptABI2PolicyBound, target: .qperiaptABI2PolicyBound
+        ))
+        XCTAssertTrue(P2PDiscoveryService.suiteSupportsTargetKEM(
+            .mlkem768MLDSA65, target: .mlkem768MLDSA65FS
+        ))
+    }
+
     func testSharedInboundAdmissionPolicyDefinesAppleRoleParity() {
         XCTAssertEqual(P2PInboundAdmissionPolicy.maximumConcurrentConnections, 32)
         XCTAssertEqual(
@@ -303,7 +319,7 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         )
         let authenticatedAuthority = try XCTUnwrap(
             macInbound.range(
-                of: ".getAuthenticatedRemoteAuthority()",
+                of: ".getAuthenticatedHandshakePeerBinding()",
                 range: established.upperBound..<macInbound.endIndex
             )
         )
@@ -451,7 +467,7 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         XCTAssertTrue(source.contains(
             "let refreshEndpoints = Self.prioritizingProvenEndpoint(\n                identityBinding.endpoint"
         ))
-        XCTAssertTrue(source.contains("return exchange.endpoint"))
+        XCTAssertTrue(source.contains("return try PQCModePolicyStore.standard.withCurrent(modePolicy) { exchange.endpoint }"))
         XCTAssertTrue(source.contains(
             "let provenPreflightEndpoint = try await ensureStrictPQCOutboundPreflightReady("
         ))
@@ -957,29 +973,29 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
     func testProtocolIdentityBindingTargetMatchRequiresLocalIdOrAlias() {
         XCTAssertTrue(
             P2PDiscoveryService.localResponderMatchesProtocolIdentityBindingTarget(
-                targetDeviceId: "id:mac-1",
-                localId: "id:mac-1",
+                targetDeviceId: "id:mac-device-1",
+                localId: "id:mac-device-1",
                 aliases: ["host:Studio"]
             )
         )
-        XCTAssertTrue(
+        XCTAssertFalse(
             P2PDiscoveryService.localResponderMatchesProtocolIdentityBindingTarget(
                 targetDeviceId: "host:Studio",
-                localId: "id:mac-1",
+                localId: "id:mac-device-1",
                 aliases: ["host:Studio"]
             )
         )
         XCTAssertFalse(
             P2PDiscoveryService.localResponderMatchesProtocolIdentityBindingTarget(
                 targetDeviceId: "id:other-device",
-                localId: "id:mac-1",
+                localId: "id:mac-device-1",
                 aliases: ["host:Studio"]
             )
         )
         XCTAssertFalse(
             P2PDiscoveryService.localResponderMatchesProtocolIdentityBindingTarget(
                 targetDeviceId: "   ",
-                localId: "id:mac-1",
+                localId: "id:mac-device-1",
                 aliases: []
             )
         )
@@ -1039,7 +1055,7 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         }
         let branchEnd = try XCTUnwrap(
             source.range(
-                of: "if let currentDriver = driver,",
+                of: "let rekeyMessageA: HandshakeMessageA?",
                 range: markerRange.upperBound..<source.endIndex
             )
         )
@@ -1121,7 +1137,7 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
             handler.range(of: "Self.isInboundBootstrapControlRequest(plaintextControl)")?.lowerBound
         )
         let soaLoadIndex = try XCTUnwrap(
-            handler.range(of: "Self.localSOAPeerIdBytes()")?.lowerBound
+            handler.range(of: "Self.localSOAIdentitySnapshot()")?.lowerBound
         )
 
         XCTAssertLessThan(receiveIndex, soaLoadIndex)
@@ -1247,7 +1263,7 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         )
         let exchangeStart = try XCTUnwrap(
             source.range(
-                of: "private func exchangeBootstrapControlMessage(",
+                of: "func exchangeBootstrapControlMessage(",
                 range: skrStart.upperBound..<source.endIndex
             )
         )

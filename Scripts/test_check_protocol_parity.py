@@ -16,6 +16,31 @@ import check_protocol_parity as parity
 
 
 class AnchorRegistryTests(unittest.TestCase):
+    def test_provider_anchor_uses_protocol_types_and_still_rejects_real_drift(self) -> None:
+        anchor = next(
+            item for item in parity.WIRE_ANCHORS
+            if item[0] == "Q-Periapt capability provider type"
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            ios_source = root / "HandshakeTypes.swift"
+            mac_source = root / "CryptoCapabilities.swift"
+            benchmark = root / "Benchmark.swift"
+            declaration = 'case qPeriapt = "Q-Periapt-ContextBound"\n'
+            ios_source.write_text(declaration, encoding="utf-8")
+            mac_source.write_text(declaration, encoding="utf-8")
+            benchmark.write_text('case qPeriapt = "Display name for benchmark"\n', encoding="utf-8")
+            ios = {ios_source.name: (ios_source.resolve(),)}
+            mac = {
+                mac_source.name: (mac_source.resolve(),),
+                benchmark.name: (benchmark.resolve(),),
+            }
+            self.assertEqual(parity.check_wire_anchors(ios, mac, [anchor], shared_sources={}), [])
+            mac_source.write_text('case qPeriapt = "different-wire-value"\n', encoding="utf-8")
+            errors = parity.check_wire_anchors(ios, mac, [anchor], shared_sources={})
+            self.assertEqual(len(errors), 1)
+            self.assertIn("MISMATCH", errors[0])
+
     def test_production_registry_contains_thirty_six_unique_extracting_anchors(self) -> None:
         self.assertEqual(len(parity.WIRE_ANCHORS), 36)
         labels = [label for label, _, _ in parity.WIRE_ANCHORS]

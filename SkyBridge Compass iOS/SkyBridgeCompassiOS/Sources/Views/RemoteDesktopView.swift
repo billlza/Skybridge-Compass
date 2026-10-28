@@ -43,9 +43,20 @@ private struct RemoteDesktopConnectionSelection {
 @available(iOS 17.0, *)
 struct RemoteDesktopView: View {
     @EnvironmentObject private var connectionManager: P2PConnectionManager
-    @StateObject private var remoteDesktopManager = RemoteDesktopManager.instance
+    @StateObject private var legacyRemoteDesktopManager = RemoteDesktopManager.instance
+    @StateObject private var workspace = RemoteDesktopWorkspace.instance
+    @State private var isLegacyTransitionInProgress = false
+    @State private var showHostPicker = false
+    @State private var connectionError: String?
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.colorScheme) private var colorScheme
+    private var remoteDesktopManager: RemoteDesktopManager {
+        workspace.focusedSession?.runtime ?? legacyRemoteDesktopManager
+    }
     @StateObject private var crossNetworkManager = CrossNetworkWebRTCManager.instance
     
+    private var isChangingSession: Bool { workspace.isChangingFocus || isLegacyTransitionInProgress }
+
     @State private var selectedConnection: Connection?
     @State private var isFullScreen = false
     @State private var lastAutoConnectedCrossNetworkSessionID: String?
@@ -101,11 +112,20 @@ struct RemoteDesktopView: View {
                     RemoteDesktopStreamView(
                         connection: connection,
                         isFullScreen: $isFullScreen,
+                        remoteDesktopManager: remoteDesktopManager,
                         onDisconnect: {
 #if DEBUG || SKYBRIDGE_TESTING
                             showUITestRemoteStream = false
 #endif
                             selectedConnection = nil
+                            if let id = workspace.sessions.first(where: {
+                                $0.runtime.currentConnection?.id == connection.id || $0.connection.id == connection.id
+                            })?.id {
+                                Task {
+                                    do { try await workspace.close(id) }
+                                    catch { connectionError = error.localizedDescription }
+                                }
+                            }
                         }
                     )
                 } else {
@@ -113,12 +133,25 @@ struct RemoteDesktopView: View {
                     connectionSelectionView
                 }
             }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if !workspace.sessions.isEmpty { workspaceSessionStrip }
+            }
             .accessibilityIdentifier("remote.root")
             .navigationTitle(RuntimeLocalization.string("远程桌面"))
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
+            .toolbarColorScheme(colorScheme, for: .navigationBar)
             .navigationBarHidden(isFullScreen)
             .toolbar {
                 if !isFullScreen {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button { showHostPicker = true } label: {
+                            Image(systemName: "plus")
+                        }
+                        .disabled(isChangingSession)
+                        .accessibilityLabel("添加远程主机")
+                    }
                     ToolbarItem(placement: .topBarTrailing) {
                         Button {
                             showRemoteDesktopSettings = true
@@ -131,7 +164,26 @@ struct RemoteDesktopView: View {
             }
         }
         .sheet(isPresented: $showRemoteDesktopSettings) {
-            RemoteDesktopStreamSettingsSheet()
+            RemoteDesktopStreamSettingsSheet(remoteDesktopManager: remoteDesktopManager)
+        }
+        .sheet(isPresented: $showHostPicker) {
+            NavigationStack {
+                connectionSelectionView
+                    .background(Color.black)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("完成") { showHostPicker = false }
+                        }
+                    }
+            }
+        }
+        .alert("远程连接未完成", isPresented: Binding(
+            get: { connectionError != nil || workspace.errorMessage != nil },
+            set: { if !$0 { connectionError = nil; workspace.clearError() } }
+        )) {
+            Button("好") { connectionError = nil; workspace.clearError() }
+        } message: {
+            Text(connectionError ?? workspace.errorMessage ?? "")
         }
         .sheet(isPresented: $showCameraConnection) {
             CameraConnectionSheet(isPresented: $showCameraConnection)
@@ -154,7 +206,8 @@ struct RemoteDesktopView: View {
             Text(remoteDesktopManager.terminalCameraErrorMessage ?? "")
         }
         .onAppear {
-            remoteDesktopManager.registerPresentationOwner(presentationOwnerToken)
+            workspace.setPresentationActive(true)
+            legacyRemoteDesktopManager.registerPresentationOwner(presentationOwnerToken)
             attemptAutoConnectCrossNetworkSession()
 #if DEBUG || SKYBRIDGE_TESTING
             attemptAutoConnectUITestFixture()
@@ -162,17 +215,38 @@ struct RemoteDesktopView: View {
 #endif
         }
         .onDisappear {
-            let shouldDisconnect = remoteDesktopManager.unregisterPresentationOwner(presentationOwnerToken)
-            guard shouldDisconnect else { return }
+            let shouldDisconnect = legacyRemoteDesktopManager.unregisterPresentationOwner(presentationOwnerToken)
+            workspace.setPresentationActive(false)
             Task {
-                await remoteDesktopManager.disconnect()
-                await MainActor.run {
-                    selectedConnection = nil
+                if !workspace.isChangingFocus {
+                    do { try await workspace.suspend() }
+                    catch { connectionError = error.localizedDescription }
+                }
+                if shouldDisconnect { await legacyRemoteDesktopManager.disconnect() }
+                selectedConnection = nil
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            workspace.setPresentationActive(phase == .active)
+            guard phase != .active else { return }
+            remoteDesktopManager.releasePresentationInput()
+            legacyRemoteDesktopManager.setWorkspaceInputFocus(false)
+            Task {
+                if !workspace.isChangingFocus {
+                    do { try await workspace.suspend() }
+                    catch { connectionError = error.localizedDescription }
+                }
+                if legacyRemoteDesktopManager.isStreaming && !legacyRemoteDesktopManager.isReadOnlyCameraSession {
+                    do { try await legacyRemoteDesktopManager.pauseWorkspaceStream() }
+                    catch { connectionError = error.localizedDescription }
                 }
             }
         }
         .onChange(of: crossNetworkManager.state) { _, _ in
             attemptAutoConnectCrossNetworkSession()
+        }
+        .onChange(of: remoteDesktopManager.state) { _, state in
+            if case .error(let message) = state { connectionError = message }
         }
         .onChange(of: remoteDesktopManager.currentConnection?.device.id) { _, _ in
             guard let activeConnection = remoteDesktopManager.currentConnection else { return }
@@ -186,6 +260,83 @@ struct RemoteDesktopView: View {
         }
     }
     
+    private var workspaceSessionStrip: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    if !legacyRemoteDesktopManager.isReadOnlyCameraSession,
+                       let primary = legacyRemoteDesktopManager.currentConnection {
+                        HStack(spacing: 6) {
+                            Button {
+                                if let selection = crossNetworkSelection {
+                                    connectToDevice(selection.connection, routeIntent: selection.routeIntent)
+                                }
+                            } label: {
+                                Label(primary.device.name, systemImage: "network")
+                            }
+                            .disabled(crossNetworkSelection == nil)
+                            Button {
+                                guard !isChangingSession else { return }
+                                isLegacyTransitionInProgress = true
+                                Task {
+                                    await legacyRemoteDesktopManager.disconnect(tearDownTransport: true)
+                                    isLegacyTransitionInProgress = false
+                                }
+                            } label: { Image(systemName: "xmark.circle") }
+                                .accessibilityLabel("关闭 \(primary.device.name)")
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(Color.primary.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .disabled(isChangingSession)
+                    }
+                    ForEach(workspace.sessions) { session in
+                        HStack(spacing: 6) {
+                            Button {
+                                guard !isChangingSession else { return }
+                                isLegacyTransitionInProgress = true
+                                Task {
+                                    defer { isLegacyTransitionInProgress = false }
+                                    do {
+                                        if legacyRemoteDesktopManager.isReadOnlyCameraSession {
+                                            await legacyRemoteDesktopManager.disconnect()
+                                        } else if legacyRemoteDesktopManager.isStreaming {
+                                            try await legacyRemoteDesktopManager.pauseWorkspaceStream()
+                                        }
+                                        try await workspace.focus(session.id)
+                                    } catch { connectionError = error.localizedDescription }
+                                }
+                            } label: {
+                                Label(session.connection.device.name,
+                                      systemImage: workspace.focusedSessionID == session.id ? "display" : "pause.circle")
+                            }
+                            Button {
+                                Task {
+                                    do { try await workspace.close(session.id) }
+                                    catch { connectionError = error.localizedDescription }
+                                }
+                            } label: { Image(systemName: "xmark.circle") }
+                                .accessibilityLabel("关闭 \(session.connection.device.name)")
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(workspace.focusedSessionID == session.id ? Color.blue.opacity(0.3) : Color.primary.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .disabled(isChangingSession)
+                    }
+                    if isChangingSession { ProgressView() }
+                }
+            }
+            Text("最多保留两台主机；后台暂停画面与声音，跨网最多一个会话。")
+                .font(.caption2)
+                .foregroundStyle(LiquidGlass.supportingText)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .liquidGlassCard(cornerRadius: 0, padding: 0)
+    }
+
     private var connectionSelectionView: some View {
         VStack(spacing: 24) {
             Spacer()
@@ -196,14 +347,14 @@ struct RemoteDesktopView: View {
             
             Text(RuntimeLocalization.string("选择要连接的设备"))
                 .font(.title2.bold())
-                .foregroundColor(.white)
+                .foregroundStyle(.primary)
             
             if lanRemoteConnections.isEmpty && crossNetworkSelection == nil {
                 Text(
                     "\(RuntimeLocalization.string("当前没有活动连接"))\n\(RuntimeLocalization.string("请先在发现页面连接设备"))"
                 )
                     .font(.body)
-                    .foregroundColor(.gray)
+                    .foregroundStyle(LiquidGlass.supportingText)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 40)
             } else {
@@ -240,14 +391,25 @@ struct RemoteDesktopView: View {
             }
 
             Button {
-                showCameraConnection = true
+                Task {
+                    do {
+                        guard workspace.sessions.isEmpty,
+                              legacyRemoteDesktopManager.currentConnection == nil else {
+                            throw RemoteDesktopError.connectionFailed("请先关闭远程主机会话，再连接智能监控。")
+                        }
+                        try await workspace.suspend()
+                        showHostPicker = false
+                        showCameraConnection = true
+                    } catch { connectionError = error.localizedDescription }
+                }
             } label: {
                 Label(RuntimeLocalization.string("连接智能监控"), systemImage: "video.fill")
                     .font(.headline)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 12)
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.bordered)
+            .foregroundStyle(.primary)
             .accessibilityIdentifier("remote.camera.connect")
             
             Spacer()
@@ -307,6 +469,9 @@ struct RemoteDesktopView: View {
         _ connection: Connection,
         routeIntent: PeerTransportRouteIntent
     ) {
+        guard !isChangingSession else { return }
+        isLegacyTransitionInProgress = true
+        showHostPicker = false
         selectedConnection = connection
 #if DEBUG || SKYBRIDGE_TESTING
         if shouldAutoConnectUITestFixture {
@@ -314,11 +479,27 @@ struct RemoteDesktopView: View {
         }
 #endif
         Task {
+            defer { isLegacyTransitionInProgress = false }
             do {
-                try await remoteDesktopManager.startStreaming(
-                    from: connection,
-                    routeIntent: routeIntent
-                )
+                let useWorkspace: Bool
+#if DEBUG || SKYBRIDGE_TESTING
+                useWorkspace = routeIntent == .directLAN && !shouldAutoConnectUITestFixture && !shouldAutoConnectP2PSmoke
+#else
+                useWorkspace = routeIntent == .directLAN
+#endif
+                if useWorkspace {
+                    if legacyRemoteDesktopManager.isReadOnlyCameraSession {
+                        await legacyRemoteDesktopManager.disconnect()
+                    } else if legacyRemoteDesktopManager.isStreaming {
+                        try await legacyRemoteDesktopManager.pauseWorkspaceStream()
+                    }
+                    try await workspace.connect(connection)
+                } else {
+                    try workspace.requireExternalAdmission(hostKey: "primary:\(connection.device.id)")
+                    try await workspace.suspend()
+                    legacyRemoteDesktopManager.setWorkspaceInputFocus(true)
+                    try await legacyRemoteDesktopManager.startStreaming(from: connection, routeIntent: routeIntent)
+                }
                 await MainActor.run {
                     if let activeConnection = remoteDesktopManager.currentConnection {
                         selectedConnection = activeConnection
@@ -342,6 +523,7 @@ struct RemoteDesktopView: View {
                         lastAutoConnectedCrossNetworkSessionID = nil
                     }
                 }
+                connectionError = error.localizedDescription
                 SkyBridgeLogger.shared.error("❌ 远程桌面连接失败: \(error.localizedDescription)")
             }
         }
@@ -697,7 +879,7 @@ struct RemoteDesktopStreamView: View {
     let onDisconnect: () -> Void
     
     @StateObject private var p2pConnectionManager = P2PConnectionManager.instance
-    @StateObject private var remoteDesktopManager = RemoteDesktopManager.instance
+    @ObservedObject var remoteDesktopManager: RemoteDesktopManager = .instance
     @StateObject private var crossNetworkManager = CrossNetworkWebRTCManager.instance
     @State private var zoomScale: CGFloat = 1.0
     
@@ -710,6 +892,16 @@ struct RemoteDesktopStreamView: View {
     @State private var lastScrollTranslationHeight: CGFloat = 0
     @State private var scrollAccumulator: CGFloat = 0
     @State private var idleTimerHeld = false
+    @State private var streamPresentationOwnerToken = UUID()
+
+    init(connection: Connection, isFullScreen: Binding<Bool>,
+         remoteDesktopManager: RemoteDesktopManager = .instance,
+         onDisconnect: @escaping () -> Void) {
+        self.connection = connection
+        _isFullScreen = isFullScreen
+        _remoteDesktopManager = ObservedObject(wrappedValue: remoteDesktopManager)
+        self.onDisconnect = onDisconnect
+    }
     @AppStorage(RemoteDesktopDiagnosticDefaults.showInteractionOverlayKey)
     private var showInteractionOverlay = false
 
@@ -738,6 +930,7 @@ struct RemoteDesktopStreamView: View {
                 // 触摸控制层
                 if !remoteDesktopManager.isReadOnlyCameraSession {
                     touchControlOverlay(geometry: geometry)
+                        .allowsHitTesting(remoteDesktopManager.canSendViewerInput)
                 }
                 
                 // 控制工具栏
@@ -752,6 +945,7 @@ struct RemoteDesktopStreamView: View {
         .statusBarHidden(isFullScreen)
         .persistentSystemOverlays(isFullScreen ? .hidden : .visible)
         .onAppear {
+            remoteDesktopManager.registerPresentationOwner(streamPresentationOwnerToken)
             acquireIdleTimer()
             resetControlsTimer()
         }
@@ -759,14 +953,17 @@ struct RemoteDesktopStreamView: View {
             controlsTimer?.invalidate()
             controlsTimer = nil
             releaseIdleTimer()
+            remoteDesktopManager.releasePresentationInput()
+            _ = remoteDesktopManager.unregisterPresentationOwner(streamPresentationOwnerToken)
         }
         .onChange(of: touchMode) { _, _ in
+            remoteDesktopManager.releasePresentationInput()
             dragMouseDownSent = false
             lastScrollTranslationHeight = 0
             scrollAccumulator = 0
         }
         .sheet(isPresented: $showStreamSettings) {
-            RemoteDesktopStreamSettingsSheet()
+            RemoteDesktopStreamSettingsSheet(remoteDesktopManager: remoteDesktopManager)
         }
     }
 
@@ -807,6 +1004,7 @@ struct RemoteDesktopStreamView: View {
                 ZStack {
                     if !crossNetworkManager.remoteVideoTrackHasRenderedFrame {
                         RemoteDesktopCompositedSurface(
+                    remoteDesktopManager: remoteDesktopManager,
                             feed: remoteDesktopManager.videoFrameFeed,
                             metalFeed: remoteDesktopManager.metalVideoFrameFeed,
                             fallbackFrame: remoteDesktopManager.currentFrame,
@@ -839,6 +1037,7 @@ struct RemoteDesktopStreamView: View {
                 }
             } else {
                 RemoteDesktopCompositedSurface(
+                    remoteDesktopManager: remoteDesktopManager,
                     feed: remoteDesktopManager.videoFrameFeed,
                     metalFeed: remoteDesktopManager.metalVideoFrameFeed,
                     fallbackFrame: remoteDesktopManager.currentFrame,
@@ -851,6 +1050,7 @@ struct RemoteDesktopStreamView: View {
             }
 #else
             RemoteDesktopCompositedSurface(
+                    remoteDesktopManager: remoteDesktopManager,
                 feed: remoteDesktopManager.videoFrameFeed,
                 metalFeed: remoteDesktopManager.metalVideoFrameFeed,
                 fallbackFrame: remoteDesktopManager.currentFrame,
@@ -913,13 +1113,18 @@ struct RemoteDesktopStreamView: View {
     private var controlToolbar: some View {
         VStack {
             VStack(spacing: 12) {
+                if !remoteDesktopManager.isReadOnlyCameraSession {
+                    Text(remoteDesktopManager.controlAccessStatusText)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.primary)
+                }
                 HStack(spacing: 10) {
                     Button(action: toggleFullScreen) {
                         Image(systemName: isFullScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
                             .font(.title3)
-                            .foregroundColor(.white)
+                            .foregroundStyle(.primary)
                             .padding(12)
-                            .background(.ultraThinMaterial)
+                            .background(.regularMaterial)
                             .cornerRadius(10)
                     }
 
@@ -930,13 +1135,13 @@ struct RemoteDesktopStreamView: View {
                             Text(transportStatusText)
                                 .font(.caption.weight(.semibold))
                         }
-                        .foregroundColor(.white)
+                        .foregroundStyle(.primary)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
-                        .background(Color.white.opacity(0.12))
+                        .background(Color.primary.opacity(0.08))
                         .overlay(
                             Capsule()
-                                .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
                         )
                         .clipShape(Capsule())
                     }
@@ -951,13 +1156,13 @@ struct RemoteDesktopStreamView: View {
                             )
                             .font(.caption.weight(.semibold))
                         }
-                        .foregroundColor(.white)
+                        .foregroundStyle(.primary)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
-                        .background(Color.white.opacity(0.12))
+                        .background(Color.primary.opacity(0.08))
                         .overlay(
                             Capsule()
-                                .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
                         )
                         .clipShape(Capsule())
                     }
@@ -971,9 +1176,9 @@ struct RemoteDesktopStreamView: View {
                         } label: {
                             Image(systemName: "slider.horizontal.3")
                                 .font(.title3)
-                                .foregroundColor(.white)
+                                .foregroundStyle(.primary)
                                 .padding(12)
-                                .background(.ultraThinMaterial)
+                                .background(.regularMaterial)
                                 .cornerRadius(10)
                         }
                     }
@@ -981,9 +1186,9 @@ struct RemoteDesktopStreamView: View {
                     Button(action: disconnect) {
                         Image(systemName: "xmark")
                             .font(.title3)
-                            .foregroundColor(.white)
+                            .foregroundStyle(.primary)
                             .padding(12)
-                            .background(.ultraThinMaterial)
+                            .background(.regularMaterial)
                             .cornerRadius(10)
                     }
                     .accessibilityIdentifier("remote.stream.disconnect")
@@ -992,7 +1197,7 @@ struct RemoteDesktopStreamView: View {
                 if remoteDesktopManager.isReadOnlyCameraSession {
                     Label(RuntimeLocalization.string("智能监控为只读画面，不会发送键盘或触控输入"), systemImage: "eye.fill")
                         .font(.footnote.weight(.semibold))
-                        .foregroundColor(.white)
+                        .foregroundStyle(.primary)
                 } else {
                     Picker(RuntimeLocalization.string("触摸模式"), selection: $touchMode) {
                         ForEach(TouchMode.allCases, id: \.self) { mode in
@@ -1004,7 +1209,7 @@ struct RemoteDesktopStreamView: View {
                 }
             }
             .padding()
-            .background(.ultraThinMaterial)
+            .background(.regularMaterial)
             
             Spacer()
         }
@@ -1045,6 +1250,10 @@ struct RemoteDesktopStreamView: View {
     }
     
     private func disconnect() {
+        if remoteDesktopManager.isIsolatedLANViewer {
+            onDisconnect()
+            return
+        }
         Task {
             if remoteDesktopManager.isReadOnlyCameraSession || isUsingNativeCrossNetworkVideo {
                 await remoteDesktopManager.disconnect()
@@ -1157,7 +1366,7 @@ enum TouchMode: String, CaseIterable {
 @available(iOS 17.0, *)
 private struct RemoteDesktopStreamSettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var remoteDesktopManager = RemoteDesktopManager.instance
+    @ObservedObject var remoteDesktopManager: RemoteDesktopManager = .instance
     @AppStorage(RemoteDesktopDiagnosticDefaults.showInteractionOverlayKey)
     private var showInteractionOverlay = false
 
@@ -1283,6 +1492,7 @@ private struct RemoteDesktopStreamSettingsSheet: View {
 
 @available(iOS 17.0, *)
 private struct RemoteDesktopCompositedSurface: View {
+    let remoteDesktopManager: RemoteDesktopManager
     @ObservedObject var feed: RemoteVideoFrameFeed
     @ObservedObject var metalFeed: RemoteMetalVideoFrameFeed
     let fallbackFrame: CGImage?
@@ -1311,6 +1521,7 @@ private struct RemoteDesktopCompositedSurface: View {
 
             ZStack {
                 RemoteDesktopRenderedSurface(
+                    remoteDesktopManager: remoteDesktopManager,
                     feed: feed,
                     metalFeed: metalFeed,
                     fallbackFrame: fallbackFrame,
@@ -1378,6 +1589,7 @@ private struct RemoteDesktopNativeVideoSurface: View {
 
 @available(iOS 17.0, *)
 private struct RemoteDesktopRenderedSurface: View {
+    let remoteDesktopManager: RemoteDesktopManager
     @ObservedObject var feed: RemoteVideoFrameFeed
     @ObservedObject var metalFeed: RemoteMetalVideoFrameFeed
     let fallbackFrame: CGImage?
@@ -1404,6 +1616,7 @@ private struct RemoteDesktopRenderedSurface: View {
                 }
             case .metalRenderer:
                 RemoteDesktopMetalVideoView(
+                remoteDesktopManager: remoteDesktopManager,
                     feed: metalFeed,
                     surfaceInvalidationVersion: metalSurfaceInvalidationVersion,
                     frameVersion: metalFrameVersion,
@@ -1411,6 +1624,7 @@ private struct RemoteDesktopRenderedSurface: View {
                 )
             case .sampleBufferDisplayLayer:
                 RemoteDesktopSampleBufferVideoView(
+                remoteDesktopManager: remoteDesktopManager,
                     feed: feed,
                     frameVersion: feedFrameVersion,
                     flushVersion: feedFlushVersion
@@ -1422,6 +1636,7 @@ private struct RemoteDesktopRenderedSurface: View {
                         .aspectRatio(contentMode: .fit)
                 } else if metalFeed.hasFrame {
                     RemoteDesktopMetalVideoView(
+                remoteDesktopManager: remoteDesktopManager,
                         feed: metalFeed,
                         surfaceInvalidationVersion: metalSurfaceInvalidationVersion,
                         frameVersion: metalFrameVersion,
@@ -1429,6 +1644,7 @@ private struct RemoteDesktopRenderedSurface: View {
                     )
                 } else if feed.hasFrame {
                     RemoteDesktopSampleBufferVideoView(
+                remoteDesktopManager: remoteDesktopManager,
                         feed: feed,
                         frameVersion: feedFrameVersion,
                         flushVersion: feedFlushVersion
@@ -1439,6 +1655,7 @@ private struct RemoteDesktopRenderedSurface: View {
             case .waiting:
                 if metalFeed.hasFrame {
                     RemoteDesktopMetalVideoView(
+                remoteDesktopManager: remoteDesktopManager,
                         feed: metalFeed,
                         surfaceInvalidationVersion: metalSurfaceInvalidationVersion,
                         frameVersion: metalFrameVersion,
@@ -1446,6 +1663,7 @@ private struct RemoteDesktopRenderedSurface: View {
                     )
                 } else if feed.hasFrame {
                     RemoteDesktopSampleBufferVideoView(
+                remoteDesktopManager: remoteDesktopManager,
                         feed: feed,
                         frameVersion: feedFrameVersion,
                         flushVersion: feedFlushVersion
@@ -1469,6 +1687,7 @@ private struct RemoteDesktopRenderedSurface: View {
                 .aspectRatio(contentMode: .fit)
         } else if feed.hasFrame {
             RemoteDesktopSampleBufferVideoView(
+                remoteDesktopManager: remoteDesktopManager,
                 feed: feed,
                 frameVersion: feed.frameVersion,
                 flushVersion: feed.flushVersion
@@ -1602,11 +1821,11 @@ private func remoteAspectFitSize(contentSize: CGSize, containerSize: CGSize) -> 
 
 @available(iOS 17.0, *)
 private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
+    let remoteDesktopManager: RemoteDesktopManager
     let feed: RemoteMetalVideoFrameFeed
     let surfaceInvalidationVersion: UInt64
     let frameVersion: UInt64
     let flushVersion: UInt64
-    private let remoteDesktopManager = RemoteDesktopManager.instance
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -2631,10 +2850,10 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
 
 @available(iOS 17.0, *)
 private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
+    let remoteDesktopManager: RemoteDesktopManager
     let feed: RemoteVideoFrameFeed
     let frameVersion: UInt64
     let flushVersion: UInt64
-    private let remoteDesktopManager = RemoteDesktopManager.instance
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -2982,11 +3201,11 @@ struct ConnectionCardView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(connection.device.name)
                     .font(.headline)
-                    .foregroundColor(.white)
+                    .foregroundStyle(.primary)
                 
                 Text(connection.device.modelName)
                     .font(.subheadline)
-                    .foregroundColor(.gray)
+                    .foregroundStyle(LiquidGlass.supportingText)
                 
                 HStack(spacing: 8) {
                     Image(systemName: "lock.shield.fill")
@@ -3002,11 +3221,9 @@ struct ConnectionCardView: View {
             Spacer()
             
             Image(systemName: "chevron.right")
-                .foregroundColor(.gray)
+                .foregroundStyle(LiquidGlass.supportingText)
         }
-        .padding()
-        .background(Color(white: 0.15))
-        .cornerRadius(16)
+        .liquidGlassCard(cornerRadius: 16, padding: 16)
     }
 }
 
@@ -3030,14 +3247,16 @@ extension RemoteDesktopStreamView {
                         remoteDesktopManager.handleTouch(
                             at: value.startLocation,
                             in: frame,
-                            type: .leftMouseDown
+                            type: .leftMouseDown,
+                            expectedConnectionID: connection.id
                         )
                     }
                     if dragMouseDownSent {
                         remoteDesktopManager.handleTouch(
                             at: value.location,
                             in: frame,
-                            type: .mouseMoved
+                            type: .mouseMoved,
+                            expectedConnectionID: connection.id
                         )
                     }
                 case .scroll:
@@ -3050,7 +3269,8 @@ extension RemoteDesktopStreamView {
                         remoteDesktopManager.handleTouch(
                             at: value.location,
                             in: frame,
-                            type: .scrollUp
+                            type: .scrollUp,
+                            expectedConnectionID: connection.id
                         )
                         scrollAccumulator += threshold
                     }
@@ -3058,7 +3278,8 @@ extension RemoteDesktopStreamView {
                         remoteDesktopManager.handleTouch(
                             at: value.location,
                             in: frame,
-                            type: .scrollDown
+                            type: .scrollDown,
+                            expectedConnectionID: connection.id
                         )
                         scrollAccumulator -= threshold
                     }
@@ -3072,33 +3293,39 @@ extension RemoteDesktopStreamView {
                     remoteDesktopManager.handleTouch(
                         at: value.location,
                         in: frame,
-                        type: .leftMouseDown
+                        type: .leftMouseDown,
+                            expectedConnectionID: connection.id
                     )
                     remoteDesktopManager.handleTouch(
                         at: value.location,
                         in: frame,
-                        type: .leftMouseUp
+                        type: .leftMouseUp,
+                            expectedConnectionID: connection.id
                     )
                 case .secondaryClick:
                     guard distance <= Self.tapMovementTolerance else { break }
                     remoteDesktopManager.handleTouch(
                         at: value.location,
                         in: frame,
-                        type: .rightMouseDown
+                        type: .rightMouseDown,
+                            expectedConnectionID: connection.id
                     )
                     remoteDesktopManager.handleTouch(
                         at: value.location,
                         in: frame,
-                        type: .rightMouseUp
+                        type: .rightMouseUp,
+                            expectedConnectionID: connection.id
                     )
                 case .drag:
                     if dragMouseDownSent {
                         remoteDesktopManager.handleTouch(
                             at: value.location,
                             in: frame,
-                            type: .leftMouseUp
+                            type: .leftMouseUp,
+                            expectedConnectionID: connection.id
                         )
                     }
+                    remoteDesktopManager.releasePresentationInput()
                     dragMouseDownSent = false
                 case .scroll:
                     lastScrollTranslationHeight = 0

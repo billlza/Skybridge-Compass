@@ -15,6 +15,7 @@ public final class PairingTrustApprovalWindowController: NSObject, NSWindowDeleg
     private let approvalService: PairingTrustApprovalService
     private let applicationActivator: @MainActor () -> Void
     private var pendingRequestSubscription: AnyCancellable?
+    private var lifecycleGeneration: UInt64 = 0
     private var approvalWindow: NSWindow?
     private var presentedRequestID: UUID?
     private var isClosingResolvedWindow = false
@@ -39,10 +40,14 @@ public final class PairingTrustApprovalWindowController: NSObject, NSWindowDeleg
 
     public func start() {
         guard pendingRequestSubscription == nil else { return }
+        lifecycleGeneration &+= 1
+        let subscribedGeneration = lifecycleGeneration
         pendingRequestSubscription = approvalService.$pendingRequest
             .sink { [weak self] request in
                 Task { @MainActor [weak self] in
-                    self?.synchronizeWindow(with: request)
+                    guard let self, self.pendingRequestSubscription != nil,
+                          self.lifecycleGeneration == subscribedGeneration else { return }
+                    self.synchronizeWindow(with: request)
                 }
             }
         synchronizeWindow(with: approvalService.pendingRequest)
@@ -52,6 +57,7 @@ public final class PairingTrustApprovalWindowController: NSObject, NSWindowDeleg
     /// This is mainly useful for an orderly host shutdown; abrupt process exit still
     /// tears down the connection and cannot produce an approval.
     public func stop() {
+        lifecycleGeneration &+= 1
         pendingRequestSubscription?.cancel()
         pendingRequestSubscription = nil
         if approvalService.pendingRequest?.id == presentedRequestID {

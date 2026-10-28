@@ -7,6 +7,7 @@ pub(crate) fn version() -> Result<()> {
         "binary_name": "skybridge",
         "cli_version": env!("CARGO_PKG_VERSION"),
         "workspace": "rust",
+        "operator_profile": crate::operator_profile::operator_profile(),
         "contracts_schema_version": 1u32,
         "implemented_phases": ["phase_4_auth", "phase_5_signaling_plane"],
     });

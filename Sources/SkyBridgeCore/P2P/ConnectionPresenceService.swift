@@ -73,6 +73,9 @@ public final class ConnectionPresenceService: ObservableObject {
         public let cryptoKind: String // X-Wing / Apple PQC / liboqs / Classic (user-facing category)
         public let suite: String // e.g. ML-KEM-768, X-Wing, X25519
         public let connectedAt: Date
+        /// The established control carrier, supplied by its owner. Discovery
+        /// methods and file-transfer address hints cannot establish this value.
+        public let controlTransport: P2PConnection.ControlTransport?
         
         public init(
             id: String,
@@ -80,7 +83,8 @@ public final class ConnectionPresenceService: ObservableObject {
             address: String? = nil,
             cryptoKind: String,
             suite: String,
-            connectedAt: Date = Date()
+            connectedAt: Date = Date(),
+            controlTransport: P2PConnection.ControlTransport? = nil
         ) {
             self.id = id
             self.displayName = displayName
@@ -88,6 +92,7 @@ public final class ConnectionPresenceService: ObservableObject {
             self.cryptoKind = cryptoKind
             self.suite = suite
             self.connectedAt = connectedAt
+            self.controlTransport = controlTransport
         }
     }
     
@@ -126,6 +131,15 @@ public final class ConnectionPresenceService: ObservableObject {
     public var isConnected: Bool { !activeConnections.isEmpty }
     public var connectedCount: Int { activeConnections.count }
     public func isRekeying(peerId: String) -> Bool { rekeyStatusByPeerId[peerId] != nil }
+
+    /// Presentation lookup by protocol identifier aliases only. A matching name
+    /// or network address never borrows another device's established session.
+    public func activeConnection(forPeerId peerId: String) -> ActiveConnection? {
+        let aliases = aliasSet(for: peerId)
+        guard !aliases.isEmpty else { return nil }
+        let matches = activeConnections.filter { !aliasSet(for: $0.id).isDisjoint(with: aliases) }
+        return matches.count == 1 ? matches[0] : nil
+    }
     
     private let logger = Logger(subsystem: "com.skybridge.core", category: "ConnectionPresence")
     
@@ -226,6 +240,7 @@ public final class ConnectionPresenceService: ObservableObject {
         cryptoKind: String,
         suite: String,
         routeDescriptor: PresenceRouteDescriptor?,
+        controlTransport: P2PConnection.ControlTransport?,
         owner: PresenceOwner
     ) -> String? {
         if let routeDescriptor, !routeDescriptor.isComplete {
@@ -254,12 +269,13 @@ public final class ConnectionPresenceService: ObservableObject {
             address: address ?? canonicalRouteDescriptor?.displayAddress,
             cryptoKind: cryptoKind,
             suite: suite,
-            connectedAt: connectedAt
+            connectedAt: connectedAt,
+            controlTransport: controlTransport
         )
 
-        if let canonicalRouteDescriptor {
-            routeDescriptorsByPeerId[canonicalPeerId] = canonicalRouteDescriptor
-        }
+        // The new owner publishes a complete snapshot. Absence of a current
+        // network file route must retire a previous session's address hint.
+        routeDescriptorsByPeerId[canonicalPeerId] = canonicalRouteDescriptor
         if let idx = activeConnections.firstIndex(where: { $0.id == canonicalPeerId }) {
             activeConnections[idx] = conn
         } else {
@@ -268,12 +284,16 @@ public final class ConnectionPresenceService: ObservableObject {
         presenceOwnersByPeerId[canonicalPeerId] = owner
         rekeyStatusByPeerId.removeValue(forKey: canonicalPeerId)
 
-        if let canonicalRouteDescriptor,
+        if controlTransport == .usb {
+            ConnectionRouteAttributionRecorder.shared.record(sessionKey: canonicalPeerId, route: .usbDirect)
+        } else if let canonicalRouteDescriptor,
            let route = ConnectionTransportRoute(canonicalRouteDescriptor.routeSource) {
             ConnectionRouteAttributionRecorder.shared.record(
                 sessionKey: canonicalPeerId,
                 route: route
             )
+        } else {
+            ConnectionRouteAttributionRecorder.shared.forget(sessionKey: canonicalPeerId)
         }
 
         if let canonicalRouteDescriptor {
@@ -297,7 +317,8 @@ public final class ConnectionPresenceService: ObservableObject {
         address: String? = nil,
         cryptoKind: String,
         suite: String,
-        routeDescriptor: PresenceRouteDescriptor? = nil
+        routeDescriptor: PresenceRouteDescriptor? = nil,
+        controlTransport: P2PConnection.ControlTransport? = nil
     ) {
         _ = publishConnected(
             peerId: peerId,
@@ -306,6 +327,7 @@ public final class ConnectionPresenceService: ObservableObject {
             cryptoKind: cryptoKind,
             suite: suite,
             routeDescriptor: routeDescriptor,
+            controlTransport: controlTransport,
             owner: .legacy
         )
     }
@@ -317,9 +339,26 @@ public final class ConnectionPresenceService: ObservableObject {
         address: String? = nil,
         cryptoKind: String,
         suite: String,
-        routeDescriptor: PresenceRouteDescriptor? = nil
+        routeDescriptor: PresenceRouteDescriptor? = nil,
+        controlTransport: P2PConnection.ControlTransport? = nil,
+        replacing previousLease: PresenceLease? = nil
     ) -> PresenceLease? {
-        let ownerId = UUID()
+        let ownerId: UUID
+        if let previousLease {
+            guard presenceOwnersByPeerId[previousLease.peerId] == .lease(previousLease.ownerId) else {
+                return nil
+            }
+            let targetPeerId = canonicalPresencePeerId(for: peerId)
+            // A delayed identity exchange from an old endpoint cannot take
+            // over a different socket that already owns the stable identity.
+            if let targetOwner = presenceOwnersByPeerId[targetPeerId],
+               targetOwner != .lease(previousLease.ownerId) {
+                return nil
+            }
+            ownerId = previousLease.ownerId
+        } else {
+            ownerId = UUID()
+        }
         guard let canonicalPeerId = publishConnected(
             peerId: peerId,
             displayName: displayName,
@@ -327,9 +366,15 @@ public final class ConnectionPresenceService: ObservableObject {
             cryptoKind: cryptoKind,
             suite: suite,
             routeDescriptor: routeDescriptor,
+            controlTransport: controlTransport,
             owner: .lease(ownerId)
         ) else {
             return nil
+        }
+        if let previousLease, previousLease.peerId != canonicalPeerId {
+            // The same authenticated socket now has its validated device ID.
+            // Retire its endpoint row, retaining only the current lease.
+            _ = disconnectIfOwned(previousLease)
         }
         return PresenceLease(ownerId: ownerId, peerId: canonicalPeerId)
     }
@@ -341,7 +386,8 @@ public final class ConnectionPresenceService: ObservableObject {
         address: String? = nil,
         cryptoKind: String,
         suite: String,
-        routeDescriptor: PresenceRouteDescriptor? = nil
+        routeDescriptor: PresenceRouteDescriptor? = nil,
+        controlTransport: P2PConnection.ControlTransport? = nil
     ) -> Bool {
         guard presenceOwnersByPeerId[lease.peerId] == .lease(lease.ownerId) else {
             return false
@@ -353,6 +399,7 @@ public final class ConnectionPresenceService: ObservableObject {
             cryptoKind: cryptoKind,
             suite: suite,
             routeDescriptor: routeDescriptor,
+            controlTransport: controlTransport,
             owner: .lease(lease.ownerId)
         ) == lease.peerId
     }
@@ -364,7 +411,8 @@ public final class ConnectionPresenceService: ObservableObject {
         address: String? = nil,
         cryptoKind: String,
         suite: String,
-        routeDescriptor: PresenceRouteDescriptor
+        routeDescriptor: PresenceRouteDescriptor,
+        controlTransport: P2PConnection.ControlTransport? = nil
     ) -> Bool {
         publishConnected(
             peerId: peerId,
@@ -373,6 +421,7 @@ public final class ConnectionPresenceService: ObservableObject {
             cryptoKind: cryptoKind,
             suite: suite,
             routeDescriptor: routeDescriptor,
+            controlTransport: controlTransport,
             owner: .legacy
         ) != nil
     }
@@ -384,7 +433,8 @@ public final class ConnectionPresenceService: ObservableObject {
         address: String? = nil,
         cryptoKind: String,
         suite: String,
-        routeDescriptor: PresenceRouteDescriptor
+        routeDescriptor: PresenceRouteDescriptor,
+        controlTransport: P2PConnection.ControlTransport? = nil
     ) -> PresenceLease? {
         markConnectedOwned(
             peerId: peerId,
@@ -392,7 +442,8 @@ public final class ConnectionPresenceService: ObservableObject {
             address: address,
             cryptoKind: cryptoKind,
             suite: suite,
-            routeDescriptor: routeDescriptor
+            routeDescriptor: routeDescriptor,
+            controlTransport: controlTransport
         )
     }
     

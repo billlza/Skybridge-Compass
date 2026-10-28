@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import SkyBridgeProtocolCore
 import SkyBridgeQPeriaptRuntime
 
 enum QPeriaptIOSRuntimePreparationResult: Sendable, Equatable {
@@ -98,10 +99,8 @@ enum QPeriaptHandshakeAdmissionSnapshot: Sendable, Equatable {
         guard protocolIdentityConfiguration.algorithm == .mlDSA65,
               (try? ProtocolSigningIdentityPolicy.requiredConfiguration(defaults: userDefaults))
                 == protocolIdentityConfiguration,
-              QPeriaptIOSRuntime.isRequested(
-                environment: environment,
-                userDefaults: userDefaults
-              ),
+              let mode = try? PQCModePolicyStore(defaults: userDefaults, environment: environment).snapshot(),
+              mode.selection.permittedSuiteWireIds.contains(0x0012),
               let session = QPeriaptIOSRuntime.currentSession,
               !authProfile.isEmpty,
               trustRootFingerprint.count == SHA256.byteCount,

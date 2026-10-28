@@ -1816,6 +1816,249 @@ test('register-current bootstraps the first current-path device when auth bootst
   }
 });
 
+async function withAccountLoginRegistration(handler, operation) {
+  const previous = registryStore.registerAccountDevice;
+  registryStore.registerAccountDevice = handler;
+  createRuntime({ allowAccountLoginRegistration: true, allowBootstrapDeviceAuth: true,
+    trustProxy: false, requireSharedStateForPublicCapabilities: false });
+  try { return await operation(); }
+  finally {
+    registryStore.registerAccountDevice = previous;
+    createRuntime({ allowAccountLoginRegistration: false, allowBootstrapDeviceAuth: true,
+      trustProxy: false, requireSharedStateForPublicCapabilities: false });
+  }
+}
+
+function accountLoginDevice(payload) {
+  return { tenant_id: payload.p_tenant_id, user_id: payload.p_user_id,
+    device_id: payload.p_device_id, protocol_signing_algorithm: payload.p_protocol_signing_algorithm,
+    protocol_public_key_fingerprint: payload.p_protocol_public_key_fingerprint,
+    device_name: payload.p_device_name, status: 'active', approval_method: 'account_login' };
+}
+
+function loginRegistrationBody(binding) {
+  return { ...binding, clientVersion: '1.0.2', protocolVersion: '1', deviceName: 'New Android' };
+}
+
+test('account login registers a new current device in an existing account using verified ownership', async () => {
+  const binding = makeIdentityBinding('account-login-new');
+  registryStore.allowSyntheticOnly(binding.deviceId);
+  try {
+    await withAccountLoginRegistration(async (payload) => {
+      assert.equal(payload.p_tenant_id, tenantId);
+      assert.equal(payload.p_user_id, userId);
+      assert.equal(payload.p_protocol_public_key_fingerprint, binding.protocolPublicKeyFingerprint);
+      return accountLoginDevice(payload);
+    }, async () => {
+      const response = await postJSON('/api/devices/register-current', { requiresAuth: true,
+        body: { ...loginRegistrationBody(binding), userId: 'forged-other-user' } });
+      assert.equal(response.status, 200);
+      assert.equal(response.json.registered, true);
+      assert.equal(response.json.activated, true);
+      assert.equal(response.json.device.user_id, userId);
+      assert.equal(response.json.device.approval_method, 'account_login');
+    });
+  } finally { registryStore.clearSyntheticOnly(binding.deviceId); }
+});
+
+test('account login preserves the activation response contract on an idempotent retry', async () => {
+  const binding = makeIdentityBinding('account-login-repeat');
+  registryStore.allowSyntheticOnly(binding.deviceId);
+  try {
+    await withAccountLoginRegistration(async (payload) => {
+      const device = accountLoginDevice(payload);
+      registryStore.devices.set(registryStore.deviceKey(tenantId, userId, binding.deviceId), device);
+      registryStore.clearSyntheticOnly(binding.deviceId);
+      return device;
+    }, async () => {
+      for (const expectedActivated of [true, false]) {
+        const response = await postJSON('/api/devices/register-current', {
+          requiresAuth: true, body: loginRegistrationBody(binding)
+        });
+        assert.equal(response.status, 200);
+        assert.equal(response.json.registered, true);
+        assert.equal(response.json.activated, expectedActivated);
+        for (const key of ['tenant_id', 'user_id', 'device_id', 'protocol_signing_algorithm',
+          'protocol_public_key_fingerprint', 'status']) {
+          assert.equal(typeof response.json.device[key], 'string', `required Apple response field: device.${key}`);
+        }
+        assert.equal(response.json.device.status, 'active');
+        assert.equal(response.json.device.device_id, binding.deviceId);
+        assert.equal(response.json.device.protocol_public_key_fingerprint, binding.protocolPublicKeyFingerprint);
+      }
+    });
+  } finally { registryStore.clearSyntheticOnly(binding.deviceId); }
+});
+
+test('account login keeps activated false for existing active and pending registry records', async () => {
+  for (const status of ['active', 'pending']) {
+    const binding = makeIdentityBinding(`account-login-existing-${status}`);
+    const existing = await registryStore.getRegisteredDevice({ tenantId, userId, ...binding });
+    assert.ok(existing);
+    existing.status = status;
+    await withAccountLoginRegistration(async (payload) => accountLoginDevice(payload), async () => {
+      const response = await postJSON('/api/devices/register-current', {
+        requiresAuth: true, body: loginRegistrationBody(binding)
+      });
+      assert.equal(response.status, 200);
+      assert.equal(response.json.registered, true);
+      assert.equal(response.json.activated, false);
+      assert.equal(response.json.device.status, 'active');
+    });
+  }
+});
+
+test('account login never confirms an inactive or differently bound registry response', async () => {
+  const binding = makeIdentityBinding('account-login-unconfirmed');
+  for (const change of [{ status: 'pending' }, { user_id: sameTenantOtherUserId },
+    { protocol_public_key_fingerprint: 'ab'.repeat(32) }]) {
+    await withAccountLoginRegistration(async (payload) => ({ ...accountLoginDevice(payload), ...change }), async () => {
+      const response = await postJSON('/api/devices/register-current', {
+        requiresAuth: true, body: loginRegistrationBody(binding) });
+      assert.equal(response.status, 503);
+      assert.equal(response.json.error, 'account_registration_unconfirmed');
+      assert.notEqual(response.json.registered, true);
+    });
+  }
+});
+
+test('account login preserves revocation, freeze and identity conflict errors', async () => {
+  const binding = makeIdentityBinding('account-login-rejected');
+  for (const [code, status] of [['device_revoked', 403], ['device_frozen', 403],
+    ['current_identity_mismatch', 409], ['new_identity_already_owned', 409]]) {
+    await withAccountLoginRegistration(async () => { throw fakeRegistryError(code); }, async () => {
+      const response = await postJSON('/api/devices/register-current', {
+        requiresAuth: true, body: loginRegistrationBody(binding) });
+      assert.equal(response.status, status);
+      assert.equal(response.json.error, code);
+    });
+  }
+});
+
+test('account login requires a bearer and keeps database failures explicit and redacted', async () => {
+  const binding = makeIdentityBinding('account-login-privacy');
+  await withAccountLoginRegistration(async () => { throw new Error('private-database-details'); }, async () => {
+    const unauthenticated = await postJSON('/api/devices/register-current', { body: loginRegistrationBody(binding) });
+    assert.equal(unauthenticated.status, 401);
+    const failure = await postJSON('/api/devices/register-current', {
+      requiresAuth: true, body: loginRegistrationBody(binding) });
+    assert.equal(failure.status, 503);
+    assert.equal(failure.json.error, 'account_registration_unavailable');
+    assert.ok(!JSON.stringify(failure.json).includes('private-database-details'));
+  });
+});
+
+async function withAccountRemoval(handler, operation) {
+  const previous = registryStore.removeAccountDevice;
+  registryStore.removeAccountDevice = handler;
+  try { return await operation(); }
+  finally { registryStore.removeAccountDevice = previous; }
+}
+
+function removedAccountDevice(payload) {
+  return { tenant_id: payload.p_tenant_id, user_id: payload.p_user_id,
+    device_id: payload.p_target_device_id, protocol_signing_algorithm: payload.p_target_signing_algorithm,
+    protocol_public_key_fingerprint: payload.p_target_fingerprint, status: 'revoked' };
+}
+
+test('account removal binds verified ownership and the exact selected identity, including self removal', async () => {
+  const caller = makeIdentityBinding('remove-caller');
+  for (const target of [makeIdentityBinding('remove-peer'), caller]) {
+    await withAccountRemoval(async payload => {
+      assert.equal(payload.p_tenant_id,tenantId); assert.equal(payload.p_user_id,userId);
+      assert.equal(payload.p_caller_device_id,caller.deviceId);
+      assert.equal(payload.p_target_fingerprint,target.protocolPublicKeyFingerprint);
+      return removedAccountDevice(payload);
+    }, async () => {
+      const response = await postJSON('/api/devices/remove', { requiresAuth:true,
+        body:{...loginRegistrationBody(caller),target,userId:sameTenantOtherUserId} });
+      assert.equal(response.status,200);
+      assert.deepEqual(response.json,{removed:true,target:{ deviceId:target.deviceId,
+        protocolSigningAlgorithm:target.protocolSigningAlgorithm,
+        protocolPublicKeyFingerprint:target.protocolPublicKeyFingerprint,status:'revoked' }});
+    });
+  }
+});
+
+test('account removal denies missing auth and invalid target before the database mutation', async () => {
+  const caller=makeIdentityBinding('remove-validation');
+  await withAccountRemoval(async () => { assert.fail('unauthorized mutation'); },async () => {
+    const body={...loginRegistrationBody(caller),target:makeIdentityBinding('remove-target')};
+    assert.equal((await postJSON('/api/devices/remove',{body})).status,401);
+    const malformed=await postJSON('/api/devices/remove',{requiresAuth:true,body:{...body,target:{deviceId:'bad'}}});
+    assert.equal(malformed.status,400);assert.equal(malformed.json.error,'bad_target_binding');
+  });
+});
+
+test('account removal keeps ownership, stale-identity and registry failures explicit', async () => {
+  const body={...loginRegistrationBody(makeIdentityBinding('remove-errors')),target:makeIdentityBinding('remove-target')};
+  for (const [code,status] of [['target_device_not_found',404],['target_identity_mismatch',409],
+    ['device_revoked',403],['device_frozen',403],['device_not_active',403]]) {
+    await withAccountRemoval(async () => { throw fakeRegistryError(code); },async () => {
+      const r=await postJSON('/api/devices/remove',{requiresAuth:true,body});
+      assert.equal(r.status,status);assert.equal(r.json.error,code);assert.notEqual(r.json.removed,true);
+    });
+  }
+  await withAccountRemoval(async () => { throw new Error('private-database-details'); },async () => {
+    const r=await postJSON('/api/devices/remove',{requiresAuth:true,body});
+    assert.equal(r.status,503);assert.equal(r.json.error,'account_removal_unavailable');
+    assert.ok(!JSON.stringify(r.json).includes('private-database-details'));
+  });
+});
+
+test('account removal never reports success for an unconfirmed registry receipt', async () => {
+  const body={...loginRegistrationBody(makeIdentityBinding('remove-receipt')),target:makeIdentityBinding('remove-target')};
+  for(const change of [{status:'active'},{user_id:sameTenantOtherUserId},{protocol_public_key_fingerprint:'ab'.repeat(32)}]) {
+    await withAccountRemoval(async p=>({...removedAccountDevice(p),...change}),async()=>{
+      const r=await postJSON('/api/devices/remove',{requiresAuth:true,body});
+      assert.equal(r.status,503);assert.equal(r.json.error,'account_removal_unconfirmed');
+    });
+  }
+});
+
+test('account removal denies a synthetic caller even when bootstrap device auth is enabled', async () => {
+  const caller = makeIdentityBinding('remove-synthetic-caller');
+  registryStore.allowSyntheticOnly(caller.deviceId);
+  try {
+    await withAccountRemoval(async () => { assert.fail('synthetic caller must not mutate a real roster'); }, async () => {
+      const response = await postJSON('/api/devices/remove', {
+        requiresAuth: true,
+        body: { ...loginRegistrationBody(caller), target: makeIdentityBinding('remove-synthetic-target') }
+      });
+      assert.equal(response.status, 403);
+      assert.equal(response.json.error, 'device_not_registered');
+      assert.notEqual(response.json.removed, true);
+    });
+  } finally {
+    registryStore.clearSyntheticOnly(caller.deviceId);
+  }
+});
+
+test('account removal reports a committed revocation with failed presence cleanup explicitly', async () => {
+  const caller = makeIdentityBinding('remove-cleanup-caller');
+  const target = makeIdentityBinding('remove-cleanup-target');
+  const body = { ...loginRegistrationBody(caller), target };
+  let commits = 0;
+  await withAccountRemoval(async payload => { commits += 1; return removedAccountDevice(payload); }, async () => {
+    const originalDelete = signalingState.deleteEphemeral;
+    signalingState.deleteEphemeral = async () => { throw new Error('private-redis-details'); };
+    try {
+      const response = await postJSON('/api/devices/remove', { requiresAuth: true, body });
+      assert.equal(commits, 1);
+      assert.equal(response.status, 503);
+      assert.equal(response.json.error, 'account_removal_cleanup_pending');
+      assert.notEqual(response.json.removed, true);
+      assert.ok(!JSON.stringify(response.json).includes('private-redis-details'));
+    } finally {
+      signalingState.deleteEphemeral = originalDelete;
+    }
+    const retry = await postJSON('/api/devices/remove', { requiresAuth: true, body });
+    assert.equal(commits, 2);
+    assert.equal(retry.status, 200);
+    assert.equal(retry.json.removed, true);
+  });
+});
+
 test('evaluateServiceHealth fails closed when shared state is required but unavailable', () => {
   const memorySnapshot = evaluateServiceHealth({
     backendHealth: { ready: true, redisConnected: false },
@@ -2927,7 +3170,11 @@ function bindingQuery(binding, extra = {}) {
 }
 
 function authHeaders(accessToken = bearerToken) {
-  return { Authorization: `Bearer ${accessToken}` };
+  return {
+    Authorization: `Bearer ${accessToken}`,
+    'X-SkyBridge-Client-Version': '1.0.2',
+    'X-SkyBridge-Protocol-Version': '1'
+  };
 }
 
 function presenceRecordKey(binding, { requestedTenantId = tenantId, requestedUserId = userId } = {}) {
@@ -3064,6 +3311,8 @@ test('presence register ignores forwarded headers when the runtime does not trus
 test('presence register rejects malformed metadata with stable public error codes', async () => {
   const binding = makeIdentityBinding('presence-validation');
   const cases = [
+    [{ lanControlPort: '51173' }, 'invalid_presence_metadata', 'lanControlPort'],
+    [{ lanControlPort: 65536 }, 'invalid_presence_metadata', 'lanControlPort'],
     [{ platform: 'visionos' }, 'invalid_presence_platform', 'platform'],
     [{ lanAddresses: '10.0.0.1' }, 'invalid_presence_metadata', 'lanAddresses'],
     [{ lanAddresses: ['192.168.1.'] }, 'invalid_presence_lan_address', 'lanAddresses'],
@@ -3185,6 +3434,101 @@ test('presence register keeps the heartbeat alive when the registry touch fails 
   assert.equal(retried.json.persisted, true);
   assert.equal(retried.json.persistReason, 'written');
   assert.equal(registryStore.presenceTouchCalls.length, callsBeforeRetry + 1);
+});
+
+const malformedPresenceTouchResults = [
+  ['undefined', undefined],
+  ['null', null],
+  ['array', []],
+  ['array-with-updated', Object.assign([], { updated: true })],
+  ['string', 'not-an-rpc-object'],
+  ['number', 0],
+  ['boolean-true', true],
+  ['boolean-false', false],
+  ['missing-updated', {}],
+  ['updated-undefined', { updated: undefined }],
+  ['updated-null', { updated: null }],
+  ['updated-number', { updated: 0 }],
+  ['updated-string-false', { updated: 'false' }],
+  ['updated-string-true', { updated: 'true' }],
+  ['updated-boxed-boolean', { updated: new Boolean(false) }],
+  ['inherited-updated-true', Object.create({ updated: true })],
+  ['inherited-updated-false', Object.create({ updated: false })]
+];
+
+for (const [name, result] of malformedPresenceTouchResults) {
+  test(`presence register rejects malformed touch result without settling inactive: ${name}`, async () => {
+    // Every case owns a fresh presence key so prior persistence or retry claims
+    // cannot bypass the actual touch result under test.
+    const binding = makeIdentityBinding(`presence-malformed-touch-${name}`);
+    registryStore.setDeviceStatus(binding, 'active');
+    const previous = registryStore.touchRegisteredDevicePresence;
+    let calls = 0;
+    registryStore.touchRegisteredDevicePresence = async () => { calls += 1; return result; };
+    try {
+      const response = await registerPresence(binding, { deviceName: 'Malformed registry result' });
+      assert.equal(response.status, 200);
+      assert.equal(response.json.online, true);
+      assert.equal(response.json.persistReason, 'registry_unavailable');
+      assert.equal(response.json.persisted, false);
+      assert.equal(calls, 1, 'the result must reach the real HTTP route');
+      const stored = await signalingState.getEphemeral('presence', presenceRecordKey(binding));
+      assert.ok(stored, 'ephemeral heartbeat remains available');
+      assert.equal(stored.persist.persistedAt, null, 'malformed result must not become a settled inactive result');
+      assert.ok(stored.persist.claimedAt, 'the existing failed-touch retry claim is retained');
+    } finally {
+      registryStore.touchRegisteredDevicePresence = previous;
+    }
+  });
+}
+
+for (const updated of [false, true]) {
+  test(`presence register preserves explicit Boolean touch result: ${updated}`, async () => {
+    const binding = makeIdentityBinding(`presence-explicit-touch-${updated}`);
+    registryStore.setDeviceStatus(binding, 'active');
+    const previous = registryStore.touchRegisteredDevicePresence;
+    registryStore.touchRegisteredDevicePresence = async () => ({ updated });
+    try {
+      const response = await registerPresence(binding, { deviceName: 'Explicit registry result' });
+      assert.equal(response.status, 200);
+      assert.equal(response.json.online, true);
+      assert.equal(response.json.persisted, updated);
+      assert.equal(response.json.persistReason, updated ? 'written' : 'device_not_active');
+      const stored = await signalingState.getEphemeral('presence', presenceRecordKey(binding));
+      assert.ok(stored.persist.persistedAt, 'a valid Boolean result is settled');
+      assert.equal(stored.persist.claimedAt, null);
+    } finally {
+      registryStore.touchRegisteredDevicePresence = previous;
+    }
+  });
+}
+
+test('presence register retries a malformed touch result only after the existing claim window', async () => {
+  const binding = makeIdentityBinding('presence-malformed-touch-retry');
+  registryStore.setDeviceStatus(binding, 'active');
+  const previous = registryStore.touchRegisteredDevicePresence;
+  const report = { deviceName: 'Retry malformed registry result' };
+  let calls = 0;
+  registryStore.touchRegisteredDevicePresence = async () => { calls += 1; return null; };
+  try {
+    const failed = await registerPresence(binding, report);
+    assert.equal(failed.json.persistReason, 'registry_unavailable');
+    const backedOff = await registerPresence(binding, report);
+    assert.equal(backedOff.json.persistReason, 'throttled');
+    assert.equal(calls, 1, 'malformed replies use the failure backoff rather than immediate retry');
+    registryStore.touchRegisteredDevicePresence = previous;
+    await signalingState.updateEphemeral('presence', presenceRecordKey(binding), (record) => {
+      record.persist.claimedAt -= 31_000;
+    });
+    const retried = await registerPresence(binding, report);
+    assert.equal(retried.json.persisted, true);
+    assert.equal(retried.json.persistReason, 'written');
+    const stored = await signalingState.getEphemeral('presence', presenceRecordKey(binding));
+    assert.ok(stored.persist.persistedAt);
+    assert.equal(stored.persist.claimedAt, null);
+  } finally {
+    registryStore.touchRegisteredDevicePresence = previous;
+  }
 });
 
 test('presence register reports device_not_active when no active registry row matches the exact identity', async () => {
@@ -3393,6 +3737,40 @@ test('devices/list rejects callers that are not active registered devices', asyn
   const badBinding = await getJSON('/api/devices/list?deviceId=short', { headers: authHeaders() });
   assert.equal(badBinding.status, 400);
   assert.equal(badBinding.json.error, 'bad_device_binding');
+});
+
+test('devices/list enforces the production version floor and accepts explicit current-version headers', async () => {
+  const caller = makeIdentityBinding('list-version-floor');
+  registryStore.setDeviceStatus(caller, 'active');
+  const getTenantPolicy = registryStore.getTenantPolicy;
+  registryStore.getTenantPolicy = async function (requestedTenantId) {
+    return {
+      ...await getTenantPolicy.call(this, requestedTenantId),
+      min_supported_client_version: '1.0.0',
+      min_supported_protocol_version: '1'
+    };
+  };
+  const path = `/api/devices/list?${bindingQuery(caller)}`;
+  try {
+    const missing = await getJSON(path, { headers: { Authorization: `Bearer ${bearerToken}` } });
+    assert.equal(missing.status, 426);
+    assert.equal(missing.json.error, 'client_version_too_old');
+    const oldClient = await getJSON(path, {
+      headers: { ...authHeaders(), 'X-SkyBridge-Client-Version': '0.9.0' }
+    });
+    assert.equal(oldClient.status, 426);
+    assert.equal(oldClient.json.error, 'client_version_too_old');
+    const oldProtocol = await getJSON(path, {
+      headers: { ...authHeaders(), 'X-SkyBridge-Protocol-Version': '0' }
+    });
+    assert.equal(oldProtocol.status, 426);
+    assert.equal(oldProtocol.json.error, 'protocol_version_too_old');
+    const current = await listDevices(caller);
+    assert.equal(current.status, 200);
+    assert.ok(current.json.devices.some((device) => device.deviceId === caller.deviceId && device.isCaller));
+  } finally {
+    registryStore.getTenantPolicy = getTenantPolicy;
+  }
 });
 
 test('devices/list is isolated per tenant and user', async () => {
@@ -3629,3 +4007,92 @@ async function postSignedSendSMS(body) {
     body: signed.rawBody
   });
 }
+
+
+test('account LAN route replaces a listener port without persisting it and withdraws on legacy heartbeat', async () => {
+  const binding = makeIdentityBinding('presence-live-route');
+  registryStore.setDeviceStatus(binding, 'active');
+  const report = { deviceName: 'Route Mac', platform: 'macos', lanAddresses: ['10.0.0.5', '192.168.1.20'] };
+  const first = await registerPresence(binding, { ...report, lanControlPort: 51164 });
+  assert.equal(first.status, 200);
+  const calls = registryStore.presenceTouchCalls.length;
+  const rowFor = async () => {
+    const response = await listDevices(binding);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers['cache-control'], 'no-store');
+    return response.json.devices.find((row) => row.deviceId === binding.deviceId);
+  };
+  assert.deepEqual((await rowFor()).lanControlRoute, {
+    addresses: report.lanAddresses, port: 51164, expiresAt: first.json.expiresAt
+  });
+  const second = await registerPresence(binding, { ...report, lanControlPort: 51173 });
+  assert.equal(second.status, 200);
+  assert.equal(registryStore.presenceTouchCalls.length, calls, 'ephemeral port does not force a registry write');
+  assert.deepEqual((await rowFor()).lanControlRoute, {
+    addresses: report.lanAddresses, port: 51173, expiresAt: second.json.expiresAt
+  });
+  assert.equal('p_lan_control_port' in registryStore.presenceTouchCalls.at(-1), false);
+  await registerPresence(binding, report);
+  assert.equal((await rowFor()).lanControlRoute, null, 'omission withdraws, never retains the previous port');
+  await registerPresence(binding, { ...report, lanControlPort: 51173 });
+  await signalingState.updateEphemeral('presence', presenceRecordKey(binding), (record) => { record.expiresAt = Date.now() - 1; });
+  const expired = await rowFor();
+  assert.equal(expired.lanControlRoute, null, 'durable metadata cannot reconstruct an expired route');
+  assert.equal(expired.online, false);
+});
+
+test('account LAN route is absent for foreign identity, account or inactive registry state', async () => {
+  const binding = makeIdentityBinding('presence-route-owner');
+  registryStore.setDeviceStatus(binding, 'active');
+  const report = { platform: 'macos', lanAddresses: ['10.0.0.5'], lanControlPort: 51173 };
+  await registerPresence(binding, report);
+  await signalingState.updateEphemeral('presence', presenceRecordKey(binding), (record) => {
+    record.protocolPublicKeyFingerprint = 'f'.repeat(64);
+  });
+  let listed = await listDevices(binding);
+  assert.equal(listed.json.devices.find((row) => row.deviceId === binding.deviceId).lanControlRoute, null);
+  const caller = makeIdentityBinding('presence-route-caller');
+  registryStore.setDeviceStatus(caller, 'active');
+  await registerPresence(binding, report);
+  registryStore.setDeviceStatus(binding, 'pending');
+  listed = await listDevices(caller);
+  assert.equal(listed.json.devices.find((row) => row.deviceId === binding.deviceId).lanControlRoute, null);
+  const foreignCaller = makeIdentityBinding('presence-route-foreign-caller');
+  registryStore.setDeviceStatus(foreignCaller, 'active', { requestedUserId: sameTenantOtherUserId });
+  const foreign = await listDevices(foreignCaller, { accessToken: sameTenantOtherUserBearerToken });
+  assert.equal(foreign.status, 200);
+  assert.equal(foreign.json.devices.some((row) => row.deviceId === binding.deviceId), false,
+    'another account cannot see the route owner at all');
+});
+
+
+test('mobile account list receives only the current Windows listener and explicit withdrawal', async () => {
+  const desktop = makeIdentityBinding('account-route-windows');
+  const mobile = makeIdentityBinding('account-route-ios');
+  registryStore.setDeviceStatus(desktop, 'active');
+  registryStore.setDeviceStatus(mobile, 'active');
+  await registerPresence(mobile, { platform: 'ios', lanAddresses: ['10.0.0.8'] });
+  const report = { platform: 'windows', lanAddresses: ['10.0.0.5'], lanControlPort: 51044 };
+  const published = await registerPresence(desktop, report);
+  assert.equal(published.status, 200);
+  const listing = await listDevices(mobile);
+  assert.equal(listing.status, 200);
+  assert.equal(listing.json.callerDeviceId, mobile.deviceId);
+  const row = listing.json.devices.find((device) => device.deviceId === desktop.deviceId);
+  assert.equal(row.isCaller, false);
+  assert.equal(row.online, true);
+  assert.equal(row.protocolPublicKeyFingerprint, desktop.protocolPublicKeyFingerprint);
+  assert.deepEqual(row.lanControlRoute, { addresses: ['10.0.0.5'], port: 51044, expiresAt: published.json.expiresAt });
+  assert.ok(row.lanControlRoute.expiresAt > listing.json.generatedAt);
+  assert.ok(row.lanControlRoute.expiresAt - listing.json.generatedAt <= 90_000);
+
+  await registerPresence(desktop, { ...report, lanAddresses: ['192.168.1.20'], lanControlPort: 51173 });
+  const moved = (await listDevices(mobile)).json.devices.find((device) => device.deviceId === desktop.deviceId);
+  assert.deepEqual(moved.lanControlRoute.addresses, ['192.168.1.20'], 'never merge a retired interface into the new listener');
+  assert.equal(moved.lanControlRoute.port, 51173);
+  await registerPresence(desktop, { ...report, lanControlPort: null });
+  const stopped = (await listDevices(mobile)).json.devices.find((device) => device.deviceId === desktop.deviceId);
+  assert.equal(stopped.online, true, 'listener withdrawal does not sign the device out');
+  assert.equal(stopped.lanControlRoute, null);
+  assert.equal(registryStore.presenceTouchCalls.some((call) => 'p_lan_control_port' in call), false);
+});

@@ -22,14 +22,19 @@ public final class AccountPresenceRefreshEngine {
         public var lastSuccessfulListAt: Date?
         public var lastListFailure: AccountPresenceFailure?
         public var lastHeartbeatFailure: AccountPresenceFailure?
+        public var removingDeviceId: String?
+        public var lastRemovalFailure: AccountPresenceFailure?
+        public var callerRemoved = false
 
         public init() {}
     }
 
     public typealias RegistrationOperation = @MainActor () async throws -> Void
     public typealias AccountDeviceListOperation = @MainActor () async throws -> AccountDeviceListSnapshot
+    public typealias RemovalOperation = @MainActor (AccountDeviceRecord, String) async throws -> Void
     public typealias TrustedDeviceIDsProvider = @MainActor () -> Set<String>
     public typealias NowProvider = @MainActor () -> Date
+    public typealias RouteClock = @MainActor () -> ContinuousClock.Instant
     public typealias FailureClassifier = @Sendable (Error) -> AccountPresenceFailure
     public typealias StateObserver = @MainActor (State) -> Void
     /// 轮询循环的等待原语。默认是 `Task.sleep`；测试注入后可在不真实等待的情况下驱动退避节奏。
@@ -51,8 +56,13 @@ public final class AccountPresenceRefreshEngine {
     private let refreshInterval: TimeInterval
     private let onlineStateTTL: TimeInterval
     private let now: NowProvider
+    private let routeClock: RouteClock
     private let registerPresence: RegistrationOperation
     private let listAccountDevices: AccountDeviceListOperation
+    private let removeAccountDevice: RemovalOperation?
+    private var removalTask: Task<Void, Never>?
+    private var removalToken: UUID?
+    public var removalScope: UInt64 { lifecycleGeneration }
     private let trustedDeviceIDs: TrustedDeviceIDsProvider
     private let classifyFailure: FailureClassifier
     private let onStateChange: StateObserver
@@ -62,8 +72,10 @@ public final class AccountPresenceRefreshEngine {
         refreshInterval: TimeInterval = AccountPresenceRefreshPolicy.heartbeatInterval,
         onlineStateTTL: TimeInterval = AccountPresenceRefreshPolicy.snapshotTTL,
         now: @escaping NowProvider = Date.init,
+        routeClock: @escaping RouteClock = { ContinuousClock.now },
         registerPresence: @escaping RegistrationOperation,
         listAccountDevices: @escaping AccountDeviceListOperation,
+        removeAccountDevice: RemovalOperation? = nil,
         trustedDeviceIDs: @escaping TrustedDeviceIDsProvider,
         classifyFailure: @escaping FailureClassifier,
         onStateChange: @escaping StateObserver,
@@ -74,8 +86,10 @@ public final class AccountPresenceRefreshEngine {
         self.refreshInterval = refreshInterval
         self.onlineStateTTL = onlineStateTTL
         self.now = now
+        self.routeClock = routeClock
         self.registerPresence = registerPresence
         self.listAccountDevices = listAccountDevices
+        self.removeAccountDevice = removeAccountDevice
         self.trustedDeviceIDs = trustedDeviceIDs
         self.classifyFailure = classifyFailure
         self.onStateChange = onStateChange
@@ -86,7 +100,7 @@ public final class AccountPresenceRefreshEngine {
 
     /// 启动心跳 + 列表轮询（幂等）。
     public func start() {
-        guard !started else { return }
+        guard !started, !state.callerRemoved else { return }
         started = true
         lifecycleGeneration &+= 1
         let generation = lifecycleGeneration
@@ -110,7 +124,8 @@ public final class AccountPresenceRefreshEngine {
                     let current = self.now()
                     sleepInterval = AccountPresenceRefreshPolicy.loopSleepInterval(
                         untilRefresh: nextRefreshAt.timeIntervalSince(current),
-                        untilOnlineStateExpires: self.timeUntilOnlineStateExpires(at: current)
+                        untilOnlineStateExpires: [self.timeUntilOnlineStateExpires(at: current),
+                            self.state.accountDevices?.timeUntilRouteExpiry(at: self.routeClock())].compactMap { $0 }.min()
                     )
                 }
                 do {
@@ -131,6 +146,7 @@ public final class AccountPresenceRefreshEngine {
 
     /// 停止并清空全部状态（登出/账号切换/后台）。
     public func stop() {
+        removalTask?.cancel(); removalTask = nil; removalToken = nil
         lifecycleGeneration &+= 1
         loopTask?.cancel()
         loopTask = nil
@@ -144,6 +160,10 @@ public final class AccountPresenceRefreshEngine {
 
     /// 挂起计时与在途刷新但保留快照（进入后台）。恢复用 `start()`。
     public func suspend() {
+        removalTask?.cancel(); removalTask = nil; removalToken = nil
+        if state.removingDeviceId != nil {
+            state.removingDeviceId = nil; state.lastRemovalFailure = .transport
+        }
         lifecycleGeneration &+= 1
         loopTask?.cancel()
         loopTask = nil
@@ -163,6 +183,47 @@ public final class AccountPresenceRefreshEngine {
     public func waitForCurrentRefresh() async {
         let task = refreshTask
         await task?.value
+    }
+
+    public func removeDevice(_ record: AccountDeviceRecord, expectedScope: UInt64) async {
+        guard expectedScope == lifecycleGeneration, started, removalTask == nil else { return }
+        guard let operation = removeAccountDevice, let snapshot = state.accountDevices,
+              let accountScope = snapshot.accountScope,
+              snapshot.devices.contains(where: { $0.isCaller && $0.status == "active" }),
+              let selected = snapshot.devices.first(where: { $0.id == record.id }) else {
+            state.lastRemovalFailure = .malformedResponse; return
+        }
+        let token = UUID(); removalToken = token
+        state.removingDeviceId = selected.deviceId; state.lastRemovalFailure = nil
+        let pendingRefresh = refreshTask
+        refreshTask?.cancel(); refreshTask = nil; refreshToken = nil
+        let task = Task { @MainActor [weak self] in
+            await pendingRefresh?.value
+            guard let self, self.isCurrentRefresh(expectedScope) else { return }
+            do {
+                try await operation(selected, accountScope)
+                guard self.isCurrentRefresh(expectedScope) else { return }
+                if selected.isCaller {
+                    self.state.callerRemoved = true
+                    self.state.accountDevices = nil
+                    self.state.onlinePeerDeviceIds = []
+                    self.state.lastListFailure = .deviceNotActive(code: "device_revoked")
+                    self.loopTask?.cancel(); self.loopTask = nil; self.started = false
+                } else if let current = self.state.accountDevices {
+                    self.state.accountDevices = current.removingDevice(recordID: selected.id)
+                    self.state.onlinePeerDeviceIds.remove(selected.deviceId)
+                }
+            } catch {
+                guard self.isCurrentRefresh(expectedScope) else { return }
+                self.state.lastRemovalFailure = self.classifyFailure(error)
+                self.logger.warning("Account device removal unconfirmed: errorClass=\(String(reflecting: Swift.type(of: error)), privacy: .public)")
+            }
+        }
+        removalTask = task
+        await task.value
+        guard lifecycleGeneration == expectedScope, removalToken == token else { return }
+        removalTask = nil; removalToken = nil; state.removingDeviceId = nil
+        if started, state.lastRemovalFailure == nil { scheduleRefresh(for: lifecycleGeneration) }
     }
 
     public func isOnline(deviceId: String) -> Bool {
@@ -190,7 +251,7 @@ public final class AccountPresenceRefreshEngine {
     }
 
     private func scheduleRefresh(for generation: UInt64) {
-        guard isCurrentGeneration(generation), refreshTask == nil else { return }
+        guard isCurrentGeneration(generation), refreshTask == nil, removalTask == nil else { return }
         let token = UUID()
         refreshToken = token
         refreshTask = Task { @MainActor [weak self] in
@@ -224,8 +285,10 @@ public final class AccountPresenceRefreshEngine {
         guard isCurrentRefresh(generation) else { return }
 
         do {
-            let snapshot = try await listAccountDevices()
+            let routeRequestStartedAt = routeClock()
+            let response = try await listAccountDevices()
             guard isCurrentRefresh(generation) else { return }
+            let snapshot = response.observingRoutes(requestStartedAt: routeRequestStartedAt, now: routeClock())
             var next = state
             next.lastListFailure = nil
             next.lastSuccessfulListAt = now()
@@ -261,6 +324,7 @@ public final class AccountPresenceRefreshEngine {
     }
 
     private func expireOnlineStateIfStale(at currentTime: Date) {
+        state.accountDevices = state.accountDevices?.removingExpiredRoutes(at: routeClock())
         guard hasOnlineState else { return }
         guard let lastSuccessfulListAt = state.lastSuccessfulListAt else {
             markOnlineStateExpired()

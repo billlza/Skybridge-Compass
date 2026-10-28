@@ -15,6 +15,29 @@ cp "$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompassiOS/Supporting Files/Info.pl
 cp "$ROOT_DIR/SkyBridge Compass iOS/Widgets/Info.plist" \
   "$SCRATCH/SkyBridge Compass iOS/Widgets/Info.plist"
 
+
+# The regression fixture has an explicit baseline independent of the next shipping build.
+python3 - "$SCRATCH" <<'PYFIXTURE'
+from pathlib import Path
+import plistlib
+import re
+import sys
+
+root = Path(sys.argv[1]) / "SkyBridge Compass iOS"
+project = root / "project.yml"
+source = project.read_text(encoding="utf-8")
+source, versions = re.subn(r'(CFBundleShortVersionString:\s*)"[^"]+"', r'\g<1>"1.0.2"', source)
+source, builds = re.subn(r'(CFBundleVersion:\s*)"[^"]+"', r'\g<1>"4"', source)
+assert versions == 2 and builds == 2
+project.write_text(source, encoding="utf-8")
+for relative in ["SkyBridgeCompassiOS/Supporting Files/Info.plist", "Widgets/Info.plist"]:
+    path = root / relative
+    value = plistlib.loads(path.read_bytes())
+    value["CFBundleShortVersionString"] = "1.0.2"
+    value["CFBundleVersion"] = "4"
+    path.write_bytes(plistlib.dumps(value))
+PYFIXTURE
+
 assert_rejected() {
   local description="$1"
   if "$CHECKER" --root "$SCRATCH" >/dev/null 2>&1; then
@@ -23,22 +46,22 @@ assert_rejected() {
   fi
 }
 
-actual="$("$CHECKER" --root "$SCRATCH" --expected-version 1.0.2 --expected-build 2)"
-[[ "$actual" == $'1.0.2\t2' ]] || {
+actual="$("$CHECKER" --root "$SCRATCH" --expected-version 1.0.2 --expected-build 4)"
+[[ "$actual" == $'1.0.2\t4' ]] || {
   echo "[ios-release-version-test] ERROR: unexpected checker output: $actual" >&2
   exit 1
 }
 
-/usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 3' \
+/usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 5' \
   "$SCRATCH/SkyBridge Compass iOS/Widgets/Info.plist"
 assert_rejected "a mismatched Widget build"
-/usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 2' \
+/usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 4' \
   "$SCRATCH/SkyBridge Compass iOS/Widgets/Info.plist"
 
 /usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 0' \
   "$SCRATCH/SkyBridge Compass iOS/SkyBridgeCompassiOS/Supporting Files/Info.plist"
 assert_rejected "a non-positive app build"
-/usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 2' \
+/usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 4' \
   "$SCRATCH/SkyBridge Compass iOS/SkyBridgeCompassiOS/Supporting Files/Info.plist"
 
 python3 - "$SCRATCH/SkyBridge Compass iOS/project.yml" <<'PY'

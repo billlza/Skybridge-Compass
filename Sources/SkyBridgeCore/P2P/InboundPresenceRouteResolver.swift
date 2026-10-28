@@ -44,6 +44,19 @@ extension P2PDiscoveryService {
         var name: String
         let displayAddress: String?
         let transferPort: Int
+
+        /// A connected MAIN does not imply a separately dialable file server on a mobile peer.
+        /// Missing transfer metadata must stay absent, never borrow its ephemeral source port.
+        func transferRouteDescriptor(peerId: String, advertisedPort: UInt16?, connectedAt: Date)
+            -> ConnectionPresenceService.PresenceRouteDescriptor? {
+            let announced = advertisedPort.flatMap { (1...65535).contains(Int($0)) ? Int($0) : nil }
+            let port = announced ?? transferPort
+            guard let address = displayAddress?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !address.isEmpty, (1...65535).contains(port) else { return nil }
+            return .init(peerId: peerId, deviceName: name, displayAddress: address,
+                         transferAddress: address, transferPort: port, routeSource: .inbound,
+                         connectedAt: connectedAt)
+        }
     }
 
     nonisolated static func resolveInboundPresenceRoute(

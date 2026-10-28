@@ -24,9 +24,37 @@ The producer does not rebuild, re-sign, notarize, upload, or publish. It
 extracts the app from the sealed IPA, installs that exact app with
 `devicectl device install app`, then validates exactly one installation-result
 record and a post-install query for bundle, version, build, remote app path,
-and executable UUIDs. A process snapshot must prove the app absent before each
-owned fresh launch. Launch uses the verified persistent identifier, no launch
-arguments, no child environment, and no terminate-existing option.
+and executable UUIDs. The install receipt's `installationURL` must equal the
+independent app query's canonical remote path. A process snapshot must prove
+the app absent before each owned fresh launch. Launch targets this exact app
+path and also supplies the persistent identifier when CoreDevice provides it.
+The exact native `unknown` sentinel means that optional synchronization token
+is unavailable; it is never passed as a token. Missing or malformed identifiers
+still fail. No launch arguments, child environment, or terminate-existing
+option is used.
+
+If installation wakes the app in the background, the producer retains that
+process snapshot and waits up to the configured producer timeout for the operator to close only
+SkyBridge. A new snapshot must independently prove absence; typing `CLOSED`
+alone cannot satisfy the gate. An unverifiable snapshot still fails immediately.
+
+Every private OSLog event must match the owned launch's PID, and its
+`processImageUUID` must match the sealed IPA executable UUID. The launch
+identity's actual executable path remains bound to the installation receipt
+and independent app query. Unified log's image catalog can display the first
+container path for a UUID after identical bytes are reinstalled: that private
+display path must retain the exact product bundle/executable and a canonical
+iOS container, but is not substituted for the actual launch path.
+The native final `{"count":N,"finished":1}` record is command framing, not an
+event: its integer count must equal all preceding events. Altered counts,
+extra fields, and premature or duplicate trailers fail.
+
+Physical iOS log collection may require macOS administrator authentication.
+Only the fixed device/PID/start-time log read is elevated through the system
+authentication dialog. The elevated reader uses a private temporary archive,
+bounded commands, and removes that archive on exit. The product launcher and
+evidence validators continue as the current user; no password is read or
+stored by the producer.
 
 ## One-time production identity lifecycle
 

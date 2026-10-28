@@ -98,7 +98,6 @@ PRIVATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-ios-process-oslog.XXXXXX")"
 chmod 0700 "$PRIVATE_DIR"
 trap '/bin/rm -rf "$PRIVATE_DIR"' EXIT
 BASE_OWNERSHIP="$PRIVATE_DIR/devicectl-launch-ownership.json"
-LOG_ARCHIVE="$PRIVATE_DIR/ios-product.logarchive"
 RAW_TEMP="$PRIVATE_DIR/ios-product.ndjson"
 
 python3 "$OWNERSHIP_HELPER" ios-capture \
@@ -118,22 +117,11 @@ IOS_PROCESS_ID="$(python3 "$OWNERSHIP_HELPER" identity-pid \
   echo "bound iOS launch identity has no exact process" >&2
   exit 1
 }
-PREDICATE="processIdentifier == $IOS_PROCESS_ID AND subsystem == \"com.skybridge.compass.release-evidence\" AND category == \"ProductSession\""
-/usr/bin/log collect \
+python3 "$ROOT_DIR/Scripts/ios_product_oslog_capture.py" \
   --device-udid "$DEVICE_UDID" \
-  --start "@$LAUNCH_START_EPOCH" \
-  --predicate "$PREDICATE" \
-  --output "$LOG_ARCHIVE" >/dev/null
-[[ -d "$LOG_ARCHIVE" && ! -L "$LOG_ARCHIVE" ]] || {
-  echo "physical iOS unified-log archive was not produced" >&2
-  exit 1
-}
-/usr/bin/log show \
-  --archive "$LOG_ARCHIVE" \
-  --style ndjson \
-  --predicate "$PREDICATE" \
-  >"$RAW_TEMP"
-chmod 0600 "$RAW_TEMP"
+  --process-id "$IOS_PROCESS_ID" \
+  --start-epoch "$LAUNCH_START_EPOCH" \
+  --raw-output "$RAW_TEMP"
 
 python3 - "$RAW_TEMP" "$RAW_OUTPUT" <<'PY'
 import os

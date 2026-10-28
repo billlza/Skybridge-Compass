@@ -440,152 +440,6 @@ actor CameraTeardownCompletionGate {
     }
 }
 
-@available(iOS 17.0, *)
-private struct LANSecureReceiveContext: @unchecked Sendable {
-    let connectionID: ObjectIdentifier
-    let generation: UInt64
-    let keys: SessionKeys
-    let pipeline: LANRemoteSecureReceivePipeline
-}
-
-@available(iOS 17.0, *)
-private struct LANSecureReceiveLoopContext: @unchecked Sendable {
-    let receiveContext: LANSecureReceiveContext
-    let scheduler: LANSecureReceiveScheduler
-}
-
-@available(iOS 17.0, *)
-private final class LANSecureReceiveScheduler: @unchecked Sendable {
-    typealias Completion = @Sendable (
-        Result<LANRemoteSecureReceiveResult, Error>,
-        ObjectIdentifier,
-        UInt64
-    ) async -> Void
-
-    private let lock = NSLock()
-    private var tailTask: Task<Void, Never>?
-    private var epoch: UInt64 = 0
-
-    func cancel() {
-        lock.lock()
-        epoch &+= 1
-        let task = tailTask
-        tailTask = nil
-        lock.unlock()
-        task?.cancel()
-    }
-
-    func scheduleChunk(
-        _ chunk: Data,
-        receivedAt: Date,
-        context: LANSecureReceiveContext,
-        maxCompleteScreenFrames: Int,
-        maxDrainBudgetMs: Double,
-        completion: @escaping Completion
-    ) {
-        let scheduledEpoch = currentEpoch()
-        let parseTaskScheduledAt = Date()
-        enqueue(
-            context: context,
-            expectedEpoch: scheduledEpoch,
-            maxCompleteScreenFrames: maxCompleteScreenFrames,
-            maxDrainBudgetMs: maxDrainBudgetMs,
-            completion: completion
-        ) {
-            let parseTaskStartedAt = Date()
-            return try await context.pipeline.appendAndDrain(
-                chunk: chunk,
-                receivedAt: receivedAt,
-                keys: context.keys,
-                maxCompleteScreenFrames: maxCompleteScreenFrames,
-                maxDrainBudgetMs: maxDrainBudgetMs,
-                parseTaskScheduledAt: parseTaskScheduledAt,
-                parseTaskStartedAt: parseTaskStartedAt
-            )
-        }
-    }
-
-    private func scheduleDrain(
-        context: LANSecureReceiveContext,
-        expectedEpoch: UInt64,
-        maxCompleteScreenFrames: Int,
-        maxDrainBudgetMs: Double,
-        completion: @escaping Completion
-    ) {
-        enqueue(
-            context: context,
-            expectedEpoch: expectedEpoch,
-            maxCompleteScreenFrames: maxCompleteScreenFrames,
-            maxDrainBudgetMs: maxDrainBudgetMs,
-            completion: completion
-        ) {
-            try await context.pipeline.drain(
-                keys: context.keys,
-                maxCompleteScreenFrames: maxCompleteScreenFrames,
-                maxDrainBudgetMs: maxDrainBudgetMs
-            )
-        }
-    }
-
-    private func enqueue(
-        context: LANSecureReceiveContext,
-        expectedEpoch: UInt64,
-        maxCompleteScreenFrames: Int,
-        maxDrainBudgetMs: Double,
-        completion: @escaping Completion,
-        work: @escaping @Sendable () async throws -> LANRemoteSecureReceiveResult
-    ) {
-        lock.lock()
-        guard epoch == expectedEpoch else {
-            lock.unlock()
-            return
-        }
-        let previous = tailTask
-        let task = Task.detached(priority: .high) { [weak self, previous] in
-            await previous?.value
-            guard !Task.isCancelled,
-                  self?.isCurrentEpoch(expectedEpoch) == true else { return }
-
-            do {
-                let result = try await work()
-                guard !Task.isCancelled,
-                      self?.isCurrentEpoch(expectedEpoch) == true else { return }
-                await completion(.success(result), context.connectionID, context.generation)
-                guard !Task.isCancelled,
-                      self?.isCurrentEpoch(expectedEpoch) == true else { return }
-                if result.hasCompletePayloadPending {
-                    self?.scheduleDrain(
-                        context: context,
-                        expectedEpoch: expectedEpoch,
-                        maxCompleteScreenFrames: maxCompleteScreenFrames,
-                        maxDrainBudgetMs: maxDrainBudgetMs,
-                        completion: completion
-                    )
-                }
-            } catch {
-                guard self?.isCurrentEpoch(expectedEpoch) == true else { return }
-                await completion(.failure(error), context.connectionID, context.generation)
-            }
-        }
-        tailTask = task
-        lock.unlock()
-    }
-
-    private func currentEpoch() -> UInt64 {
-        lock.lock()
-        let value = epoch
-        lock.unlock()
-        return value
-    }
-
-    private func isCurrentEpoch(_ expectedEpoch: UInt64) -> Bool {
-        lock.lock()
-        let isCurrent = epoch == expectedEpoch
-        lock.unlock()
-        return isCurrent
-    }
-}
-
 // MARK: - RemoteDesktopManager
 
 /// 远程桌面管理器 - iOS 作为查看器/控制端
@@ -614,6 +468,37 @@ public class RemoteDesktopManager: ObservableObject {
     /// authority for that state.
     @Published public private(set) var pendingCameraPresentationConnection: Connection?
     private var pendingConnectionTarget: DiscoveredDevice?
+    let isIsolatedLANViewer: Bool
+    @Published private(set) var hasInputFocus = true
+    @Published private(set) var controlAccess: RemoteControlAccess?
+    private var controlAccessTracker = RemoteControlAccessTracker()
+    private let workspaceConfigurationWaiter = RemoteDesktopConfigurationWaiter()
+    private var isWorkspaceSuspending = false
+    private var inputFocusRevision: UInt64 = 0
+    private lazy var inputDispatcher = RemoteDesktopInputDispatcher(
+        cancelPendingSend: { [weak self] context in self?.cancelViewerTransport(for: context) },
+        send: { [weak self] message, context in
+            guard let self, self.currentInputContext(requiresFocus: false) == context else {
+                throw CancellationError()
+            }
+            try await self.sendMessage(message)
+        },
+        failed: { [weak self] error, context in
+            guard let self, self.currentInputContext(requiresFocus: false) == context else { return }
+            await self.handleTransportFailure(error.localizedDescription)
+        }
+    )
+
+    var canSendViewerInput: Bool {
+        currentInputContext() != nil
+    }
+
+    var controlAccessStatusText: String {
+        if !hasAcknowledgedActiveStreamConfiguration { return "等待主机确认" }
+        if controlAccess?.role == .observer { return "仅查看 · 控制权由被控电脑分配" }
+        if !inputDispatcher.acceptsNewInput { return "正在同步画面配置" }
+        return hasInputFocus ? "可以控制" : "会话已暂停"
+    }
 
     /// 连接状态
     @Published public private(set) var state: RemoteDesktopState = .disconnected
@@ -670,7 +555,7 @@ public class RemoteDesktopManager: ObservableObject {
             if oldValue.audioRedirectionEnabled && !viewerSettings.audioRedirectionEnabled {
                 teardownRemoteAudioPlayback()
             }
-            if !isApplyingPersistedViewerSettings {
+            if !isIsolatedLANViewer && !isApplyingPersistedViewerSettings {
                 viewerSettingsRevision &+= 1
                 let pending = (settings: viewerSettings, revision: viewerSettingsRevision)
                 if isViewerSettingsPersistenceReady {
@@ -692,6 +577,7 @@ public class RemoteDesktopManager: ObservableObject {
     private var lanEstablishedArbiterLease: PeerSessionArbiter.EstablishedLease?
     private var lanSessionKeys: SessionKeys?
     private var lanReceiveLoopConnectionID: ObjectIdentifier?
+    private var lanReceiveReadFence: LANReceiveReadFence?
     private var lanSOAPairKey: Data?
     private var lanSecureReplayWindow = RemoteControlSecureReplayWindow()
     private var lanHandshakePeerId: String?
@@ -758,7 +644,8 @@ public class RemoteDesktopManager: ObservableObject {
         let transaction: RemoteDesktopStreamConfigurationTransaction
         let operationWitness: RemoteDesktopSessionMutationGate.OperationWitness
         let transportOwner: TransportFailureOwner
-        let audioInstalledOwner: RealtimeMediaAudioInstalledOwner?
+        let audioBindingRequirement: RemoteDesktopViewerStreamConfigurationPushPolicy
+            .AudioBindingRequirement<RealtimeMediaAudioInstalledOwner>
         let acknowledgementExpectation:
             RemoteDesktopViewerStreamConfigurationPushPolicy.AcknowledgementExpectation
     }
@@ -860,13 +747,21 @@ public class RemoteDesktopManager: ObservableObject {
     private var realtimeMediaAudioRelayBindGraceTask: Task<Void, Never>?
     private var realtimeMediaAudioRelayRenewalTask: Task<Void, Never>?
     private var realtimeMediaAudioNoTrafficRecoveryTask: Task<Void, Never>?
+    private var realtimeMediaAudioStartupDiagnosticTask: Task<Void, Never>?
+    private var startupWatchdogAdmission = RemoteDesktopViewerStreamConfigurationPushPolicy
+        .StartupWatchdogAdmission<RealtimeMediaAudioInstalledOwner>()
     private var realtimeMediaAudioNoTrafficRecoveryAttemptsBySessionId: [String: Int] = [:]
     private var streamConfigurationAckTask: Task<Void, Never>?
     private let streamConfigurationOperationGate =
         RemoteDesktopStreamConfigurationOperationGate()
     private var activeStreamConfigurationSendOwner: ViewerStreamConfigurationSendOwner?
+    private typealias LANConfigurationLane = RemoteDesktopViewerStreamConfigurationPushPolicy.LANSendLane<TransportFailureOwner>
+    private var lanConfigurationLane = LANConfigurationLane()
+    private var lanConfigurationDeadlineTask: Task<Void, Never>?
+
     private var acknowledgedStreamConfigurationTransaction:
         RemoteDesktopStreamConfigurationTransaction?
+    private var sessionTerminationContract: RemoteDesktopSessionTerminationContract?
     private var negotiatedFramePresentationAckVersion: Int?
     private var framePresentationAcknowledgementGate =
         FramePresentationAcknowledgementGate()
@@ -997,10 +892,19 @@ public class RemoteDesktopManager: ObservableObject {
     private var viewerSettingsRevision: UInt64 = 0
     private var pendingViewerSettingsPersistence: (settings: RemoteDesktopViewerSettings, revision: UInt64)?
 
-    private init() {
-        crossNetwork.nativeAudioReceiveEnabled = RemoteDesktopManagerRuntimeConfig.crossNetworkNativeAudioReceiveEnabled
-        installCameraLifecycleObserverIfNeeded()
-        bootstrapViewerSettingsPersistence()
+    private init(isolatedLANViewer: Bool = false, initialSettings: RemoteDesktopViewerSettings? = nil) {
+        isIsolatedLANViewer = isolatedLANViewer
+        hasInputFocus = !isolatedLANViewer
+        if let initialSettings { viewerSettings = initialSettings }
+        if !isolatedLANViewer {
+            crossNetwork.nativeAudioReceiveEnabled = RemoteDesktopManagerRuntimeConfig.crossNetworkNativeAudioReceiveEnabled
+            installCameraLifecycleObserverIfNeeded()
+            bootstrapViewerSettingsPersistence()
+        }
+    }
+
+    static func makeLANViewer() -> RemoteDesktopManager {
+        RemoteDesktopManager(isolatedLANViewer: true, initialSettings: instance.viewerSettings)
     }
 
     private func invalidateDecodePipelineState() {
@@ -2146,6 +2050,9 @@ public class RemoteDesktopManager: ObservableObject {
             expectedCrossNetworkSessionID = nil
         }
         let useCrossNetworkTransport = expectedCrossNetworkSessionID != nil
+        guard !isIsolatedLANViewer || !useCrossNetworkTransport else {
+            throw RemoteDesktopError.notSupported("局域网工作区不拥有跨网传输")
+        }
         let resolvedDevice = useCrossNetworkTransport
             ? device
             : deviceResolver.resolveLatestDevice(from: device)
@@ -2211,6 +2118,10 @@ public class RemoteDesktopManager: ObservableObject {
             }
             sessionMutationGate.finish(connectionAttempt)
         }
+        controlAccessTracker = RemoteControlAccessTracker()
+        controlAccess = nil
+        inputDispatcher.retire()
+        workspaceConfigurationWaiter.fail(CancellationError())
         state = .connecting
         var attemptedLANConnection: NWConnection?
         stopRealtimeMediaAudioReceiver(reason: "connection-attempt-replacement")
@@ -2278,7 +2189,7 @@ public class RemoteDesktopManager: ObservableObject {
                 return
             }
 
-            crossNetwork.stopRemoteDesktopHeartbeat()
+            stopOwnedCrossNetworkHeartbeat()
             cancelCrossNetworkFrameSubscription()
             // Tear down any prior LAN socket before we install a new one.
             // Otherwise stale callbacks from the previous NWConnection can
@@ -2324,10 +2235,10 @@ public class RemoteDesktopManager: ObservableObject {
                     }
                     switch connectionState {
                     case .failed(let error):
-                        await self.handleTransportFailure(error.localizedDescription)
+                        await self.handleLANStateTerminal(error.localizedDescription, connection: connection)
                     case .cancelled:
-                        await self.handleTransportFailure(
-                            RemoteDesktopError.disconnected.errorDescription ?? "连接已断开"
+                        await self.handleLANStateTerminal(
+                            RemoteDesktopError.disconnected.errorDescription ?? "连接已断开", connection: connection
                         )
                     default:
                         break
@@ -2407,7 +2318,7 @@ public class RemoteDesktopManager: ObservableObject {
             guard sessionMutationGate.isCurrent(cleanupToken) else {
                 throw CancellationError()
             }
-            crossNetwork.stopRemoteDesktopHeartbeat()
+            stopOwnedCrossNetworkHeartbeat()
             cancelCrossNetworkFrameSubscription()
             await decoder.cleanup()
             currentConnection = nil
@@ -2446,7 +2357,7 @@ public class RemoteDesktopManager: ObservableObject {
 
         isStreaming = true
         beginRemoteAudioPlaybackSession()
-        crossNetwork.disarmIdleConnectionReminder(clearPrompt: true)
+        if !isIsolatedLANViewer { crossNetwork.disarmIdleConnectionReminder(clearPrompt: true) }
         state = .streaming
         streamEpoch &+= 1
         lastHandledSessionAuthorityLostStreamEpoch = nil
@@ -2481,7 +2392,6 @@ public class RemoteDesktopManager: ObservableObject {
         firstFrameContinuityTask?.cancel()
         interactionContinuityTask?.cancel()
         streamContinuityWatchdogTask?.cancel()
-        startStreamContinuityWatchdog(for: streamEpoch)
         if activeTransportMode == .crossNetwork {
             if let sessionId = crossNetwork.activeRemoteDesktopSessionId,
                let crossNetworkOwner = crossNetwork.currentRemoteDesktopSessionOwner() {
@@ -2501,7 +2411,6 @@ public class RemoteDesktopManager: ObservableObject {
         guard sessionMutationGate.isCurrent(operationWitness) else {
             throw CancellationError()
         }
-        scheduleFirstFrameWatchdog(for: streamEpoch)
         guard activeTransportMode != .lan || networkConnection != nil else {
             firstFrameWatchdogTask?.cancel()
             firstFrameWatchdogTask = nil
@@ -2640,6 +2549,10 @@ public class RemoteDesktopManager: ObservableObject {
 
     /// 停止流媒体
     public func stopStreaming() async {
+        await finishStoppingStream(sendStopConfiguration: true)
+    }
+
+    private func finishStoppingStream(sendStopConfiguration: Bool) async {
         if isReadOnlyCameraSession {
             _ = await endCameraSession(
                 finalState: .disconnected,
@@ -2654,11 +2567,11 @@ public class RemoteDesktopManager: ObservableObject {
         defer { sessionMutationGate.finish(mutation) }
         SkyBridgeLogger.shared.info("⏹️ 停止远程桌面流")
 
-        if !hadPendingConnectionAttempt {
+        if !hadPendingConnectionAttempt && sendStopConfiguration {
             await sendViewerStreamStopConfigurationIfNeeded()
         }
         isStreaming = false
-        crossNetwork.stopRemoteDesktopHeartbeat()
+        stopOwnedCrossNetworkHeartbeat()
         cancelCrossNetworkFrameSubscription()
         teardownRemoteAudioPlayback()
         realtimeMediaAudioReceiverStartTask?.cancel()
@@ -2740,7 +2653,7 @@ public class RemoteDesktopManager: ObservableObject {
         if !hadPendingConnectionAttempt {
             await sendViewerStreamStopConfigurationIfNeeded()
         }
-        crossNetwork.stopRemoteDesktopHeartbeat()
+        stopOwnedCrossNetworkHeartbeat()
         cancelCrossNetworkFrameSubscription()
         firstFrameWatchdogTask?.cancel()
         firstFrameContinuityTask?.cancel()
@@ -3237,8 +3150,10 @@ public class RemoteDesktopManager: ObservableObject {
 
     private func handleTransportFailure(
         _ reason: String,
-        owner failureOwner: TransportFailureOwner
+        owner failureOwner: TransportFailureOwner,
+        hostTerminationReason: RemoteDesktopSessionTermination.Reason? = nil
     ) async {
+        let isNormalHostEnd = hostTerminationReason.map { !$0.isFailure } ?? false
         guard let teardownToken = sessionMutationGate.beginExclusiveMutation(
             ifCurrent: isCurrentTransportFailureOwner(failureOwner)
         ) else { return }
@@ -3251,6 +3166,7 @@ public class RemoteDesktopManager: ObservableObject {
         let errorMessage = normalizedReason.isEmpty
             ? (RemoteDesktopError.disconnected.errorDescription ?? "连接已断开")
             : normalizedReason
+        workspaceConfigurationWaiter.fail(isNormalHostEnd ? RemoteDesktopError.disconnected : RemoteDesktopError.streamingFailed(errorMessage))
         let failedTransport = transportStatusText ?? currentTransportStatusText() ?? "unknown"
         let failedConnection = currentConnection
         let failedConnectionId = failedConnection?.device.id ?? "-"
@@ -3259,9 +3175,13 @@ public class RemoteDesktopManager: ObservableObject {
             cancelCrossNetworkFrameSubscription()
         }
 
-        SkyBridgeLogger.shared.error(
-            "❌ 远程桌面传输失败: device=\(failedConnectionId) transport=\(failedTransport) reason=\(errorMessage)"
-        )
+        if isNormalHostEnd {
+            SkyBridgeLogger.shared.info("Remote host ended the authenticated session: reason=\(hostTerminationReason?.rawValue ?? "unknown")")
+        } else {
+            SkyBridgeLogger.shared.error(
+                "❌ 远程桌面传输失败: device=\(failedConnectionId) transport=\(failedTransport) reason=\(errorMessage)"
+            )
+        }
 
         if failureOwner.transportMode == .lan, let failedConnection {
             await NotificationManager.sendRemoteDesktopTerminalNotificationIfNeeded(
@@ -3269,7 +3189,7 @@ public class RemoteDesktopManager: ObservableObject {
                 deviceName: failedConnection.device.name,
                 transport: "lan",
                 role: "viewer",
-                kind: .interrupted,
+                kind: isNormalHostEnd ? .normal : .interrupted,
                 reason: errorMessage
             )
         } else if let crossNetworkOwner = failureOwner.crossNetworkOwner {
@@ -3284,7 +3204,7 @@ public class RemoteDesktopManager: ObservableObject {
             ownerIsCurrent: isCurrentLocalTransportPresentationOwner(failureOwner)
         ) else { return }
 
-        crossNetwork.stopRemoteDesktopHeartbeat()
+        stopOwnedCrossNetworkHeartbeat()
         firstFrameWatchdogTask?.cancel()
         firstFrameContinuityTask?.cancel()
         interactionContinuityTask?.cancel()
@@ -3342,7 +3262,7 @@ public class RemoteDesktopManager: ObservableObject {
         pendingFrames.removeAll()
         decodeQueueWaitingForSyncFrame = false
         resetFrameTelemetry()
-        state = .error(errorMessage)
+        state = isNormalHostEnd ? .disconnected : .error(errorMessage)
     }
 
     private func effectiveSupportedRemoteVideoFormats(at now: Date = Date()) -> [String] {
@@ -3354,7 +3274,7 @@ public class RemoteDesktopManager: ObservableObject {
         mimeType: String,
         fromDeviceId: String? = nil
     ) {
-        guard !isReadOnlyCameraSession,
+        guard !isReadOnlyCameraSession, hasInputFocus, controlAccessTracker.canSendInput,
               viewerSettings.clipboardSyncEnabled,
               hasAcknowledgedActiveStreamConfiguration else { return }
         configureSessionClipboardSync()
@@ -3499,7 +3419,9 @@ public class RemoteDesktopManager: ObservableObject {
 
     private func configureSessionClipboardSync() {
         let clipboard = ClipboardManager.shared
-        let shouldEnable = viewerSettings.clipboardSyncEnabled
+        let shouldEnable = hasInputFocus && controlAccessTracker.canSendInput
+            && inputDispatcher.acceptsNewInput && hasAcknowledgedActiveStreamConfiguration
+            && viewerSettings.clipboardSyncEnabled
             && isStreaming
             && hasReceivedFrameInCurrentStream
             && !isReadOnlyCameraSession
@@ -3531,6 +3453,7 @@ public class RemoteDesktopManager: ObservableObject {
 
     private func handleLocalClipboardChange(data: Data, mimeType: String) async throws {
         guard !isReadOnlyCameraSession,
+              let context = currentInputContext(),
               viewerSettings.clipboardSyncEnabled,
               isStreaming,
               hasAcknowledgedActiveStreamConfiguration else {
@@ -3538,7 +3461,8 @@ public class RemoteDesktopManager: ObservableObject {
         }
         let payload = RemoteClipboardMessagePayload(mimeType: mimeType, data: data)
         let encoded = try JSONEncoder().encode(payload)
-        let message = RemoteMessage(type: .clipboard, payload: encoded)
+        let message = RemoteMessage(type: .clipboard, payload: encoded, inputControlLease: context.access?.lease)
+        guard currentInputContext() == context else { throw CancellationError() }
         try await sendMessage(message)
     }
 
@@ -3828,73 +3752,9 @@ public class RemoteDesktopManager: ObservableObject {
                 endpoint: endpoint,
                 mode: mode
             )
-            scheduleRealtimeMediaAudioNoTrafficRecovery(
-                sessionId: snapshot.sessionId,
-                endpoint: endpoint,
-                renderer: renderer,
-                mode: mode,
-                installedOwner: installedOwner
-            )
             SkyBridgeLogger.shared.info(
                 "🎧 PQC media audio receiver ready: session=\(snapshot.sessionId) port=\(endpoint.port) mode=\(mode.rawValue) transport=\(activeTransportModeLabel()) codec=opus audioPath=pqc-opus-source-node-ring relayToken=\(endpoint.relayToken == nil ? "missing" : "present") legacyFallback=false"
             )
-            Task.detached(priority: .utility) { [renderer, sessionId = snapshot.sessionId, endpoint, mode] in
-                do {
-                    try await Task.sleep(for: .seconds(3))
-                } catch {
-                    return
-                }
-                let snapshot = await renderer.startupDiagnosticSnapshot()
-                if snapshot.received == 0 {
-                    let probable: String = {
-                        if snapshot.datagramsSeen == 0 {
-                            return "host-not-sending-or-relay-blocked"
-                        }
-                        if snapshot.sessionHashRejected > 0 {
-                            return "session-hash-rejected"
-                        }
-                        if snapshot.authRejected > 0 {
-                            return "auth-decrypt-rejected"
-                        }
-                        if snapshot.sourceRejected > 0 {
-                            return "source-rejected"
-                        }
-                        if snapshot.replayRejected > 0 {
-                            return "replay-rejected"
-                        }
-                        return "rx-not-accepted"
-                    }()
-                    SkyBridgeLogger.shared.warning(
-                        "🎧 PQC media audio rx startup stalled: session=\(sessionId) relay=\(endpoint.host):\(endpoint.port) mode=\(mode.rawValue) audioRxDatagrams=\(snapshot.datagramsSeen) audioRxRecv=0 audioRxDecoded=\(snapshot.decoded) audioRxPlayed=\(snapshot.played) rejected=\(snapshot.rejected) authRejected=\(snapshot.authRejected) sessionHashRejected=\(snapshot.sessionHashRejected) replayRejected=\(snapshot.replayRejected) sourceReject=\(snapshot.sourceRejected) sourceMigrate=\(snapshot.sourceMigrated) probable=\(probable)"
-                    )
-                    SkyBridgeDiagnosticTrace.append(
-                        "audio-rx session=\(sessionId) audioRxDatagrams=\(snapshot.datagramsSeen) audioRxRecv=0 audioRxDecoded=\(snapshot.decoded) audioRxPlayed=\(snapshot.played) recvTotal=\(snapshot.received) decodeTotal=\(snapshot.decoded) playTotal=\(snapshot.played) rejected=\(snapshot.rejected) authRejected=\(snapshot.authRejected) sessionHashRejected=\(snapshot.sessionHashRejected) replayRejected=\(snapshot.replayRejected) sourceReject=\(snapshot.sourceRejected) sourceMigrate=\(snapshot.sourceMigrated) relay=\(endpoint.host):\(endpoint.port) mode=\(mode.rawValue) probable=\(probable)"
-                    )
-                    SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
-                        [
-                            "kind": "audioRxStartup",
-                            "session": sessionId,
-                            "session_id": sessionId,
-                            "audioRxDatagrams": snapshot.datagramsSeen,
-                            "audioRxRecv": UInt64(0),
-                            "audioRxDecoded": snapshot.decoded,
-                            "audioRxPlayed": snapshot.played,
-                            "recvTotal": snapshot.received,
-                            "decodeTotal": snapshot.decoded,
-                            "playTotal": snapshot.played,
-                            "rejected": snapshot.rejected,
-                            "authRejected": snapshot.authRejected,
-                            "sessionHashRejected": snapshot.sessionHashRejected,
-                            "replayRejected": snapshot.replayRejected,
-                            "sourceReject": snapshot.sourceRejected,
-                            "sourceMigrate": snapshot.sourceMigrated,
-                            "relay": "\(endpoint.host):\(endpoint.port)",
-                            "mode": mode.rawValue,
-                            "probable": probable
-                        ]
-                    )
-                }
-            }
             return (endpoint, snapshot.sessionId)
         } catch {
             guard isCurrentRealtimeMediaAudioReceiverStart(owner) else { return nil }
@@ -3904,6 +3764,80 @@ public class RemoteDesktopManager: ObservableObject {
                 reason: "receiver-start-failed:\(reason)"
             )
             throw error
+        }
+    }
+
+    private func scheduleRealtimeMediaAudioStartupDiagnostic(
+        sessionId: String,
+        endpoint: SkyBridgeMediaEndpoint,
+        renderer: IOSRealtimeMediaAudioReceiver,
+        mode: SkyBridgeMediaAudioMode,
+        installedOwner: RealtimeMediaAudioInstalledOwner
+    ) {
+        realtimeMediaAudioStartupDiagnosticTask?.cancel()
+        realtimeMediaAudioStartupDiagnosticTask = Task { @MainActor [weak self, renderer] in
+            do {
+                try await Task.sleep(for: .seconds(3))
+            } catch {
+                return
+            }
+            guard let self,
+                  self.realtimeMediaAudioRenderer === renderer,
+                  self.isCurrentRealtimeMediaAudioInstalledOwner(installedOwner),
+                  self.hasAcknowledgedActiveStreamConfiguration,
+                  self.lastAcknowledgedMediaAudioEndpointPresent else { return }
+            let snapshot = await renderer.startupDiagnosticSnapshot()
+            guard self.realtimeMediaAudioRenderer === renderer,
+                  self.isCurrentRealtimeMediaAudioInstalledOwner(installedOwner) else { return }
+            if snapshot.received == 0 {
+                let probable: String = {
+                    if snapshot.datagramsSeen == 0 {
+                        return "host-not-sending-or-relay-blocked"
+                    }
+                    if snapshot.sessionHashRejected > 0 {
+                        return "session-hash-rejected"
+                    }
+                    if snapshot.authRejected > 0 {
+                        return "auth-decrypt-rejected"
+                    }
+                    if snapshot.sourceRejected > 0 {
+                        return "source-rejected"
+                    }
+                    if snapshot.replayRejected > 0 {
+                        return "replay-rejected"
+                    }
+                    return "rx-not-accepted"
+                }()
+                SkyBridgeLogger.shared.warning(
+                    "🎧 PQC media audio rx startup stalled: session=\(sessionId) relay=\(endpoint.host):\(endpoint.port) mode=\(mode.rawValue) audioRxDatagrams=\(snapshot.datagramsSeen) audioRxRecv=0 audioRxDecoded=\(snapshot.decoded) audioRxPlayed=\(snapshot.played) rejected=\(snapshot.rejected) authRejected=\(snapshot.authRejected) sessionHashRejected=\(snapshot.sessionHashRejected) replayRejected=\(snapshot.replayRejected) sourceReject=\(snapshot.sourceRejected) sourceMigrate=\(snapshot.sourceMigrated) probable=\(probable)"
+                )
+                SkyBridgeDiagnosticTrace.append(
+                    "audio-rx session=\(sessionId) audioRxDatagrams=\(snapshot.datagramsSeen) audioRxRecv=0 audioRxDecoded=\(snapshot.decoded) audioRxPlayed=\(snapshot.played) recvTotal=\(snapshot.received) decodeTotal=\(snapshot.decoded) playTotal=\(snapshot.played) rejected=\(snapshot.rejected) authRejected=\(snapshot.authRejected) sessionHashRejected=\(snapshot.sessionHashRejected) replayRejected=\(snapshot.replayRejected) sourceReject=\(snapshot.sourceRejected) sourceMigrate=\(snapshot.sourceMigrated) relay=\(endpoint.host):\(endpoint.port) mode=\(mode.rawValue) probable=\(probable)"
+                )
+                SkyBridgeDiagnosticTrace.appendMediaDiagnostic(
+                    [
+                        "kind": "audioRxStartup",
+                        "session": sessionId,
+                        "session_id": sessionId,
+                        "audioRxDatagrams": snapshot.datagramsSeen,
+                        "audioRxRecv": UInt64(0),
+                        "audioRxDecoded": snapshot.decoded,
+                        "audioRxPlayed": snapshot.played,
+                        "recvTotal": snapshot.received,
+                        "decodeTotal": snapshot.decoded,
+                        "playTotal": snapshot.played,
+                        "rejected": snapshot.rejected,
+                        "authRejected": snapshot.authRejected,
+                        "sessionHashRejected": snapshot.sessionHashRejected,
+                        "replayRejected": snapshot.replayRejected,
+                        "sourceReject": snapshot.sourceRejected,
+                        "sourceMigrate": snapshot.sourceMigrated,
+                        "relay": "\(endpoint.host):\(endpoint.port)",
+                        "mode": mode.rawValue,
+                        "probable": probable
+                    ]
+                )
+            }
         }
     }
 
@@ -4037,6 +3971,9 @@ public class RemoteDesktopManager: ObservableObject {
         realtimeMediaAudioRelayRenewalTask = nil
         realtimeMediaAudioNoTrafficRecoveryTask?.cancel()
         realtimeMediaAudioNoTrafficRecoveryTask = nil
+        realtimeMediaAudioStartupDiagnosticTask?.cancel()
+        realtimeMediaAudioStartupDiagnosticTask = nil
+        startupWatchdogAdmission.retireAudio()
         realtimeMediaAudioRelayBindState = .idle
         let renderer = realtimeMediaAudioRenderer
         renderer?.retire()
@@ -4062,6 +3999,54 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func pushViewerStreamConfiguration(force: Bool, refreshStream: Bool = false) async {
+        guard activeTransportMode == .lan else {
+            await sendViewerStreamConfiguration(force: force, refreshStream: refreshStream)
+            return
+        }
+        guard !isWorkspaceSuspending, !isReadOnlyCameraSession, isStreaming,
+              let owner = currentTransportFailureOwner() else { return }
+        guard let work = lanConfigurationLane.request(
+            owner: owner, intent: .init(force: force, refreshStream: refreshStream)
+        ) else { return }
+        await sendLANConfiguration(work)
+    }
+
+    private func sendLANConfiguration(_ initialWork: LANConfigurationLane.Work) async {
+        var work = initialWork
+        while lanConfigurationLane.isCurrent(work), isCurrentTransportFailureOwner(work.owner) {
+            lanConfigurationDeadlineTask?.cancel()
+            // Preserve the initial human approval/capture budget. Later configuration
+            // updates do not receive a new first-approval window.
+            let timeout = RemoteDesktopViewerStreamConfigurationPushPolicy.configurationResponseTimeout(
+                hasApprovedSession: controlAccessTracker.hasAcknowledgement
+            )
+            let deadlineWork = work
+            lanConfigurationDeadlineTask = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: timeout) } catch { return }
+                guard let self, self.lanConfigurationLane.isAwaitingResponse(deadlineWork),
+                      self.isCurrentTransportFailureOwner(deadlineWork.owner) else { return }
+                self.lanConfigurationLane.cancel(deadlineWork)
+                await self.handleTransportFailure(RemoteDesktopError.timeout.localizedDescription, owner: deadlineWork.owner)
+            }
+            await sendViewerStreamConfiguration(force: work.intent.force, refreshStream: work.intent.refreshStream, lanWork: work)
+            guard lanConfigurationLane.isCurrent(work) else { return }
+            if Task.isCancelled {
+                lanConfigurationLane.cancel(work)
+                await handleTransportFailure(RemoteDesktopError.disconnected.localizedDescription, owner: work.owner)
+                return
+            }
+            let next = lanConfigurationLane.finishSending(work)
+            if !lanConfigurationLane.isAwaitingResponse(work) {
+                lanConfigurationDeadlineTask?.cancel()
+                lanConfigurationDeadlineTask = nil
+            }
+            guard let next else { return }
+            work = next
+        }
+    }
+
+    private func sendViewerStreamConfiguration(force: Bool, refreshStream: Bool, lanWork: LANConfigurationLane.Work? = nil) async {
+        guard !isWorkspaceSuspending else { return }
         guard !isReadOnlyCameraSession else { return }
         guard isStreaming else { return }
         guard !handleCrossNetworkSessionAuthorityLostIfNeeded(source: "stream-config") else { return }
@@ -4114,12 +4099,19 @@ public class RemoteDesktopManager: ObservableObject {
             || (payload.streamRefreshToken != nil
                 && mediaAudioBinding != nil
                 && lastAcknowledgedMediaAudioEndpointPresent)
-        guard let sendOwner = beginViewerStreamConfigurationSend(
-            payload: &payload,
-            operationWitness: operationWitness,
-            transportOwner: transportOwner,
-            expectedAudioEndpointPresent: expectedAudioEndpointPresent
-        ) else {
+        let sendOwner: ViewerStreamConfigurationSendOwner
+        do {
+            guard let preparedOwner = try await beginViewerStreamConfigurationSend(
+                payload: &payload,
+                operationWitness: operationWitness,
+                transportOwner: transportOwner,
+                expectedAudioEndpointPresent: expectedAudioEndpointPresent,
+                lanWork: lanWork
+            ) else { return }
+            sendOwner = preparedOwner
+        } catch is CancellationError { return }
+        catch {
+            await handleTransportFailure(error.localizedDescription, owner: transportOwner)
             return
         }
         do {
@@ -4129,7 +4121,8 @@ public class RemoteDesktopManager: ObservableObject {
                 owner: sendOwner
             )
             lastSentStreamConfiguration = payload
-            if payload.mediaAudioEndpoint != nil {
+            if payload.mediaAudioEndpoint != nil,
+               activeTransportMode != .lan || acknowledgedStreamConfigurationTransaction != sendOwner.transaction {
                 lastAcknowledgedMediaAudioEndpointPresent = false
             }
             if preparationPlan.includeAudioEndpointInStreamConfig, payload.mediaAudioEndpoint != nil {
@@ -4165,6 +4158,9 @@ public class RemoteDesktopManager: ObservableObject {
                 )
             }
             SkyBridgeLogger.shared.error("❌ 发送远控流配置失败: \(error.localizedDescription)")
+            if activeTransportMode == .lan {
+                await handleTransportFailure(error.localizedDescription, owner: sendOwner.transportOwner)
+            }
         }
     }
 
@@ -4202,25 +4198,53 @@ public class RemoteDesktopManager: ObservableObject {
         payload: inout RemoteDesktopStreamConfigurationPayload,
         operationWitness: RemoteDesktopSessionMutationGate.OperationWitness,
         transportOwner: TransportFailureOwner,
-        expectedAudioEndpointPresent: Bool
-    ) -> ViewerStreamConfigurationSendOwner? {
+        expectedAudioEndpointPresent: Bool,
+        lanWork: LANConfigurationLane.Work? = nil
+    ) async throws -> ViewerStreamConfigurationSendOwner? {
         guard sessionMutationGate.isCurrent(operationWitness),
               isCurrentTransportFailureOwner(transportOwner) else {
             return nil
         }
+        let audioBindingRequirement = try RemoteDesktopViewerStreamConfigurationPushPolicy
+            .AudioBindingRequirement(
+                audioEndpointPresent: expectedAudioEndpointPresent,
+                installedOwner: currentConfigurationAudioOwner
+            )
+        // Release under the previous acknowledged configuration before retiring its input context.
+        // This includes ordinary quality changes, keyframe refreshes and audio endpoint publication.
+        let inputAdmission = inputDispatcher.beginConfigurationUpdate()
+        configureSessionClipboardSync()
+        objectWillChange.send()
+        defer {
+            inputDispatcher.finishConfigurationUpdate(inputAdmission)
+            configureSessionClipboardSync()
+            objectWillChange.send()
+        }
+        try await releaseViewerInput()
+        guard sessionMutationGate.isCurrent(operationWitness),
+              isCurrentTransportFailureOwner(transportOwner),
+              audioBindingRequirement.isSatisfied(by: currentConfigurationAudioOwner) else { return nil }
+        if activeTransportMode == .lan, payload.screenFrameTransport != "stopped" {
+            guard let lanWork, lanConfigurationLane.isCurrent(lanWork) else { throw CancellationError() }
+        }
+        workspaceConfigurationWaiter.fail(RemoteDesktopConfigurationWaiter.Failure.superseded)
         let transaction = streamConfigurationOperationGate.begin()
+        if activeTransportMode == .lan, payload.screenFrameTransport != "stopped" {
+            guard let lanWork, lanConfigurationLane.bind(transaction, work: lanWork) else { throw CancellationError() }
+        }
         payload.streamConfigurationTransaction = transaction
         let owner = ViewerStreamConfigurationSendOwner(
             transaction: transaction,
             operationWitness: operationWitness,
             transportOwner: transportOwner,
-            audioInstalledOwner: realtimeMediaAudioInstalledOwner,
+            audioBindingRequirement: audioBindingRequirement,
             acknowledgementExpectation: .init(
                 transaction: transaction,
                 streamRefreshToken: payload.streamRefreshToken,
                 audioEndpointPresent: expectedAudioEndpointPresent,
                 screenFrameTransport: payload.screenFrameTransport,
-                framePresentationAckVersion: payload.framePresentationAckVersion
+                framePresentationAckVersion: payload.framePresentationAckVersion,
+                sessionTerminationVersion: payload.sessionTerminationVersion
             )
         )
         setStreamMediaAdmission(false, for: owner)
@@ -4242,11 +4266,13 @@ public class RemoteDesktopManager: ObservableObject {
               isCurrentTransportFailureOwner(expected.transportOwner) else {
             return false
         }
-        if let audioOwner = expected.audioInstalledOwner {
-            return realtimeMediaAudioInstalledOwner == audioOwner
-                && isCurrentRealtimeMediaAudioInstalledOwner(audioOwner)
-        }
-        return realtimeMediaAudioInstalledOwner == nil
+        return expected.audioBindingRequirement.isSatisfied(by: currentConfigurationAudioOwner)
+    }
+
+    private var currentConfigurationAudioOwner: RealtimeMediaAudioInstalledOwner? {
+        guard let owner = realtimeMediaAudioInstalledOwner,
+              isCurrentRealtimeMediaAudioInstalledOwner(owner) else { return nil }
+        return owner
     }
 
     private func retireViewerStreamConfigurationSendOwner(
@@ -4272,18 +4298,23 @@ public class RemoteDesktopManager: ObservableObject {
             transaction: expected.transaction,
             operationWitness: expected.operationWitness,
             transportOwner: expected.transportOwner,
-            audioInstalledOwner: audioInstalledOwner,
+            audioBindingRequirement: .exact(audioInstalledOwner),
             acknowledgementExpectation: expected.acknowledgementExpectation
         )
     }
 
     private func retireActiveViewerStreamConfigurationSendOwner() {
+        lanConfigurationLane.reset()
+        lanConfigurationDeadlineTask?.cancel()
+        lanConfigurationDeadlineTask = nil
+        workspaceConfigurationWaiter.fail(CancellationError())
+        inputDispatcher.retire()
         let retiringOwner = activeStreamConfigurationSendOwner
         if let retiringOwner {
             setStreamMediaAdmission(false, for: retiringOwner)
         } else {
             realtimeMediaAudioStreamAdmission.setOpen(false)
-            if let crossNetworkOwner = crossNetwork.currentRemoteDesktopSessionOwner() {
+            if !isIsolatedLANViewer, let crossNetworkOwner = crossNetwork.currentRemoteDesktopSessionOwner() {
                 _ = crossNetwork.setRemoteDesktopNativeVideoAdmission(
                     false,
                     owner: crossNetworkOwner
@@ -4422,16 +4453,43 @@ public class RemoteDesktopManager: ObservableObject {
             )
             return
         }
+        do {
+            let changed = try controlAccessTracker.accept(ack.controlAccess)
+            if changed { inputDispatcher.retire() }
+            controlAccess = controlAccessTracker.access
+        } catch {
+            workspaceConfigurationWaiter.fail(error)
+            let failureOwner = owner.transportOwner
+            Task { [weak self] in
+                guard let self, self.isCurrentTransportFailureOwner(failureOwner) else { return }
+                await self.handleTransportFailure(error.localizedDescription)
+            }
+            return
+        }
         acknowledgedStreamConfigurationTransaction = owner.transaction
+        sessionTerminationContract = RemoteDesktopSessionTerminationContract(acknowledgement: ack)
+        workspaceConfigurationWaiter.acknowledge(owner.transaction)
+        objectWillChange.send()
+        configureSessionClipboardSync()
         negotiatedFramePresentationAckVersion = ack.framePresentationAckVersion
             == RemoteDesktopFramePresentationAcknowledgement.currentVersion
             ? RemoteDesktopFramePresentationAcknowledgement.currentVersion
             : nil
         framePresentationAcknowledgementGate.reset()
-        setStreamMediaAdmission(true, for: owner)
+        setStreamMediaAdmission(owner.acknowledgementExpectation.screenFrameTransport != "stopped", for: owner)
         streamConfigurationAckTask?.cancel()
         streamConfigurationAckTask = nil
         lastAcknowledgedMediaAudioEndpointPresent = ack.audioEndpointPresent
+        scheduleAcknowledgedMediaStartupWatchdogs(for: owner)
+        if activeTransportMode == .lan,
+           lanConfigurationLane.awaits(owner.transaction, owner: owner.transportOwner) {
+            let next = lanConfigurationLane.acknowledge(owner.transaction, owner: owner.transportOwner)
+            lanConfigurationDeadlineTask?.cancel()
+            lanConfigurationDeadlineTask = nil
+            if let next {
+                Task { @MainActor [weak self] in await self?.sendLANConfiguration(next) }
+            }
+        }
         let sessionReference = Self.sessionEvidenceReference(owner.transportOwner)
         let streamReference = P2PEvidenceReference.transaction(owner.transaction.id)
         SkyBridgeLogger.shared.info(
@@ -4442,11 +4500,121 @@ public class RemoteDesktopManager: ObservableObject {
         )
     }
 
+    private func handleSessionTermination(_ payload: Data) async throws {
+        let termination = try JSONDecoder().decode(RemoteDesktopSessionTermination.self, from: payload)
+        guard activeTransportMode == .lan, lanSessionKeys != nil,
+              let contract = sessionTerminationContract,
+              let owner = currentTransportFailureOwner(), isCurrentTransportFailureOwner(owner) else {
+            throw RemoteDesktopSessionTermination.ValidationError.notNegotiated
+        }
+        try contract.validate(termination)
+        let message: String
+        switch termination.reason {
+        case .userStopped: message = RuntimeLocalization.string("remote.session.hostStopped")
+        case .permissionRevoked: message = RuntimeLocalization.string("remote.session.permissionRevoked")
+        case .captureFailed: message = RuntimeLocalization.string("remote.session.captureFailed")
+        }
+        await handleTransportFailure(message, owner: owner, hostTerminationReason: termination.reason)
+    }
+
+    private func handleStreamConfigurationRejection(_ payload: Data) async throws {
+        let rejection = try JSONDecoder().decode(RemoteDesktopStreamConfigurationRejection.self, from: payload)
+        guard isStreaming, !isReadOnlyCameraSession,
+              let owner = activeStreamConfigurationSendOwner,
+              isCurrentViewerStreamConfigurationSendOwner(owner),
+              owner.transaction == rejection.transaction,
+              acknowledgedStreamConfigurationTransaction != rejection.transaction else {
+            throw RemoteDesktopError.streamingFailed(RuntimeLocalization.string("remote.error.invalidConfigurationResponse"))
+        }
+        let key = RemoteDesktopViewerStreamConfigurationPushPolicy.rejectionLocalizationKey(code: rejection.code)
+        SkyBridgeLogger.shared.error("Remote stream configuration rejected: code=\(rejection.code) stream_ref=\(P2PEvidenceReference.transaction(rejection.transaction.id))")
+        await handleTransportFailure(RuntimeLocalization.string(key), owner: owner.transportOwner)
+    }
+
+    func handleCrossNetworkSessionTermination(_ payload: Data) {
+        // This viewer requests v1 only on LAN. A cross-network peer cannot infer permission
+        // from the enum being decodable; reject through that exact transport's failure owner.
+        guard activeTransportMode == .crossNetwork, let owner = currentTransportFailureOwner() else { return }
+        Task { [weak self] in
+            guard let self, self.isCurrentTransportFailureOwner(owner) else { return }
+            do { try await self.handleSessionTermination(payload) }
+            catch {
+                guard self.isCurrentTransportFailureOwner(owner) else { return }
+                await self.handleTransportFailure(error.localizedDescription, owner: owner)
+            }
+        }
+    }
+
+    func handleCrossNetworkStreamConfigurationRejection(_ payload: Data) {
+        guard activeTransportMode == .crossNetwork, let owner = currentTransportFailureOwner() else { return }
+        Task { [weak self] in
+            guard let self, self.isCurrentTransportFailureOwner(owner) else { return }
+            do { try await self.handleStreamConfigurationRejection(payload) }
+            catch {
+                guard self.isCurrentTransportFailureOwner(owner) else { return }
+                await self.handleTransportFailure(error.localizedDescription, owner: owner)
+            }
+        }
+    }
+
+    func handleControlAccessUpdate(_ access: RemoteControlAccess) throws {
+        guard controlAccessTracker.hasAcknowledgement, controlAccessTracker.access != nil else {
+            throw RemoteControlAccess.ValidationError.negotiationChanged
+        }
+        if try controlAccessTracker.accept(access) { inputDispatcher.retire() }
+        controlAccess = controlAccessTracker.access
+        configureSessionClipboardSync()
+    }
+
+    func handleCrossNetworkControlAccessPayload(_ payload: Data) {
+        guard activeTransportMode == .crossNetwork, let owner = currentTransportFailureOwner() else { return }
+        do {
+            try handleControlAccessUpdate(JSONDecoder().decode(RemoteControlAccess.self, from: payload))
+        } catch {
+            Task { [weak self] in
+                guard let self, self.isCurrentTransportFailureOwner(owner) else { return }
+                await self.handleTransportFailure(error.localizedDescription)
+            }
+        }
+    }
+
+    private func scheduleAcknowledgedMediaStartupWatchdogs(for owner: ViewerStreamConfigurationSendOwner) {
+        guard owner.acknowledgementExpectation.screenFrameTransport != "stopped" else { return }
+        let audioOwner = owner.audioBindingRequirement.requiredOwner
+        let admission = startupWatchdogAdmission.acknowledge(audioOwner: audioOwner)
+        if admission.startVideo {
+            startStreamContinuityWatchdog(for: streamEpoch)
+            scheduleFirstFrameWatchdog(for: streamEpoch)
+        }
+        guard admission.startAudio else { return }
+        guard let audioOwner,
+              let renderer = realtimeMediaAudioRenderer,
+              let endpoint = realtimeMediaAudioEndpoint,
+              let sessionId = realtimeMediaAudioReceiverSessionId else {
+            Task { [weak self] in
+                await self?.handleTransportFailure(
+                    "已确认配置的音频接收器不可用", owner: owner.transportOwner
+                )
+            }
+            return
+        }
+        scheduleRealtimeMediaAudioStartupDiagnostic(
+            sessionId: sessionId, endpoint: endpoint, renderer: renderer,
+            mode: audioOwner.mode, installedOwner: audioOwner
+        )
+        scheduleRealtimeMediaAudioNoTrafficRecovery(
+            sessionId: sessionId, endpoint: endpoint, renderer: renderer,
+            mode: audioOwner.mode, installedOwner: audioOwner
+        )
+    }
+
     private func setStreamMediaAdmission(
         _ admitted: Bool,
         for owner: ViewerStreamConfigurationSendOwner
     ) {
-        realtimeMediaAudioStreamAdmission.setOpen(admitted)
+        realtimeMediaAudioStreamAdmission.setOpen(
+            admitted && owner.audioBindingRequirement.requiresAudioBinding
+        )
         guard let crossNetworkOwner = owner.transportOwner.crossNetworkOwner else { return }
         _ = crossNetwork.setRemoteDesktopNativeVideoAdmission(
             admitted,
@@ -4577,6 +4745,7 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func resetStreamConfigurationAckState() {
+        startupWatchdogAdmission = .init()
         retireActiveViewerStreamConfigurationSendOwner()
         lastAcknowledgedMediaAudioEndpointPresent = false
     }
@@ -5094,7 +5263,7 @@ public class RemoteDesktopManager: ObservableObject {
                 await relayTransport.stop()
                 return
             }
-            guard let sendOwner = beginViewerStreamConfigurationSend(
+            guard let sendOwner = try await beginViewerStreamConfigurationSend(
                 payload: &payload,
                 operationWitness: operationWitness,
                 transportOwner: transportOwner,
@@ -5964,36 +6133,134 @@ public class RemoteDesktopManager: ObservableObject {
 
     // MARK: - Input Events
 
-    /// 发送鼠标/触控事件
-    public func sendMouseEvent(_ event: MouseEvent) async {
-        guard isStreaming,
-              !isReadOnlyCameraSession,
-              hasAcknowledgedActiveStreamConfiguration else { return }
-
-        do {
-            let data = try JSONEncoder().encode(event)
-            let message = RemoteMessage(type: .mouseEvent, payload: data)
-            try await sendMessage(message)
-            noteViewerInteraction(kind: "mouse")
-        } catch {
-            SkyBridgeLogger.shared.error("❌ 发送鼠标事件失败: \(error.localizedDescription)")
+    private func cancelViewerTransport(for context: RemoteDesktopInputContext) {
+        guard currentConnection?.id == context.connectionID, streamEpoch == context.streamEpoch,
+              let owner = currentTransportFailureOwner() else { return }
+        if activeTransportMode == .lan { networkConnection?.cancel() }
+        Task { [weak self] in
+            await self?.handleTransportFailure(
+                RemoteDesktopOperationDeadline.Failure.expired(.inputRelease).localizedDescription,
+                owner: owner
+            )
         }
     }
 
-    /// 发送键盘事件
-    public func sendKeyboardEvent(_ event: KeyboardEvent) async {
-        guard isStreaming,
-              !isReadOnlyCameraSession,
-              hasAcknowledgedActiveStreamConfiguration else { return }
+    private func stopOwnedCrossNetworkHeartbeat() {
+        if !isIsolatedLANViewer { crossNetwork.stopRemoteDesktopHeartbeat() }
+    }
 
-        do {
-            let data = try JSONEncoder().encode(event)
-            let message = RemoteMessage(type: .keyboardEvent, payload: data)
-            try await sendMessage(message)
-            noteViewerInteraction(kind: "keyboard")
-        } catch {
-            SkyBridgeLogger.shared.error("❌ 发送键盘事件失败: \(error.localizedDescription)")
+    private func currentInputContext(requiresFocus: Bool = true) -> RemoteDesktopInputContext? {
+        guard (!requiresFocus || (hasInputFocus && inputDispatcher.acceptsNewInput)),
+              isStreaming, !isReadOnlyCameraSession,
+              hasAcknowledgedActiveStreamConfiguration, controlAccessTracker.canSendInput,
+              let connection = currentConnection,
+              let transaction = acknowledgedStreamConfigurationTransaction else { return nil }
+        return RemoteDesktopInputContext(connectionID: connection.id, streamEpoch: streamEpoch,
+                                         transaction: transaction, access: controlAccessTracker.access)
+    }
+
+    func enqueueMouseEvent(_ event: MouseEvent, expectedConnectionID: String) {
+        guard let context = currentInputContext(), context.connectionID == expectedConnectionID else { return }
+        inputDispatcher.enqueue(.mouse(event), context: context)
+    }
+
+    public func sendMouseEvent(_ event: MouseEvent) async {
+        guard let context = currentInputContext() else { return }
+        inputDispatcher.enqueue(.mouse(event), context: context)
+        await inputDispatcher.drain()
+    }
+
+    public func sendKeyboardEvent(_ event: KeyboardEvent) async {
+        guard let context = currentInputContext() else { return }
+        inputDispatcher.enqueue(.keyboard(event), context: context)
+        await inputDispatcher.drain()
+    }
+
+    func releaseViewerInput() async throws {
+        try await inputDispatcher.releasePressedInput()
+    }
+
+    func releasePresentationInput() {
+        guard let owner = currentInputContext(requiresFocus: false) else { return }
+        let restoreFocus = hasInputFocus
+        let focusRevision = inputFocusRevision
+        hasInputFocus = false
+        Task { [weak self] in
+            guard let self, self.currentInputContext(requiresFocus: false) == owner else { return }
+            do {
+                try await self.releaseViewerInput()
+                if restoreFocus, self.inputFocusRevision == focusRevision,
+                   self.currentInputContext(requiresFocus: false) == owner {
+                    self.hasInputFocus = true
+                }
+            } catch is CancellationError { return }
+            catch {
+                guard self.currentInputContext(requiresFocus: false) == owner else { return }
+                await self.handleTransportFailure(error.localizedDescription)
+            }
         }
+    }
+
+    func setWorkspaceInputFocus(_ focused: Bool) {
+        inputFocusRevision &+= 1
+        hasInputFocus = focused
+        configureSessionClipboardSync()
+    }
+
+    func waitForWorkspaceConfigurationAcknowledgement() async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now + RemoteControlStartupTiming.acknowledgementTimeout(
+            hasApprovedSession: controlAccessTracker.hasAcknowledgement,
+            configurationTimeout: .seconds(10)
+        )
+        while clock.now < deadline {
+            try Task.checkCancellation()
+            guard let owner = activeStreamConfigurationSendOwner,
+                  isCurrentViewerStreamConfigurationSendOwner(owner) else {
+                throw RemoteDesktopError.streamingFailed("远控配置没有可等待的当前事务")
+            }
+            if acknowledgedStreamConfigurationTransaction != owner.transaction {
+                do {
+                    try await workspaceConfigurationWaiter.wait(for: owner.transaction, timeout: deadline - clock.now)
+                } catch RemoteDesktopConfigurationWaiter.Failure.superseded {
+                    continue
+                }
+            }
+            if isCurrentViewerStreamConfigurationSendOwner(owner),
+               acknowledgedStreamConfigurationTransaction == owner.transaction {
+                return
+            }
+        }
+        throw RemoteDesktopError.timeout
+    }
+
+    func pauseWorkspaceStream() async throws {
+        hasInputFocus = false
+        configureSessionClipboardSync()
+        try await releaseViewerInput()
+        guard isStreaming else { return }
+        guard let operationWitness = sessionMutationGate.captureOperationWitness(),
+              let transportOwner = currentTransportFailureOwner() else {
+            throw RemoteDesktopError.disconnected
+        }
+        isWorkspaceSuspending = true
+        lanConfigurationLane.reset()
+        lanConfigurationDeadlineTask?.cancel()
+        lanConfigurationDeadlineTask = nil
+        defer { isWorkspaceSuspending = false }
+        pendingViewerSettingsTask?.cancel()
+        pendingViewerSettingsTask = nil
+        realtimeMediaAudioReceiverStartTask?.cancel()
+        realtimeMediaAudioReceiverStartTask = nil
+        var payload = makeViewerStreamStopConfigurationPayload()
+        guard let owner = try await beginViewerStreamConfigurationSend(
+            payload: &payload, operationWitness: operationWitness,
+            transportOwner: transportOwner, expectedAudioEndpointPresent: false
+        ) else { throw CancellationError() }
+        try await sendViewerStreamConfigurationPayload(payload, retryAttempt: nil, owner: owner)
+        lastSentStreamConfiguration = payload
+        try await waitForWorkspaceConfigurationAcknowledgement()
+        await finishStoppingStream(sendStopConfiguration: false)
     }
 
     // MARK: - Private Methods - Device Resolution
@@ -6042,6 +6309,7 @@ public class RemoteDesktopManager: ObservableObject {
         lanHandshakeDriver = nil
         lanEstablishedArbiterLease = nil
         lanSessionKeys = nil
+        sessionTerminationContract = nil
         lanReceiveLoopConnectionID = nil
         lanSOAPairKey = nil
         lanSecureReplayWindow = RemoteControlSecureReplayWindow()
@@ -6087,7 +6355,7 @@ public class RemoteDesktopManager: ObservableObject {
 
         let resolvedBootstrapPeer = connectionManager.resolvedPeerDevice(for: bootstrapDevice)
         let readiness = try await connectionManager.requestPairingIdentityExchangeBootstrapReadiness(
-            with: resolvedBootstrapPeer.id,
+            with: resolvedBootstrapPeer,
             timeout: .seconds(8)
         )
         let bootstrapReady = readiness.isReady
@@ -6159,13 +6427,16 @@ public class RemoteDesktopManager: ObservableObject {
             expectedRemoteAuthority: trustedAuthority
         )
 
-        try await skyBridgeCore.initialize(policy: .requirePQC)
+        let candidates = PeerIdentityAliasResolver.lookupCandidates(for: trustedPeerId)
+        let plan = try await CryptoProviderFactory.captureLANHandshakePlan(candidates: candidates,
+            pinnedFingerprints: trustProvider.trustedFingerprints(for: trustedPeerId))
 
         let transport = NWConnectionTransport()
         await transport.setConnection(connection, for: trustedPeerId)
         lanHandshakeTransport = transport
         lanHandshakePeerId = trustedPeerId
         lanSessionKeys = nil
+        sessionTerminationContract = nil
         lanReceiveLoopConnectionID = nil
         lanSecureReplayWindow = RemoteControlSecureReplayWindow()
         lanSecureSendCounter = 0
@@ -6224,16 +6495,18 @@ public class RemoteDesktopManager: ObservableObject {
             expectedRemoteSOAPeerId: expectedRemoteSOAPeerId,
             trustProvider: trustProvider,
             soaSessionScope: .remoteControl,
-            onDriverCreated: { driver in
+            onDriverCreated: { [weak self] driver in
                 await MainActor.run {
-                    RemoteDesktopManager.instance.installLANHandshakeDriver(
+                    guard let self else { return }
+                    self.installLANHandshakeDriver(
                         driver,
                         forConnectionID: connectionID,
                         peerId: trustedPeerId
                     )
-                    RemoteDesktopManager.instance.startReceiving()
+                    self.startReceiving()
                 }
-            }
+            },
+            lanPlan: plan
         )
 
         guard let establishedDriver = lanHandshakeDriver else {
@@ -6274,12 +6547,10 @@ public class RemoteDesktopManager: ObservableObject {
                 try await Task.sleep(for: .milliseconds(100))
                 continue
             case .current:
-                try installLANSecureSessionKeys(
-                    keys,
-                    peerId: trustedPeerId,
-                    source: "performHandshake-return"
-                )
-                lanEstablishedArbiterLease = establishedLease
+                try plan.withCurrent {
+                    try installLANSecureSessionKeys(keys, peerId: trustedPeerId, source: "performHandshake-return")
+                    lanEstablishedArbiterLease = establishedLease
+                }
                 return
             }
         }
@@ -6350,10 +6621,12 @@ public class RemoteDesktopManager: ObservableObject {
         }
         if shouldResumeReceiveAfterCommit,
            let connection = networkConnection,
-           lanReceiveLoopConnectionID == ObjectIdentifier(connection) {
+           lanReceiveLoopConnectionID == ObjectIdentifier(connection),
+           let readFence = lanReceiveReadFence, readFence.connectionID == ObjectIdentifier(connection) {
             receiveNextLANChunk(
                 from: connection,
-                secureContext: makeLANSecureReceiveContextIfAvailable(for: connection)
+                secureContext: makeLANSecureReceiveContextIfAvailable(for: connection),
+                readFence: readFence
             )
         }
     }
@@ -6700,12 +6973,13 @@ public class RemoteDesktopManager: ObservableObject {
         var length = UInt32(payload.count).bigEndian
         var framedData = Data(bytes: &length, count: 4)
         framedData.append(payload)
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        let deadline = RemoteDesktopOperationDeadline(cancelResource: { connection.cancel() })
+        try await deadline.run(timeout: .seconds(3), phase: .lanWrite) { finish in
             connection.send(content: framedData, completion: .contentProcessed { error in
-                if let error = error {
-                    continuation.resume(throwing: RemoteDesktopError.streamingFailed(error.localizedDescription))
+                if let error {
+                    finish(.failure(RemoteDesktopError.streamingFailed(error.localizedDescription)))
                 } else {
-                    continuation.resume()
+                    finish(.success(()))
                 }
             })
         }
@@ -6721,12 +6995,14 @@ public class RemoteDesktopManager: ObservableObject {
             return
         }
         lanReceiveLoopConnectionID = connectionID
+        let readFence = LANReceiveReadFence(connectionID: connectionID)
+        lanReceiveReadFence = readFence
         if lanSessionKeys == nil {
             resetLANReceiveParserState()
         } else {
             SkyBridgeLogger.shared.debug("ℹ️ LAN secure session 已存在，保留接收管线状态并启动接收循环")
         }
-        receiveNextLANChunk(from: connection, secureContext: makeLANSecureReceiveContextIfAvailable(for: connection))
+        receiveNextLANChunk(from: connection, secureContext: makeLANSecureReceiveContextIfAvailable(for: connection), readFence: readFence)
     }
 
     private func makeLANSecureReceiveContextIfAvailable(for connection: NWConnection) -> LANSecureReceiveLoopContext? {
@@ -6748,24 +7024,20 @@ public class RemoteDesktopManager: ObservableObject {
 
     private nonisolated func receiveNextLANChunk(
         from connection: NWConnection,
-        secureContext: LANSecureReceiveLoopContext? = nil
+        secureContext: LANSecureReceiveLoopContext? = nil,
+        readFence: LANReceiveReadFence
     ) {
+        guard readFence.connectionID == ObjectIdentifier(connection) else { return }
+        readFence.beginRead()
         connection.receive(
             minimumIncompleteLength: 1,
             maximumLength: RemoteDesktopManagerRuntimeLimits.lanReceiveChunkMaxBytes
         ) { [weak self] data, _, isComplete, error in
             let receivedAt = Date()
             if let secureContext {
+                defer { readFence.endRead() }
                 let receiveContext = secureContext.receiveContext
                 let shouldContinueReceiving = error == nil && !isComplete
-
-                if let error {
-                    Task { @MainActor [weak self] in
-                        guard let self, self.isCurrentLANConnectionID(receiveContext.connectionID) else { return }
-                        await self.handleTransportFailure(error.localizedDescription)
-                    }
-                    return
-                }
 
                 if let chunk = data, !chunk.isEmpty {
                     secureContext.scheduler.scheduleChunk(
@@ -6785,14 +7057,15 @@ public class RemoteDesktopManager: ObservableObject {
                 }
 
                 if shouldContinueReceiving {
-                    self?.receiveNextLANChunk(from: connection, secureContext: secureContext)
+                    self?.receiveNextLANChunk(from: connection, secureContext: secureContext, readFence: readFence)
                 }
 
-                if isComplete {
-                    Task { @MainActor [weak self] in
-                        guard let self, self.isCurrentLANConnectionID(receiveContext.connectionID) else { return }
-                        await self.handleTransportFailure(
-                            RemoteDesktopError.disconnected.errorDescription ?? "连接已断开"
+                if error != nil || isComplete {
+                    let reason = error?.localizedDescription
+                        ?? (RemoteDesktopError.disconnected.errorDescription ?? "连接已断开")
+                    secureContext.scheduler.scheduleTerminal(context: receiveContext) { [weak self] connectionID, generation in
+                        await self?.handleSecureLANTerminalEvent(
+                            reason: reason, connectionID: connectionID, generation: generation
                         )
                     }
                 }
@@ -6800,10 +7073,25 @@ public class RemoteDesktopManager: ObservableObject {
             }
 
             Task { @MainActor [weak self] in
+                defer { readFence.endRead() }
                 guard let self else { return }
                 guard self.isCurrentLANConnection(connection) else { return }
                 let shouldContinueReceiving = error == nil && !isComplete
 
+                // A read armed during bootstrap may finish after the exact initiator
+                // committed keys. Promote it to the same ordered secure terminal path.
+                if let context = self.makeLANSecureReceiveContextIfAvailable(for: connection) {
+                    if let chunk = data, !chunk.isEmpty {
+                        self.processSecureLANReceiveChunk(chunk, receivedAt: receivedAt, from: connection, keys: context.receiveContext.keys)
+                    }
+                    if error != nil || isComplete {
+                        self.enqueueSecureLANTerminal(error?.localizedDescription ?? (RemoteDesktopError.disconnected.errorDescription ?? "连接已断开"),
+                            context: context.receiveContext)
+                    } else {
+                        self.receiveNextLANChunk(from: connection, secureContext: context, readFence: readFence)
+                    }
+                    return
+                }
                 if let error = error {
                     await self.handleTransportFailure(error.localizedDescription)
                     return
@@ -6838,9 +7126,12 @@ public class RemoteDesktopManager: ObservableObject {
                 }
 
                 if isComplete {
-                    await self.handleTransportFailure(
-                        RemoteDesktopError.disconnected.errorDescription ?? "连接已断开"
-                    )
+                    if let context = self.makeLANSecureReceiveContextIfAvailable(for: connection) {
+                        self.enqueueSecureLANTerminal(RemoteDesktopError.disconnected.errorDescription ?? "连接已断开",
+                            context: context.receiveContext)
+                    } else {
+                        await self.handleTransportFailure(RemoteDesktopError.disconnected.errorDescription ?? "连接已断开")
+                    }
                     return
                 }
 
@@ -6855,7 +7146,8 @@ public class RemoteDesktopManager: ObservableObject {
                         self.isLANReceiveResumePendingAfterInitiatorCommit = false
                         self.receiveNextLANChunk(
                             from: connection,
-                            secureContext: self.makeLANSecureReceiveContextIfAvailable(for: connection)
+                            secureContext: self.makeLANSecureReceiveContextIfAvailable(for: connection),
+                            readFence: readFence
                         )
                     }
                 }
@@ -6906,12 +7198,51 @@ public class RemoteDesktopManager: ObservableObject {
                 generation: generation
             )
         case .failure(let error):
+            await lanSecureReceiveApplyChain?.value
             await handleSecureLANReceiveFailure(
                 error,
                 connectionID: connectionID,
                 generation: generation
             )
         }
+    }
+
+    private func enqueueSecureLANTerminal(_ reason: String, context: LANSecureReceiveContext) {
+        lanSecureReceiveScheduler.scheduleTerminal(context: context) { [weak self] connectionID, generation in
+            await self?.handleSecureLANTerminalEvent(reason: reason, connectionID: connectionID, generation: generation)
+        }
+    }
+
+    private func handleLANStateTerminal(_ reason: String, connection: NWConnection) async {
+        guard isCurrentLANConnection(connection) else { return }
+        guard lanSessionKeys != nil else { await handleTransportFailure(reason); return }
+        let generation = lanSecureReceiveGeneration
+        do {
+            if let fence = lanReceiveReadFence, fence.connectionID == ObjectIdentifier(connection) {
+                try await fence.waitUntilIdle()
+            }
+        } catch {
+            guard isCurrentLANConnection(connection), generation == lanSecureReceiveGeneration else { return }
+            // A failed native read may not retain this connection indefinitely. No
+            // authenticated end evidence was available to this terminal boundary.
+            await handleTransportFailure(reason)
+            return
+        }
+        guard isCurrentLANConnection(connection), generation == lanSecureReceiveGeneration,
+              let keys = lanSessionKeys else { return }
+        enqueueSecureLANTerminal(reason, context: .init(connectionID: ObjectIdentifier(connection), generation: generation,
+            keys: keys, pipeline: lanSecureReceivePipeline))
+    }
+
+    private func handleSecureLANTerminalEvent(
+        reason: String, connectionID: ObjectIdentifier, generation: UInt64
+    ) async {
+        // Parsing schedules application separately. Let a verified final rejection
+        // acquire its existing failure owner before an EOF can replace its reason.
+        await lanSecureReceiveApplyChain?.value
+        guard isCurrentLANConnectionID(connectionID),
+              generation == lanSecureReceiveGeneration else { return }
+        await handleTransportFailure(reason)
     }
 
     private func scheduleSecureLANReceiveApply(
@@ -7327,6 +7658,12 @@ public class RemoteDesktopManager: ObservableObject {
         case .overlayUpdate:
             let payload = try JSONDecoder().decode(RemoteDesktopOverlayPayload.self, from: message.payload)
             handleInboundOverlayUpdate(payload)
+        case .controlAccess:
+            try handleControlAccessUpdate(JSONDecoder().decode(RemoteControlAccess.self, from: message.payload))
+        case .sessionEnded:
+            try await handleSessionTermination(message.payload)
+        case .streamConfigurationRejected:
+            try await handleStreamConfigurationRejection(message.payload)
         case .streamConfigurationAck:
             let ack = try JSONDecoder().decode(
                 RemoteDesktopStreamConfigurationAcknowledgement.self,

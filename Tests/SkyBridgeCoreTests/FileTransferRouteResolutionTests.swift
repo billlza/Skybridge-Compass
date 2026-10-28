@@ -4,6 +4,49 @@ import Network
 
 @MainActor
 final class FileTransferRouteResolutionTests: XCTestCase {
+    func testBonjourConnectionUsesIdentityExchangePeerForPublishedFileRoute() async throws {
+        let peerID = UUID().uuidString.lowercased()
+        let routeID = "bonjour:test-\(UUID().uuidString)._skybridge._tcp.local."
+        let socket = NWConnection(host: "127.0.0.1", port: 9, using: .tcp)
+        defer { socket.cancel() }
+        let connection = P2PConnection(
+            device: P2PDevice(
+                id: routeID, name: "Same display name", type: .iOS,
+                address: "127.0.0.1", port: 9, osVersion: "test",
+                capabilities: [], publicKey: Data(), lastSeen: Date()
+            ),
+            connection: socket
+        )
+        // Model the already accepted encrypted identity exchange, not a new handshake.
+        connection.testingSetClassicTransferRemoteIdentity(deviceId: peerID)
+        _ = ConnectionPresenceService.shared.publishConnectedAtomically(
+            peerId: peerID, displayName: "Same display name", address: "127.0.0.1",
+            cryptoKind: "PQC", suite: "X-Wing",
+            routeDescriptor: .init(
+                peerId: peerID, deviceName: "Same display name",
+                displayAddress: "127.0.0.1", transferAddress: "127.0.0.1",
+                transferPort: 8080, routeSource: .inbound
+            )
+        )
+        defer { ConnectionPresenceService.shared.markDisconnected(peerId: peerID) }
+        let historyStore = CodablePersistenceStore<[PersistedFileTransferHistoryEntry]>(
+            location: .protectedApplicationSupport(path: "FileTransferRouteTests/\(UUID().uuidString).json"),
+            rootDirectoryName: "SkyBridgeStateTests"
+        )
+        defer { XCTAssertNoThrow(try historyStore.remove()) }
+        let manager = FileTransferManager(historyStore: historyStore)
+        let oldSelection = await manager.resolveActivePeerRoutes(
+            matchingPeerIds: [connection.device.deviceId], preferredDeviceName: "Same display name"
+        )
+        XCTAssertTrue(oldSelection.isEmpty, "A route label must not gain identity through a name match.")
+        let selected = await manager.resolveActivePeerRoutes(
+            matchingPeerIds: [connection.classicTransferResolvedPeerDeviceId()]
+        )
+        XCTAssertEqual(connection.classicTransferResolvedPeerDeviceId(), "id:\(peerID)")
+        XCTAssertEqual(selected.map(\.deviceId), ["id:\(peerID)"])
+        XCTAssertEqual(selected.first?.port, 8080)
+    }
+
     func testRouteRetryPolicyRequiresExactlyOneNormalizedTarget() {
         XCTAssertTrue(
             ClassicTransferRouteRetryPolicy.hasSingleTarget(
@@ -885,7 +928,9 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         )
 
         XCTAssertTrue(source.contains("FileTransferConstants.defaultPort"))
-        XCTAssertTrue(source.contains("cancelPeerProtectionRoots(for: runtimePeerId)"))
+        XCTAssertTrue(source.contains("cancelPeerProtectionRoots(for: runtimePeerId, resetReconnectBudget: true)"))
+        XCTAssertTrue(source.contains("cancelPeerProtectionRoots(for: runtimePeerId, resetReconnectBudget: false)"))
+        XCTAssertTrue(source.contains("if resetReconnectBudget {"))
         XCTAssertTrue(source.contains("cancelPathRecoveryTask(deviceId: key)"))
         XCTAssertTrue(source.contains("pathRecoveryTasks.removeValue(forKey: deviceId)?.cancel()"))
         XCTAssertTrue(source.contains("bootstrapRekeyTasks[key]?.cancel()"))
@@ -1039,9 +1084,9 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         )
 
         XCTAssertTrue(source.contains("ensureClassicTransferIdentityBridgeReady(for: resolvedDevice)"))
-        XCTAssertTrue(source.contains("connectionManager.sendPairingIdentityExchange(to: device.id)"))
-        XCTAssertTrue(source.contains("connectionManager.hasCurrentPairingIdentityExchangeActivity("))
-        XCTAssertTrue(source.contains("waitForPairingIdentityExchangeActivity"))
+        XCTAssertTrue(source.contains("connectionManager.requestPairingIdentityExchangeBootstrapReadiness("))
+        XCTAssertTrue(source.contains("requirement: .acceptedIdentity"))
+        XCTAssertTrue(source.contains("guard let receipt = readiness.receipt else"))
         XCTAssertTrue(p2pSource.contains("pairingIdentityObservationAliases(for: deviceId)"))
         XCTAssertTrue(
             p2pSource.contains(
@@ -1053,7 +1098,7 @@ final class FileTransferRouteResolutionTests: XCTestCase {
                 "expectedSessionId: current.receipt.sessionId"
             )
         )
-        XCTAssertTrue(source.contains("P2P pairing identity exchange 未被对端确认，拒绝启动经典文件传输"))
+        XCTAssertTrue(source.contains("当前认证会话的 pairing identity exchange 未在期限内确认，拒绝启动经典文件传输"))
         XCTAssertTrue(source.contains("stage: \"identity_bridge_send_failed\""))
         XCTAssertTrue(source.contains("stage: \"identity_bridge_not_confirmed\""))
         XCTAssertTrue(source.contains("stage: \"route_resolution_missing_transfer_endpoint\""))
@@ -1095,30 +1140,30 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         let bridgeBody = String(
             source[bridgeStart.lowerBound..<bridgeEnd.lowerBound]
         )
-        let currentObservationCheck = try XCTUnwrap(
-            bridgeBody.range(
-                of: "hasCurrentPairingIdentityExchangeActivity("
-            )
+        let requestReadiness = try XCTUnwrap(
+            bridgeBody.range(of: "requestPairingIdentityExchangeBootstrapReadiness(")
         )
-        let networkSend = try XCTUnwrap(
-            bridgeBody.range(of: "sendPairingIdentityExchange(to: device.id)")
+        let requireReceipt = try XCTUnwrap(bridgeBody.range(of: "guard let receipt = readiness.receipt else"))
+        let requireCurrent = try XCTUnwrap(
+            bridgeBody.range(of: "requireCurrentPairingIdentityBootstrapReadiness(receipt)")
         )
-        let previousConfirmationReturn = try XCTUnwrap(
-            bridgeBody.range(
-                of: "if wasPreviouslyConfirmed {",
-                range: networkSend.upperBound..<bridgeBody.endIndex
-            )
-        )
-        XCTAssertLessThan(
-            currentObservationCheck.lowerBound,
-            networkSend.lowerBound,
-            "A current-session pairing identity observation must satisfy the bridge before a duplicate request can be rate-limited."
-        )
-        XCTAssertLessThan(
-            networkSend.lowerBound,
-            previousConfirmationReturn.lowerBound,
-            "A confirmation from an older session must not suppress the current session's identity refresh."
-        )
+        XCTAssertLessThan(requestReadiness.lowerBound, requireReceipt.lowerBound)
+        XCTAssertLessThan(requireReceipt.lowerBound, requireCurrent.lowerBound)
+        XCTAssertTrue(p2pSource.contains("requireCurrent: { try self.requireCurrentAuthenticatedConnection(current.receipt) }"))
+        XCTAssertTrue(p2pSource.contains("current.receipt.lease.generation == receipt.connectionGeneration"))
+        XCTAssertTrue(p2pSource.contains("current.receipt.sessionId == receipt.sessionId"))
+        XCTAssertTrue(p2pSource.contains("switch pairingIdentityEvidenceState(matching: receipt)"))
+        // Resolving a live endpoint is another actor hop; recheck the same receipt afterwards.
+        let endpointAwait = try XCTUnwrap(source.range(of: "let endpoints = try await makeTransferEndpointCandidates(for: resolvedDevice)"))
+        let postEndpointCheck = try XCTUnwrap(source.range(
+            of: "requireCurrentPairingIdentityBootstrapReadiness(identityReceipt)",
+            range: endpointAwait.upperBound..<source.endIndex
+        ))
+        let securityContext = try XCTUnwrap(source.range(
+            of: "let securityContext = try classicTransferSecurityContext(",
+            range: endpointAwait.upperBound..<source.endIndex
+        ))
+        XCTAssertLessThan(postEndpointCheck.lowerBound, securityContext.lowerBound)
 
         let handlerStart = try XCTUnwrap(
             p2pSource.range(of: "private func handlePairingIdentityExchangeRequest(")
@@ -1276,7 +1321,7 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         let commitRange = try XCTUnwrap(handler.range(of: ".commitAuthorityAndKEM("))
         let replyRange = try XCTUnwrap(
             handler.range(
-                of: "try await sendFramed(outPadded)",
+                of: "try await publishCurrentPairingIdentity(localIdentity.message, keys: keys)",
                 range: commitRange.lowerBound..<handler.endIndex
             )
         )
@@ -1290,6 +1335,19 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         XCTAssertTrue(handler.contains("PairingIdentityExchangeCommitCoordinator.isCurrent("))
         XCTAssertTrue(source.contains("protocolIdentityPublicKeys = try await Self.localProtocolIdentityPublicKeysForPairing()"))
         XCTAssertTrue(source.contains("protocolIdentityPublicKeys: protocolIdentityPublicKeys"))
+
+        let publisherStart = try XCTUnwrap(source.range(of: "func publishCurrentPairingIdentity("))
+        let publisherEnd = try XCTUnwrap(source.range(of: "func sendInboundPostAuthPairingIdentityExchange(",
+            range: publisherStart.upperBound..<source.endIndex))
+        let publisher = String(source[publisherStart.lowerBound..<publisherEnd.lowerBound])
+        XCTAssertTrue(publisher.contains("P2PAudioCapabilityPublication.send(over: connection)"))
+        XCTAssertTrue(publisher.contains("live.sessionId == keys.sessionId"))
+        XCTAssertTrue(publisher.contains("live.sendKey == keys.sendKey"))
+        XCTAssertTrue(publisher.contains("live.receiveKey == keys.receiveKey"))
+        XCTAssertTrue(publisher.contains("live.transcriptHash == keys.transcriptHash"))
+        let encrypt = try XCTUnwrap(publisher.range(of: "encryptAppPayload(plaintext, with: live)"))
+        let enqueue = try XCTUnwrap(publisher.range(of: "try enqueue(P2PControlFramePolicy.frame(body: padded))"))
+        XCTAssertLessThan(encrypt.lowerBound, enqueue.lowerBound)
     }
 
     func testAuthenticatedPairingIdentityBridgeStillRespectsPersistedRejectPolicy() async throws {
@@ -1638,7 +1696,16 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         XCTAssertTrue(source.contains("handleConnectionStateChange(state, for: device, lease: lease)"))
         XCTAssertTrue(source.contains("current.generation == lease.generation"))
         XCTAssertTrue(source.contains("&& current.connection === lease.connection"))
-        XCTAssertTrue(source.contains("guard connections.removeIfOwned(lease, for: runtimePeerId) != nil else"))
+        XCTAssertTrue(source.contains("guard removeTrackedConnectionIfOwned(lease, for: runtimePeerId) != nil else"))
+        let removalStart = try XCTUnwrap(source.range(of: "private func removeTrackedConnectionIfOwned("))
+        let removalEnd = try XCTUnwrap(source.range(of: "private func receiveAudioControl(",
+            range: removalStart.upperBound..<source.endIndex))
+        let removal = String(source[removalStart.lowerBound..<removalEnd.lowerBound])
+        let owned = try XCTUnwrap(removal.range(of: "guard let removed = connections.removeIfOwned(lease, for: peerId) else { return nil }"))
+        let invalidate = try XCTUnwrap(removal.range(of: "invalidateAudio(for: peerId, generation: lease.generation, forgetPeer: true, forgetHistory: true)"))
+        XCTAssertLessThan(owned.lowerBound, invalidate.lowerBound)
+        XCTAssertTrue(removal.contains("audioAdmissionByRuntimePeerId[peerId]?.generation == lease.generation"))
+        XCTAssertTrue(removal.contains("return removed"))
     }
 
     func testIOSFileTransferInboundMetadataFailuresFailClosed() throws {

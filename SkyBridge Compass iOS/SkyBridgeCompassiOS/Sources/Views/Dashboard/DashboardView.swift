@@ -7,8 +7,10 @@
 //
 
 import SwiftUI
+import SkyBridgeWeatherRendering
 import Foundation
 import Darwin
+import SkyBridgeProtocolCore
 
 // MARK: - Dashboard View
 
@@ -21,16 +23,19 @@ public struct DashboardView: View {
     @StateObject private var viewModel = DashboardViewModel.shared
     @StateObject private var discoveryManager = DeviceDiscoveryManager.instance
     @StateObject private var connectionManager = P2PConnectionManager.instance
+    @ObservedObject private var accountPresence = AccountPresenceService.shared
     @StateObject private var fileTransferManager = FileTransferManager.instance
     @StateObject private var remoteDesktopManager = RemoteDesktopManager.instance
     @StateObject private var settingsManager = SettingsManager.instance
     @StateObject private var crossNetworkManager = CrossNetworkWebRTCManager.instance
     @EnvironmentObject private var authManager: AuthenticationManager
+    @Environment(\.colorScheme) private var colorScheme
 
     @State private var selectedTab: DashboardTab = Self.initialSelectedTab
     @State private var loadedTabs: Set<DashboardTab> = [Self.initialSelectedTab]
     @State private var enableAnimatedBackground = false
     @State private var enableWeatherEffects = false
+    @State private var rainScene = WeatherRainScene()
     @State private var showingQRScanner = false
     @State private var showingSettings = false
     @State private var showingDeviceDetail: DiscoveredDevice?
@@ -39,6 +44,15 @@ public struct DashboardView: View {
     /// 扫码连接进行中：让 `.onChange(of: state)` 跳过失败弹窗，
     /// 改由 `handleScannedConnectLink` 在扫码 sheet 完全收起后单点呈现，避免双重 present。
     @State private var isHandlingScannedConnectLink = false
+    @State private var pendingLANConnection: LanDirectConnectionInfo?
+    @State private var deviceConnectionTask: Task<Void, Never>?
+    @State private var deviceConnectionOperationID: UUID?
+    @State private var deviceConnectionMessage: String?
+    @State private var isCancellingDeviceConnection = false
+    @State private var activeAccountSelection: IOSAccountConnectionSelection?
+    @State private var activeAccountRoute: IOSAccountLANRouteSelection?
+    @State private var connectedActionDevice: DiscoveredDevice?
+    @State private var deviceConnectionCancellationMessage: String?
     
     @Namespace private var animation
 
@@ -111,10 +125,40 @@ public struct DashboardView: View {
             .tag(DashboardTab.settings)
         }
         .accessibilityIdentifier("dashboard.root")
-        .tint(.cyan)
-        .preferredColorScheme(.dark)
+        .safeAreaInset(edge: .top) {
+            if let deviceConnectionMessage {
+                HStack(spacing: 12) {
+                    if deviceConnectionOperationID != nil { ProgressView() }
+                    Text(deviceConnectionMessage).font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    if deviceConnectionOperationID != nil {
+                        Button(isCancellingDeviceConnection ? "正在取消…" : "取消") {
+                            isCancellingDeviceConnection = true
+                            deviceConnectionTask?.cancel()
+                        }.disabled(isCancellingDeviceConnection)
+                    } else {
+                        if let device = connectedActionDevice {
+                            Button(RuntimeLocalization.string("设备操作")) { showingDeviceDetail = device }
+                                .accessibilityIdentifier("dashboard.connected.device.actions")
+                        }
+                        Button("关闭") { self.deviceConnectionMessage = nil; connectedActionDevice = nil }
+                    }
+                }
+                .padding(12)
+                .background(.regularMaterial)
+                .accessibilityIdentifier("dashboard.device.connection.status")
+            }
+        }
+        .tint(colorScheme == .dark ? .cyan : .blue)
         .onChange(of: selectedTab) { _, newValue in
             loadedTabs.insert(newValue)
+        }
+        .onChange(of: accountPresence.accountDevices) { _, _ in
+            cancelInvalidAccountConnection()
+        }
+        .onChange(of: accountPresence.connectionAccountGeneration) { _, _ in
+            cancelInvalidAccountConnection()
         }
         .task {
             loadedTabs.insert(selectedTab)
@@ -122,11 +166,18 @@ public struct DashboardView: View {
             await viewModel.start()
         }
         .onDisappear {
+            pendingLANConnection = nil
+            deviceConnectionTask?.cancel()
             guard !shouldSkipInteractiveStartup else { return }
             viewModel.stop()
         }
-        .sheet(isPresented: $showingQRScanner) {
+        .sheet(isPresented: $showingQRScanner, onDismiss: startPendingLANConnection) {
             QRCodeHubSheet(
+                onScanLANConnection: { info in
+                    guard deviceConnectionOperationID == nil else { throw IOSLanConnectionError.existingOperation }
+                    pendingLANConnection = info
+                    showingQRScanner = false
+                },
                 onScanConnectLink: { link in
                     handleScannedConnectLink(link)
                 },
@@ -186,6 +237,7 @@ public struct QuantumGlassBackground: View {
     @StateObject private var settingsManager = SettingsManager.instance
     @StateObject private var fileTransferManager = FileTransferManager.instance
     @StateObject private var remoteDesktopManager = RemoteDesktopManager.instance
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
@@ -194,15 +246,20 @@ public struct QuantumGlassBackground: View {
     private let enableAnimations: Bool
     private let enableWeatherEffects: Bool
     private let isHomeVisible: Bool
+    private let glassRegions: [WeatherGlassRegion]
+    private let rainScene: WeatherRainScene?
 
     public init(
         enableAnimations: Bool = true,
         enableWeatherEffects: Bool = true,
-        isHomeVisible: Bool = true
+        isHomeVisible: Bool = true,
+        glassRegions: [WeatherGlassRegion] = [], rainScene: WeatherRainScene? = nil
     ) {
         self.enableAnimations = enableAnimations
         self.enableWeatherEffects = enableWeatherEffects
         self.isHomeVisible = isHomeVisible
+        self.glassRegions = glassRegions
+        self.rainScene = rainScene
     }
 
     public var body: some View {
@@ -230,10 +287,14 @@ public struct QuantumGlassBackground: View {
         ZStack {
             // 1. Rich deep-space gradient (navy → deep indigo, NOT pure black)
             LinearGradient(
-                gradient: Gradient(colors: [
+                gradient: Gradient(colors: colorScheme == .dark ? [
                     Color(red: 0.04, green: 0.06, blue: 0.18),
                     Color(red: 0.06, green: 0.04, blue: 0.16),
                     Color(red: 0.03, green: 0.03, blue: 0.10)
+                ] : [
+                    Color(red: 0.91, green: 0.95, blue: 1.00),
+                    Color(red: 0.85, green: 0.89, blue: 0.98),
+                    Color(red: 0.95, green: 0.97, blue: 1.00)
                 ]),
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
@@ -273,7 +334,7 @@ public struct QuantumGlassBackground: View {
 
             // 4. Weather effects (independent lifecycle, must NOT be re-created per frame)
             DashboardWeatherEffectsBackgroundLayer(
-                isActive: shouldRunWeatherEffects
+                isActive: shouldRunWeatherEffects, glassRegions: glassRegions, rainScene: rainScene
             )
         }
         .id(animationPolicyGeneration)
@@ -402,12 +463,6 @@ private struct QuantumStarLayer: View {
     private var homeTab: some View {
         NavigationStack {
             ZStack {
-                QuantumGlassBackground(
-                    enableAnimations: enableAnimatedBackground,
-                    enableWeatherEffects: enableWeatherEffects,
-                    isHomeVisible: selectedTab == .home
-                )
-
                 ScrollView(showsIndicators: false) {
                     VStack(spacing: 16) {
                         welcomeSection
@@ -439,15 +494,28 @@ private struct QuantumStarLayer: View {
                             activeConnectionsSection
                         }
                     }
+                    .liquidGlassGroup()
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
                 }
                 .scrollContentBackground(.hidden)
+                .weatherGlassClippingRegion()
                 .background(Color.clear)
             }
+            .backgroundPreferenceValue(WeatherGlassPreferenceKey.self) { anchors in
+                GeometryReader { geometry in
+                    QuantumGlassBackground(
+                        enableAnimations: enableAnimatedBackground,
+                        enableWeatherEffects: enableWeatherEffects,
+                        isHomeVisible: selectedTab == .home,
+                        glassRegions: anchors.map { $0.resolve(in: geometry) }, rainScene: rainScene
+                    )
+                }
+                .ignoresSafeArea()
+            }
+            .overlay { WeatherRainGlassOverlay(scene: rainScene).ignoresSafeArea() }
             .navigationTitle(dashboardTitle)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarColorScheme(.dark, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     UserAvatarButton()
@@ -455,7 +523,7 @@ private struct QuantumStarLayer: View {
                 ToolbarItem(placement: .principal) {
                     Text(dashboardTitle)
                         .font(.headline.weight(.semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(.primary)
                         .lineLimit(1)
                 }
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
@@ -464,7 +532,7 @@ private struct QuantumStarLayer: View {
                     } label: {
                         Image(systemName: viewModel.isRefreshing ? "arrow.triangle.2.circlepath" : "arrow.clockwise")
                             .font(.system(size: 16, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.7))
+                            .foregroundStyle(LiquidGlass.supportingText)
                             .rotationEffect(.degrees(viewModel.isRefreshing ? 360 : 0))
                             .animation(viewModel.isRefreshing ? .linear(duration: 1).repeatForever(autoreverses: false) : .default, value: viewModel.isRefreshing)
                     }
@@ -476,7 +544,7 @@ private struct QuantumStarLayer: View {
                     } label: {
                         Image(systemName: "qrcode.viewfinder")
                             .font(.system(size: 16, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.7))
+                            .foregroundStyle(LiquidGlass.supportingText)
                     }
                     .accessibilityIdentifier("dashboard.qr.button")
                 }
@@ -510,7 +578,7 @@ private struct QuantumStarLayer: View {
             // 设备图标 (Glassy)
             ZStack {
                 Circle()
-                    .fill(.ultraThinMaterial)
+                    .fill(Color.cyan.opacity(0.12))
                     .frame(width: 60, height: 60)
                 
                 Image(systemName: "iphone")
@@ -528,17 +596,17 @@ private struct QuantumStarLayer: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(AppleMobileDeviceIdentity.currentSnapshot().deviceName)
                     .font(.headline)
-                    .foregroundColor(.white)
+                    .foregroundStyle(.primary)
                     .lineLimit(1)
 
                 Text("\(Self.currentModelDisplayName) · \(Self.currentChipDisplayName)")
                     .font(.caption)
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(LiquidGlass.supportingText)
                     .lineLimit(1)
                 
                 Text("iOS \(UIDevice.current.systemVersion)")
                     .font(.subheadline)
-                    .foregroundColor(.white.opacity(0.7))
+                    .foregroundStyle(LiquidGlass.supportingText)
                 
                 HStack(spacing: 4) {
                     Circle()
@@ -547,13 +615,13 @@ private struct QuantumStarLayer: View {
                         .shadow(color: primaryConnectionStatusColor.opacity(0.5), radius: 3, x: 0, y: 0)
                     Text(primaryConnectionStatusText)
                         .font(.caption)
-                        .foregroundColor(.white.opacity(0.7))
+                        .foregroundStyle(LiquidGlass.supportingText)
                 }
 
                 if let primaryConnectionDetailText {
                     Text(primaryConnectionDetailText)
                         .font(.caption2)
-                        .foregroundColor(.white.opacity(0.55))
+                        .foregroundStyle(LiquidGlass.supportingText)
                         .lineLimit(1)
                 }
             }
@@ -575,20 +643,10 @@ private struct QuantumStarLayer: View {
                     .foregroundColor(securityBadgeColor)
             }
             .padding(10)
-            .background(.ultraThinMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(LinearGradient(colors: [securityBadgeColor.opacity(0.4), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
-            )
+            .background(securityBadgeColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .padding()
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(LinearGradient(colors: [.white.opacity(0.4), .clear, .cyan.opacity(0.2)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
-        )
+        .liquidGlassCard(cornerRadius: 24, padding: 0)
     }
 
     // MARK: - Device Model / Chip (best-effort)
@@ -732,7 +790,7 @@ private struct QuantumStarLayer: View {
         VStack(alignment: .leading, spacing: 12) {
             Text(RuntimeLocalization.string("快捷操作"))
                 .font(.headline)
-                .foregroundColor(.white.opacity(0.9))
+                .foregroundStyle(LiquidGlass.supportingText)
             
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 16) {
@@ -802,12 +860,12 @@ private struct QuantumStarLayer: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(latest.fileName)
                             .font(.subheadline.weight(.semibold))
-                            .foregroundColor(.white)
+                            .foregroundStyle(.primary)
                             .lineLimit(1)
                         
                         Text(latest.status == .completed ? RuntimeLocalization.string("传输完成") : RuntimeLocalization.string("传输失败"))
                             .font(.caption)
-                            .foregroundColor(latest.status == .completed ? .green.opacity(0.8) : .red.opacity(0.8))
+                            .foregroundStyle(LiquidGlass.supportingText)
                     }
                     
                     Spacer()
@@ -830,7 +888,7 @@ private struct QuantumStarLayer: View {
             HStack {
                 Text("附近设备")
                     .font(.headline)
-                    .foregroundColor(.white.opacity(0.9))
+                    .foregroundStyle(LiquidGlass.supportingText)
                 
                 Spacer()
                 
@@ -870,7 +928,7 @@ private struct QuantumStarLayer: View {
             HStack {
                 Text("活跃连接")
                     .font(.headline)
-                    .foregroundColor(.white.opacity(0.9))
+                    .foregroundStyle(LiquidGlass.supportingText)
                 
                 Spacer()
                 
@@ -996,7 +1054,9 @@ private struct QuantumStarLayer: View {
     private var devicesTab: some View {
         DeviceDiscoveryView(onOpenCrossNetworkConnect: {
             showingQRScanner = true
-        })
+        }, onConnectAccountDevice: startAccountDeviceConnection,
+            onConnectRoutedAccountDevice: startRoutedAccountDeviceConnection,
+            isDeviceConnectionInProgress: deviceConnectionOperationID != nil)
     }
     
     // MARK: - Files Tab
@@ -1018,6 +1078,93 @@ private struct QuantumStarLayer: View {
     }
     
     // MARK: - Methods
+
+    private func startPendingLANConnection() {
+        guard let info = pendingLANConnection else { return }
+        pendingLANConnection = nil
+        // The scanner's actual onDismiss is the presentation handoff to PIB-1.
+        startDeviceConnection(name: info.deviceName, accountSelection: nil) {
+            try await connectionManager.connect(direct: info)
+        }
+    }
+
+    private func startAccountDeviceConnection(_ record: AccountDeviceRecord, _ device: DiscoveredDevice) {
+        guard deviceConnectionOperationID == nil else { return }
+        do {
+            let selection = try accountPresence.connectionSelection(for: record)
+            startDeviceConnection(name: AccountDevicePresentationPolicy.displayName(for: record), accountSelection: selection) {
+                try await connectionManager.connect(account: selection, to: device)
+            }
+        } catch {
+            connectedActionDevice = nil
+            deviceConnectionMessage = "连接未完成：\(error.localizedDescription)"
+        }
+    }
+
+    private func startRoutedAccountDeviceConnection(_ record: AccountDeviceRecord) {
+        guard deviceConnectionOperationID == nil else { return }
+        do {
+            let route = try accountPresence.routedConnectionSelection(for: record)
+            startDeviceConnection(name: AccountDevicePresentationPolicy.displayName(for: record),
+                                  accountSelection: route.account, accountRoute: route) {
+                try await connectionManager.connect(accountRoute: route)
+            }
+        } catch {
+            connectedActionDevice = nil
+            deviceConnectionMessage = "连接未完成：\(error.localizedDescription)"
+        }
+    }
+
+    private func cancelInvalidAccountConnection() {
+        guard let activeAccountSelection, deviceConnectionOperationID != nil else { return }
+        do {
+            try accountPresence.requireCurrentConnectionSelection(activeAccountSelection)
+            if let activeAccountRoute { try accountPresence.requireCurrentRouteSelection(activeAccountRoute) }
+        }
+        catch {
+            deviceConnectionCancellationMessage = error.localizedDescription
+            isCancellingDeviceConnection = true
+            deviceConnectionTask?.cancel()
+        }
+    }
+
+    private func startDeviceConnection(name: String, accountSelection: IOSAccountConnectionSelection?,
+                                       accountRoute: IOSAccountLANRouteSelection? = nil,
+                                       operation: @escaping @MainActor () async throws -> DiscoveredDevice) {
+        guard deviceConnectionOperationID == nil else { return }
+        let operationID = UUID()
+        deviceConnectionOperationID = operationID
+        activeAccountSelection = accountSelection
+        activeAccountRoute = accountRoute
+        connectedActionDevice = nil
+        deviceConnectionCancellationMessage = nil
+        isCancellingDeviceConnection = false
+        deviceConnectionMessage = "正在连接 \(name)…"
+        deviceConnectionTask = Task { @MainActor in
+            defer {
+                if deviceConnectionOperationID == operationID {
+                    deviceConnectionOperationID = nil
+                    deviceConnectionTask = nil
+                    activeAccountSelection = nil
+                    activeAccountRoute = nil
+                    isCancellingDeviceConnection = false
+                }
+            }
+            do {
+                let device = try await operation()
+                guard deviceConnectionOperationID == operationID else { return }
+                deviceConnectionMessage = "已安全连接到 \(name)"
+                connectedActionDevice = device
+                selectedTab = .devices
+            } catch is CancellationError {
+                guard deviceConnectionOperationID == operationID else { return }
+                deviceConnectionMessage = deviceConnectionCancellationMessage ?? "连接已取消"
+            } catch {
+                guard deviceConnectionOperationID == operationID else { return }
+                deviceConnectionMessage = "连接未完成：\(P2PConnectionManager.localizedConnectionErrorMessage(error))"
+            }
+        }
+    }
 
     private func handleScannedConnectLink(_ link: String) {
         Task { @MainActor in
@@ -1065,7 +1212,7 @@ private struct LiveTransferBannerView: View {
                 HStack {
                     Text(fileName)
                         .font(.subheadline.weight(.semibold))
-                        .foregroundColor(.white)
+                        .foregroundStyle(.primary)
                         .lineLimit(1)
                     
                     Spacer()
@@ -1098,16 +1245,10 @@ private struct LiveTransferBannerView: View {
                 
                 Text(speedDisplay(speed))
                     .font(.caption2.monospacedDigit())
-                    .foregroundColor(.white.opacity(0.6))
+                    .foregroundStyle(LiquidGlass.supportingText)
             }
         }
-        .padding(16)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(LinearGradient(colors: [.white.opacity(0.4), .clear, .cyan.opacity(0.2)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
-        )
+        .liquidGlassCard(cornerRadius: 24, padding: 16)
     }
     
     private func byteCount(_ bytes: Int64) -> String {
@@ -1156,13 +1297,13 @@ private struct UserAvatarButton: View {
                         default:
                             Text(initials)
                                 .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.7))
+                                .foregroundStyle(LiquidGlass.supportingText)
                         }
                     }
                 } else {
                     Text(initials)
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(LiquidGlass.supportingText)
                 }
             }
             .frame(width: 32, height: 32)
@@ -1212,6 +1353,7 @@ private struct QRCodeHubSheet: View {
     @State private var isPresentedInHierarchy = false
     @FocusState private var isCodeInputFocused: Bool
 
+    let onScanLANConnection: (LanDirectConnectionInfo) throws -> Void
     let onScanConnectLink: (String) -> Void
     let onConnectWithCode: (String) -> Void
 
@@ -1238,29 +1380,27 @@ private struct QRCodeHubSheet: View {
                                     scannerSessionID = UUID()
                                 },
                                 onScanString: { string in
-                                    // Short connection-code QR (skybridge://code/<code>): redeems via the
-                                    // signaling server using the existing connect(withCode:) path. Checked
-                                    // before the self-contained connect-link form so a short code never
-                                    // gets misrouted into the base64-payload parser.
-                                    if let code = CrossNetworkWebRTCManager.extractConnectionCode(fromScannedString: string) {
-                                        guard !interactionState.isSubmittingCode else { return }
-                                        interactionState.startConnectionCodeSubmission()
-                                        SkyBridgeLogger.shared.info("🌐 扫描到跨网连接码二维码")
-                                        onConnectWithCode(code)
-                                        return
+                                    guard !interactionState.isSubmittingCode,
+                                          !interactionState.isSubmittingScannedConnectLink else { return }
+                                    do {
+                                        switch try IOSScannedConnectionRoute.decode(string) {
+                                        case .lan(let target):
+                                            interactionState.startScannedConnectLinkSubmission()
+                                            try onScanLANConnection(target.info)
+                                        case .connectionCode(let code):
+                                            interactionState.startConnectionCodeSubmission()
+                                            onConnectWithCode(code)
+                                        case .crossNetwork(let link):
+                                            interactionState.startScannedConnectLinkSubmission()
+                                            onScanConnectLink(link)
+                                        }
+                                    } catch {
+                                        interactionState.resetForModeChange()
+                                        interactionState.sheetErrorMessage = error.localizedDescription
                                     }
-                                    if CrossNetworkWebRTCManager.isConnectLinkString(string) {
-                                        guard !interactionState.isSubmittingScannedConnectLink else { return }
-                                        interactionState.startScannedConnectLinkSubmission()
-                                        SkyBridgeLogger.shared.info("🌐 扫描到跨网连接二维码")
-                                        onScanConnectLink(string)
-                                        return
-                                    }
-                                    // 非配对二维码：先简单提示（后续可扩展文件分享等）
-                                    SkyBridgeLogger.shared.info("📷 扫描到字符串二维码: \(string)")
                                 },
                                 onError: { error in
-                                    SkyBridgeLogger.shared.error("❌ 扫码失败: \(error.localizedDescription)")
+                                    interactionState.sheetErrorMessage = error.localizedDescription
                                 }
                             )
                             // 用 id 强制重建 VC，从而支持“重新扫描”
@@ -1276,13 +1416,12 @@ private struct QRCodeHubSheet: View {
                                         .controlSize(.large)
                                     Text("连接中...")
                                         .font(.headline)
-                                        .foregroundStyle(.white)
-                                    Text("正在验证二维码并建立跨网连接")
+                                        .foregroundStyle(.primary)
+                                    Text("正在验证二维码并建立连接")
                                         .font(.subheadline)
-                                        .foregroundStyle(.white.opacity(0.8))
+                                        .foregroundStyle(LiquidGlass.supportingText)
                                 }
-                                .padding(24)
-                                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                                .liquidGlassCard(cornerRadius: 20, padding: 24)
                                 .padding(.horizontal, 24)
                                 .transition(.opacity)
                             }
@@ -1307,12 +1446,12 @@ private struct QRCodeHubSheet: View {
                                 
                                 Text("请输入另一台设备显示的连接码")
                                     .font(.subheadline)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(LiquidGlass.supportingText)
                                     .multilineTextAlignment(.center)
                             }
                             .padding(.horizontal, 20)
                             
-                            TextField("例如：AB12CD34", text: $codeInput)
+                            TextField("例如：AB23CD45", text: $codeInput)
                                 .textInputAutocapitalization(.characters)
                                 .autocorrectionDisabled()
                                 .focused($isCodeInputFocused)
@@ -1393,7 +1532,7 @@ private struct QRCodeHubSheet: View {
                                         : RuntimeLocalization.string("connection.codeMode.shortHint")
                                 )
                                 .font(.footnote)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(LiquidGlass.supportingText)
                                 .multilineTextAlignment(.center)
                                 .padding(.horizontal, 24)
 
@@ -1405,7 +1544,7 @@ private struct QRCodeHubSheet: View {
 
                                 Text("在另一台设备端输入此连接码即可连接到本机")
                                     .font(.footnote)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(LiquidGlass.supportingText)
                                     .multilineTextAlignment(.center)
                             }
                             .padding(.horizontal, 24)
@@ -1464,12 +1603,13 @@ private struct QRCodeHubSheet: View {
                 isPresentedInHierarchy = false
                 interactionState.resetForModeChange()
             }
-            .alert("跨网连接", isPresented: Binding(
+            .alert("扫码连接", isPresented: Binding(
                 get: { interactionState.sheetErrorMessage != nil },
                 set: { if !$0 { interactionState.sheetErrorMessage = nil } }
             )) {
                 Button("确定", role: .cancel) {
                     interactionState.sheetErrorMessage = nil
+                    scannerSessionID = UUID()
                 }
             } message: {
                 Text(interactionState.sheetErrorMessage ?? "")
@@ -1548,7 +1688,7 @@ private struct MyConnectionQRCodeView: View {
 
             Text(selectedTransportMode.subtitle)
                 .font(.footnote)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(LiquidGlass.supportingText)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
                 .accessibilityIdentifier("dashboard.qr.myqr.transport.subtitle")
@@ -1568,7 +1708,7 @@ private struct MyConnectionQRCodeView: View {
                 ProgressView()
             } else if let errorText {
                 Text(errorText)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(LiquidGlass.supportingText)
                     .multilineTextAlignment(.center)
                     .padding()
             } else {
@@ -1577,7 +1717,7 @@ private struct MyConnectionQRCodeView: View {
 
             Text(descriptionText)
                 .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(LiquidGlass.supportingText)
                 .multilineTextAlignment(.center)
                 .accessibilityIdentifier("dashboard.qr.myqr.description")
 
@@ -1586,7 +1726,7 @@ private struct MyConnectionQRCodeView: View {
                !code.isEmpty {
                 Text("连接码：\(code)（也可在对端手动输入）")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(LiquidGlass.supportingText)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal)
             }
@@ -1722,7 +1862,7 @@ private struct DashboardNotificationBellButton: View {
         } label: {
             Image(systemName: unreadCount > 0 ? "bell.badge.fill" : "bell")
                 .font(.system(size: 16, weight: .medium))
-                .foregroundStyle(unreadCount > 0 ? .cyan : .white.opacity(0.7))
+                .foregroundStyle(unreadCount > 0 ? Color.accentColor : Color.secondary)
         }
         .buttonStyle(.plain)
         .sheet(isPresented: $showCenter) {
@@ -1733,7 +1873,7 @@ private struct DashboardNotificationBellButton: View {
                     Group {
                         if events.isEmpty && inFlightTransfers.isEmpty {
                             ContentUnavailableView("暂无通知", systemImage: "bell.slash")
-                                .foregroundStyle(.white.opacity(0.82))
+                                .foregroundStyle(LiquidGlass.supportingText)
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                         } else {
                             ScrollView {
@@ -1742,7 +1882,7 @@ private struct DashboardNotificationBellButton: View {
                                         VStack(alignment: .leading, spacing: 10) {
                                             Text("进行中的传输")
                                                 .font(.caption.weight(.semibold))
-                                                .foregroundStyle(.white.opacity(0.74))
+                                                .foregroundStyle(LiquidGlass.supportingText)
 
                                             ForEach(sortedInFlightTransfers) { transfer in
                                                 VStack(alignment: .leading, spacing: 8) {
@@ -1751,12 +1891,12 @@ private struct DashboardNotificationBellButton: View {
                                                             .foregroundStyle(transfer.isIncoming ? .green : .cyan)
                                                         Text(transfer.fileName)
                                                             .font(.subheadline.weight(.semibold))
-                                                            .foregroundStyle(.white)
+                                                            .foregroundStyle(.primary)
                                                             .lineLimit(1)
                                                         Spacer(minLength: 0)
                                                         Text("\(Int((min(max(transfer.progress, 0), 1) * 100).rounded(.down)))%")
                                                             .font(.caption.monospacedDigit())
-                                                            .foregroundStyle(.white.opacity(0.72))
+                                                            .foregroundStyle(LiquidGlass.supportingText)
                                                     }
 
                                                     ProgressView(value: min(max(transfer.progress, 0), 1))
@@ -1773,12 +1913,12 @@ private struct DashboardNotificationBellButton: View {
                                                         Text("\(byteCount(transfer.transferredBytes))/\(byteCount(transfer.totalBytes))")
                                                     }
                                                     .font(.caption2)
-                                                    .foregroundStyle(.white.opacity(0.68))
+                                                    .foregroundStyle(LiquidGlass.supportingText)
 
                                                     if transfer.isIncoming, let location = localLocationHint(path: transfer.localPath) {
                                                         Text(String(format: RuntimeLocalization.string("保存到 %@"), location))
                                                             .font(.caption2)
-                                                            .foregroundStyle(.white.opacity(0.68))
+                                                            .foregroundStyle(LiquidGlass.supportingText)
                                                             .lineLimit(1)
                                                     }
                                                 }
@@ -1799,7 +1939,7 @@ private struct DashboardNotificationBellButton: View {
                                         VStack(alignment: .leading, spacing: 10) {
                                             Text("事件记录")
                                                 .font(.caption.weight(.semibold))
-                                                .foregroundStyle(.white.opacity(0.74))
+                                                .foregroundStyle(LiquidGlass.supportingText)
 
                                             ForEach(events) { item in
                                                 HStack(alignment: .top, spacing: 10) {
@@ -1809,15 +1949,15 @@ private struct DashboardNotificationBellButton: View {
                                                     VStack(alignment: .leading, spacing: 4) {
                                                         Text(item.title)
                                                             .font(.subheadline.weight(.semibold))
-                                                            .foregroundStyle(.white)
+                                                            .foregroundStyle(.primary)
                                                         if let detail = item.detail, !detail.isEmpty {
                                                             Text(detail)
                                                                 .font(.caption)
-                                                                .foregroundStyle(.white.opacity(0.72))
+                                                                .foregroundStyle(LiquidGlass.supportingText)
                                                         }
                                                         Text(item.timestampFormatted)
                                                             .font(.caption2)
-                                                            .foregroundStyle(.white.opacity(0.56))
+                                                            .foregroundStyle(LiquidGlass.supportingText)
                                                     }
                                                     Spacer(minLength: 0)
                                                 }
@@ -1848,12 +1988,12 @@ private struct DashboardNotificationBellButton: View {
                                 events.removeAll()
                                 unreadCount = 0
                             }
-                            .foregroundStyle(events.isEmpty ? .white.opacity(0.35) : .white.opacity(0.9))
+                            .foregroundStyle(.tint)
                             .disabled(events.isEmpty)
                         }
                     }
                     .toolbarBackground(.hidden, for: .navigationBar)
-                    .toolbarColorScheme(.dark, for: .navigationBar)
+
                 }
             }
             .preferredColorScheme(.dark)

@@ -128,7 +128,8 @@ enum RemoteDesktopViewerStreamConfigurationFactory {
             remoteControlSecurityIdentity: input.securityIdentity?.isEmpty == true ? nil : input.securityIdentity,
             framePresentationAckVersion: activeTransportMode == .lan
                 ? RemoteDesktopFramePresentationAcknowledgement.currentVersion
-                : nil
+                : nil,
+            sessionTerminationVersion: activeTransportMode == .lan ? 1 : nil
         )
     }
 

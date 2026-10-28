@@ -212,6 +212,10 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         handleUSBDevicesUpdate(devices)
     }
 
+    func applyICloudDevicesUpdateForTesting(_ devices: [iCloudDevice]) {
+        handleiCloudDevicesUpdate(devices)
+    }
+
     func reloadPersistedDevicesForTesting() {
         onlineDevices.removeAll()
         deviceMap.removeAll()
@@ -2461,11 +2465,21 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         uniqueDevices = coalesced.devices
         uniqueDevices = Self.filterShadowedAppleMobileLinkLocalRoutes(uniqueDevices)
 
-        // Rewrite aliases for coalesced devices back to the winning row. This keeps stale
-        // persisted identities from resurfacing as separate "recent" rows on the next refresh.
+        // Coalesce presentation without redirecting another protocol identity's
+        // update key. Otherwise a late cloud update mutates the selected record.
         deviceMap = deviceMap.reduce(into: [:]) { result, element in
             guard let replacement = coalesced.replacementByOriginalId[element.value.id] else { return }
-            result[element.key] = replacement
+            let replacementEvidence = Self.trustFusionIdentityEvidence(for: replacement)
+            let originalEvidence = Self.trustFusionIdentityEvidence(for: element.value)
+            let keyEvidence = PeerIdentityFusionPolicy.IdentityEvidence(
+                stableDeviceId: PeerIdentityFusionPolicy.normalizedStableDeviceId(element.key),
+                publicKeyFingerprint: normalizedFingerprintPayload(from: element.key)
+            )
+            if PeerIdentityFusionPolicy.identitiesContradict(originalEvidence, replacementEvidence) {
+                result[element.key] = element.value
+            } else if !PeerIdentityFusionPolicy.identitiesContradict(keyEvidence, replacementEvidence) {
+                result[element.key] = replacement
+            }
             result[replacement.uniqueIdentifier] = replacement
         }
 
@@ -2841,15 +2855,32 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
     }
 
     private func mergeEquivalentDeviceGroup(_ group: [OnlineDevice]) -> OnlineDevice {
-        guard var merged = group.sorted(by: shouldPreferCoalescedDevice).first else {
+        let preferredIdentity = (preferredLiveStableIdentifier(for: group)
+            ?? preferredTrustedStableIdentifier(for: group))
+            .flatMap { PeerIdentityFusionPolicy.normalizedStableDeviceId($0) }
+        let ranked = group.sorted(by: shouldPreferCoalescedDevice)
+        let preferredRecord = preferredIdentity.flatMap { identity in
+            ranked.first {
+                PeerIdentityFusionPolicy.normalizedStableDeviceId($0.uniqueIdentifier)
+                    == identity
+            }
+        }
+        guard var merged = preferredRecord ?? ranked.first else {
             fatalError("mergeEquivalentDeviceGroup requires at least one device")
         }
 
-        for device in group where device.id != merged.id {
+        // A physical-device group can contain historical protocol identities.
+        // Select a complete record before merging; changing just its ID would
+        // leave another identity's fingerprint, address or connection history.
+        let selectedEvidence = Self.trustFusionIdentityEvidence(for: merged)
+        let compatible = group.filter {
+            !PeerIdentityFusionPolicy.identitiesContradict(selectedEvidence, Self.trustFusionIdentityEvidence(for: $0))
+        }
+        for device in compatible where device.id != merged.id {
             merged = mergeDeviceInfo(existing: merged, new: device)
         }
 
-        if let strongestIdentifier = group
+        if let strongestIdentifier = compatible
             .map(\.uniqueIdentifier)
             .max(by: { Self.identifierStrength($0) < Self.identifierStrength($1) }),
            Self.identifierStrength(strongestIdentifier) > Self.identifierStrength(merged.uniqueIdentifier),
@@ -2857,47 +2888,43 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             merged = Self.copyDevice(merged, uniqueIdentifier: strongestIdentifier)
         }
 
-        if let liveStableIdentifier = preferredLiveStableIdentifier(for: group) {
-            if liveStableIdentifier != merged.uniqueIdentifier {
-                merged = Self.copyDevice(merged, uniqueIdentifier: liveStableIdentifier)
-            }
-        } else if let trustedStableIdentifier = preferredTrustedStableIdentifier(for: group),
-                  trustedStableIdentifier != merged.uniqueIdentifier {
-            merged = Self.copyDevice(merged, uniqueIdentifier: trustedStableIdentifier)
-        }
-
-        if group.contains(where: { $0.connectionStatus == .connected }) {
+        if compatible.contains(where: { $0.connectionStatus == .connected }) {
             merged.connectionStatus = .connected
-        } else if group.contains(where: { $0.connectionStatus == .online }) {
+        } else if compatible.contains(where: { $0.connectionStatus == .online }) {
             merged.connectionStatus = .online
         } else {
             merged.connectionStatus = .offline
         }
 
-        merged.lastSeen = group.map(\.lastSeen).max() ?? merged.lastSeen
-        merged.lastConnectedAt = group.compactMap(\.lastConnectedAt).max()
-        merged.isAuthorized = group.contains(where: \.isAuthorized)
-        let newestSeen = group.map(\.lastSeen).max() ?? merged.lastSeen
-        merged.isConnectable = group.contains { device in
+        merged.lastSeen = compatible.map(\.lastSeen).max() ?? merged.lastSeen
+        merged.lastConnectedAt = compatible.compactMap(\.lastConnectedAt).max()
+        merged.isAuthorized = compatible.contains(where: \.isAuthorized)
+        let newestSeen = compatible.map(\.lastSeen).max() ?? merged.lastSeen
+        merged.isConnectable = compatible.contains { device in
             Self.hasFreshConnectableControlRouteSource(device, newestSeen: newestSeen)
         }
-        merged.isLocalDevice = group.contains(where: \.isLocalDevice)
+        merged.isLocalDevice = compatible.contains(where: \.isLocalDevice)
 
-        if let newestCryptoSource = group
+        if let newestCryptoSource = compatible
             .filter({ $0.lastCryptoKind != nil || $0.lastCryptoSuite != nil || $0.guardStatus != nil })
             .max(by: { ($0.lastConnectedAt ?? $0.lastSeen) < ($1.lastConnectedAt ?? $1.lastSeen) }) {
             merged.lastCryptoKind = newestCryptoSource.lastCryptoKind ?? merged.lastCryptoKind
             merged.lastCryptoSuite = newestCryptoSource.lastCryptoSuite ?? merged.lastCryptoSuite
             merged.guardStatus = newestCryptoSource.guardStatus ?? merged.guardStatus
         }
-        merged.name = Self.bestDisplayName(for: group + [merged])
+        merged.name = Self.bestDisplayName(for: compatible + [merged])
+        // Discovery-method labels describe the physical record's history, not
+        // current identity, authorization or route availability.
+        for source in group.flatMap(\.sources) where !merged.sources.contains(source) {
+            merged.sources.append(source)
+        }
 
         return merged
     }
 
     private func preferredTrustedStableIdentifier(for group: [OnlineDevice]) -> String? {
         let groupCandidates = Set(
-            group.flatMap { Self.deviceTrustLookupCandidates(for: $0) }
+            group.compactMap { PeerIdentityFusionPolicy.normalizedStableDeviceId($0.uniqueIdentifier) }
         )
         guard !groupCandidates.isEmpty else { return nil }
 
@@ -2905,9 +2932,8 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             .filter { !$0.isTombstone && !$0.isExpired }
             .filter { record in
                 let recordCandidates = Set(
-                    PeerTrustLookup.recordLookupCandidates(record).map {
-                        $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                    }
+                    PeerTrustLookup.recordLookupCandidates(record)
+                        .compactMap { PeerIdentityFusionPolicy.normalizedStableDeviceId($0) }
                 )
                 return !recordCandidates.isEmpty && !recordCandidates.isDisjoint(with: groupCandidates)
             }
@@ -2919,8 +2945,8 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             }
 
         for record in matchingRecords {
-            if let stable = Self.canonicalStableIdentifierToken(record.currentDeviceIdMetadata)
-                ?? Self.canonicalStableIdentifierToken(record.deviceId) {
+            if let stable = PeerIdentityFusionPolicy.normalizedStableDeviceId(record.currentDeviceIdMetadata)
+                ?? PeerIdentityFusionPolicy.normalizedStableDeviceId(record.deviceId) {
                 return stable
             }
         }
@@ -2928,14 +2954,34 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
     }
 
     private func preferredLiveStableIdentifier(for group: [OnlineDevice]) -> String? {
+        let currentObservations = networkDiscovery.discoveredDevices.filter {
+            !$0.isLocalDevice && $0.services.contains(BonjourInteropContract.controlServiceType)
+        }
         let ranked = group.compactMap { device -> (identifier: String, score: Int, lastSeen: Date)? in
-            guard let identifier = Self.canonicalStableIdentifierToken(device.uniqueIdentifier),
-                  Self.isProtocolStableIdentifierToken(identifier),
-                  !Self.isCloudHeartbeatOnly(device) else {
+            guard let identifier = PeerIdentityFusionPolicy.normalizedStableDeviceId(device.uniqueIdentifier),
+                  Self.isProtocolStableIdentifierToken(identifier) else {
                 return nil
             }
 
-            var score = 0
+            // Source tags, ports and lastSeen survive in history and can also be
+            // refreshed by USB hardware/cloud observations. They cannot establish
+            // which protocol identity is currently advertised or authenticated.
+            let evidence = Self.trustFusionIdentityEvidence(for: device)
+            let observations = currentObservations.filter {
+                PeerIdentityFusionPolicy.normalizedStableDeviceId($0.deviceId) == evidence.stableDeviceId
+            }
+            let hasCurrentObservation = evidence.stableDeviceId != nil && !observations.isEmpty
+                && observations.allSatisfy { observation in
+                    !PeerIdentityFusionPolicy.identitiesContradict(evidence, .init(
+                        stableDeviceId: PeerIdentityFusionPolicy.normalizedStableDeviceId(observation.deviceId),
+                        publicKeyFingerprint: BonjourInteropContract.normalizedPubKeyFingerprint(observation.pubKeyFP)
+                    ))
+                }
+            let hasCurrentSession = ConnectionPresenceService.shared
+                .activeConnection(forPeerId: identifier) != nil
+            guard hasCurrentSession || hasCurrentObservation else { return nil }
+
+            var score = hasCurrentSession ? 1_000 : 0
             if device.connectionStatus == .connected {
                 score += 80
             } else if device.connectionStatus == .online {
@@ -3058,21 +3104,23 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
     }
 
     private func shouldPreferCoalescedDevice(_ lhs: OnlineDevice, _ rhs: OnlineDevice) -> Bool {
-        if lhs.connectionStatus.priority != rhs.connectionStatus.priority {
-            return lhs.connectionStatus.priority > rhs.connectionStatus.priority
-        }
         let lhsStrength = Self.identifierStrength(lhs.uniqueIdentifier)
         let rhsStrength = Self.identifierStrength(rhs.uniqueIdentifier)
         if lhsStrength != rhsStrength {
             return lhsStrength > rhsStrength
         }
-        if lhs.isConnectable != rhs.isConnectable {
-            return lhs.isConnectable
-        }
+        // Current observations/sessions are selected separately. For history,
+        // a later cloud "online" status must not outrank a completed connection.
         let lhsConnected = lhs.lastConnectedAt ?? .distantPast
         let rhsConnected = rhs.lastConnectedAt ?? .distantPast
         if lhsConnected != rhsConnected {
             return lhsConnected > rhsConnected
+        }
+        if lhs.connectionStatus.priority != rhs.connectionStatus.priority {
+            return lhs.connectionStatus.priority > rhs.connectionStatus.priority
+        }
+        if lhs.isConnectable != rhs.isConnectable {
+            return lhs.isConnectable
         }
         if lhs.lastSeen != rhs.lastSeen {
             return lhs.lastSeen > rhs.lastSeen

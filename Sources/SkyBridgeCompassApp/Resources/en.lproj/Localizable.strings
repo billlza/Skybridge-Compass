@@ -35,3 +35,22 @@
 "startup.step.weatherServices" = "Weather services";
 "startup.step.appleSiliconOptimization" = "Apple Silicon optimization";
 "startup.step.remoteDesktopServices" = "Remote desktop services";
+
+/* Account device registration and hardware metadata */
+"discovery.accountDevices.caller.identityMismatch" = "This device’s identity differs from its historical registration. Verify the device again.";
+"discovery.accountDevices.caller.notRegistered" = "This device is not registered. Approval from a registered device is required.";
+"discovery.accountDevices.caller.pending" = "This device’s registration is awaiting approval.";
+"discovery.accountDevices.caller.frozen" = "This device’s registration is frozen.";
+"discovery.accountDevices.caller.unrecognizedStatus" = "This device’s registration status could not be confirmed.";
+"discovery.accountDevices.modelNotReported" = "Model not reported";
+
+/* Established connection transport and USB peer identification. */
+"device.discovery.methods" = "Discovered via:";
+"connection.current.usb" = "Connected via USB";
+"connection.current.network" = "Connected over network";
+"usb.connection.details" = "Connection details";
+"usb.peer.identifying" = "Identifying the connected device…";
+"usb.peer.pairFirst" = "Open SkyBridge on the phone or tablet and pair it using the QR code first.";
+"usb.peer.identificationFailed" = "Unable to identify the connected SkyBridge device: ";
+
+"可用的音频选项会显示在手机的设备页面。播放前会检查账户授权和输出格式，并请求本机确认。" = "Available audio options appear on the phone’s device page. Playback checks account authorization and the output format, and asks for confirmation on this Mac.";

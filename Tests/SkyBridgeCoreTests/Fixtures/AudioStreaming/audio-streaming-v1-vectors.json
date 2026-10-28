@@ -1,0 +1,298 @@
+{
+  "version": 1,
+  "maximumMessageBytes": 12288,
+  "streamId": "00112233-4455-6677-8899-aabbccddeeff",
+  "vectors": [
+    {
+      "name": "file-offer",
+      "opcode": 1,
+      "hex": "534241550101000000112233445566778899aabbccddeeff00000038ffeeddccbbaa99887766554433221100000000000000002ca8ca57504d073328a2e3b26c1f49abfd8a4d328e3dd837f2a55227a4ca0b0418",
+      "expected": {
+        "transferId": "ffeeddcc-bbaa-9988-7766-554433221100",
+        "length": "44",
+        "sha256Hex": "a8ca57504d073328a2e3b26c1f49abfd8a4d328e3dd837f2a55227a4ca0b0418"
+      }
+    },
+    {
+      "name": "capture-packed24",
+      "opcode": 2,
+      "hex": "534241550102000000112233445566778899aabbccddeeff000000100000ac44000203180100000000000003",
+      "expected": {
+        "sampleRate": 44100,
+        "channels": 2,
+        "encoding": 3,
+        "validBits": 24,
+        "waveChannelMask": 3
+      }
+    },
+    {
+      "name": "capture-24-in-32",
+      "opcode": 2,
+      "hex": "534241550102000000112233445566778899aabbccddeeff0000001000017700000204180100000000000003",
+      "expected": {
+        "sampleRate": 96000,
+        "channels": 2,
+        "encoding": 4,
+        "validBits": 24,
+        "waveChannelMask": 3
+      }
+    },
+    {
+      "name": "capture-layout-unknown",
+      "opcode": 2,
+      "hex": "534241550102000000112233445566778899aabbccddeeff000000100000bb80000206200000000000000000",
+      "expected": {
+        "sampleRate": 48000,
+        "channels": 2,
+        "encoding": 6,
+        "validBits": 32,
+        "waveChannelMask": null
+      }
+    },
+    {
+      "name": "capture-directout",
+      "opcode": 2,
+      "hex": "534241550102000000112233445566778899aabbccddeeff000000100000bb80000206200100000000000000",
+      "expected": {
+        "sampleRate": 48000,
+        "channels": 2,
+        "encoding": 6,
+        "validBits": 32,
+        "waveChannelMask": 0
+      }
+    },
+    {
+      "name": "capture-unsigned8",
+      "opcode": 2,
+      "hex": "534241550102000000112233445566778899aabbccddeeff0000001000001f40000101080100000000000004",
+      "expected": {
+        "sampleRate": 8000,
+        "channels": 1,
+        "encoding": 1,
+        "validBits": 8,
+        "waveChannelMask": 4
+      }
+    },
+    {
+      "name": "capture-signed16",
+      "opcode": 2,
+      "hex": "534241550102000000112233445566778899aabbccddeeff000000100000bb80000102100100000000000004",
+      "expected": {
+        "sampleRate": 48000,
+        "channels": 1,
+        "encoding": 2,
+        "validBits": 16,
+        "waveChannelMask": 4
+      }
+    },
+    {
+      "name": "capture-signed64",
+      "opcode": 2,
+      "hex": "534241550102000000112233445566778899aabbccddeeff000000100002ee00000205400100000000000003",
+      "expected": {
+        "sampleRate": 192000,
+        "channels": 2,
+        "encoding": 5,
+        "validBits": 64,
+        "waveChannelMask": 3
+      }
+    },
+    {
+      "name": "capture-float64",
+      "opcode": 2,
+      "hex": "534241550102000000112233445566778899aabbccddeeff0000001000017700000207400100000000000003",
+      "expected": {
+        "sampleRate": 96000,
+        "channels": 2,
+        "encoding": 7,
+        "validBits": 64,
+        "waveChannelMask": 3
+      }
+    },
+    {
+      "name": "accept-file",
+      "opcode": 3,
+      "hex": "534241550103000000112233445566778899aabbccddeeff0000000400000000",
+      "expected": {
+        "receiveWindowBytes": 0
+      }
+    },
+    {
+      "name": "accept-pcm",
+      "opcode": 3,
+      "hex": "534241550103000000112233445566778899aabbccddeeff000000040000fffc",
+      "expected": {
+        "receiveWindowBytes": 65532
+      }
+    },
+    {
+      "name": "pcm-data-low-bits",
+      "opcode": 4,
+      "hex": "534241550104000000112233445566778899aabbccddeeff0000001a0000000000000000000080ffffff000000010000ffff7f123456",
+      "expected": {
+        "byteOffset": "0",
+        "dataHex": "000080ffffff000000010000ffff7f123456"
+      }
+    },
+    {
+      "name": "pcm-data-wide-offset",
+      "opcode": 4,
+      "hex": "534241550104000000112233445566778899aabbccddeeff0000001a0020000000000001000080ffffff000000010000ffff7f123456",
+      "expected": {
+        "byteOffset": "9007199254740993",
+        "dataHex": "000080ffffff000000010000ffff7f123456"
+      }
+    },
+    {
+      "name": "credit",
+      "opcode": 5,
+      "hex": "534241550105000000112233445566778899aabbccddeeff00000008000000000000fffc",
+      "expected": {
+        "retiredBytes": "65532"
+      }
+    },
+    {
+      "name": "end",
+      "opcode": 6,
+      "hex": "534241550106000000112233445566778899aabbccddeeff00000028000000000000002ca8ca57504d073328a2e3b26c1f49abfd8a4d328e3dd837f2a55227a4ca0b0418",
+      "expected": {
+        "totalBytes": "44",
+        "sha256Hex": "a8ca57504d073328a2e3b26c1f49abfd8a4d328e3dd837f2a55227a4ca0b0418"
+      }
+    },
+    {
+      "name": "content-verified",
+      "opcode": 7,
+      "hex": "534241550107000000112233445566778899aabbccddeeff00000028000000000000002ca8ca57504d073328a2e3b26c1f49abfd8a4d328e3dd837f2a55227a4ca0b0418",
+      "expected": {
+        "totalBytes": "44",
+        "sha256Hex": "a8ca57504d073328a2e3b26c1f49abfd8a4d328e3dd837f2a55227a4ca0b0418"
+      }
+    },
+    {
+      "name": "output-ready",
+      "opcode": 8,
+      "hex": "534241550108000000112233445566778899aabbccddeeff000000100000ac44000203180100000000000003",
+      "expected": {
+        "sampleRate": 44100,
+        "channels": 2,
+        "encoding": 3,
+        "validBits": 24,
+        "waveChannelMask": 3
+      }
+    },
+    {
+      "name": "playback-complete",
+      "opcode": 9,
+      "hex": "534241550109000000112233445566778899aabbccddeeff0000000c00000000000003e900000143",
+      "expected": {
+        "sourceFrames": "1001",
+        "trailingPaddingFrames": 323
+      }
+    },
+    {
+      "name": "stop-1",
+      "opcode": 10,
+      "hex": "53424155010a000000112233445566778899aabbccddeeff0000000400010000",
+      "expected": {
+        "reason": 1
+      }
+    },
+    {
+      "name": "stop-2",
+      "opcode": 10,
+      "hex": "53424155010a000000112233445566778899aabbccddeeff0000000400020000",
+      "expected": {
+        "reason": 2
+      }
+    },
+    {
+      "name": "stop-3",
+      "opcode": 10,
+      "hex": "53424155010a000000112233445566778899aabbccddeeff0000000400030000",
+      "expected": {
+        "reason": 3
+      }
+    },
+    {
+      "name": "stop-4",
+      "opcode": 10,
+      "hex": "53424155010a000000112233445566778899aabbccddeeff0000000400040000",
+      "expected": {
+        "reason": 4
+      }
+    },
+    {
+      "name": "stop-5",
+      "opcode": 10,
+      "hex": "53424155010a000000112233445566778899aabbccddeeff0000000400050000",
+      "expected": {
+        "reason": 5
+      }
+    },
+    {
+      "name": "stop-6",
+      "opcode": 10,
+      "hex": "53424155010a000000112233445566778899aabbccddeeff0000000400060000",
+      "expected": {
+        "reason": 6
+      }
+    },
+    {
+      "name": "stop-7",
+      "opcode": 10,
+      "hex": "53424155010a000000112233445566778899aabbccddeeff0000000400070000",
+      "expected": {
+        "reason": 7
+      }
+    },
+    {
+      "name": "stop-8",
+      "opcode": 10,
+      "hex": "53424155010a000000112233445566778899aabbccddeeff0000000400080000",
+      "expected": {
+        "reason": 8
+      }
+    },
+    {
+      "name": "stop-9",
+      "opcode": 10,
+      "hex": "53424155010a000000112233445566778899aabbccddeeff0000000400090000",
+      "expected": {
+        "reason": 9
+      }
+    },
+    {
+      "name": "stop-10",
+      "opcode": 10,
+      "hex": "53424155010a000000112233445566778899aabbccddeeff00000004000a0000",
+      "expected": {
+        "reason": 10
+      }
+    },
+    {
+      "name": "stop-11",
+      "opcode": 10,
+      "hex": "53424155010a000000112233445566778899aabbccddeeff00000004000b0000",
+      "expected": {
+        "reason": 11
+      }
+    },
+    {
+      "name": "stop-12",
+      "opcode": 10,
+      "hex": "53424155010a000000112233445566778899aabbccddeeff00000004000c0000",
+      "expected": {
+        "reason": 12
+      }
+    },
+    {
+      "name": "stop-13",
+      "opcode": 10,
+      "hex": "53424155010a000000112233445566778899aabbccddeeff00000004000d0000",
+      "expected": {
+        "reason": 13
+      }
+    }
+  ]
+}

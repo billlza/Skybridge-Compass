@@ -8,12 +8,15 @@ import SkyBridgeProtocolCore
 /// macOS 是唯一可被远程桌面控制的平台，因此上报 `remote_desktop` 能力。
 @available(macOS 14.0, *)
 public enum LocalDevicePresenceReportBuilder {
-    public static func currentReport() throws -> AccountDevicePresenceReport {
-        try makeReport(
+    public static func currentReport() async throws -> AccountDevicePresenceReport {
+        let listener = await ServiceAdvertiserCenter.shared.advertisementSnapshot(for: BonjourInteropContract.controlServiceType)
+        try Task.checkCancellation()
+        return try makeReport(
             presentation: LocalDevicePresentation.current(),
             hardwareModel: HardwareModelIdentifier.current(),
             lanAddresses: LocalNetworkAdvertisementAddressProvider.routableLANAddresses(),
-            operatingSystemVersion: ProcessInfo.processInfo.operatingSystemVersion
+            operatingSystemVersion: ProcessInfo.processInfo.operatingSystemVersion,
+            listener: listener
         )
     }
 
@@ -22,22 +25,24 @@ public enum LocalDevicePresenceReportBuilder {
         presentation: LocalDevicePresentation.Snapshot,
         hardwareModel: String?,
         lanAddresses: [String],
-        operatingSystemVersion: OperatingSystemVersion
+        operatingSystemVersion: OperatingSystemVersion,
+        listener: ServiceAdvertisementSnapshot? = nil
     ) throws -> AccountDevicePresenceReport {
         let trimmedName = presentation.deviceName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let resolvedName = !trimmedName.isEmpty
             ? trimmedName
             : (hardwareModel ?? presentation.modelName ?? "Mac")
+        let addresses = LANAddressRoutabilityPolicy.routableAddresses(
+            from: lanAddresses, limit: AccountDevicePresenceReport.maximumLANAddresses)
+        let mainReady = listener?.serviceType == BonjourInteropContract.controlServiceType && listener?.isConnectable == true
         return try AccountDevicePresenceReport(
             deviceName: resolvedName,
             platform: .macOS,
             deviceModel: hardwareModel ?? presentation.modelName,
             osVersion: formattedVersion(operatingSystemVersion),
-            lanAddresses: LANAddressRoutabilityPolicy.routableAddresses(
-                from: lanAddresses,
-                limit: AccountDevicePresenceReport.maximumLANAddresses
-            ),
-            capabilities: [.remoteDesktop, .fileTransfer, .clipboard]
+            lanAddresses: addresses,
+            capabilities: [.remoteDesktop, .fileTransfer, .clipboard],
+            lanControlPort: mainReady && !addresses.isEmpty ? listener?.port : nil
         )
     }
 

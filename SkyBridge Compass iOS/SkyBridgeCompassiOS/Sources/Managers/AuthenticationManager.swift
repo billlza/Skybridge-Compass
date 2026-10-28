@@ -3,6 +3,7 @@ import CryptoKit
 import AuthenticationServices
 import Security
 import UIKit
+import SkyBridgeProtocolCore
 
 public struct RemoteControlSecurityIdentityMetadata: Sendable, Equatable {
     public let accountDisplayName: String?
@@ -28,7 +29,10 @@ public class AuthenticationManager: ObservableObject {
     @Published public private(set) var appleAuthorizationState: ASAuthorizationAppleIDProvider.CredentialState = .notFound
     @Published public private(set) var isRestoringSession: Bool = true
 
-    private var session: AuthSession?
+    private let sessionState = IOSAuthenticationSessionState()
+    private var session: AuthSession? { sessionState.session }
+    private var refreshOperation: (id: UUID, witness: IOSAuthenticationSessionState.Witness,
+                                   task: Task<AuthSession, Error>)?
     private var didLogSupabaseConfigMissing = false
     private var lastTokenRefreshAttemptAt: Date?
     private var captchaPassed = false
@@ -211,25 +215,28 @@ public class AuthenticationManager: ObservableObject {
 #else
         let shouldResetState = false
 #endif
+        let intent = sessionState.currentIntent
         Task { [weak self] in
-            await self?.restoreInitialAuthenticationState(resetPersistedSession: shouldResetState)
+            await self?.restoreInitialAuthenticationState(resetPersistedSession: shouldResetState, intent: intent)
         }
     }
 
-    private func restoreInitialAuthenticationState(resetPersistedSession: Bool) async {
+    private func restoreInitialAuthenticationState(resetPersistedSession: Bool, intent: IOSAuthenticationIntent) async {
 #if DEBUG || SKYBRIDGE_TESTING
         if resetPersistedSession {
             do {
-                try await clearSession()
+                try await sessionState.clear(intent: intent)
             } catch {
                 SkyBridgeLogger.shared.error("❌ UI 测试登录态清理失败: \(error.localizedDescription)")
             }
+            guard intent === sessionState.currentIntent, intent.isCurrent else { return }
             isRestoringSession = false
             return
         }
 #endif
 
-        await loadSession()
+        await loadSession(intent: intent)
+        guard intent === sessionState.currentIntent, intent.isCurrent else { return }
         isRestoringSession = false
         await checkAppleIDCredentialState()
     }
@@ -471,6 +478,7 @@ public class AuthenticationManager: ObservableObject {
         }
         pendingAppleSignInNonce = nil
 
+        let intent = beginAuthenticationIntent()
         let auditIdentifier = Self.appleAuditIdentifier(for: credential)
         let riskOutcome = try await ensureRegistrationAllowed(
             identifier: auditIdentifier,
@@ -489,7 +497,8 @@ public class AuthenticationManager: ObservableObject {
             let hydratedSession = await hydrateSessionProfileIfPossible(enrichedSession)
             try await applySession(
                 hydratedSession,
-                emailFallback: credential.email ?? hydratedSession.email ?? "\(credential.user)@appleid.local"
+                emailFallback: credential.email ?? hydratedSession.email ?? "\(credential.user)@appleid.local",
+                intent: intent
             )
             await recordRegistrationAttempt(
                 identifier: auditIdentifier,
@@ -523,6 +532,7 @@ public class AuthenticationManager: ObservableObject {
     
     /// 注册
     public func register(email: String, password: String, captchaToken: String? = nil) async throws {
+        let intent = beginAuthenticationIntent()
         let riskOutcome = try await ensureRegistrationAllowed(
             identifier: email,
             identifierType: .email,
@@ -594,7 +604,7 @@ public class AuthenticationManager: ObservableObject {
         )
 
         let hydratedSession = await hydrateSessionProfileIfPossible(enrichedSession)
-        try await applySession(hydratedSession, emailFallback: email)
+        try await applySession(hydratedSession, emailFallback: email, intent: intent)
         await recordRegistrationAttempt(
             identifier: email,
             identifierType: .email,
@@ -609,6 +619,7 @@ public class AuthenticationManager: ObservableObject {
     
     /// 登录
     public func signIn(email: String, password: String, captchaToken: String? = nil) async throws {
+        let intent = beginAuthenticationIntent()
         let riskOutcome = try await ensureRegistrationAllowed(
             identifier: email,
             identifierType: .email,
@@ -638,7 +649,7 @@ public class AuthenticationManager: ObservableObject {
             ])
         }
         let hydratedSession = await hydrateSessionProfileIfPossible(session)
-        try await applySession(hydratedSession, emailFallback: email)
+        try await applySession(hydratedSession, emailFallback: email, intent: intent)
         await recordRegistrationAttempt(
             identifier: email,
             identifierType: .email,
@@ -723,6 +734,7 @@ public class AuthenticationManager: ObservableObject {
 
     /// 使用手机号 + 短信验证码登录；若手机号首次使用，Supabase 会按项目策略自动创建账号。
     public func signInWithPhone(phoneNumber: String, code: String) async throws {
+        let intent = beginAuthenticationIntent()
         let riskOutcome = try await ensureRegistrationAllowed(
             identifier: phoneNumber,
             identifierType: .phone,
@@ -748,7 +760,7 @@ public class AuthenticationManager: ObservableObject {
             ])
         }
         let hydratedSession = await hydrateSessionProfileIfPossible(session)
-        try await applySession(hydratedSession, emailFallback: phoneNumber)
+        try await applySession(hydratedSession, emailFallback: phoneNumber, intent: intent)
         await recordRegistrationAttempt(
             identifier: phoneNumber,
             identifierType: .phone,
@@ -763,6 +775,7 @@ public class AuthenticationManager: ObservableObject {
 
     /// Nebula 安全浏览器登录（OAuth 2.1 + PKCE）
     public func signInWithNebulaBrowser() async throws {
+        let intent = beginAuthenticationIntent()
         let (tokenResponse, userInfo) = try await NebulaPublicClientOAuth.shared.authenticateUsingSystemBrowser()
         let displayName = userInfo.name ?? userInfo.preferredUsername ?? userInfo.email ?? "Nebula User"
         let email = userInfo.email ?? "\(userInfo.subject)@nebula.local"
@@ -777,12 +790,13 @@ public class AuthenticationManager: ObservableObject {
             nebulaId: nebulaId,
             issuedAt: Date()
         )
-        try await applySession(session, emailFallback: email)
+        try await applySession(session, emailFallback: email, intent: intent)
         SkyBridgeLogger.shared.info("✅ Nebula 浏览器登录成功: \(displayName)")
     }
 
     /// Nebula 安全浏览器注册（OAuth 2.1 + PKCE）
     public func registerWithNebulaBrowser() async throws {
+        let intent = beginAuthenticationIntent()
         let (tokenResponse, userInfo) = try await NebulaPublicClientOAuth.shared.registerUsingSystemBrowser()
         let displayName = userInfo.name ?? userInfo.preferredUsername ?? userInfo.email ?? "Nebula User"
         let email = userInfo.email ?? "\(userInfo.subject)@nebula.local"
@@ -797,7 +811,7 @@ public class AuthenticationManager: ObservableObject {
             nebulaId: nebulaId,
             issuedAt: Date()
         )
-        try await applySession(session, emailFallback: email)
+        try await applySession(session, emailFallback: email, intent: intent)
         SkyBridgeLogger.shared.info("✅ Nebula 浏览器注册成功: \(displayName)")
     }
 
@@ -808,7 +822,8 @@ public class AuthenticationManager: ObservableObject {
     
     /// 游客模式登录
     public func signInAsGuest() async throws {
-        try await clearSession()
+        let intent = beginAuthenticationIntent()
+        try await sessionState.clear(intent: intent)
 
         let guestUser = User(
             id: "guest-\(UUID().uuidString)",
@@ -819,7 +834,6 @@ public class AuthenticationManager: ObservableObject {
         currentUser = guestUser
         isAuthenticated = true
         isGuestMode = true
-        session = nil
         
         SkyBridgeLogger.shared.info("👤 游客模式登录")
     }
@@ -827,12 +841,12 @@ public class AuthenticationManager: ObservableObject {
     /// 退出登录
     public func signOut() async throws {
         let sessionToRevoke = session
-        try await clearSession()
+        let intent = beginAuthenticationIntent()
+        try await sessionState.clear(intent: intent)
 
         currentUser = nil
         isAuthenticated = false
         isGuestMode = false
-        session = nil
 
         if let sessionToRevoke {
             do {
@@ -847,27 +861,29 @@ public class AuthenticationManager: ObservableObject {
     
     // MARK: - Private Methods
     
-    private func loadSession() async {
+    private func beginAuthenticationIntent() -> IOSAuthenticationIntent {
+        refreshOperation?.task.cancel()
+        refreshOperation = nil
+        lastTokenRefreshAttemptAt = nil
+        let intent = sessionState.beginMutation()
+        isRestoringSession = false
+        return intent
+    }
+
+    private func loadSession(intent: IOSAuthenticationIntent) async {
         do {
-            guard let session = try await KeychainManager.shared.loadAuthSessionStrict() else {
-                return
+            if let loaded = try await sessionState.restore(intent: intent) {
+                applyPersistedSessionToUI(loaded)
             }
-            applyPersistedSession(session)
         } catch {
-            session = nil
+            guard intent === sessionState.currentIntent, intent.isCurrent else { return }
+            do { try sessionState.clearPublishedSession(intent: intent) }
+            catch { SkyBridgeLogger.shared.error("持久化登录态清理失败: \(error.localizedDescription)"); return }
             currentUser = nil
             isAuthenticated = false
             isGuestMode = false
             SkyBridgeLogger.shared.error("❌ 持久化登录态读取失败: \(error.localizedDescription)")
         }
-    }
-    
-    private func persistSession(_ session: AuthSession) async throws {
-        try await KeychainManager.shared.storeAuthSession(session)
-    }
-    
-    private func clearSession() async throws {
-        try await KeychainManager.shared.deleteAuthSession()
     }
 
 #if DEBUG || SKYBRIDGE_TESTING
@@ -914,11 +930,11 @@ public class AuthenticationManager: ObservableObject {
             nebulaId: identity.explicitTenantID,
             issuedAt: Date()
         )
-        try await persistSession(smokeSession)
+        let intent = beginAuthenticationIntent()
+        try await sessionState.install(smokeSession, intent: intent)
 
         // Persistence is the commit point. Once it succeeds, synchronously publish the matching
         // in-memory state so UI and signaling cannot observe different authentication identities.
-        session = smokeSession
         currentUser = User(
             id: identity.subject,
             email: "smoke@skybridge.local",
@@ -946,6 +962,7 @@ public class AuthenticationManager: ObservableObject {
             throw SmokeRemoteDesktopSessionError.disabled
         }
 
+        let intent = beginAuthenticationIntent()
         let bootstrapIdentity = try SignalServerClientCompat.resolveAuthenticatedJWTIdentity(
             accessToken: accessToken
         )
@@ -962,7 +979,9 @@ public class AuthenticationManager: ObservableObject {
         }
 
         try Task.checkCancellation()
-        applyPersistedSession(persistedSession)
+        let restored = try await sessionState.restore(intent: intent, matching: persistedSession)
+        guard restored == persistedSession else { throw SmokeRemoteDesktopSessionError.invalidCredentials }
+        applyPersistedSessionToUI(persistedSession)
         isRestoringSession = false
         SkyBridgeLogger.shared.info("🧪 Real-device smoke verified the existing system-Keychain product session")
     }
@@ -988,6 +1007,7 @@ public class AuthenticationManager: ObservableObject {
 
 #if DEBUG || SKYBRIDGE_TESTING
     private func applyUITestGuestSession() {
+        _ = beginAuthenticationIntent()
         currentUser = User(
             id: "uitest-guest",
             email: "guest@skybridge.local",
@@ -995,12 +1015,12 @@ public class AuthenticationManager: ObservableObject {
         )
         isAuthenticated = true
         isGuestMode = true
-        session = nil
     }
 #endif
 
 #if DEBUG || SKYBRIDGE_TESTING
     private func applyP2PSmokeGuestSession() {
+        _ = beginAuthenticationIntent()
         currentUser = User(
             id: "p2p-smoke-guest",
             email: "p2p-smoke@skybridge.local",
@@ -1008,13 +1028,11 @@ public class AuthenticationManager: ObservableObject {
         )
         isAuthenticated = true
         isGuestMode = true
-        session = nil
         SkyBridgeLogger.shared.info("🧪 P2P smoke guest session installed for visible RemoteDesktopView path")
     }
 #endif
 
-    private func applyPersistedSession(_ session: AuthSession) {
-        self.session = session
+    private func applyPersistedSessionToUI(_ session: AuthSession) {
         let email = session.email ?? (session.displayName.contains("@") ? session.displayName : "user@skybridge.local")
         let displayName = session.displayName.isEmpty ? (email.components(separatedBy: "@").first ?? "用户") : session.displayName
         let avatarURL = session.avatarURL.flatMap(URL.init(string:))
@@ -1035,9 +1053,9 @@ public class AuthenticationManager: ObservableObject {
         }
     }
 
-    private func applySession(_ session: AuthSession, emailFallback: String) async throws {
-        try await persistSession(session)
-        self.session = session
+    private func applySession(_ session: AuthSession, emailFallback: String,
+                              intent: IOSAuthenticationIntent) async throws {
+        try await sessionState.install(session, intent: intent)
         let displayName = session.displayName.isEmpty ? (emailFallback.components(separatedBy: "@").first ?? "用户") : session.displayName
         let avatarURL = session.avatarURL.flatMap(URL.init(string:))
         currentUser = User(
@@ -1088,7 +1106,11 @@ public class AuthenticationManager: ObservableObject {
 
     private func refreshProfileIfPossible() async {
         guard isAuthenticated, !isGuestMode else { return }
-        guard let session, session.accessToken != "pending_verification" else { return }
+        let expected: IOSAuthenticationSessionState.Witness
+        do { expected = try sessionState.witness() }
+        catch { return } // Signed out has no profile to refresh.
+        let session = expected.session
+        guard session.accessToken != "pending_verification" else { return }
         guard await hasSupabaseConfiguration() else {
             // 配置缺失时不刷屏：只提示一次即可
             if !didLogSupabaseConfigMissing {
@@ -1105,20 +1127,26 @@ public class AuthenticationManager: ObservableObject {
         }
 
         do {
+            try sessionState.requireCurrent(expected)
             let profile = try await SupabaseService.shared.fetchCurrentUserProfile(accessToken: session.accessToken)
-            await applyRemoteProfile(profile)
+            await applyRemoteProfile(profile, expected: expected)
         } catch {
             // 若是 token 过期，尝试 refresh_token 后重试一次
-            if await tryRefreshTokenIfNeeded(because: error) {
-                if let updated = self.session {
+            if await tryRefreshTokenIfNeeded(because: error, expected: expected) {
+                do {
+                    let retry = try sessionState.witness()
+                    guard retry.intent === expected.intent else { return }
+                    let updated = retry.session
                     do {
                         let profile = try await SupabaseService.shared.fetchCurrentUserProfile(
                             accessToken: updated.accessToken
                         )
-                        await applyRemoteProfile(profile)
+                        await applyRemoteProfile(profile, expected: retry)
                     } catch {
                         SkyBridgeLogger.shared.debug("ℹ️ 刷新令牌后的资料加载失败: \(error.localizedDescription)")
                     }
+                } catch {
+                    SkyBridgeLogger.shared.debug("资料重试会话已变化: \(error.localizedDescription)")
                 }
                 return
             }
@@ -1137,43 +1165,150 @@ public class AuthenticationManager: ObservableObject {
         }
     }
 
-    private func tryRefreshTokenIfNeeded(because error: Error) async -> Bool {
-        guard let session else { return false }
-        guard let refreshToken = session.refreshToken, !refreshToken.isEmpty else { return false }
-
-        // 限制 refresh 重试频率，避免失败时刷网络/刷日志
-        if let last = lastTokenRefreshAttemptAt, Date().timeIntervalSince(last) < 30 {
-            return false
-        }
-
+    private func tryRefreshTokenIfNeeded(because error: Error,
+                                         expected: IOSAuthenticationSessionState.Witness) async -> Bool {
         guard isSupabaseTokenExpiredError(error) else { return false }
-        lastTokenRefreshAttemptAt = Date()
-
+        if let last = lastTokenRefreshAttemptAt, Date().timeIntervalSince(last) < 30 { return false }
         do {
-            let refreshed = try await SupabaseService.shared.refreshSession(refreshToken: refreshToken)
-            let merged = try SignalServerClientCompat.validatedRefreshedAuthSession(
-                refreshed,
-                replacing: session,
-                explicitTenantID: nil,
-                now: Date()
-            )
-            guard self.session == session else {
-                throw SignalServerClientCompat.ClientError.authenticationSessionChanged
-            }
-            let replaced = try await KeychainManager.shared.replaceAuthSession(
-                expected: session,
-                with: merged
-            )
-            guard replaced, self.session == session else {
-                throw SignalServerClientCompat.ClientError.authenticationSessionChanged
-            }
-            self.session = merged
-            SkyBridgeLogger.shared.info("🔄 Supabase access token 已刷新")
+            try sessionState.requireCurrent(expected)
+            lastTokenRefreshAttemptAt = Date()
+            _ = try await refreshAuthenticatedSession(expected: expected)
             return true
         } catch {
             SkyBridgeLogger.shared.error("❌ Supabase token 刷新失败：\(error.localizedDescription)")
             return false
         }
+    }
+
+    private func refreshAuthenticatedSession(expected: IOSAuthenticationSessionState.Witness) async throws -> AuthSession {
+        try sessionState.requireCurrent(expected)
+        if let existing = refreshOperation, existing.witness.hasSameCredentials(as: expected) {
+            return try await existing.task.value
+        }
+        guard let refreshToken = expected.session.refreshToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !refreshToken.isEmpty else { throw SignalServerClientCompat.ClientError.missingAuthentication }
+        let id = UUID()
+        let task = Task<AuthSession, Error> { @MainActor [self] in
+            try await sessionState.refresh(expected: expected, isTemporaryFailure: Self.isTemporaryCredentialRefreshFailure) { source in
+                let refreshed: AuthSession
+                do {
+                    refreshed = try await SupabaseService.shared.refreshSession(refreshToken: refreshToken)
+                } catch {
+                    if case let SupabaseService.SupabaseError.httpStatus(status, body) = error,
+                       AudioAccountRefreshFailurePolicy.invalidatesAuthorization(status: status, body: body) {
+                        do { try await sessionState.revokeAudio(expected: expected) }
+                        catch let persistence { throw IOSAuthenticationPersistenceFailure(original: error, persistence: persistence) }
+                    }
+                    throw error
+                }
+                do {
+                    guard SupabaseService.shared.isSupabaseAccessToken(refreshed.accessToken) else {
+                        throw SignalServerClientCompat.ClientError.invalidAuthenticationClaims
+                    }
+                    return try SignalServerClientCompat.validatedRefreshedAuthSession(
+                        refreshed, replacing: source,
+                        explicitTenantID: ProcessInfo.processInfo.environment["SKYBRIDGE_TENANT_ID"], now: Date())
+                } catch {
+                    do { try await sessionState.revokeAudio(expected: expected) }
+                    catch let persistence { throw IOSAuthenticationPersistenceFailure(original: error, persistence: persistence) }
+                    throw error
+                }
+            }
+        }
+        refreshOperation = (id, expected, task)
+        defer { if refreshOperation?.id == id { refreshOperation = nil } }
+        return try await task.value
+    }
+
+    private static func isTemporaryCredentialRefreshFailure(_ error: any Error) -> Bool {
+        if AudioMembershipRequestFailurePolicy.isTemporaryNetworkError(error) { return true }
+        guard let failure = error as? SupabaseService.SupabaseError else { return false }
+        switch failure {
+        case .network(let cause): return AudioMembershipRequestFailurePolicy.isTemporaryNetworkError(cause)
+        case let .httpStatus(status, body):
+            guard !AudioAccountRefreshFailurePolicy.invalidatesAuthorization(status: status, body: body) else { return false }
+            return AudioMembershipRequestFailurePolicy.isTemporaryHTTPStatus(status,
+                errorCode: body.flatMap { SignalServerClient.serverRejectedErrorCode(fromSanitizedDescription: $0) })
+        default: return false
+        }
+    }
+
+    /// All live authenticated signaling requests resolve through this owner. An
+    /// expired/failed account cannot silently be reconstructed from old disk state.
+    func resolveSignalingSession() async throws -> SignalServerClientCompat.ResolvedAuthenticationSession {
+        guard isAuthenticated, !isGuestMode, !isRestoringSession else {
+            throw SignalServerClientCompat.ClientError.missingAuthentication
+        }
+        let expected = try sessionState.witness()
+        if sessionState.needsCredentialVerification ||
+            (SignalServerClientCompat.shouldRefreshAccessToken(expected.session.accessToken) &&
+             expected.session.refreshToken?.isEmpty == false) {
+            _ = try await refreshAuthenticatedSession(expected: expected)
+        }
+        try sessionState.requireCurrent(expected.intent)
+        let current = try sessionState.witness()
+        return SignalServerClientCompat.ResolvedAuthenticationSession(
+            session: current.session, requireCurrent: { try expected.intent.requireCurrent() })
+    }
+
+    func currentAudioAccountContext() throws -> AudioAccountContext {
+        guard let context = try audioAccountContextIfPublished() else {
+            throw AudioMembershipLeaseFailure.accountChanged
+        }
+        return context
+    }
+
+    func loadAudioMembershipCheckpoint(for context: AudioAccountContext) async throws
+        -> AudioMembershipPersistenceSnapshot {
+        try requireAudioPersistenceContext(context)
+        let snapshot = try await sessionState.loadAudioMembershipCheckpoint(for: context.authorization, keychain: .shared)
+        try requireAudioPersistenceContext(context)
+        return snapshot
+    }
+
+    func saveAudioMembershipCheckpoint(_ bytes: Data?, replacing revision: UUID,
+                                       for context: AudioAccountContext) async throws -> AudioMembershipPersistenceSnapshot {
+        try requireAudioPersistenceContext(context)
+        let snapshot = try await sessionState.saveAudioMembershipCheckpoint(bytes,
+            replacing: revision, for: context.authorization, keychain: .shared)
+        try requireAudioPersistenceContext(context)
+        return snapshot
+    }
+
+    func beginAudioMembershipObservation(for context: AudioAccountContext) async throws
+        -> AudioMembershipPersistenceObservation {
+        try requireAudioPersistenceContext(context)
+        let observation = try await sessionState.beginAudioMembershipObservation(for: context.authorization, keychain: .shared)
+        do { try requireAudioPersistenceContext(context) }
+        catch { await observation.abandon(); throw error }
+        return AudioMembershipPersistenceObservation(finish: { [self] revision, update in
+            try requireAudioPersistenceContext(context)
+            let saved = try await observation.finish(revision, update)
+            try requireAudioPersistenceContext(context)
+            return saved
+        }, abandon: observation.abandon)
+    }
+
+    private func requireAudioPersistenceContext(_ expected: AudioAccountContext) throws {
+        let current = try currentAudioAccountContext()
+        guard current.account == expected.account, current.authorization === expected.authorization else {
+            throw AudioMembershipLeaseFailure.accountChanged
+        }
+    }
+
+    /// Absence is legal after logout/guest or an interrupted replacement. Invalid
+    /// identity/configuration still throws; it is not converted into absence.
+    func audioAccountContextIfPublished() throws -> AudioAccountContext? {
+        guard isAuthenticated, !isGuestMode, !isRestoringSession,
+              let session, let authorization = sessionState.audioAuthorization else {
+            return nil
+        }
+        try sessionState.requireAudioAuthorization(authorization)
+        let identity = try SignalServerClientCompat.resolveAuthenticatedJWTIdentity(
+            accessToken: session.accessToken, expectedUserIdentifier: session.userIdentifier)
+        return AudioAccountContext(authorization: authorization,
+            account: try AudioAccountIdentity(authority: CrossNetworkServerConfig.signalingServerURL,
+                tenantID: identity.effectiveTenantID, userID: identity.subject))
     }
 
     private func isSupabaseTokenExpiredError(_ error: Error) -> Bool {
@@ -1192,8 +1327,9 @@ public class AuthenticationManager: ObservableObject {
         return msg.contains("bad_jwt") || msg.contains("token is expired") || msg.contains("expired")
     }
 
-    private func applyRemoteProfile(_ profile: SupabaseService.RemoteUserProfile) async {
-        guard let session else { return }
+    private func applyRemoteProfile(_ profile: SupabaseService.RemoteUserProfile,
+                                    expected: IOSAuthenticationSessionState.Witness) async {
+        let session = expected.session
 
         // 更新 session（写入 Keychain 持久化）
         let updatedSession = AuthSession(
@@ -1207,12 +1343,11 @@ public class AuthenticationManager: ObservableObject {
             issuedAt: session.issuedAt
         )
         do {
-            try await persistSession(updatedSession)
+            try await sessionState.replace(updatedSession, expected: expected)
         } catch {
             SkyBridgeLogger.shared.error("❌ 远端账号资料持久化失败: \(error.localizedDescription)")
             return
         }
-        self.session = updatedSession
 
         // 更新 currentUser（驱动 UI）
         let email = updatedSession.email ?? (updatedSession.displayName.contains("@") ? updatedSession.displayName : (currentUser?.email ?? "user@skybridge.local"))

@@ -211,7 +211,21 @@ skybridge_default_xcode_derived_data_path() {
     printf '%s\n' "${HOME}/Library/Developer/Xcode/DerivedData/SkyBridgeCompassPro-Release"
 }
 
+skybridge_configured_build_jobs() {
+    if [[ "${SKYBRIDGE_BUILD_JOBS+x}" != "x" ]]; then
+        return 0
+    fi
+    local jobs="${SKYBRIDGE_BUILD_JOBS}"
+    if [[ ! "${jobs}" =~ ^[1-9][0-9]?$ ]] || (( jobs > 64 )); then
+        echo "错误：SKYBRIDGE_BUILD_JOBS 必须为 1 到 64 的正整数，不允许空值或前导零。" >&2
+        return 1
+    fi
+    printf '%s\n' "${jobs}"
+}
+
 skybridge_run_xcodebuild() {
+    local configured_jobs
+    configured_jobs="$(skybridge_configured_build_jobs)" || return 1
     local arg
     for arg in "$@"; do
         case "${arg}" in
@@ -222,12 +236,15 @@ skybridge_run_xcodebuild() {
         esac
     done
 
-    local xcodebuild_warning_settings=(
+    local xcodebuild_arguments=(
         "SWIFT_SUPPRESS_WARNINGS=NO"
     )
+    if [[ -n "${configured_jobs}" ]]; then
+        xcodebuild_arguments+=(-jobs "${configured_jobs}")
+    fi
     case "${SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS:-0}" in
         1|true|TRUE|yes|YES)
-            xcodebuild_warning_settings+=(
+            xcodebuild_arguments+=(
                 "SWIFT_TREAT_WARNINGS_AS_ERRORS=YES"
                 "GCC_TREAT_WARNINGS_AS_ERRORS=YES"
             )
@@ -240,5 +257,5 @@ skybridge_run_xcodebuild() {
             ;;
     esac
 
-    xcodebuild "${xcodebuild_warning_settings[@]}" "$@"
+    xcodebuild "${xcodebuild_arguments[@]}" "$@"
 }

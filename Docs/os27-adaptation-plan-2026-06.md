@@ -117,7 +117,7 @@
 
 I/O 2026 的主线是 agentic 开发（Gemini 3.5 Flash、Antigravity 2.0、Managed Agents、AI Studio 原生 Android 支持）。对本项目的影响：
 
-- **Android 客户端路线**（`Docs/UbuntuAndroidIntegrationPracticalPlan.md`）：Android Studio 的 Migration Agent 与开源 Android Skills（Jetpack Compose 迁移等）可降低未来 Android 端实现成本；前提仍是先完成两端协议防漂移/`SkyBridgeProtocolCore` 复用（见 `CoreLayering.md`），否则 Android 端会成为第三份手工复制的协议实现。
+- **Android 客户端路线**：旧接入提案已合并至 [现行文档入口](README.md)。按 [ADR-0003](ADR-0003-Native-Runtimes-and-Operator-Contract.md) 保持现有 Kotlin/JNI 运行时，共享协议、身份、授权和验收契约；不再从早期迁移工具建议推导新的运行时所有权。
 - **WebMCP / Modern Web Guidance**：与本项目无直接交集，不采纳。
 - **Managed Agents / Gemini API**：服务端无 AI 推理需求，不引入（符合依赖管理原则：不为小问题引入重量级依赖）。
 

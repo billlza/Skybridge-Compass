@@ -22,6 +22,27 @@ enum OnlineDeviceConnectionCoordinator {
         unifiedDeviceManager: UnifiedOnlineDeviceManager,
         p2pDiscoveryService: P2PDiscoveryService
     ) async throws {
+        // A known cable route does not need Bonjour or a LAN listener. Resolve
+        // it before the network-only plan rejects a disconnected USB session.
+        let usbIdentity = await MainActor.run { () -> (String, String)? in
+            guard SettingsManager.shared.enableP2PDirectConnection,
+                  let peerID = authoritativeProtocolDeviceId(for: device, unifiedDeviceManager: unifiedDeviceManager),
+                  let fingerprint = authoritativeProtocolFingerprint(for: device, unifiedDeviceManager: unifiedDeviceManager)
+            else { return nil }
+            return (peerID, fingerprint)
+        }
+        if let (peerID, fingerprint) = usbIdentity,
+           let route = try await p2pDiscoveryService.resolvePreviouslyAuthenticatedUSBRoute(
+            peerID: peerID, expectedFingerprint: fingerprint) {
+            try Task.checkCancellation()
+            guard await MainActor.run(body: { SettingsManager.shared.enableP2PDirectConnection }) else {
+                throw P2PDiscoveryError.connectionCancelled
+            }
+            try await p2pDiscoveryService.connectToDevice(route.device, routePreference: .usbOnly(udid: route.udid))
+            await unifiedDeviceManager.markDeviceAsConnected(device.id)
+            return
+        }
+
         let plan = try await MainActor.run {
             try makeConnectionPlan(for: device, unifiedDeviceManager: unifiedDeviceManager)
         }

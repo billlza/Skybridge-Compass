@@ -23,6 +23,32 @@ private final class PreparedFileProtectionFailingFileManager: FileManager, @unch
 }
 
 final class CodablePersistenceStoreTests: XCTestCase {
+    func testRawRecoverySnapshotDoesNotMigrateLegacyDataAndPreservesUnknownFields() throws {
+        struct Payload: Codable { let value: Int }
+        let suite = "SkyBridgeCoreTests.RecoverySnapshot.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let relative = "Tests/\(UUID().uuidString).json"
+        let store = CodablePersistenceStore<Payload>(
+            location: .protectedApplicationSupport(path: relative, legacyUserDefaultsKey: "legacy"),
+            rootDirectoryName: "SkyBridgeStateTests", defaults: defaults
+        )
+        defer {
+            do { try store.remove() } catch { XCTFail("Owned fixture cleanup failed: \(error)") }
+            defaults.removePersistentDomain(forName: suite)
+        }
+        let raw = Data(#"{"value":7,"future":{"retain":"all fields"}}"#.utf8)
+        defaults.set(raw, forKey: "legacy")
+        XCTAssertEqual(try store.rawSnapshotOrThrow(), raw)
+        XCTAssertEqual(defaults.data(forKey: "legacy"), raw)
+        let file = try protectedApplicationSupportURL(rootDirectoryName: "SkyBridgeStateTests", relativePath: relative)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+        try store.saveRawSnapshot(raw)
+        XCTAssertEqual(try store.rawSnapshotOrThrow(), raw)
+        XCTAssertEqual(try store.loadOrThrow()?.value, 7)
+        XCTAssertThrowsError(try store.saveRawSnapshot(Data(#"{"unexpected":0}"#.utf8)))
+        XCTAssertEqual(try store.rawSnapshotOrThrow(), raw)
+    }
+
     func testProtectedApplicationSupportStoreMigratesLegacyDefaults() throws {
         let suiteName = "SkyBridgeCoreTests.CodablePersistenceStore.\(UUID().uuidString)"
         let legacyKey = "legacy.codable.persistence"

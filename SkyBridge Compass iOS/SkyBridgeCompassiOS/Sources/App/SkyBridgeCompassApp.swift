@@ -446,6 +446,7 @@ struct SkyBridgeCompassApp: App {
 #if DEBUG || SKYBRIDGE_TESTING
         await LocalP2PSmokeHarness.shared.startIfNeeded()
         await LocalWebRTCSmokeHarness.shared.startIfNeeded()
+        await LocalAudioFileSmokeHarness.shared.startIfNeeded()
 #endif
     }
 

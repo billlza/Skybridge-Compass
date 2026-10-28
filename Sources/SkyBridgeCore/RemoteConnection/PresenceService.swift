@@ -31,6 +31,14 @@ public final class PresenceService: ObservableObject {
     @Published public private(set) var lastListFailure: AccountPresenceFailure?
     /// 最近一次心跳失败（成功后清空）。
     @Published public private(set) var lastHeartbeatFailure: AccountPresenceFailure?
+    @Published public private(set) var removingDeviceId: String?
+    @Published public private(set) var lastRemovalFailure: AccountPresenceFailure?
+    @Published public private(set) var callerRemoved = false
+    public var removalScope: UInt64 { engine.removalScope }
+    public func removeDevice(_ record: AccountDeviceRecord, expectedScope: UInt64) async {
+        await engine.removeDevice(record, expectedScope: expectedScope)
+        isActive = engine.isStarted
+    }
     /// 服务是否处于运行态（登录后由 DashboardViewModel 启动；登出/访客模式为 false）。UI 据此区分「未登录」与「同步中」。
     @Published public private(set) var isActive = false
 
@@ -42,11 +50,14 @@ public final class PresenceService: ObservableObject {
             onlineStateTTL: AccountPresenceRefreshPolicy.snapshotTTL,
             now: Date.init,
             registerPresence: {
-                let report = try LocalDevicePresenceReportBuilder.currentReport()
+                let report = try await LocalDevicePresenceReportBuilder.currentReport()
                 _ = try await CrossNetworkConnectionManager.shared.registerDevicePresence(report: report)
             },
             listAccountDevices: {
                 try await CrossNetworkConnectionManager.shared.listAccountDevices()
+            },
+            removeAccountDevice: { record, scope in
+                try await CrossNetworkConnectionManager.shared.removeAccountDevice(record, expectedAccountScope: scope)
             },
             trustedDeviceIDs: {
                 Set(
@@ -64,6 +75,7 @@ public final class PresenceService: ObservableObject {
         now: @escaping NowProvider,
         registerPresence: @escaping RegistrationOperation,
         listAccountDevices: @escaping AccountDeviceListOperation,
+        removeAccountDevice: AccountPresenceRefreshEngine.RemovalOperation? = nil,
         trustedDeviceIDs: @escaping TrustedDeviceIDsProvider,
         classifyFailure: @escaping FailureClassifier = SignalServerClient.presenceFailure(for:)
     ) {
@@ -74,6 +86,7 @@ public final class PresenceService: ObservableObject {
             now: now,
             registerPresence: registerPresence,
             listAccountDevices: listAccountDevices,
+            removeAccountDevice: removeAccountDevice,
             trustedDeviceIDs: trustedDeviceIDs,
             classifyFailure: classifyFailure,
             onStateChange: { [weak self] state in
@@ -108,6 +121,8 @@ public final class PresenceService: ObservableObject {
     }
 
     private func apply(_ state: AccountPresenceRefreshEngine.State) {
+        removingDeviceId = state.removingDeviceId; lastRemovalFailure = state.lastRemovalFailure
+        callerRemoved = state.callerRemoved
         if onlinePeerDeviceIds != state.onlinePeerDeviceIds { onlinePeerDeviceIds = state.onlinePeerDeviceIds }
         if accountDevices != state.accountDevices { accountDevices = state.accountDevices }
         if lastSuccessfulListAt != state.lastSuccessfulListAt { lastSuccessfulListAt = state.lastSuccessfulListAt }

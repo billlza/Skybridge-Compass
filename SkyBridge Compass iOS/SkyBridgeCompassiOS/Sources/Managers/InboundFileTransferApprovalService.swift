@@ -1,4 +1,5 @@
 import Foundation
+import SkyBridgeProtocolCore
 
 @available(iOS 17.0, *)
 @MainActor
@@ -29,7 +30,8 @@ final class InboundFileTransferApprovalService: ObservableObject {
     }
 
     func decide(
-        for request: CrossNetworkWebRTCManager.InboundFileTransferApprovalRequest
+        for request: CrossNetworkWebRTCManager.InboundFileTransferApprovalRequest,
+        remoteApproval: RemoteFileApprovalContext? = nil
     ) async -> CrossNetworkWebRTCManager.InboundFileTransferApprovalDecision {
         guard !Task.isCancelled else {
             return .rejected(reason: "inbound_file_transfer_approval_cancelled")
@@ -59,6 +61,19 @@ final class InboundFileTransferApprovalService: ObservableObject {
                     timeoutTask: timeoutTask
                 )
                 pendingRequest = PendingRequest(id: id, request: request)
+                if let remoteApproval {
+                    do {
+                        _ = try RemoteFileApprovalRegistry.shared.register(binding: remoteApproval.binding,
+                            nativeRequestID: id, expiresAt: Date().addingTimeInterval(60),
+                            revalidate: remoteApproval.revalidate, resolve: { [weak self] allowed in
+                                guard let self, self.pendingDecision?.id == id else { return false }
+                                self.resolve(id: id, decision: allowed ? .approved : .rejected(reason: "inbound_file_transfer_cli_rejected"))
+                                return true
+                            })
+                    } catch {
+                        resolve(id: id, decision: .rejected(reason: "inbound_file_transfer_cli_approval_unavailable"))
+                    }
+                }
                 if Task.isCancelled {
                     resolve(
                         id: id,
@@ -95,6 +110,7 @@ final class InboundFileTransferApprovalService: ObservableObject {
     ) {
         guard let pendingDecision, pendingDecision.id == id else { return }
         self.pendingDecision = nil
+        RemoteFileApprovalRegistry.shared.remove(nativeRequestID: id)
         pendingRequest = nil
         pendingDecision.timeoutTask.cancel()
         pendingDecision.continuation.resume(returning: decision)

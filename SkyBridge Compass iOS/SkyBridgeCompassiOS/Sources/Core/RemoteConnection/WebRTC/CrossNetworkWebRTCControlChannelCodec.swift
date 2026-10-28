@@ -425,6 +425,10 @@ enum CrossNetworkWebRTCControlChannelCodec {
 
     nonisolated static func bootstrapAppMessageKind(_ message: AppMessage) -> String {
         switch message {
+        case .usbPeerDiscoveryRequest: return "usbPeerDiscoveryRequest"
+        case .usbPeerDiscoveryResponse: return "usbPeerDiscoveryResponse"
+        case .handshakeConfigurationRequest: return "handshakeConfigurationRequest"
+        case .handshakeConfigurationResponse: return "handshakeConfigurationResponse"
         case .clipboard:
             return "clipboard"
         case .textMessage:

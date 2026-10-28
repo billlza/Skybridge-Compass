@@ -146,7 +146,9 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             modelName: "iPad_Pro_11-inch__M4_",
             protocolFingerprint: liveProtocolFingerprint
         )
+        manager.replaceNetworkDiscoveredDevicesForTesting([discoveryObservation(for: live)])
         defer {
+            manager.replaceNetworkDiscoveredDevicesForTesting([])
             manager.replaceDevicesForTesting([])
         }
 
@@ -2319,6 +2321,146 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
     }
 
     @MainActor
+    func testRouteShapedTrustMetadataCannotSelectAnonymousHardwareRecord() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let trust = TrustSyncService.shared
+        let knownID = "id:11111111-1111-4111-8111-111111111105"
+        let serial = "00008103-0011223344AABBCF"
+        let now = Date()
+        let known = makeDevice(
+            name: "Current iPad", uniqueIdentifier: knownID, ipv4: "192.0.2.31",
+            status: .offline, lastConnectedAt: now.addingTimeInterval(-120),
+            isConnectable: true, connectionTypes: [.usb, .wifi],
+            platformName: "iPadOS", modelName: "iPad Pro", serialNumber: serial,
+            protocolFingerprint: liveProtocolFingerprint
+        )
+        let anonymous = makeDevice(
+            name: "USB iPad", uniqueIdentifier: "serial:\(serial)", ipv4: "192.0.2.99",
+            status: .online, lastConnectedAt: nil, connectionTypes: [.usb],
+            sources: [.skybridgeUSB], platformName: "iPadOS", modelName: "iPad Pro",
+            serialNumber: serial
+        )
+        let previousRecords = trust.activeTrustRecords
+        defer {
+            trust.activeTrustRecords = previousRecords
+            manager.replaceDevicesForTesting([])
+        }
+
+        for metadata in ["192.0.2.88", "host:192.0.2.88", "id:192.0.2.88", "bonjour:iPad@local."] {
+            trust.activeTrustRecords = [TrustRecord(
+                deviceId: knownID, pubKeyFP: String(repeating: "e", count: 64),
+                publicKey: Data([0x04]), signature: Data(), deviceName: known.name,
+                currentDeviceId: metadata, knownDeviceIds: [knownID]
+            )]
+            for records in [[anonymous, known], [known, anonymous]] {
+                manager.replaceDevicesForTesting(records)
+                manager.recomputeDeviceStatusesForTesting()
+                let result = try XCTUnwrap(manager.onlineDevices.first)
+                XCTAssertEqual(manager.onlineDevices.count, 1)
+                XCTAssertEqual(result.uniqueIdentifier, knownID, metadata)
+                XCTAssertEqual(result.id, known.id, "Invalid metadata must not select an identity-less record: \(metadata)")
+                XCTAssertEqual(result.ipv4, known.ipv4, "Invalid metadata must not redirect the connection: \(metadata)")
+                XCTAssertEqual(result.protocolFingerprint, known.protocolFingerprint)
+            }
+        }
+    }
+
+    @MainActor
+    func testCachedUSBDiscoveryMetadataCannotReplaceNewerConnectedIdentity() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let oldID = "id:11111111-1111-4111-8111-111111111101"
+        let currentID = "id:11111111-1111-4111-8111-111111111102"
+        let now = Date()
+        let sources: [DeviceSource] = [.skybridgeBonjour, .skybridgeUSB, .skybridgeCloud]
+        var old = makeDevice(
+            name: "Historical iPad", uniqueIdentifier: oldID, ipv4: "192.0.2.20",
+            status: .offline, lastConnectedAt: now.addingTimeInterval(-3_600),
+            isConnectable: true, connectionTypes: [.usb, .wifi], sources: sources,
+            platformName: "iPadOS", modelName: "iPad Pro", lastSeen: now,
+            serialNumber: "00008103-0011223344AABBCD"
+        )
+        var current = makeDevice(
+            name: "Current iPad", uniqueIdentifier: currentID, ipv4: "192.0.2.21",
+            status: .offline, lastConnectedAt: now.addingTimeInterval(-120),
+            isConnectable: true, connectionTypes: [.usb, .wifi], sources: sources,
+            platformName: "iPadOS", modelName: "iPad Pro",
+            lastSeen: now.addingTimeInterval(-120), serialNumber: "00008103-0011223344AABBCD"
+        )
+        old.isAuthorized = true
+        current.isAuthorized = true
+        defer { manager.replaceDevicesForTesting([]) }
+
+        // A fresh hardware/cloud observation does not attest the app identity.
+        // Check both insertion orders and a second projection after alias rewrite.
+        for records in [[old, current], [current, old]] {
+            manager.replaceDevicesForTesting(records)
+            for _ in 0..<2 {
+                manager.recomputeDeviceStatusesForTesting()
+                let result = try XCTUnwrap(manager.onlineDevices.first)
+                XCTAssertEqual(manager.onlineDevices.count, 1)
+                XCTAssertEqual(result.uniqueIdentifier, currentID)
+                XCTAssertEqual(result.lastConnectedAt, current.lastConnectedAt)
+                XCTAssertEqual(result.connectionStatus, .offline)
+                XCTAssertNil(result.protocolFingerprint)
+                XCTAssertEqual(manager.device(withIdentifier: oldID)?.uniqueIdentifier, oldID,
+                    "A later update for the old ID must still address its own record")
+                XCTAssertEqual(manager.device(withIdentifier: currentID)?.uniqueIdentifier, currentID)
+            }
+            manager.applyICloudDevicesUpdateForTesting([iCloudDevice(
+                id: "historical-cloud-record", name: "Historical iPad", model: "iPad Pro",
+                osVersion: "26.5", appVersion: "1.0.0", lastSeen: now,
+                capabilities: [.remoteDesktop], isOnline: true, networkType: .wifi,
+                ipAddress: "192.0.2.99", stableIdentityDeviceId: String(oldID.dropFirst(3))
+            )])
+            let afterCloud = try XCTUnwrap(manager.onlineDevices.first)
+            XCTAssertEqual(manager.onlineDevices.count, 1)
+            XCTAssertEqual(afterCloud.uniqueIdentifier, currentID)
+            XCTAssertEqual(afterCloud.ipv4, current.ipv4)
+            XCTAssertEqual(afterCloud.lastConnectedAt, current.lastConnectedAt)
+            XCTAssertEqual(afterCloud.connectionStatus, .offline)
+        }
+    }
+
+    @MainActor
+    func testAuthenticatedUSBIdentityWinsOverAnotherCurrentDiscoveryIdentity() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let presence = ConnectionPresenceService.shared
+        let now = Date()
+        let connected = makeDevice(
+            name: "USB iPad", uniqueIdentifier: "id:11111111-1111-4111-8111-111111111103",
+            status: .offline, lastConnectedAt: now.addingTimeInterval(-120),
+            connectionTypes: [.usb], sources: [.skybridgeUSB],
+            platformName: "iPadOS", modelName: "iPad Pro",
+            lastSeen: now.addingTimeInterval(-120), serialNumber: "00008103-0011223344AABBCE"
+        )
+        let advertised = makeDevice(
+            name: "Nearby iPad", uniqueIdentifier: "id:11111111-1111-4111-8111-111111111104",
+            ipv4: "192.0.2.22", status: .online, lastConnectedAt: now,
+            isConnectable: true, platformName: "iPadOS", modelName: "iPad Pro",
+            serialNumber: "00008103-0011223344AABBCE", protocolFingerprint: liveProtocolFingerprint
+        )
+        let lease = try XCTUnwrap(presence.markConnectedOwned(
+            peerId: connected.uniqueIdentifier, displayName: connected.name,
+            cryptoKind: "Q-Periapt", suite: "Q-Periapt-ABI2-PolicyBound", controlTransport: .usb
+        ))
+        defer {
+            XCTAssertTrue(presence.disconnectIfOwned(lease))
+            manager.replaceNetworkDiscoveredDevicesForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+        manager.replaceNetworkDiscoveredDevicesForTesting([discoveryObservation(for: advertised)])
+        manager.replaceDevicesForTesting([advertised, connected])
+        manager.recomputeDeviceStatusesForTesting()
+
+        let result = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        XCTAssertEqual(result.uniqueIdentifier, connected.uniqueIdentifier)
+        XCTAssertEqual(result.connectionStatus, .connected)
+        XCTAssertNil(result.protocolFingerprint, "A different protocol identity cannot supply this connection's pin")
+        XCTAssertNil(result.ipv4, "A different protocol identity cannot supply this USB connection's network address")
+    }
+
+    @MainActor
     func testTrustedCanonicalProtocolIdentityWinsWhenOldAndNewIPadRowsCoalesce() async throws {
         let manager = UnifiedOnlineDeviceManager.shared
         let trust = TrustSyncService.shared
@@ -2460,6 +2602,8 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             lastSeen: now
         )
 
+        manager.replaceNetworkDiscoveredDevicesForTesting([discoveryObservation(for: liveRow)])
+        defer { manager.replaceNetworkDiscoveredDevicesForTesting([]) }
         manager.replaceDevicesForTesting([staleRow, liveRow])
         manager.recomputeDeviceStatusesForTesting()
 
@@ -3006,6 +3150,16 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             "路径端点不得被当成稳定身份而顶掉真正的协议身份"
         )
         XCTAssertEqual(manager.onlineDevices.first?.platformName, "ios")
+    }
+
+    private func discoveryObservation(for row: OnlineDevice) -> DiscoveredDevice {
+        DiscoveredDevice(
+            id: UUID(), name: row.name, ipv4: row.ipv4, ipv6: row.ipv6,
+            platformName: row.platformName, services: row.services, portMap: row.portMap,
+            connectionTypes: [.wifi], uniqueIdentifier: row.uniqueIdentifier,
+            routeIdentifiers: row.routeIdentifiers, deviceId: row.uniqueIdentifier,
+            pubKeyFP: row.protocolFingerprint
+        )
     }
 
     private func makeDevice(

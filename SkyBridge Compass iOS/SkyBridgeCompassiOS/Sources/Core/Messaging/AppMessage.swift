@@ -18,6 +18,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
     case signedProtocolIdentityBinding(SignedProtocolIdentityBindingPayload)
     case protocolIdentityBindingConfirm(ProtocolIdentityBindingConfirmPayload)
     case signedProtocolIdentityBindingFinalAck(SignedProtocolIdentityBindingFinalAckPayload)
+    case usbPeerDiscoveryRequest(USBPeerDiscoveryRequest)
+    case usbPeerDiscoveryResponse(USBPeerDiscoveryResponse)
+    case handshakeConfigurationRequest(HandshakeConfigurationRequest)
+    case handshakeConfigurationResponse(HandshakeConfigurationResponse)
     case heartbeat(HeartbeatPayload)
     case authenticatedRouteBinding(AuthenticatedRouteBindingPayload)
     case peerDisconnecting(PeerDisconnectingPayload)
@@ -191,6 +195,8 @@ public enum AppMessage: Codable, Sendable, Equatable {
     public struct KEMRefreshRequestPayload: Codable, Sendable, Equatable {
         public static let domainSeparator = "SkyBridge-SKR-1-Request"
         public static let currentVersion = 1
+        public static let qPeriaptVersion = 2
+        public static let negotiationVersion = SignedKEMRefreshNegotiation.version
         public static let maximumAcceptedAge: TimeInterval = 120
         public static let maximumAcceptedFutureSkew: TimeInterval = 30
 
@@ -207,6 +213,9 @@ public enum AppMessage: Codable, Sendable, Equatable {
         public let bonjourEndpointDigest: String?
         public let nonce: Data
         public let sentAt: Date
+        public let platform: String?
+        public let osVersion: String?
+        public let qPeriaptAuthProfile: String?
 
         public init(
             version: Int = Self.currentVersion,
@@ -221,7 +230,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
             routeScope: String = "lan",
             bonjourEndpointDigest: String? = nil,
             nonce: Data,
-            sentAt: Date = Date()
+            sentAt: Date = Date(),
+            platform: String? = nil,
+            osVersion: String? = nil,
+            qPeriaptAuthProfile: String? = nil
         ) {
             self.version = version
             self.requesterDeviceId = requesterDeviceId
@@ -235,19 +247,24 @@ public enum AppMessage: Codable, Sendable, Equatable {
                 ?? AppMessage.skr1PolicyHashHex(
                     requirePQC: policyRequirePQC,
                     allowClassicFallback: policyAllowClassicFallback,
-                    routeScope: routeScope
+                    routeScope: routeScope,
+                    version: version
                 )
             self.routeScope = routeScope
             self.bonjourEndpointDigest = bonjourEndpointDigest
             self.nonce = nonce
             self.sentAt = sentAt
+            self.platform = platform
+            self.osVersion = osVersion
+            self.qPeriaptAuthProfile = qPeriaptAuthProfile
         }
 
         public var expectedPolicyHashHex: String {
             AppMessage.skr1PolicyHashHex(
                 requirePQC: policyRequirePQC,
                 allowClassicFallback: policyAllowClassicFallback,
-                routeScope: routeScope
+                routeScope: routeScope,
+                    version: version
             )
         }
 
@@ -275,7 +292,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
             maximumAcceptedAge: TimeInterval = Self.maximumAcceptedAge,
             maximumAcceptedFutureSkew: TimeInterval = Self.maximumAcceptedFutureSkew
         ) throws -> [CryptoSuite] {
-            guard version == Self.currentVersion else { throw KEMRefreshValidationError.invalidVersion }
+            guard version == Self.currentVersion || version == Self.qPeriaptVersion || version == Self.negotiationVersion else { throw KEMRefreshValidationError.invalidVersion }
             guard AppMessage.canonicalMillisecondsSinceEpoch(sentAt) != nil else {
                 throw KEMRefreshValidationError.unrepresentableTimestamp
             }
@@ -284,7 +301,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
             guard routeScope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "lan" else {
                 throw KEMRefreshValidationError.invalidRouteScope
             }
-            guard nonce.count >= 16 else { throw KEMRefreshValidationError.invalidRequestNonce }
+            guard (16...128).contains(nonce.count) else { throw KEMRefreshValidationError.invalidRequestNonce }
             guard sentAt.timeIntervalSince(now) <= maximumAcceptedFutureSkew else {
                 throw KEMRefreshValidationError.requestFromFuture
             }
@@ -299,12 +316,26 @@ public enum AppMessage: Codable, Sendable, Equatable {
                 guard !suite.isLegacyOnly else { throw KEMRefreshValidationError.legacySuiteRejected(wireId: suite.wireId) }
                 guard suite.isPQCGroup else { throw KEMRefreshValidationError.classicSuiteRejected(wireId: suite.wireId) }
             }
+            guard Set(requestedSuiteWireIds).count == requestedSuiteWireIds.count else {
+                throw KEMRefreshValidationError.policyMismatch
+            }
+            if version == Self.negotiationVersion {
+                try SignedKEMRefreshNegotiation.validateCapabilities(suites: requestedSuiteWireIds,
+                    platform: platform, osVersion: osVersion, profile: qPeriaptAuthProfile,
+                    allowEmpty: false, requireSorted: false)
+            } else if version == Self.qPeriaptVersion {
+                guard requestedSuiteWireIds == [CryptoSuite.qperiaptABI2PolicyBound.wireId] else {
+                    throw KEMRefreshValidationError.policyMismatch
+                }
+            } else if suites.contains(.qperiaptABI2PolicyBound) {
+                throw KEMRefreshValidationError.policyMismatch
+            }
             return suites
         }
 
         public var canonicalPreimage: Data {
             let fields: [(String, String)] = [
-                ("domain", Self.domainSeparator),
+                ("domain", version == Self.currentVersion ? Self.domainSeparator : "SkyBridge-SKR-\(version)-Request"),
                 ("version", String(version)),
                 ("requesterDeviceId", AppMessage.normalizedToken(requesterDeviceId)),
                 ("targetDeviceId", AppMessage.normalizedToken(targetDeviceId)),
@@ -319,7 +350,9 @@ public enum AppMessage: Codable, Sendable, Equatable {
                 ("nonce", nonce.base64EncodedString()),
                 ("sentAtMs", String(AppMessage.millisecondsSinceEpoch(sentAt)))
             ]
-            return AppMessage.canonicalLineEncoding(fields)
+            return AppMessage.canonicalLineEncoding(fields + (version == Self.negotiationVersion
+                ? SignedKEMRefreshNegotiation.requestFields(platform: platform, osVersion: osVersion, profile: qPeriaptAuthProfile)
+                : []))
         }
     }
 
@@ -1064,6 +1097,8 @@ public enum AppMessage: Codable, Sendable, Equatable {
     public struct SignedKEMRefreshPayload: Codable, Sendable, Equatable {
         public static let domainSeparator = "SkyBridge-SKR-1-SignedKEMRefresh"
         public static let currentVersion = 1
+        public static let qPeriaptVersion = 2
+        public static let negotiationVersion = SignedKEMRefreshNegotiation.version
 
         public let version: Int
         public let deviceId: String
@@ -1082,6 +1117,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
         public let policyAllowClassicFallback: Bool
         public let routeScope: String
         public let bonjourEndpointDigest: String?
+        public let platform: String?
+        public let osVersion: String?
+        public let permittedSuiteWireIds: [UInt16]?
+        public let qPeriaptAuthProfile: String?
         public let signature: Data
 
         public init(
@@ -1102,6 +1141,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
             policyAllowClassicFallback: Bool = false,
             routeScope: String = "lan",
             bonjourEndpointDigest: String? = nil,
+            platform: String? = nil,
+            osVersion: String? = nil,
+            permittedSuiteWireIds: [UInt16]? = nil,
+            qPeriaptAuthProfile: String? = nil,
             signature: Data
         ) {
             self.version = version
@@ -1121,6 +1164,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
             self.policyAllowClassicFallback = policyAllowClassicFallback
             self.routeScope = routeScope
             self.bonjourEndpointDigest = bonjourEndpointDigest
+            self.platform = platform
+            self.osVersion = osVersion
+            self.permittedSuiteWireIds = permittedSuiteWireIds
+            self.qPeriaptAuthProfile = qPeriaptAuthProfile
             self.signature = signature
         }
 
@@ -1156,6 +1203,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
                 policyAllowClassicFallback: policyAllowClassicFallback,
                 routeScope: routeScope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
                 bonjourEndpointDigest: AppMessage.normalizedToken(bonjourEndpointDigest ?? ""),
+                platform: platform.map(AppMessage.normalizedToken),
+                osVersion: osVersion.map(AppMessage.normalizedToken),
+                permittedSuiteWireIds: permittedSuiteWireIds,
+                qPeriaptAuthProfile: qPeriaptAuthProfile,
                 signature: signature
             )
         }
@@ -1169,7 +1220,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
                 .sorted()
                 .joined(separator: ",")
             let fields: [(String, String)] = [
-                ("domain", Self.domainSeparator),
+                ("domain", payload.version == Self.currentVersion ? Self.domainSeparator : "SkyBridge-SKR-\(payload.version)-SignedKEMRefresh"),
                 ("version", String(payload.version)),
                 ("deviceId", AppMessage.normalizedToken(payload.deviceId)),
                 ("aliases", AppMessage.normalizedUniqueTokens(payload.aliases).joined(separator: ",")),
@@ -1189,8 +1240,13 @@ public enum AppMessage: Codable, Sendable, Equatable {
                 ("policyAllowClassicFallback", payload.policyAllowClassicFallback ? "1" : "0"),
                 ("routeScope", payload.routeScope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()),
                 ("bonjourEndpointDigest", AppMessage.normalizedToken(payload.bonjourEndpointDigest ?? ""))
-            ]
-            return AppMessage.canonicalLineEncoding(fields)
+            ] + (payload.version == Self.qPeriaptVersion || payload.version == Self.negotiationVersion ? [
+                ("platform", AppMessage.normalizedToken(payload.platform ?? "")),
+                ("osVersion", AppMessage.normalizedToken(payload.osVersion ?? ""))
+            ] : [])
+            return AppMessage.canonicalLineEncoding(fields + (payload.version == Self.negotiationVersion
+                ? SignedKEMRefreshNegotiation.responseFields(permitted: payload.permittedSuiteWireIds, profile: payload.qPeriaptAuthProfile)
+                : []))
         }
 
         public func validatedForStrictPQCImport(
@@ -1198,7 +1254,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
             pinnedProtocolFingerprints: Set<String>,
             minimumGeneration: UInt64? = nil
         ) throws -> SignedKEMRefreshPayload {
-            guard version == Self.currentVersion else { throw KEMRefreshValidationError.invalidVersion }
+            guard version == Self.currentVersion || version == Self.qPeriaptVersion || version == Self.negotiationVersion else { throw KEMRefreshValidationError.invalidVersion }
             guard AppMessage.canonicalMillisecondsSinceEpoch(sentAt) != nil,
                   AppMessage.canonicalMillisecondsSinceEpoch(expiresAt) != nil else {
                 throw KEMRefreshValidationError.unrepresentableTimestamp
@@ -1219,7 +1275,56 @@ public enum AppMessage: Codable, Sendable, Equatable {
             ) == claimedFingerprint else {
                 throw KEMRefreshValidationError.invalidProtocolIdentityFingerprint
             }
-            guard !kemPublicKeys.isEmpty else { throw KEMRefreshValidationError.missingKEMPublicKey }
+            guard version == Self.negotiationVersion || !kemPublicKeys.isEmpty else { throw KEMRefreshValidationError.missingKEMPublicKey }
+            guard Set(kemPublicKeys.map(\.suiteWireId)).count == kemPublicKeys.count else {
+                throw KEMRefreshValidationError.policyMismatch
+            }
+            if version == Self.negotiationVersion {
+                guard let permittedSuiteWireIds else { throw KEMRefreshValidationError.policyMismatch }
+                try SignedKEMRefreshNegotiation.validateCapabilities(suites: permittedSuiteWireIds,
+                    platform: platform, osVersion: osVersion, profile: qPeriaptAuthProfile,
+                    allowEmpty: true, requireSorted: true)
+                guard expiresAt.timeIntervalSince(sentAt) <= 300,
+                      sentAt.timeIntervalSince(now) <= KEMRefreshRequestPayload.maximumAcceptedFutureSkew,
+                      requestNonce.count <= 128 else { throw KEMRefreshValidationError.invalidValidityWindow }
+                if permittedSuiteWireIds.contains(SignedKEMRefreshNegotiation.qPeriapt) {
+                    guard algorithm == .mlDSA65, protocolIdentityPublicKey.count == 1952,
+                          signature.count == algorithm.signatureByteCount else { throw KEMRefreshValidationError.invalidSignatureAlgorithm }
+                }
+                guard kemPublicKeys.allSatisfy({ permittedSuiteWireIds.contains($0.suiteWireId) }) else {
+                    throw KEMRefreshValidationError.policyMismatch
+                }
+                // Validate raw entries before signature normalization can discard an empty key.
+                for key in kemPublicKeys {
+                    let expected = AppMessage.expectedKEMPublicKeyLength(for: CryptoSuite(wireId: key.suiteWireId))
+                    guard expected > 0 else { throw KEMRefreshValidationError.unknownSuite(wireId: key.suiteWireId) }
+                    guard key.publicKey.count == expected else {
+                        throw KEMRefreshValidationError.invalidKEMPublicKeyLength(wireId: key.suiteWireId, expected: expected, actual: key.publicKey.count)
+                    }
+                }
+            } else if version == Self.qPeriaptVersion {
+                guard algorithm == .mlDSA65 else { throw KEMRefreshValidationError.invalidSignatureAlgorithm }
+                guard protocolIdentityPublicKey.count == 1952 else {
+                    throw KEMRefreshValidationError.invalidProtocolIdentityPublicKey
+                }
+                guard signature.count == algorithm.signatureByteCount else {
+                    throw KEMRefreshValidationError.missingSignature
+                }
+                guard expiresAt.timeIntervalSince(sentAt) <= 300,
+                      sentAt.timeIntervalSince(now) <= KEMRefreshRequestPayload.maximumAcceptedFutureSkew,
+                      requestNonce.count <= 128 else {
+                    throw KEMRefreshValidationError.invalidValidityWindow
+                }
+                guard kemPublicKeys.map(\.suiteWireId) == [CryptoSuite.qperiaptABI2PolicyBound.wireId],
+                      let platform, let osVersion,
+                      !AppMessage.normalizedToken(platform).isEmpty,
+                      !AppMessage.normalizedToken(osVersion).isEmpty,
+                      QPeriaptPeerPlatformPolicy.isPeerAppPlatformEligible(platform: platform, osVersion: osVersion) else {
+                    throw KEMRefreshValidationError.policyMismatch
+                }
+            } else if platform != nil || osVersion != nil || kemPublicKeys.contains(where: { $0.suiteWireId == CryptoSuite.qperiaptABI2PolicyBound.wireId }) {
+                throw KEMRefreshValidationError.policyMismatch
+            }
             guard let payload = normalizedForSignature else { throw KEMRefreshValidationError.invalidDeviceId }
             guard payload.policyRequirePQC, !payload.policyAllowClassicFallback else {
                 throw KEMRefreshValidationError.policyMismatch
@@ -1241,7 +1346,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
                 throw KEMRefreshValidationError.generationRollback(current: minimumGeneration, incoming: payload.generation)
             }
 
-            guard !payload.kemPublicKeys.isEmpty else { throw KEMRefreshValidationError.missingKEMPublicKey }
+            guard payload.version == Self.negotiationVersion || !payload.kemPublicKeys.isEmpty else { throw KEMRefreshValidationError.missingKEMPublicKey }
             for key in payload.kemPublicKeys {
                 let suite = CryptoSuite(wireId: key.suiteWireId)
                 guard suite.isKnown else { throw KEMRefreshValidationError.unknownSuite(wireId: key.suiteWireId) }
@@ -1266,6 +1371,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
             pinnedProtocolFingerprints: Set<String>,
             minimumGeneration: UInt64? = nil
         ) throws -> SignedKEMRefreshPayload {
+            guard version == request.version else { throw KEMRefreshValidationError.invalidVersion }
             guard request.hasExpectedPolicyHash else {
                 throw KEMRefreshValidationError.requestPolicyHashMismatch
             }
@@ -1280,6 +1386,12 @@ public enum AppMessage: Codable, Sendable, Equatable {
                     throw KEMRefreshValidationError.responseSuiteNotRequested(wireId: key.suiteWireId)
                 }
             }
+            if version == Self.negotiationVersion {
+                guard let permitted = payload.permittedSuiteWireIds else { throw KEMRefreshValidationError.policyMismatch }
+                try SignedKEMRefreshNegotiation.requireKeySet(payload.kemPublicKeys.map(\.suiteWireId),
+                    requested: request.requestedSuiteWireIds, permitted: permitted,
+                    requesterProfile: request.qPeriaptAuthProfile, responderProfile: payload.qPeriaptAuthProfile)
+            }
             guard payload.requestNonce == request.nonce else {
                 throw KEMRefreshValidationError.requestNonceMismatch
             }
@@ -1292,6 +1404,14 @@ public enum AppMessage: Codable, Sendable, Equatable {
             )
             guard !targetDeviceId.isEmpty, responseDeviceIds.contains(targetDeviceId) else {
                 throw KEMRefreshValidationError.targetDeviceIdMismatch
+            }
+            guard AppMessage.normalizedToken(bonjourEndpointDigest ?? "") ==
+                    AppMessage.normalizedToken(request.bonjourEndpointDigest ?? "") else {
+                throw KEMRefreshValidationError.requestHashMismatch
+            }
+            if let requestedFingerprint = AppMessage.normalizedFingerprint(request.targetProtocolIdentityFingerprint),
+               requestedFingerprint != payload.protocolIdentityFingerprint {
+                throw KEMRefreshValidationError.pinnedProtocolIdentityMismatch(fingerprint: payload.protocolIdentityFingerprint)
             }
             return payload
         }
@@ -1309,6 +1429,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
         case signedProtocolIdentityBinding
         case protocolIdentityBindingConfirm
         case signedProtocolIdentityBindingFinalAck
+        case usbPeerDiscoveryRequest
+        case usbPeerDiscoveryResponse
+        case handshakeConfigurationRequest
+        case handshakeConfigurationResponse
         case heartbeat
         case authenticatedRouteBinding
         case peerDisconnecting
@@ -1451,6 +1575,14 @@ public enum AppMessage: Codable, Sendable, Equatable {
                 SignedProtocolIdentityBindingFinalAckPayload.self, forKey: selectedKey,
                 from: container, legacyAssociatedValue: usesLegacyAssociatedValue
             ))
+        case .usbPeerDiscoveryRequest:
+            self = .usbPeerDiscoveryRequest(try container.decode(USBPeerDiscoveryRequest.self, forKey: .usbPeerDiscoveryRequest))
+        case .usbPeerDiscoveryResponse:
+            self = .usbPeerDiscoveryResponse(try container.decode(USBPeerDiscoveryResponse.self, forKey: .usbPeerDiscoveryResponse))
+        case .handshakeConfigurationRequest:
+            self = .handshakeConfigurationRequest(try container.decode(HandshakeConfigurationRequest.self, forKey: .handshakeConfigurationRequest))
+        case .handshakeConfigurationResponse:
+            self = .handshakeConfigurationResponse(try container.decode(HandshakeConfigurationResponse.self, forKey: .handshakeConfigurationResponse))
         case .heartbeat:
             self = .heartbeat(try Self.decodePayload(
                 HeartbeatPayload.self, forKey: selectedKey, from: container,
@@ -1504,6 +1636,14 @@ public enum AppMessage: Codable, Sendable, Equatable {
             try container.encode(payload, forKey: .protocolIdentityBindingConfirm)
         case .signedProtocolIdentityBindingFinalAck(let payload):
             try container.encode(payload, forKey: .signedProtocolIdentityBindingFinalAck)
+        case .usbPeerDiscoveryRequest(let payload):
+            try container.encode(payload, forKey: .usbPeerDiscoveryRequest)
+        case .usbPeerDiscoveryResponse(let payload):
+            try container.encode(payload, forKey: .usbPeerDiscoveryResponse)
+        case .handshakeConfigurationRequest(let payload):
+            try container.encode(payload, forKey: .handshakeConfigurationRequest)
+        case .handshakeConfigurationResponse(let payload):
+            try container.encode(payload, forKey: .handshakeConfigurationResponse)
         case .heartbeat(let payload):
             try container.encode(payload, forKey: .heartbeat)
         case .authenticatedRouteBinding(let payload):
@@ -1582,11 +1722,12 @@ public enum AppMessage: Codable, Sendable, Equatable {
     private static func skr1PolicyHashHex(
         requirePQC: Bool,
         allowClassicFallback: Bool,
-        routeScope: String
+        routeScope: String,
+        version: Int
     ) -> String {
         let fields: [(String, String)] = [
-            ("domain", "SkyBridge-SKR-1-Policy"),
-            ("version", String(KEMRefreshRequestPayload.currentVersion)),
+            ("domain", "SkyBridge-SKR-\(version)-Policy"),
+            ("version", String(version)),
             ("policyRequirePQC", requirePQC ? "1" : "0"),
             ("policyAllowClassicFallback", allowClassicFallback ? "1" : "0"),
             ("routeScope", routeScope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())

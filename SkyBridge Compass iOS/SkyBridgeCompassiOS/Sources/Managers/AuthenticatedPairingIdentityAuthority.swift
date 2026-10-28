@@ -4,6 +4,10 @@ import Foundation
 
 @available(iOS 17.0, *)
 struct ValidatedPairingIdentityAuthority: Sendable, Equatable {
+  /// Exact protocol ID authenticated by the pairing payload and Finished binding.
+  /// Account registry identities are case-sensitive and do not use local aliases.
+  let protocolDeviceId: String
+  /// Canonical local trust-store key; never substitute it in account requests.
   let declaredDeviceId: String
   let authorizedDeviceIds: [String]
   let protocolSigningAlgorithm: ProtocolSigningAlgorithm
@@ -11,12 +15,14 @@ struct ValidatedPairingIdentityAuthority: Sendable, Equatable {
   let protocolPublicKey: Data
 
   fileprivate init(
+    protocolDeviceId: String,
     declaredDeviceId: String,
     authorizedDeviceIds: [String],
     protocolSigningAlgorithm: ProtocolSigningAlgorithm,
     protocolPublicKeyFingerprint: String,
     protocolPublicKey: Data
   ) {
+    self.protocolDeviceId = protocolDeviceId
     self.declaredDeviceId = declaredDeviceId
     self.authorizedDeviceIds = authorizedDeviceIds
     self.protocolSigningAlgorithm = protocolSigningAlgorithm
@@ -172,6 +178,7 @@ enum AuthenticatedPairingIdentityAuthorityValidator {
     }
 
     return ValidatedPairingIdentityAuthority(
+      protocolDeviceId: declaredDeviceId,
       declaredDeviceId: persistentDeclaredDeviceId,
       authorizedDeviceIds: authorizedDeviceIds,
       protocolSigningAlgorithm: algorithm,
@@ -839,6 +846,31 @@ struct PairingAcceptanceJournalStore: Sendable {
 @MainActor
 enum PairingIdentityAuthorityMutationBarrier {
   private static var activePermit: PairingIdentityAuthorityMutationPermit?
+
+  /// A transient write barrier is not a negative trust decision. Wait only for
+  /// the live owner, then perform the caller's strict read without another
+  /// suspension point. An abandoned journal is still rejected by that read.
+  /// Session-bound readers validate their captured owner after every suspension;
+  /// nil preserves the existing independent strict-store-read contract.
+  static func readAfterActiveMutation<Value>(
+    timeout: Duration = .seconds(8),
+    validateCurrent: (@MainActor () throws -> Void)? = nil,
+    _ read: () throws -> Value
+  ) async throws -> Value {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while activePermit != nil {
+      try Task.checkCancellation()
+      try validateCurrent?()
+      guard clock.now < deadline else {
+        throw AuthorityBoundPairingIdentityPersistenceError.transactionInProgress
+      }
+      try await Task.sleep(for: min(.milliseconds(20), clock.now.duration(to: deadline)))
+    }
+    try Task.checkCancellation()
+    try validateCurrent?()
+    return try read()
+  }
 
   static func acquire(
     transactionID: UUID,

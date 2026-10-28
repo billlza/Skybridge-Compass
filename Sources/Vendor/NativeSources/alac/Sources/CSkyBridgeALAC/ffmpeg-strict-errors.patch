@@ -1,0 +1,31 @@
+--- a/libavcodec/alac.c
++++ b/libavcodec/alac.c
+@@ -156,0 +157,2 @@
++                    if (alac->avctx->err_recognition & AV_EF_EXPLODE)
++                        return AVERROR_INVALIDDATA;
+@@ -456 +458 @@
+-        if (ret < 0 && get_bits_left(&alac->gb))
++        if (ret < 0 && (get_bits_left(&alac->gb) || (avctx->err_recognition & AV_EF_EXPLODE)))
+@@ -468,0 +471,2 @@
++        if (avctx->err_recognition & AV_EF_EXPLODE)
++            return AVERROR_INVALIDDATA;
+@@ -473 +477 @@
+-    else
++    else {
+@@ -474,0 +479,3 @@
++        if (avctx->err_recognition & AV_EF_EXPLODE)
++            return AVERROR_INVALIDDATA;
++    }
+@@ -632,0 +640,6 @@
++
++/* SkyBridge strict ALAC provider contract, revision 1. Error behavior is opt-in via AV_EF_EXPLODE. */
++unsigned avcodec_alac_strict_errors_version(void)
++{
++    return 1;
++}
+--- a/libavcodec/avcodec.h
++++ b/libavcodec/avcodec.h
+@@ -2116,0 +2117,3 @@
++
++/** SkyBridge ALAC strict-error provider contract revision (requires AV_EF_EXPLODE). */
++unsigned avcodec_alac_strict_errors_version(void);

@@ -32,15 +32,17 @@ public final class WeatherManager: NSObject, ObservableObject {
     
     // MARK: - Services
     
-    private let weatherService = WeatherService.shared
-    private let locationManager = CLLocationManager()
-    private let localizationManager = LocalizationManager.instance
+    private let weatherService: WeatherService
+    private let locationManager: CLLocationManager
+    private let localizationManager: LocalizationManager
     
     // MARK: - Private Properties
     
     private var cancellables = Set<AnyCancellable>()
     private var refreshTimer: Timer?
     private var lastRefreshTime: Date?
+    private var lifecycleGeneration: UInt64 = 0
+    private var isRunning = false
     
     // MARK: - Configuration (iOS 优化)
     
@@ -52,7 +54,14 @@ public final class WeatherManager: NSObject, ObservableObject {
     
     // MARK: - Initialization
     
-    private override init() {
+    private override convenience init() {
+        self.init(weatherService: .shared, locationManager: CLLocationManager(), localizationManager: .instance)
+    }
+
+    init(weatherService: WeatherService, locationManager: CLLocationManager, localizationManager: LocalizationManager) {
+        self.weatherService = weatherService
+        self.locationManager = locationManager
+        self.localizationManager = localizationManager
         super.init()
         
         locationManager.delegate = self
@@ -65,7 +74,10 @@ public final class WeatherManager: NSObject, ObservableObject {
     
     /// 启动天气系统
     public func start() async {
-        guard !isInitialized else { return }
+        guard SettingsManager.instance.enableRealTimeWeather, !isRunning else { return }
+        lifecycleGeneration &+= 1
+        let generation = lifecycleGeneration
+        isRunning = true
         
         SkyBridgeLogger.shared.info("🌤️ 启动天气系统")
         isLoading = true
@@ -77,8 +89,11 @@ public final class WeatherManager: NSObject, ObservableObject {
         // 如果已有位置，直接获取天气
         if let location = currentLocation {
             await weatherService.fetchWeather(for: location)
+            guard isCurrentRun(generation) else { return }
             currentWeather = weatherService.currentWeather
         }
+
+        guard isCurrentRun(generation) else { return }
         
         isInitialized = true
         isLoading = false
@@ -89,6 +104,8 @@ public final class WeatherManager: NSObject, ObservableObject {
     
     /// 手动刷新
     public func refresh() async {
+        guard isRunning, SettingsManager.instance.enableRealTimeWeather else { return }
+        let generation = lifecycleGeneration
         // 检查最小刷新间隔
         if let lastRefresh = lastRefreshTime,
            Date().timeIntervalSince(lastRefresh) < minimumRefreshInterval {
@@ -104,11 +121,20 @@ public final class WeatherManager: NSObject, ObservableObject {
         locationManager.requestLocation()
         
         // 等待位置更新
-        try? await Task.sleep(for: .seconds(2))
+        do { try await Task.sleep(for: .seconds(2)) }
+        catch is CancellationError {
+            if isCurrentRun(generation) { isLoading = false }
+            return
+        } catch {
+            if isCurrentRun(generation) { self.error = error.localizedDescription; isLoading = false }
+            return
+        }
+        guard isCurrentRun(generation) else { return }
         
         // 获取天气
         if let location = currentLocation {
             await weatherService.fetchWeather(for: location)
+            guard isCurrentRun(generation) else { return }
             currentWeather = weatherService.currentWeather
         }
         
@@ -118,6 +144,12 @@ public final class WeatherManager: NSObject, ObservableObject {
     
     /// 停止天气系统
     public func stop() {
+        lifecycleGeneration &+= 1
+        isRunning = false
+        isInitialized = false
+        isLoading = false
+        lastRefreshTime = nil
+        locationManager.stopUpdatingLocation()
         stopAutoRefresh()
         SkyBridgeLogger.shared.info("⏹️ 天气系统已停止")
     }
@@ -136,6 +168,7 @@ public final class WeatherManager: NSObject, ObservableObject {
     
     /// 请求位置权限
     public func requestLocationPermission() {
+        guard isRunning, SettingsManager.instance.enableRealTimeWeather else { return }
         switch locationManager.authorizationStatus {
         case .notDetermined:
             locationManager.requestWhenInUseAuthorization()
@@ -153,14 +186,15 @@ public final class WeatherManager: NSObject, ObservableObject {
         weatherService.$currentWeather
             .receive(on: DispatchQueue.main)
             .sink { [weak self] weather in
-                self?.currentWeather = weather
+                guard let self, self.isRunning, SettingsManager.instance.enableRealTimeWeather else { return }
+                self.currentWeather = weather
             }
             .store(in: &cancellables)
         
         weatherService.$error
             .receive(on: DispatchQueue.main)
             .sink { [weak self] weatherError in
-                guard let self else { return }
+                guard let self, self.isRunning, SettingsManager.instance.enableRealTimeWeather else { return }
                 self.error = weatherError.map { self.localizedErrorMessage(for: $0) }
             }
             .store(in: &cancellables)
@@ -168,7 +202,8 @@ public final class WeatherManager: NSObject, ObservableObject {
         weatherService.$isLoading
             .receive(on: DispatchQueue.main)
             .sink { [weak self] loading in
-                self?.isLoading = loading
+                guard let self, self.isRunning, SettingsManager.instance.enableRealTimeWeather else { return }
+                self.isLoading = loading
             }
             .store(in: &cancellables)
     }
@@ -189,6 +224,10 @@ public final class WeatherManager: NSObject, ObservableObject {
         refreshTimer?.invalidate()
         refreshTimer = nil
     }
+
+    private func isCurrentRun(_ generation: UInt64) -> Bool {
+        isRunning && lifecycleGeneration == generation && SettingsManager.instance.enableRealTimeWeather
+    }
 }
 
 // MARK: - CLLocationManagerDelegate
@@ -200,11 +239,14 @@ extension WeatherManager: CLLocationManagerDelegate {
         guard let location = locations.last else { return }
         
         Task { @MainActor in
+            guard self.isRunning, SettingsManager.instance.enableRealTimeWeather else { return }
+            let generation = self.lifecycleGeneration
             // 使用反向地理编码获取城市名
             let geocoder = CLGeocoder()
             
             do {
                 let placemarks = try await geocoder.reverseGeocodeLocation(location)
+                guard self.isCurrentRun(generation) else { return }
                 let cityName = placemarks.first?.locality ?? placemarks.first?.administrativeArea
                 
                 self.currentLocation = LocationInfo(
@@ -218,10 +260,12 @@ extension WeatherManager: CLLocationManagerDelegate {
                 // 如果天气数据为空，立即获取
                 if self.currentWeather == nil, let loc = self.currentLocation {
                     await self.weatherService.fetchWeather(for: loc)
+                    guard self.isCurrentRun(generation) else { return }
                     self.currentWeather = self.weatherService.currentWeather
                 }
                 
             } catch {
+                guard self.isCurrentRun(generation) else { return }
                 // 即使地理编码失败，也保存坐标
                 self.currentLocation = LocationInfo(
                     latitude: location.coordinate.latitude,
@@ -232,6 +276,7 @@ extension WeatherManager: CLLocationManagerDelegate {
                 // 地理编码失败也要继续拉天气（否则 UI 会一直停在“正在获取”）
                 if self.currentWeather == nil, let loc = self.currentLocation {
                     await self.weatherService.fetchWeather(for: loc)
+                    guard self.isCurrentRun(generation) else { return }
                     self.currentWeather = self.weatherService.currentWeather
                 }
             }
@@ -240,6 +285,7 @@ extension WeatherManager: CLLocationManagerDelegate {
     
     nonisolated public func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         Task { @MainActor in
+            guard self.isRunning, SettingsManager.instance.enableRealTimeWeather else { return }
             SkyBridgeLogger.shared.error("❌ 位置获取失败: \(error.localizedDescription)")
             self.error = self.localizedLocationErrorMessage(error)
         }
@@ -249,6 +295,7 @@ extension WeatherManager: CLLocationManagerDelegate {
         let status = manager.authorizationStatus
         Task { @MainActor in
             self.locationAuthorizationStatus = status
+            guard self.isRunning, SettingsManager.instance.enableRealTimeWeather else { return }
             
             switch status {
             case .authorizedWhenInUse, .authorizedAlways:

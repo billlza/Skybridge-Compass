@@ -7,6 +7,7 @@ public enum AccountDevicePresenceReportError: Error, Equatable, Sendable {
     case invalidLANAddress(String)
     case tooManyCapabilities(count: Int)
     case invalidCapability(String)
+    case invalidListenerPort
 }
 
 /// 心跳上报给信令服务器的本机元数据（只含元数据；身份绑定与 client/protocol 版本由各平台客户端自己附加）。
@@ -26,6 +27,8 @@ public struct AccountDevicePresenceReport: Encodable, Sendable, Equatable {
     public let lanAddresses: [String]
     /// 已规范化：去重、字典序、最多 16 条。
     public let capabilities: [String]
+    /// Current ready MAIN listener only. Nil explicitly withdraws the route on the next heartbeat.
+    public let lanControlPort: UInt16?
 
     public init(
         deviceName: String,
@@ -33,8 +36,11 @@ public struct AccountDevicePresenceReport: Encodable, Sendable, Equatable {
         deviceModel: String?,
         osVersion: String?,
         lanAddresses: [String],
-        capabilities: [AccountDeviceCapability]
+        capabilities: [AccountDeviceCapability],
+        lanControlPort: UInt16? = nil
     ) throws {
+        guard lanControlPort != 0 else { throw AccountDevicePresenceReportError.invalidListenerPort }
+        self.lanControlPort = lanControlPort
         self.deviceName = try Self.normalizedDeviceName(deviceName)
         self.platform = platform
         self.deviceModel = try Self.normalizedMetadata(deviceModel, field: "deviceModel")
@@ -50,6 +56,7 @@ public struct AccountDevicePresenceReport: Encodable, Sendable, Equatable {
         case osVersion
         case lanAddresses
         case capabilities
+        case lanControlPort
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -60,6 +67,7 @@ public struct AccountDevicePresenceReport: Encodable, Sendable, Equatable {
         try container.encodeIfPresent(osVersion, forKey: .osVersion)
         try container.encode(lanAddresses, forKey: .lanAddresses)
         try container.encode(capabilities, forKey: .capabilities)
+        try container.encodeIfPresent(lanControlPort, forKey: .lanControlPort)
     }
 
     // MARK: - Normalization (mirrors Server/skybridge-signaling/lib/presence_report.js)
