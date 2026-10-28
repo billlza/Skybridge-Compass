@@ -386,14 +386,28 @@ final class SettingsRuntimeTruthSourceContractTests: XCTestCase {
     func testPreferXWingUsesSettingsManagerTruthSource() throws {
         let settingsView = try readSource("Sources/SkyBridgeCore/Views/SettingsView.swift")
         let preferencesView = try readSource("Sources/SkyBridgeCompassApp/PreferencesView.swift")
+        let modeSettings = try readSource("Sources/SkyBridgeCore/Views/PQCModeSettingsView.swift")
+        let nativeConfiguration = try readSource("Sources/SkyBridgeCore/OperatorControl/NativeHandshakeConfiguration.swift")
         let factory = try readSource("Sources/SkyBridgeCore/P2P/CryptoProviderFactory.swift")
         let selector = try readSource("Sources/SkyBridgeCore/P2P/CryptoProviderSelector.swift")
         let twoAttempt = try readSource("Sources/SkyBridgeCore/P2P/TwoAttemptHandshakeManager.swift")
 
-        XCTAssertTrue(settingsView.contains("isOn: $settingsManager.preferXWingHybrid"))
-        XCTAssertTrue(preferencesView.contains("isOn: $settingsManager.preferXWingHybrid"))
-        XCTAssertFalse(settingsView.contains("@AppStorage(\"Settings.PreferXWingHybrid\")"))
-        XCTAssertFalse(preferencesView.contains("@AppStorage(\"Settings.PreferXWingHybrid\")"))
+        // Both surfaces now delegate to the shared mode picker. A direct toggle
+        // would bypass its revision-checked native configuration transaction.
+        for source in [settingsView, preferencesView] {
+            XCTAssertTrue(source.contains("PQCModeSettingsView(settingsManager: settingsManager)"))
+        }
+        for source in [settingsView, preferencesView, modeSettings] {
+            XCTAssertFalse(source.contains("@AppStorage(\"Settings.PreferXWingHybrid\")"))
+            XCTAssertFalse(source.contains("$settingsManager.preferXWingHybrid"))
+        }
+        XCTAssertTrue(modeSettings.contains("@ObservedObject private var settingsManager: SettingsManager"))
+        XCTAssertTrue(modeSettings.contains("settingsManager.preferXWingHybrid ? .xwing : .mlkem"))
+        XCTAssertTrue(modeSettings.contains(".tag(HandshakeProfile.xwing)"))
+        XCTAssertTrue(modeSettings.contains("NativeHandshakeConfiguration.snapshot()"))
+        XCTAssertTrue(modeSettings.contains("NativeHandshakeConfiguration.apply(profile, revision: current.revision)"))
+        XCTAssertTrue(modeSettings.contains("settingsManager.reportPQCModePolicyError(error)"))
+        XCTAssertTrue(nativeConfiguration.contains("SettingsManager.shared.applyHandshakeProfile(profile, expectedRevision: revision"))
         XCTAssertTrue(factory.contains("SettingsStorageKeys.preferXWingHybrid"))
         XCTAssertTrue(selector.contains("SettingsStorageKeys.preferXWingHybrid"))
         XCTAssertTrue(twoAttempt.contains("SettingsStorageKeys.preferXWingHybrid"))
