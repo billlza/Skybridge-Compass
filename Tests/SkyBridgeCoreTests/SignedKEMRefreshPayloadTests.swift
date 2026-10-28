@@ -386,7 +386,11 @@ final class SignedKEMRefreshPayloadTests: XCTestCase {
         XCTAssertTrue(source.contains("admissionGate.cachedCompletedResponse("))
         XCTAssertTrue(source.contains("admissionGate.recordCompletedResponse("))
         XCTAssertTrue(source.contains("missing_requested_suite"))
-        XCTAssertTrue(source.contains("limitingTo: requestedSuites"))
+        XCTAssertTrue(source.contains("SignedKEMRefreshNegotiation.intersection(requested: request.requestedSuiteWireIds,"))
+        XCTAssertTrue(source.contains("inventory.suiteWireIds.filter { request.requestedSuiteWireIds.contains($0) }"))
+        XCTAssertTrue(source.contains("for wireId in intersection {"))
+        XCTAssertTrue(source.contains("let provider = try inventory.provider(for: wireId)"))
+        XCTAssertTrue(source.contains("getKEMPublicKey(for: CryptoSuite(wireId: wireId), provider: provider)"))
         XCTAssertTrue(source.contains("responderLatencyMs="))
     }
 

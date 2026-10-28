@@ -3536,7 +3536,8 @@ final class ProtocolIdentityBindingV3Tests: XCTestCase {
     private func makeConfirm(
         transcript: Transcript,
         confirmationNonce: Data = Data(repeating: 0xB2, count: 24),
-        now: Date = Date()
+        now: Date = Date(),
+        expiresAt: Date? = nil
     ) throws -> AppMessage.ProtocolIdentityBindingConfirmPayload {
         let unsigned = AppMessage.ProtocolIdentityBindingConfirmPayload(
             transactionId: transcript.request.transactionId,
@@ -3550,7 +3551,7 @@ final class ProtocolIdentityBindingV3Tests: XCTestCase {
             sasTranscriptHashHex: transcript.candidate.sasTranscriptHashHex(request: transcript.request),
             confirmationNonce: confirmationNonce,
             sentAt: now,
-            expiresAt: P2PProtocolIdentityBindingAdmissionPolicy.boundedChildExpiry(
+            expiresAt: expiresAt ?? P2PProtocolIdentityBindingAdmissionPolicy.boundedChildExpiry(
                 parentExpiry: transcript.candidate.expiresAt,
                 issuedAt: now
             ),
@@ -3577,7 +3578,8 @@ final class ProtocolIdentityBindingV3Tests: XCTestCase {
         transcript: Transcript,
         confirm: AppMessage.ProtocolIdentityBindingConfirmPayload,
         accepted: Bool = true,
-        now: Date = Date()
+        now: Date = Date(),
+        expiresAt: Date? = nil
     ) throws -> AppMessage.SignedProtocolIdentityBindingFinalAckPayload {
         let unsigned = AppMessage.SignedProtocolIdentityBindingFinalAckPayload(
             transactionId: transcript.request.transactionId,
@@ -3593,7 +3595,7 @@ final class ProtocolIdentityBindingV3Tests: XCTestCase {
             sasTranscriptHashHex: transcript.candidate.sasTranscriptHashHex(request: transcript.request),
             accepted: accepted,
             sentAt: now,
-            expiresAt: P2PProtocolIdentityBindingAdmissionPolicy.boundedChildExpiry(
+            expiresAt: expiresAt ?? P2PProtocolIdentityBindingAdmissionPolicy.boundedChildExpiry(
                 parentExpiry: confirm.expiresAt,
                 issuedAt: now
             ),
@@ -3616,6 +3618,70 @@ final class ProtocolIdentityBindingV3Tests: XCTestCase {
             expiresAt: unsigned.expiresAt,
             responderSignature: try transcript.responderKey.signature(for: unsigned.signaturePreimage)
         )
+    }
+
+    func testFinalAckCannotExtendEitherParentExpiry() throws {
+        let issuedAt = Date(timeIntervalSince1970: 2_000_000_000)
+        let transcript = try makeTranscript(now: issuedAt)
+        // Isolate each upper bound: candidate at +300, confirmation at +360 or +240.
+        for confirmationLifetime in [360.0, 240.0] {
+            let confirm = try makeConfirm(
+                transcript: transcript,
+                now: issuedAt.addingTimeInterval(180),
+                expiresAt: issuedAt.addingTimeInterval(confirmationLifetime)
+            )
+            let ack = try makeFinalAck(
+                transcript: transcript,
+                confirm: confirm,
+                now: issuedAt.addingTimeInterval(200),
+                expiresAt: issuedAt.addingTimeInterval(min(300, confirmationLifetime) + 1)
+            )
+            XCTAssertTrue(transcript.responderKey.publicKey.isValidSignature(
+                ack.responderSignature, for: ack.signaturePreimage
+            ))
+            XCTAssertThrowsError(try ack.validatedForFinalization(
+                request: transcript.request,
+                candidate: transcript.candidate,
+                confirm: confirm,
+                now: issuedAt.addingTimeInterval(210)
+            )) { error in
+                XCTAssertEqual(error as? AppMessage.ProtocolIdentityBindingValidationError, .invalidValidityWindow)
+            }
+        }
+    }
+
+    func testLateFinalAckCannotRenewExpiredPairing() throws {
+        let issuedAt = Date(timeIntervalSince1970: 2_000_000_000)
+        let transcript = try makeTranscript(now: issuedAt)
+        let confirm = try makeConfirm(transcript: transcript, now: issuedAt.addingTimeInterval(180))
+        let ack = try makeFinalAck(
+            transcript: transcript, confirm: confirm,
+            now: issuedAt.addingTimeInterval(290), expiresAt: issuedAt.addingTimeInterval(590)
+        )
+        XCTAssertThrowsError(try ack.validatedForFinalization(
+            request: transcript.request, candidate: transcript.candidate, confirm: confirm,
+            now: issuedAt.addingTimeInterval(310)
+        )) { error in
+            XCTAssertEqual(error as? AppMessage.ProtocolIdentityBindingValidationError, .invalidValidityWindow)
+        }
+    }
+
+    func testFinalAckAtEarlierParentExpirySurvivesThreeMinuteSASWait() throws {
+        let issuedAt = Date(timeIntervalSince1970: 2_000_000_000)
+        let transcript = try makeTranscript(now: issuedAt)
+        for confirmationLifetime in [240.0, 300.0] {
+            let confirm = try makeConfirm(
+                transcript: transcript, now: issuedAt.addingTimeInterval(180),
+                expiresAt: issuedAt.addingTimeInterval(confirmationLifetime)
+            )
+            let ack = try makeFinalAck(
+                transcript: transcript, confirm: confirm, now: issuedAt.addingTimeInterval(180)
+            )
+            XCTAssertNoThrow(try ack.validatedForFinalization(
+                request: transcript.request, candidate: transcript.candidate, confirm: confirm,
+                now: issuedAt.addingTimeInterval(180)
+            ))
+        }
     }
 
     func testV3TranscriptRoundTripsAndValidatesBothSignatures() throws {

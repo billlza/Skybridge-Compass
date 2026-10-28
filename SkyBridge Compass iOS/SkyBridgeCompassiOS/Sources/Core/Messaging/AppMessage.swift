@@ -1060,6 +1060,8 @@ public enum AppMessage: Codable, Sendable, Equatable {
             }
             guard expiresAt > sentAt,
                   expiresAt.timeIntervalSince(sentAt) <= Self.maximumValidityWindow,
+                  expiresAt <= candidate.expiresAt,
+                  expiresAt <= confirm.expiresAt,
                   expiresAt > now,
                   sentAt.timeIntervalSince(now) <= Self.maximumAcceptedFutureSkew else {
                 throw ProtocolIdentityBindingValidationError.invalidValidityWindow
