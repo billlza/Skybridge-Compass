@@ -2,6 +2,12 @@
 
 按主题进入 [文档入口](Docs/README.md)；账号设备五端统一遵循 [登记与移除契约](Docs/account-device-lifecycle.md)。
 
+## 开发分支与 main
+
+`main` 通过 Pull Request 接收开发分支的更新。推送到开发分支只更新该分支；CI 通过并合并 PR 后，新代码才会出现在 `main`。开始新开发前先同步 `origin/main`，避免长期分叉。
+
+历史投稿快照的固定版本说明保留在 [Submission README](Docs/README_SUBMISSION_TDSC-2026-01-0318.md)；其中的 tag 指向归档版本，不代表当前产品代码。
+
 
 SkyBridge Compass Pro 是一个以 **跨平台协议内核（SkyBridgeCore）** 为中心的 P2P 连接/安全栈，并提供 macOS 应用形态与论文复现实验流水线（IEEE/TDSC）。
 
