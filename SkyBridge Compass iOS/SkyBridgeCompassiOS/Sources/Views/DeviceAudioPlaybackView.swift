@@ -215,6 +215,9 @@ private struct BluetoothFilePlaybackStatus: View {
         case .stopping: return "正在停止并关闭资源"
         case .completed: return "电脑已确认播放完成"
         case .failed:
+            if operation.failure?.isNativeBluetoothFailure == true {
+                return "蓝牙连接失败，请检查两端蓝牙和系统配对后重试。"
+            }
             switch operation.failure?.reason {
             case .userStopped: return "播放已停止"
             case .receiverDeclined: return "电脑未同意本次播放"

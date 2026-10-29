@@ -56,6 +56,7 @@ struct IOSOpusFileSendFailure: Error, Sendable {
     let reason: AudioStreamingStopReason
     let underlying: any Error
     let cleanupFailures: [String]
+    var isNativeBluetoothFailure: Bool { underlying is BluetoothAudioNativeFailure }
 }
 
 /// One selected file, one finite account lease, one exact MAIN and one CoC child.
@@ -536,7 +537,7 @@ final class IOSOpusFileSendSession: ObservableObject {
         case AudioStreamingChannelError.unsupportedPeer: return .unsupportedOutput
         default: break
         }
-        if error is BluetoothControlStreamError || error is BluetoothAudioConnectorError || error is BluetoothAudioChannelError || error is AudioBluetoothAttachmentError { return .sessionReplaced }
+        if error is BluetoothControlStreamError || error is BluetoothAudioConnectorError || error is BluetoothAudioNativeFailure || error is BluetoothAudioChannelError || error is AudioBluetoothAttachmentError { return .sessionReplaced }
         if error is AudioStreamingChannelError { return .sessionReplaced }
         if error is CancellationError { return .userStopped }
         return .sourceFailed

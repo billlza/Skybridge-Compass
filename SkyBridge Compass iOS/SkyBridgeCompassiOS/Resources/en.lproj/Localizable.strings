@@ -505,6 +505,7 @@
 "传送格式" = "Sent format";
 "电脑已确认压缩音频接收和播放完成。" = "The computer confirmed receipt and playback of the compressed audio.";
 "正在连接电脑蓝牙" = "Connecting to the computer over Bluetooth";
+"蓝牙连接失败，请检查两端蓝牙和系统配对后重试。" = "Bluetooth connection failed. Check Bluetooth and system pairing on both devices, then try again.";
 "正在通过蓝牙传送音频" = "Sending audio over Bluetooth";
 "选择音源和传输方式，电脑确认后开始播放。" = "Choose a source and transport. Playback starts after the computer approves.";
 

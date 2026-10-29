@@ -1,5 +1,6 @@
 import XCTest
 import CryptoKit
+import CoreBluetooth
 import Foundation
 import SwiftUI
 import UIKit
@@ -13,6 +14,37 @@ import SkyBridgeProtocolCore
 /// controlled: these tests do not claim radio, speaker or background acceptance.
 @MainActor
 final class IOSOpusFileSendSessionTests: XCTestCase {
+    func testNativePairingFailureRemainsTransportFailureAndClosesResources() async throws {
+        try await withFixture { f in
+            f.connectFailure = BluetoothAudioNativeFailure(operation: .readPSM,
+                underlying: NSError(domain: CBATTErrorDomain, code: CBATTError.insufficientEncryption.rawValue))
+            let sender = try f.start()
+            try await f.failure(.sessionReplaced)
+            let failure = try XCTUnwrap(sender.failure)
+            XCTAssertTrue(failure.isNativeBluetoothFailure)
+            let native = try XCTUnwrap(failure.underlying as? BluetoothAudioNativeFailure)
+            XCTAssertEqual(native.diagnosticLabel, "native.read_psm.bluetooth.att.15")
+            XCTAssertEqual(f.link?.receivedPackets, 0)
+            try await f.assertClosed()
+        }
+    }
+
+    func testNativeCallbackFailuresKeepTheirTransportCategory() async throws {
+        for operation in BluetoothAudioNativeFailure.Operation.allCases {
+            try await withFixture { f in
+                f.connectFailure = BluetoothAudioNativeFailure(operation: operation,
+                    underlying: NSError(domain: CBErrorDomain, code: CBError.unknown.rawValue))
+                let sender = try f.start()
+                try await f.failure(.sessionReplaced)
+                XCTAssertEqual(sender.failure?.isNativeBluetoothFailure, true)
+                try await f.assertClosed()
+            }
+        }
+        let sourceFailure = IOSOpusFileSendFailure(reason: .sourceFailed,
+            underlying: IOSOpusFileSourceError.queueCapacity, cleanupFailures: [])
+        XCTAssertFalse(sourceFailure.isNativeBluetoothFailure)
+    }
+
     func testQualificationOptionsStayWithinFiniteExistingProfiles() throws {
         var environment = [
             "SKYBRIDGE_AUDIO_SMOKE_RUN_ID": "00000000-0000-4000-8000-000000000001",
@@ -515,6 +547,7 @@ private final class OpusFileFixture {
     var badDigest = false, prematurePlayback = false, wrongLeaseOwner = false, endWriteFailure = false
     var endAfterPlayback = false, endAfterContent = false
     var closeFailures = 0
+    var connectFailure: (any Error)?
     var acceptWindowPackets: UInt32?
     var finished = false
 
@@ -558,6 +591,7 @@ private final class OpusFileFixture {
                     endWriteFailure: endWriteFailure)
                 value.endAfterPlayback = endAfterPlayback; value.endAfterContent = endAfterContent
                 value.acceptWindowPackets = acceptWindowPackets
+                value.connectFailure = connectFailure
                 link = value; return value
             })
         sender = value; return value
@@ -624,6 +658,7 @@ private final class OpusTestLink: IOSBluetoothAudioSendLink {
     var readsAfterTerminal = 0
     var acceptWindowPackets: UInt32?
     var peer: Task<Void, Error>?
+    var connectFailure: (any Error)?
     init(attachment: AudioBluetoothAttachment, keys: SkyBridgeCompass_iOS.SessionKeys,
          effect: @escaping @Sendable () throws -> Void, holdOutput: Bool, sendCredits: Bool,
          invalidCredit: Bool, badDigest: Bool, prematurePlayback: Bool, closeFailures: Int, endWriteFailure: Bool) throws {
@@ -644,6 +679,7 @@ private final class OpusTestLink: IOSBluetoothAudioSendLink {
         sink = BluetoothAudioChannel(transport: BluetoothControlFrameTransport(input: try XCTUnwrap(i2), output: try XCTUnwrap(o1)), attachment: sinkAttachment)
     }
     func connect() async throws {
+        if let connectFailure { throw connectFailure }
         async let a: Void = source.authenticate(requireEffectAuthorization: effect)
         async let b: Void = sink.authenticate(requireEffectAuthorization: effect)
         _ = try await (a, b)

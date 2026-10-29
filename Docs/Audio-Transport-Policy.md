@@ -277,3 +277,15 @@ iOS 蓝牙文件服务已接入现有的有限后台任务所有权。系统实�
 接收循环现仅在发起端驱动器已经 established、对应操作仍在发布时保留当前业务帧，等待该操作终止，最长十秒。没有新增接收队列；握手控制帧和尚未 established 的驱动器继续原流程。取消、超时、连接替换或发布失败不会授权业务效果。恢复分发前重新核对连接代次和已发布的会话密钥，随后仍执行原有 AEAD、消息解码及应用准入。
 
 本地完整 iOS 套件 1,873 项中 1,871 项通过，2 项既有实体设备专用检查跳过，无运行期警告；新增回归覆盖首帧恢复、等待取消、连接替换、无效密文及有界等待。Mac 连接契约 18 项、协议一致性 41 对通过。旧路径失败日志和新结果保留在 `.build/local-release-logs/ci-main-integration/ios-publication-*`；模拟器复用时发生测试宿主连接超时，新建模拟器运行成功。该修复尚不构成实体蓝牙后台连续播放验收，产品验收开关保持原状。
+
+### 2026-10-29：新 Mac 的系统蓝牙配对阻塞与错误分类
+
+首帧修复的正式 iOS Release 安装后，已配对 iPad 与新 Mac 的身份、能力交换及普通音频入口恢复。实际 600 秒文件尝试已取得系统后台任务，但在读取加密 GATT PSM 时失败，尚未进入音频子通道认证或持续播放。应用的公钥信任与系统蓝牙配对是不同边界；前者成功不代表后者完成。
+
+01:30 UTC 的两端限定日志相互印证：iOS 首个错误为 `native.read_psm.bluetooth.att.15`，Mac 的 `bluetoothd` 同时收到配对请求，因没有处理该请求的系统处理者而拒绝，随后报告配对失败。01:33 UTC 打开 Mac 蓝牙设置后重试仍得到相同的 iOS 错误。ATT 15 对应 Apple 的 [`insufficientEncryption`](https://developer.apple.com/documentation/corebluetooth/cbatterror-swift.struct/insufficientencryption)；这些观测定位到原生配对／链路加密阶段，不能进一步证明系统处理者缺失的原因，也不能据此放宽加密要求。原始限定日志保留在 `.build/local-release-logs/ci-main-integration/audio-native-pairing-window-macos.log` 和 `ios-audio-diagnostic-runtime.log`，不上传设备标识或完整系统日志。
+
+发送器原先将此原生传输错误归入 `sourceFailed`。现在保留原生失败的操作、白名单错误域和数值诊断，将其归入既有连接失败类别；本地界面提供中、英、日三种蓝牙及系统配对提示。首个失败在清理前记录，后续清理失败仍保留，不记录原生错误的 `userInfo`。回归用真实的原生错误包装和受控连接边界验证分类、零媒体包发送及资源关闭；旧逻辑实际失败于错误类别断言，修复后通过。严格编译、三种语言资源语法及测试配置检查通过。完整 iOS 回归 1,875 项中 1,873 项通过、2 项既有实体设备检查跳过，XCResult 无 runtimeWarnings。
+
+本次完整日志检查仍未通过：`IOSurfaceClientSetSurfaceNotify failed e00002c7` 出现在首个异步账户测试期间，超出既有检查仅允许的测试前启动边界；修复前的 `ios-publication-full.log` 在同一测试处已有相同诊断，故不是本次蓝牙修改新增。没有修改该检查或忽略日志。该本地模拟器诊断与未完成的原生配对对照分别保留，不能将断言全部通过表述为所有验证通过。新回归、严格编译和完整执行证据为 `.build/local-release-logs/ci-main-integration/ios-bluetooth-failure-*`。
+
+系统配对与本机后台十分钟连续播放仍未通过验收。既有账户准入、子通道认证、加密 GATT、加密 CoC、64 包缓冲及播放完成回执条件均保持原有契约；产品蓝牙接收验收开关继续关闭。
