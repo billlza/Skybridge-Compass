@@ -26,7 +26,7 @@ enum IOSAudioTaskStatus: Equatable, Sendable {
 protocol IOSContinuedAudioTask: AnyObject {
     var identifier: String { get }
     var isExpired: Bool { get }
-    func attachProgress(_ progress: Progress)
+    func updateProgress(_ progress: Progress)
     func updateStatus(_ status: IOSAudioTaskStatus)
     func setExpirationHandler(_ handler: @escaping @MainActor () -> Void)
     @discardableResult func complete(success: Bool) -> Bool
@@ -45,21 +45,15 @@ protocol IOSContinuedAudioScheduler: AnyObject {
 /// Neither representation is a clock or an audible-position estimate.
 @MainActor
 final class IOSAudioTaskProgress {
-    let value = Progress(totalUnitCount: 4)
-    private let preparation = Progress(totalUnitCount: 1)
-    private let transfer = Progress(totalUnitCount: 1)
-    private let receiver = Progress(totalUnitCount: 1)
-    private let finalization = Progress(totalUnitCount: 1)
+    // Native continued tasks need advancing completed units, not only a child
+    // Progress fraction. Preserve the four equal measured-work components with
+    // integer resolution; the final quarter still requires receipt and cleanup.
+    private static let unitsPerComponent: UInt64 = 1_000_000
+    let value = Progress(totalUnitCount: 4_000_000)
     private var counts: [(completed: Int64, total: Int64)?] = [nil, nil, nil]
     private enum Kind: Equatable { case originalFile, bluetoothFile }
     private var kind: Kind?
     private(set) var status = IOSAudioTaskStatus.originalFile(.idle)
-
-    init() {
-        for component in [preparation, transfer, receiver, finalization] {
-            value.addChild(component, withPendingUnitCount: 1)
-        }
-    }
 
     func update(_ work: IOSOriginalFileSendSession.WorkProgress) throws {
         guard let frames = Int64(exactly: work.outputFrames) else { throw IOSAudioBackgroundError.invalidProgress }
@@ -108,11 +102,16 @@ final class IOSAudioTaskProgress {
         try record(1, transfer.0, transfer.1)
         try record(2, receiver.0, receiver.1)
         counts = next; kind = incomingKind; self.status = status
-        for (index, component) in [self.preparation, self.transfer, self.receiver].enumerated() {
-            guard let count = next[index] else { continue }
+        value.completedUnitCount = next.reduce(Int64(0)) { completed, count in
             // Known empty work is complete. Unknown extent remains at zero.
-            component.totalUnitCount = max(1, count.total)
-            component.completedUnitCount = count.total == 0 ? 1 : count.completed
+            guard let count else { return completed }
+            guard count.total > 0 else { return completed + Int64(Self.unitsPerComponent) }
+            // Full-width arithmetic floors the measured ratio without overflow
+            // or rounding unfinished Int64.max-sized work up to completion.
+            // Validation above bounds the quotient to unitsPerComponent.
+            let product = UInt64(count.completed).multipliedFullWidth(by: Self.unitsPerComponent)
+            let units = UInt64(count.total).dividingFullWidth(product).quotient
+            return completed + Int64(units)
         }
     }
 
@@ -120,7 +119,7 @@ final class IOSAudioTaskProgress {
         guard status.isCompleted, counts.allSatisfy({ $0.map { $0.completed == $0.total } ?? false }) else {
             throw IOSAudioBackgroundError.incompleteWork
         }
-        finalization.completedUnitCount = 1
+        value.completedUnitCount = value.totalUnitCount
     }
 }
 
@@ -214,6 +213,7 @@ final class IOSAudioBackgroundExecution: ObservableObject {
         do {
             let previousStatus = progress.status
             try update()
+            systemTask?.updateProgress(progress.value)
             if previousStatus != progress.status { systemTask?.updateStatus(progress.status) }
         }
         catch { end(error) }
@@ -241,7 +241,10 @@ final class IOSAudioBackgroundExecution: ObservableObject {
         if success, failure == nil, !submitted || systemTask == nil { failure = IOSAudioBackgroundError.incompleteWork }
         var completed = success && failure == nil
         if completed {
-            do { try progress.finishSuccessfully() }
+            do {
+                try progress.finishSuccessfully()
+                systemTask?.updateProgress(progress.value)
+            }
             catch { failure = error; completed = false }
         }
         let acceptedSuccess = systemTask?.complete(success: completed)
@@ -263,7 +266,7 @@ final class IOSAudioBackgroundExecution: ObservableObject {
             }
             guard !closed, failure == nil else { task.complete(success: false); return }
             systemTask = task
-            task.attachProgress(progress.value)
+            task.updateProgress(progress.value)
             task.updateStatus(progress.status)
             task.setExpirationHandler { [weak self] in self?.end(IOSAudioBackgroundError.expired) }
             activateIfReady()

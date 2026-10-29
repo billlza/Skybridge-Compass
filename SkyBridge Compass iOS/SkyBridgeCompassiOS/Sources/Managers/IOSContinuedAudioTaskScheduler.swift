@@ -78,9 +78,9 @@ final class IOSContinuedAudioTaskScheduler: IOSContinuedAudioScheduler {
                 Task { @MainActor [weak self] in self?.expiration?() }
             }
         }
-        func attachProgress(_ progress: Progress) {
-            task.progress.totalUnitCount = 1
-            task.progress.addChild(progress, withPendingUnitCount: 1)
+        func updateProgress(_ progress: Progress) {
+            task.progress.totalUnitCount = progress.totalUnitCount
+            task.progress.completedUnitCount = progress.completedUnitCount
         }
         func updateStatus(_ status: IOSAudioTaskStatus) {
             let text: String

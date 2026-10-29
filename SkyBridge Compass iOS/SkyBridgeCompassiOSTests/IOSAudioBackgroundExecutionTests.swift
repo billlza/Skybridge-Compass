@@ -3,6 +3,47 @@ import XCTest
 
 @MainActor
 final class IOSAudioBackgroundExecutionTests: XCTestCase {
+    func testPartialPacketWorkAdvancesReportedUnitCountsWithinTheSamePhase() async throws {
+        let scheduler = ControlledAudioBackgroundScheduler()
+        let execution = try makeExecution(scheduler)
+        let start = Task { try await execution.start {} }
+        try await until { scheduler.submitting }; let handle = scheduler.launch(); try await start.value
+        execution.update(IOSOpusFileSendSession.WorkProgress(phase: .streaming,
+            preparationCompleted: true, totalPackets: 30_001, sentPackets: 300, retiredPackets: 236))
+        let first = try XCTUnwrap(handle.progress).completedUnitCount
+        execution.update(IOSOpusFileSendSession.WorkProgress(phase: .streaming,
+            preparationCompleted: true, totalPackets: 30_001, sentPackets: 350, retiredPackets: 286))
+        let reported = try XCTUnwrap(handle.progress)
+        XCTAssertGreaterThan(reported.completedUnitCount, first,
+            "The system must observe completed units advancing during streaming, not just a child fraction.")
+        XCTAssertLessThan(reported.completedUnitCount, reported.totalUnitCount)
+        XCTAssertTrue(handle.completions.isEmpty)
+        await execution.finish(success: false)
+        XCTAssertEqual(handle.completions, [false])
+    }
+
+    func testReportedProgressFloorsMaximumCountsWithoutPrematureCompletion() throws {
+        let progress = IOSAudioTaskProgress()
+        let total = UInt64(Int64.max)
+        try progress.update(IOSOpusFileSendSession.WorkProgress(phase: .streaming,
+            preparationCompleted: true, totalPackets: total, sentPackets: total - 1, retiredPackets: 0))
+        XCTAssertEqual(progress.value.completedUnitCount, 1_999_999)
+        XCTAssertLessThan(progress.value.fractionCompleted, 0.5)
+        XCTAssertThrowsError(try progress.finishSuccessfully())
+    }
+
+    func testUnknownWorkDoesNotManufactureProgressOrCompleteFinalReceipt() throws {
+        let progress = IOSAudioTaskProgress()
+        try progress.update(IOSOpusFileSendSession.WorkProgress(phase: .inspecting,
+            preparationCompleted: false, totalPackets: nil, sentPackets: 0, retiredPackets: 0))
+        XCTAssertEqual(progress.value.completedUnitCount, 0)
+        try progress.update(IOSOpusFileSendSession.WorkProgress(phase: .connectingBluetooth,
+            preparationCompleted: true, totalPackets: nil, sentPackets: 0, retiredPackets: 0))
+        XCTAssertEqual(progress.value.fractionCompleted, 0.25)
+        XCTAssertThrowsError(try progress.finishSuccessfully())
+        XCTAssertEqual(progress.value.fractionCompleted, 0.25)
+    }
+
     func testLaunchAndSuccessfulSubmissionAreBothRequired() async throws {
         let scheduler = ControlledAudioBackgroundScheduler(); scheduler.holdSubmission = true
         let execution = try makeExecution(scheduler)
@@ -32,6 +73,7 @@ final class IOSAudioBackgroundExecutionTests: XCTestCase {
         let handle = scheduler.launch(); try await start.value
         execution.update(work(.awaitingPlayback, frames: 50))
         XCTAssertEqual(execution.progress.value.fractionCompleted, 0.625, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(handle.progress).fractionCompleted, 0.625, accuracy: 0.0001)
         execution.update(work(.completed, frames: 100))
         XCTAssertTrue(handle.completions.isEmpty, "Final progress cannot finish before the session owner joins cleanup")
         await execution.finish(success: true)
@@ -39,6 +81,7 @@ final class IOSAudioBackgroundExecutionTests: XCTestCase {
         execution.cancel()
         XCTAssertEqual(handle.completions, [true])
         XCTAssertEqual(execution.progress.value.fractionCompleted, 1)
+        XCTAssertEqual(try XCTUnwrap(handle.progress).fractionCompleted, 1)
         XCTAssertEqual(execution.state, .finished); XCTAssertNil(execution.failure)
         XCTAssertFalse(execution.preservesBackgroundWork)
     }
@@ -129,9 +172,11 @@ final class IOSAudioBackgroundExecutionTests: XCTestCase {
             let handle = scheduler.launch(); try await start.value
             execution.update(work(.awaitingPlayback, frames: 50))
             let before = execution.progress.value.fractionCompleted
+            let reportedBefore = try XCTUnwrap(handle.progress).completedUnitCount
             execution.update(invalid)
             XCTAssertTrue(stopped)
             XCTAssertEqual(execution.progress.value.fractionCompleted, before)
+            XCTAssertEqual(try XCTUnwrap(handle.progress).completedUnitCount, reportedBefore)
             XCTAssertEqual(execution.failure as? IOSAudioBackgroundError, .invalidProgress)
             await execution.finish(success: false); XCTAssertEqual(handle.completions, [false])
         }
@@ -278,7 +323,12 @@ final class ControlledAudioBackgroundTask: IOSContinuedAudioTask {
     private(set) var statuses: [IOSAudioTaskStatus] = []
     private var expiration: (@MainActor () -> Void)?
     init(identifier: String) { self.identifier = identifier }
-    func attachProgress(_ progress: Progress) { self.progress = progress }
+    func updateProgress(_ progress: Progress) {
+        let reported = self.progress ?? Progress(totalUnitCount: progress.totalUnitCount)
+        reported.totalUnitCount = progress.totalUnitCount
+        reported.completedUnitCount = progress.completedUnitCount
+        self.progress = reported
+    }
     func updateStatus(_ status: IOSAudioTaskStatus) { statuses.append(status) }
     func setExpirationHandler(_ handler: @escaping @MainActor () -> Void) { expiration = handler }
     @discardableResult func complete(success: Bool) -> Bool {
