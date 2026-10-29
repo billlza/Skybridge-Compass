@@ -68,7 +68,7 @@ jobs:
     outputs:
       certificate-sha1: ${{ steps.signing-inputs.outputs.certificate-sha1 }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Verify Supplied Signing Certificate and Profiles
@@ -108,7 +108,7 @@ jobs:
       SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: "6.3.3"
 
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -296,12 +296,12 @@ jobs:
       SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: "6.3.3"
 
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Checkout Pinned Q-Periapt Source
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: billlza/q-periapt
           ref: fabe003ddc3507b88af7a67a7138344e4b9634fd
@@ -367,7 +367,7 @@ jobs:
       SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: "6.3.3"
 
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
