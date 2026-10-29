@@ -9,7 +9,7 @@ struct UserProfileOverlay: View {
     @EnvironmentObject var authModel: AuthenticationViewModel
     @EnvironmentObject var themeConfiguration: ThemeConfiguration
     @Binding var isPresented: Bool
-    
+
  // 编辑状态
     @State private var isEditing = false
     @State private var editedDisplayName = ""
@@ -21,12 +21,13 @@ struct UserProfileOverlay: View {
     @State private var uploadError: String?
     @State private var saveSuccess = false
     @State private var showingSaveResult = false
-    
+    @State private var cachedAvatar: NSImage?
+
  // 动画状态
     @State private var overlayOpacity: Double = 0
     @State private var contentScale: Double = 0.8
     @State private var contentOffset: CGFloat = 50
-    
+
     var body: some View {
         ZStack {
  // 背景遮罩 - 使用macOS 26的新材质效果
@@ -37,21 +38,21 @@ struct UserProfileOverlay: View {
                 .onTapGesture {
                     dismissOverlay()
                 }
-            
+
  // 主要内容区域
             VStack(spacing: 0) {
  // 顶部工具栏
                 topToolbar
-                
+
  // 内容区域
                 ScrollView {
                     VStack(spacing: 24) {
  // 头像区域
                         avatarSection
-                        
+
  // 用户信息卡片
                         userInfoCard
-                        
+
  // 操作按钮区域
                         if !isEditing {
                             actionButtons
@@ -60,7 +61,7 @@ struct UserProfileOverlay: View {
                     .padding(.horizontal, 24)
                     .padding(.bottom, 24)
                 }
-                
+
  // 底部编辑操作栏（仅编辑模式显示）
                 if isEditing {
                     editingToolbar
@@ -73,7 +74,7 @@ struct UserProfileOverlay: View {
             .scaleEffect(contentScale)
             .offset(y: contentOffset)
             .opacity(overlayOpacity)
-            
+
  // 保存结果提示
             if showingSaveResult {
                 saveResultOverlay
@@ -83,6 +84,9 @@ struct UserProfileOverlay: View {
             setupInitialValues()
             showOverlay()
         }
+        .task(id: authModel.currentSession?.userIdentifier) {
+            await loadCachedAvatar(for: authModel.currentSession?.userIdentifier)
+        }
         .fileImporter(
             isPresented: $showingImagePicker,
             allowedContentTypes: [.image],
@@ -91,7 +95,7 @@ struct UserProfileOverlay: View {
             handleImageSelection(result)
         }
     }
-    
+
  // MARK: - 顶部工具栏
     private var topToolbar: some View {
         HStack {
@@ -100,9 +104,9 @@ struct UserProfileOverlay: View {
                 .font(.title2)
                 .fontWeight(.semibold)
                 .foregroundColor(.primary)
-            
+
             Spacer()
-            
+
  // 关闭按钮
             Button(action: dismissOverlay) {
                 Image(systemName: "xmark.circle.fill")
@@ -116,7 +120,7 @@ struct UserProfileOverlay: View {
         .padding(.horizontal, 24)
         .padding(.vertical, 20)
     }
-    
+
  // MARK: - 头像区域
     private var avatarSection: some View {
         VStack(spacing: 16) {
@@ -134,26 +138,28 @@ struct UserProfileOverlay: View {
                             .resizable()
                             .aspectRatio(contentMode: .fill)
                     } else if let userId = authModel.currentSession?.userIdentifier,
-                              let cachedAvatar = AvatarCacheManager.shared.getAvatar(for: userId) {
+                              let cachedAvatar = cachedAvatar ?? AvatarCacheManager.shared.getAvatar(for: userId) {
  // 显示缓存的真实头像
                         Image(nsImage: cachedAvatar)
                             .resizable()
                             .aspectRatio(contentMode: .fill)
+                    } else if let avatarURLString = authModel.currentSession?.avatarURL,
+                              let avatarURL = URL(string: avatarURLString) {
+                        AsyncImage(url: avatarURL) { phase in
+                            switch phase {
+                            case .empty:
+                                ProgressView()
+                            case .success(let image):
+                                image
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fill)
+                            default:
+                                defaultAvatarView
+                            }
+                        }
                     } else {
  // 显示默认头像 - 显示用户名首字母
-                        Circle()
-                            .fill(
-                                LinearGradient(
-                                    gradient: Gradient(colors: [.blue, .purple]),
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
-                            .overlay(
-                                Text(getInitials())
-                                    .font(.system(size: 36, weight: .medium))
-                                    .foregroundColor(.white)
-                            )
+                        defaultAvatarView
                     }
                 }
                 .frame(width: 120, height: 120)
@@ -181,7 +187,7 @@ struct UserProfileOverlay: View {
             }
             .buttonStyle(.plain)
             .disabled(!isEditing)
-            
+
             if isEditing {
                 Text("点击更换头像")
                     .font(.caption)
@@ -191,30 +197,46 @@ struct UserProfileOverlay: View {
         }
         .padding(.top, 8)
     }
-    
+
+    private var defaultAvatarView: some View {
+        Circle()
+            .fill(
+                LinearGradient(
+                    gradient: Gradient(colors: [.blue, .purple]),
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            .overlay(
+                Text(getInitials())
+                    .font(.system(size: 36, weight: .medium))
+                    .foregroundColor(.white)
+            )
+    }
+
  // MARK: - 用户信息卡片
     private var userInfoCard: some View {
         VStack(spacing: 20) {
  // 星云ID行
             InfoRow(
                 title: "星云ID",
-                content: authModel.currentSession?.userIdentifier ?? "未知",
+                content: authModel.displayedNebulaId,
                 showCopyButton: true,
                 copyAction: copyUserID
             )
-            
+
             Divider()
                 .background(.quaternary)
-            
+
  // 昵称编辑区域
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Text("昵称")
                         .font(.headline)
                         .foregroundColor(.primary)
-                    
+
                     Spacer()
-                    
+
                     if !isEditing {
                         Button("编辑") {
                             withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
@@ -228,7 +250,7 @@ struct UserProfileOverlay: View {
                         .buttonStyle(.plain)
                     }
                 }
-                
+
                 if isEditing {
                     TextField("请输入昵称", text: $editedDisplayName)
                         .textFieldStyle(.roundedBorder)
@@ -245,19 +267,19 @@ struct UserProfileOverlay: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
             }
-            
+
             Divider()
                 .background(.quaternary)
-            
+
  // 邮箱编辑区域
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Text("邮箱")
                         .font(.headline)
                         .foregroundColor(.primary)
-                    
+
                     Spacer()
-                    
+
                     if !isEditing && (getEmailAddress().isEmpty || getEmailAddress() == "未绑定") {
                         Button("绑定") {
                             withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
@@ -284,7 +306,7 @@ struct UserProfileOverlay: View {
                         .buttonStyle(.plain)
                     }
                 }
-                
+
                 if isEditing {
                     TextField("请输入邮箱地址", text: $editedEmailAddress)
                         .textFieldStyle(.roundedBorder)
@@ -300,7 +322,7 @@ struct UserProfileOverlay: View {
                             .padding(.vertical, 10)
                             .background(.quaternary.opacity(0.5))
                             .clipShape(RoundedRectangle(cornerRadius: 8))
-                        
+
                     if !getEmailAddress().isEmpty && getEmailAddress() != LocalizationManager.shared.localizedString("profile.email.unbound") {
                             Button(action: {
                                 let pasteboard = NSPasteboard.general
@@ -320,19 +342,19 @@ struct UserProfileOverlay: View {
                     }
                 }
             }
-            
+
             Divider()
                 .background(.quaternary)
-            
+
  // 手机号编辑区域 - 新增手机号绑定功能
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Text("手机号")
                         .font(.headline)
                         .foregroundColor(.primary)
-                    
+
                     Spacer()
-                    
+
                     if !isEditing && getPhoneNumber().isEmpty {
                         Button("绑定") {
                             withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
@@ -346,7 +368,7 @@ struct UserProfileOverlay: View {
                         .buttonStyle(.plain)
                     }
                 }
-                
+
                 if isEditing {
                     TextField("请输入手机号", text: $editedPhoneNumber)
                         .textFieldStyle(.roundedBorder)
@@ -374,7 +396,7 @@ struct UserProfileOverlay: View {
                 )
         )
     }
-    
+
  // MARK: - 操作按钮
     private var actionButtons: some View {
         VStack(spacing: 12) {
@@ -385,7 +407,7 @@ struct UserProfileOverlay: View {
                     .padding(.horizontal)
                     .transition(AnyTransition.opacity.combined(with: AnyTransition.move(edge: .top)))
             }
-            
+
             Button(action: {
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
                     isEditing = true
@@ -409,7 +431,7 @@ struct UserProfileOverlay: View {
             .buttonStyle(.plain)
         }
     }
-    
+
  // MARK: - 编辑工具栏
     private var editingToolbar: some View {
         HStack(spacing: 12) {
@@ -425,7 +447,7 @@ struct UserProfileOverlay: View {
                     .foregroundColor(.primary)
             }
             .buttonStyle(.plain)
-            
+
             Button(action: saveChanges) {
                 HStack(spacing: 8) {
                     if isUploading {
@@ -451,7 +473,7 @@ struct UserProfileOverlay: View {
         .padding(.vertical, 16)
         .transition(AnyTransition.move(edge: .bottom).combined(with: AnyTransition.opacity))
     }
-    
+
  // MARK: - 保存结果提示覆盖层
     private var saveResultOverlay: some View {
         VStack(spacing: 16) {
@@ -459,13 +481,13 @@ struct UserProfileOverlay: View {
             Image(systemName: saveSuccess ? "checkmark.circle.fill" : "xmark.circle.fill")
                 .font(.system(size: 48))
                 .foregroundColor(saveSuccess ? .green : .red)
-            
+
  // 标题
             Text(saveSuccess ? LocalizationManager.shared.localizedString("profile.save.success") : LocalizationManager.shared.localizedString("profile.save.failure"))
                 .font(.title2)
                 .fontWeight(.semibold)
                 .foregroundColor(.primary)
-            
+
  // 详细信息
             if let error = uploadError, !saveSuccess {
                 Text(error)
@@ -479,7 +501,7 @@ struct UserProfileOverlay: View {
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
             }
-            
+
  // 确定按钮
             Button(LocalizationManager.shared.localizedString("action.ok")) {
                 withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
@@ -502,7 +524,7 @@ struct UserProfileOverlay: View {
         )
         .transition(AnyTransition.scale.combined(with: AnyTransition.opacity))
     }
-    
+
  // MARK: - 动画方法
     private func showOverlay() {
         withAnimation(.spring(response: 0.6, dampingFraction: 0.8)) {
@@ -511,19 +533,19 @@ struct UserProfileOverlay: View {
             contentOffset = 0
         }
     }
-    
+
     private func dismissOverlay() {
         withAnimation(.spring(response: 0.4, dampingFraction: 0.9)) {
             overlayOpacity = 0.0
             contentScale = 0.9
             contentOffset = 30
         }
-        
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             isPresented = false
         }
     }
-    
+
  // MARK: - 辅助方法
     private func getInitials() -> String {
         if let displayName = authModel.currentSession?.displayName, !displayName.isEmpty {
@@ -534,13 +556,23 @@ struct UserProfileOverlay: View {
             return "24"
         }
     }
-    
+
     private func setupInitialValues() {
         editedDisplayName = authModel.currentSession?.displayName ?? ""
         editedPhoneNumber = getPhoneNumber()
         editedEmailAddress = getEmailAddress()
     }
-    
+
+    private func loadCachedAvatar(for userId: String?) async {
+        cachedAvatar = nil
+        guard let userId else { return }
+        do {
+            cachedAvatar = try await AvatarCacheManager.shared.loadCachedAvatar(for: userId)
+        } catch {
+            SkyBridgeLogger.ui.error("加载头像缓存失败: \(error.localizedDescription, privacy: .private)")
+        }
+    }
+
  /// 获取用户邮箱地址 - 修复邮箱显示逻辑
     private func getEmailAddress() -> String {
  // 优先显示当前会话中的邮箱（适用于邮箱注册用户）
@@ -550,61 +582,69 @@ struct UserProfileOverlay: View {
                 return session.displayName
             }
         }
-        
+
  // 其次显示星云邮箱
         if !authModel.nebulaEmail.isEmpty {
             return authModel.nebulaEmail
         }
-        
+
  // 最后显示手机邮箱
         if !authModel.phoneEmail.isEmpty {
             return authModel.phoneEmail
         }
-        
+
         return LocalizationManager.shared.localizedString("profile.email.unbound")
     }
-    
+
  /// 获取用户手机号
     private func getPhoneNumber() -> String {
  // 这里可以从用户会话或其他地方获取手机号
  // 目前返回空字符串，表示未绑定
         return authModel.phoneNumber.isEmpty ? "" : authModel.phoneNumber
     }
-    
+
     private func copyUserID() {
-        if let userID = authModel.currentSession?.userIdentifier {
+        if authModel.currentSession != nil {
+            let userID = authModel.displayedNebulaId
             let pasteboard = NSPasteboard.general
             pasteboard.clearContents()
             pasteboard.setString(userID, forType: .string)
-            
+
  // 可以添加一个临时的成功提示
             withAnimation(.easeInOut(duration: 0.3)) {
  // 这里可以添加复制成功的视觉反馈
             }
         }
     }
-    
+
     private func handleImageSelection(_ result: Result<[URL], Error>) {
         switch result {
         case .success(let urls):
             guard let url = urls.first else { return }
-            
-            do {
-                let imageData = try Data(contentsOf: url)
-                if NSImage(data: imageData) != nil {
-                    selectedImageData = imageData
-                } else {
-                    uploadError = "无效的图片格式"
+            // 避免在主线程同步读大文件导致 UI 卡顿
+            Task {
+                do {
+                    let imageData = try await Task.detached(priority: .userInitiated) {
+                        try Data(contentsOf: url)
+                    }.value
+                    if NSImage(data: imageData) != nil {
+                        selectedImageData = imageData
+                        uploadError = nil
+                    } else {
+                        selectedImageData = nil
+                        uploadError = "无效的图片格式"
+                    }
+                } catch {
+                    selectedImageData = nil
+                    uploadError = "读取图片失败: \(error.localizedDescription)"
                 }
-            } catch {
-                uploadError = "读取图片失败: \(error.localizedDescription)"
             }
-            
+
         case .failure(let error):
             uploadError = "选择图片失败: \(error.localizedDescription)"
         }
     }
-    
+
     private func cancelEditing() {
         withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
             isEditing = false
@@ -617,31 +657,31 @@ struct UserProfileOverlay: View {
             showingSaveResult = false
         }
     }
-    
+
     private func saveChanges() {
         Task {
             await MainActor.run {
                 isUploading = true
                 uploadError = nil
             }
-            
+
             do {
                 guard let currentSession = authModel.currentSession else {
                     throw NSError(domain: "AuthError", code: -1, userInfo: [NSLocalizedDescriptionKey: "用户未登录"])
                 }
-                
+
                 SkyBridgeLogger.ui.debugOnly("🔄 [UserProfileOverlay] 开始保存用户资料更改")
                 SkyBridgeLogger.ui.debugOnly("   用户ID: \(currentSession.userIdentifier)")
                 SkyBridgeLogger.ui.debugOnly("   原昵称: \(currentSession.displayName)")
                 SkyBridgeLogger.ui.debugOnly("   新昵称: \(editedDisplayName)")
                 SkyBridgeLogger.ui.debugOnly("   手机号: \(editedPhoneNumber)")
                 SkyBridgeLogger.ui.debugOnly("   邮箱: \(editedEmailAddress)")
-                
+
                 let hasDisplayNameChange = editedDisplayName != currentSession.displayName
                 let hasPhoneChange = editedPhoneNumber != getPhoneNumber()
                 let hasEmailChange = editedEmailAddress != getEmailAddress() && !editedEmailAddress.isEmpty
                 let hasAvatarChange = selectedImageData != nil
-                
+
  // 检查是否使用Supabase模式
                 if isSupabaseUser() {
  // 使用Supabase API更新用户资料
@@ -651,7 +691,7 @@ struct UserProfileOverlay: View {
                         email: hasEmailChange ? editedEmailAddress : nil,
                         imageData: hasAvatarChange ? selectedImageData : nil
                     )
-                    
+
  // 如果有邮箱更改，更新本地邮箱信息
                     if hasEmailChange {
                         await MainActor.run {
@@ -667,61 +707,58 @@ struct UserProfileOverlay: View {
                         imageData: hasAvatarChange ? selectedImageData : nil,
                         accessToken: currentSession.accessToken
                     )
-                    
+
+                    let updatedSession = AuthSession(
+                        accessToken: currentSession.accessToken,
+                        refreshToken: currentSession.refreshToken,
+                        userIdentifier: currentSession.userIdentifier,
+                        nebulaId: currentSession.nebulaId,
+                        displayName: updatedUserInfo.displayName,
+                        avatarURL: updatedUserInfo.avatar ?? currentSession.avatarURL,
+                        issuedAt: currentSession.issuedAt
+                    )
+                    try await AuthenticationService.shared.updateSession(updatedSession)
                     await MainActor.run {
  // 更新本地会话信息
-                        let updatedSession = AuthSession(
-                            accessToken: currentSession.accessToken,
-                            refreshToken: currentSession.refreshToken,
-                            userIdentifier: currentSession.userIdentifier,
-                            displayName: updatedUserInfo.displayName,
-                            issuedAt: currentSession.issuedAt
-                        )
-                        
                         SkyBridgeLogger.ui.debugOnly("🔄 [UserProfileOverlay] 准备更新用户会话信息")
                         SkyBridgeLogger.ui.debugOnly("   原昵称: \(currentSession.displayName)")
                         SkyBridgeLogger.ui.debugOnly("   新昵称: \(updatedUserInfo.displayName)")
-                        
+
  // 如果有头像更新，缓存新头像
                         if hasAvatarChange, let imageData = selectedImageData, let image = NSImage(data: imageData) {
                             AvatarCacheManager.shared.cacheAvatar(image, for: currentSession.userIdentifier)
                             SkyBridgeLogger.ui.debugOnly("   头像已缓存: \(updatedUserInfo.avatar ?? "无")")
                         }
-                        
- // 通过AuthenticationViewModel更新会话，确保UI状态同步
+
+ // Keychain 持久化成功后再更新界面状态。
                         authModel.currentSession = updatedSession
-                        do {
-                            try AuthenticationService.shared.updateSession(updatedSession)
-                        } catch {
-                            SkyBridgeLogger.ui.error("❌ [UserProfileOverlay] 会话写入失败: \(error.localizedDescription, privacy: .private)")
-                        }
-                        
+
  // 如果有邮箱更改，更新本地邮箱信息
                         if hasEmailChange {
                             authModel.nebulaEmail = editedEmailAddress
                             SkyBridgeLogger.ui.debugOnly("✅ [UserProfileOverlay] 邮箱已更新: \(editedEmailAddress)")
                         }
-                        
+
  // 如果有手机号更改，更新本地手机号信息
                         if hasPhoneChange {
                             authModel.phoneNumber = editedPhoneNumber
                             SkyBridgeLogger.ui.debugOnly("✅ [UserProfileOverlay] 手机号已更新: \(editedPhoneNumber)")
                         }
-                        
+
                         SkyBridgeLogger.ui.debugOnly("✅ [UserProfileOverlay] 用户会话已更新")
-                        
+
  // 重置编辑状态
                         isEditing = false
                         selectedImageData = nil
                         isUploading = false
-                        
+
                         SkyBridgeLogger.ui.debugOnly("✅ [UserProfileOverlay] 用户资料保存成功")
-                        
+
  // 显示保存成功提示
                         saveSuccess = true
                         uploadError = nil
                         isUploading = false
-                        
+
                         withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                             showingSaveResult = true
                         }
@@ -735,7 +772,7 @@ struct UserProfileOverlay: View {
                 var isAuthError = false
                 var supabaseAuthMessage: String?
                 let supabaseMessage = SupabaseService.userMessage(for: error)
-                
+
  // 检查是否为SkyBridgeCore中定义的认证相关错误
                 if let supabaseError = error as? SupabaseService.SupabaseError {
                     switch supabaseError {
@@ -752,7 +789,7 @@ struct UserProfileOverlay: View {
                         isAuthError = false
                     }
                 }
-                
+
                 if let supabaseMessage {
                     SkyBridgeLogger.ui.debugOnly("ℹ️ [UserProfileOverlay] Supabase错误提示: \(supabaseMessage)")
                     saveSuccess = false
@@ -764,7 +801,7 @@ struct UserProfileOverlay: View {
                             (errorString.contains("Unauthorized") || errorString.contains("Forbidden") ||
                              errorString.contains("token") || errorString.contains("认证"))
                     }
-                    
+
                     if isAuthError {
                         SkyBridgeLogger.ui.debugOnly("ℹ️ [UserProfileOverlay] 认证失败，保持登录状态并提示重试")
                         saveSuccess = false
@@ -780,17 +817,17 @@ struct UserProfileOverlay: View {
                         }
                     }
                 }
-                    
+
                     withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                         showingSaveResult = true
                     }
-                    
+
                     isUploading = false
                 }
             }
         }
     }
-    
+
  /// 检查是否为Supabase用户
     private func isSupabaseUser() -> Bool {
         guard let session = authModel.currentSession else { return false }
@@ -798,47 +835,66 @@ struct UserProfileOverlay: View {
         guard session.accessToken != "pending_verification" else { return false }
         return SupabaseService.shared.isSupabaseAccessToken(session.accessToken)
     }
-    
+
  /// 使用Supabase API更新用户资料
     private func updateSupabaseProfile(displayName: String?, phoneNumber: String?, email: String?, imageData: Data?) async throws {
         guard var session = authModel.currentSession else {
             throw NSError(domain: "AuthError", code: -1, userInfo: [NSLocalizedDescriptionKey: "用户未登录"])
         }
-        
+
         SkyBridgeLogger.ui.debugOnly("🔄 [UserProfileOverlay] 使用Supabase更新用户资料")
-        
+        var resolvedAvatarURL = session.avatarURL
+        do {
+            resolvedAvatarURL = try await SupabaseService.shared.getUserAvatarUrl(
+                userId: session.userIdentifier,
+                accessToken: session.accessToken
+            ) ?? resolvedAvatarURL
+        } catch {
+            SkyBridgeLogger.ui.debugOnly("ℹ️ [UserProfileOverlay] 预取云端头像 URL 失败（忽略）: \(error.localizedDescription)")
+        }
+
  // 尝试刷新 Token 以确保有效性
-        if let refreshToken = session.refreshToken {
+        if session.refreshToken != nil {
             do {
                 SkyBridgeLogger.ui.debugOnly("🔄 [UserProfileOverlay] 尝试刷新访问令牌")
-                let newSession = try await SupabaseService.shared.refreshAccessToken(refreshToken)
-                session = newSession
-                await MainActor.run {
-                    authModel.currentSession = newSession
-                    do {
-                        try AuthenticationService.shared.updateSession(newSession)
-                    } catch {
-                        SkyBridgeLogger.ui.error("❌ [UserProfileOverlay] 刷新会话写入失败: \(error.localizedDescription, privacy: .private)")
-                    }
+                guard AuthenticationService.shared.currentSessionSnapshot()?.userIdentifier
+                        == session.userIdentifier,
+                      let newSession = try await AuthenticationService.shared.validSession(
+                        forceRefresh: true
+                      ),
+                      newSession.userIdentifier == session.userIdentifier else {
+                    throw AuthenticationService.AuthenticationError.sessionChangedDuringRefresh
                 }
+                session = newSession
+                do {
+                    resolvedAvatarURL = try await SupabaseService.shared.getUserAvatarUrl(
+                        userId: newSession.userIdentifier,
+                        accessToken: newSession.accessToken
+                    ) ?? (resolvedAvatarURL ?? newSession.avatarURL)
+                } catch {
+                    SkyBridgeLogger.ui.debugOnly("ℹ️ [UserProfileOverlay] 刷新后预取云端头像 URL 失败（忽略）: \(error.localizedDescription)")
+                }
+                await MainActor.run { authModel.currentSession = newSession }
                 SkyBridgeLogger.ui.debugOnly("✅ [UserProfileOverlay] 访问令牌刷新成功")
+            } catch AuthenticationService.AuthenticationError.sessionChangedDuringRefresh {
+                throw AuthenticationService.AuthenticationError.sessionChangedDuringRefresh
             } catch {
                 SkyBridgeLogger.ui.debugOnly("⚠️ [UserProfileOverlay] 令牌刷新失败，使用现有令牌: \(error.localizedDescription)")
             }
         }
-        
+
  // 如果有头像更新，先上传头像到Supabase Storage
         if let imageData = imageData {
             do {
                 SkyBridgeLogger.ui.debugOnly("📸 [UserProfileOverlay] 开始上传头像到Supabase Storage")
-                let avatarUrl = try await SupabaseService.shared.uploadAvatarToStorage(
+                resolvedAvatarURL = try await SupabaseService.shared.uploadAvatarToStorage(
                     userId: session.userIdentifier,
                     imageData: imageData,
                     accessToken: session.accessToken
                 )
-                
-                SkyBridgeLogger.ui.debugOnly("✅ [UserProfileOverlay] 头像上传成功: \(avatarUrl)")
-                
+
+                SkyBridgeLogger.ui.debugOnly("✅ [UserProfileOverlay] 头像上传成功: \(resolvedAvatarURL ?? "-")")
+
  // 本地缓存头像
                 if let image = NSImage(data: imageData) {
                     AvatarCacheManager.shared.cacheAvatar(image, for: session.userIdentifier)
@@ -849,7 +905,7 @@ struct UserProfileOverlay: View {
                 throw error
             }
         }
-        
+
  // 调用真实的Supabase API更新用户资料（必要时刷新令牌并重试）
         var success = false
         let emailToUpdate = email
@@ -871,7 +927,7 @@ struct UserProfileOverlay: View {
                     return false
                 }
             } ?? false
-            
+
             if isForbidden && emailToUpdate == nil {
                 SkyBridgeLogger.ui.debugOnly("⚠️ [UserProfileOverlay] auth API 403，改用 profiles 表更新")
                 success = try await SupabaseService.shared.updateProfilesTable(
@@ -880,18 +936,18 @@ struct UserProfileOverlay: View {
                     phoneNumber: phoneNumber,
                     accessToken: session.accessToken
                 )
-            } else if let refreshToken = session.refreshToken {
+            } else if session.refreshToken != nil {
                 SkyBridgeLogger.ui.debugOnly("🔄 [UserProfileOverlay] auth API 失败，尝试刷新令牌并重试")
-                let newSession = try await SupabaseService.shared.refreshAccessToken(refreshToken)
-                session = newSession
-                await MainActor.run {
-                    authModel.currentSession = newSession
-                    do {
-                        try AuthenticationService.shared.updateSession(newSession)
-                    } catch {
-                        SkyBridgeLogger.ui.error("❌ [UserProfileOverlay] 刷新会话写入失败: \(error.localizedDescription, privacy: .private)")
-                    }
+                guard AuthenticationService.shared.currentSessionSnapshot()?.userIdentifier
+                        == session.userIdentifier,
+                      let newSession = try await AuthenticationService.shared.validSession(
+                        forceRefresh: true
+                      ),
+                      newSession.userIdentifier == session.userIdentifier else {
+                    throw AuthenticationService.AuthenticationError.sessionChangedDuringRefresh
                 }
+                session = newSession
+                await MainActor.run { authModel.currentSession = newSession }
                 do {
                     success = try await SupabaseService.shared.updateUserProfile(
                         displayName: displayName,
@@ -910,7 +966,7 @@ struct UserProfileOverlay: View {
                             return false
                         }
                     } ?? false
-                    
+
                     if retryForbidden && emailToUpdate == nil {
                         SkyBridgeLogger.ui.debugOnly("⚠️ [UserProfileOverlay] 重试仍为 403，改用 profiles 表更新")
                         success = try await SupabaseService.shared.updateProfilesTable(
@@ -933,48 +989,48 @@ struct UserProfileOverlay: View {
                 )
             }
         }
-        
+
         if success {
+            if imageData != nil, resolvedAvatarURL == nil {
+                throw NSError(domain: "AuthError", code: -2, userInfo: [NSLocalizedDescriptionKey: "头像上传后未能从云端资料回读 avatar_url"])
+            }
+            let updatedSession = AuthSession(
+                accessToken: session.accessToken,
+                refreshToken: session.refreshToken,
+                userIdentifier: session.userIdentifier,
+                nebulaId: session.nebulaId,
+                displayName: displayName ?? session.displayName,
+                avatarURL: resolvedAvatarURL ?? session.avatarURL,
+                issuedAt: session.issuedAt
+            )
+            try await AuthenticationService.shared.updateSession(updatedSession)
             await MainActor.run {
  // 更新本地会话信息
-                let updatedSession = AuthSession(
-                    accessToken: session.accessToken,
-                    refreshToken: session.refreshToken,
-                    userIdentifier: session.userIdentifier,
-                    displayName: displayName ?? session.displayName,
-                    issuedAt: session.issuedAt
-                )
-                
                 authModel.currentSession = updatedSession
-                do {
-                    try AuthenticationService.shared.updateSession(updatedSession)
-                } catch {
-                    SkyBridgeLogger.ui.error("❌ [UserProfileOverlay] 会话写入失败: \(error.localizedDescription, privacy: .private)")
-                }
-                
+
  // 如果有手机号更新，保存到AuthenticationViewModel
                 if let phoneNumber = phoneNumber {
                     authModel.phoneNumber = phoneNumber
                     SkyBridgeLogger.ui.debugOnly("✅ [UserProfileOverlay] 手机号已更新: \(phoneNumber)")
                 }
-                
+
  // 如果有邮箱更新，保存到AuthenticationViewModel
                 if let email = email {
                     authModel.nebulaEmail = email
                     SkyBridgeLogger.ui.debugOnly("✅ [UserProfileOverlay] 邮箱已更新: \(email)")
                 }
-                
+
  // 重置编辑状态
                 isEditing = false
                 selectedImageData = nil
                 isUploading = false
-                
+
                 SkyBridgeLogger.ui.debugOnly("✅ [UserProfileOverlay] Supabase用户资料更新成功")
-                
+
  // 显示保存成功提示
                 saveSuccess = true
                 uploadError = nil
-                
+
                 withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                     showingSaveResult = true
                 }
@@ -993,20 +1049,20 @@ struct InfoRow: View {
     let content: String
     let showCopyButton: Bool
     let copyAction: (() -> Void)?
-    
+
     init(title: String, content: String, showCopyButton: Bool = false, copyAction: (() -> Void)? = nil) {
         self.title = title
         self.content = content
         self.showCopyButton = showCopyButton
         self.copyAction = copyAction
     }
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
                 .font(.headline)
                 .foregroundColor(.primary)
-            
+
             HStack {
                 Text(content)
                     .font(.body)
@@ -1016,7 +1072,7 @@ struct InfoRow: View {
                     .padding(.vertical, 10)
                     .background(.quaternary.opacity(0.5))
                     .clipShape(RoundedRectangle(cornerRadius: 8))
-                
+
                 if showCopyButton {
                     Button(action: {
                         copyAction?()

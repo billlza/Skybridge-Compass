@@ -1,0 +1,301 @@
+{
+  "project_ref": "hloqytmhjludmuhwyyzb",
+  "email_otp_max_seconds": 600,
+  "intentional": [
+    {
+      "lint": "pg_graphql_anon_table_exposed",
+      "metadata": {
+        "name": "constellations",
+        "type": "table",
+        "schema": "public"
+      },
+      "reason": "Public read-only reference data."
+    },
+    {
+      "lint": "pg_graphql_anon_table_exposed",
+      "metadata": {
+        "name": "disposable_email_domains",
+        "type": "table",
+        "schema": "public"
+      },
+      "reason": "Public read-only reference data."
+    },
+    {
+      "lint": "pg_graphql_authenticated_table_exposed",
+      "metadata": {
+        "name": "account_bindings",
+        "type": "table",
+        "schema": "public"
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "pg_graphql_authenticated_table_exposed",
+      "metadata": {
+        "name": "account_links",
+        "type": "table",
+        "schema": "public"
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "pg_graphql_authenticated_table_exposed",
+      "metadata": {
+        "name": "activity_logs",
+        "type": "table",
+        "schema": "public"
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "pg_graphql_authenticated_table_exposed",
+      "metadata": {
+        "name": "auth_methods",
+        "type": "table",
+        "schema": "public"
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "pg_graphql_authenticated_table_exposed",
+      "metadata": {
+        "name": "constellations",
+        "type": "table",
+        "schema": "public"
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "pg_graphql_authenticated_table_exposed",
+      "metadata": {
+        "name": "disposable_email_domains",
+        "type": "table",
+        "schema": "public"
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "pg_graphql_authenticated_table_exposed",
+      "metadata": {
+        "name": "idempotent_requests",
+        "type": "table",
+        "schema": "public"
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "pg_graphql_authenticated_table_exposed",
+      "metadata": {
+        "name": "nebula_accounts",
+        "type": "table",
+        "schema": "public"
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "pg_graphql_authenticated_table_exposed",
+      "metadata": {
+        "name": "notifications",
+        "type": "table",
+        "schema": "public"
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "pg_graphql_authenticated_table_exposed",
+      "metadata": {
+        "name": "oauth_accounts",
+        "type": "table",
+        "schema": "public"
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "pg_graphql_authenticated_table_exposed",
+      "metadata": {
+        "name": "phone_auth",
+        "type": "table",
+        "schema": "public"
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "pg_graphql_authenticated_table_exposed",
+      "metadata": {
+        "name": "profiles",
+        "type": "table",
+        "schema": "public"
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "pg_graphql_authenticated_table_exposed",
+      "metadata": {
+        "name": "sync_status",
+        "type": "table",
+        "schema": "public"
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "pg_graphql_authenticated_table_exposed",
+      "metadata": {
+        "name": "universal_users",
+        "type": "table",
+        "schema": "public"
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "pg_graphql_authenticated_table_exposed",
+      "metadata": {
+        "name": "user_activity",
+        "type": "table",
+        "schema": "public"
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "pg_graphql_authenticated_table_exposed",
+      "metadata": {
+        "name": "user_avatars",
+        "type": "table",
+        "schema": "public"
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "pg_graphql_authenticated_table_exposed",
+      "metadata": {
+        "name": "user_profiles",
+        "type": "table",
+        "schema": "public"
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "pg_graphql_authenticated_table_exposed",
+      "metadata": {
+        "name": "user_sessions",
+        "type": "table",
+        "schema": "public"
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "pg_graphql_authenticated_table_exposed",
+      "metadata": {
+        "name": "user_settings",
+        "type": "table",
+        "schema": "public"
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "pg_graphql_authenticated_table_exposed",
+      "metadata": {
+        "name": "username_change_limits",
+        "type": "table",
+        "schema": "public"
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "pg_graphql_authenticated_table_exposed",
+      "metadata": {
+        "name": "username_history",
+        "type": "table",
+        "schema": "public"
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "anon_security_definer_function_executable",
+      "metadata": {
+        "name": "guard_registration_attempt_v1",
+        "schema": "public",
+        "language": "plpgsql",
+        "arguments": "identifier_hash text, identifier_type text, raw_identifier text, device_fingerprint text, config_name text, attempt_type text",
+        "security_definer": true
+      },
+      "reason": "Public read-only reference data."
+    },
+    {
+      "lint": "anon_security_definer_function_executable",
+      "metadata": {
+        "name": "record_registration_attempt_v1",
+        "schema": "public",
+        "language": "plpgsql",
+        "arguments": "raw_identifier text, identifier_type text, device_fingerprint text, attempt_type text, success boolean, failure_reason text, captcha_required boolean, captcha_passed boolean, audit_ticket text, metadata jsonb",
+        "security_definer": true
+      },
+      "reason": "Public read-only reference data."
+    },
+    {
+      "lint": "authenticated_security_definer_function_executable",
+      "metadata": {
+        "name": "guard_registration_attempt_v1",
+        "schema": "public",
+        "language": "plpgsql",
+        "arguments": "identifier_hash text, identifier_type text, raw_identifier text, device_fingerprint text, config_name text, attempt_type text",
+        "security_definer": true
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "authenticated_security_definer_function_executable",
+      "metadata": {
+        "name": "record_registration_attempt_v1",
+        "schema": "public",
+        "language": "plpgsql",
+        "arguments": "raw_identifier text, identifier_type text, device_fingerprint text, attempt_type text, success boolean, failure_reason text, captcha_required boolean, captcha_passed boolean, audit_ticket text, metadata jsonb",
+        "security_definer": true
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "authenticated_security_definer_function_executable",
+      "metadata": {
+        "name": "avatar_finalize_upload",
+        "schema": "public",
+        "language": "plpgsql",
+        "arguments": "p_storage_path text, p_avatar_url text, p_mime_type text, p_file_size bigint, p_width integer, p_height integer, p_crop_data jsonb, p_avatar_type text",
+        "security_definer": true
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "authenticated_security_definer_function_executable",
+      "metadata": {
+        "name": "bind_contact_method",
+        "schema": "public",
+        "language": "plpgsql",
+        "arguments": "contact_type_param text, contact_value_param text, verification_code_param text, client_ip_param inet, client_user_agent_param text",
+        "security_definer": true
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "authenticated_security_definer_function_executable",
+      "metadata": {
+        "name": "unbind_contact_method",
+        "schema": "public",
+        "language": "plpgsql",
+        "arguments": "contact_type_param text, verification_code_param text, client_ip_param inet, client_user_agent_param text",
+        "security_definer": true
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    },
+    {
+      "lint": "authenticated_security_definer_function_executable",
+      "metadata": {
+        "name": "get_user_binding_status",
+        "schema": "public",
+        "language": "plpgsql",
+        "arguments": "target_user_id uuid",
+        "security_definer": true
+      },
+      "reason": "Authenticated access governed by ownership RLS; schema visibility is intentional."
+    }
+  ]
+}

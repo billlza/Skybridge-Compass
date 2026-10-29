@@ -9,14 +9,14 @@
 \newcommand{\pandocbounded}[1]{#1}
 \graphicspath{{../figures/}}
 
-\title{SkyBridge Compass: A Crypto-Agile Peer-to-Peer Remote Desktop and File Transfer System with Post-Quantum Readiness on Apple Platforms}
+\title{SkyBridge Compass: A Crypto-Agile P2P Handshake Framework for Remote Desktop and File Transfer with Post-Quantum Readiness on Apple Platforms}
 \author{Author Name}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-Peer-to-peer remote desktop and file transfer systems increasingly operate across heterogeneous devices, untrusted networks, and long lifecycles in which cryptographic assumptions may expire faster than products. Yet ``post-quantum readiness'' is often treated as a one-off algorithm swap rather than a migration problem with downgrade resistance, auditability, and reproducibility requirements. This paper presents SkyBridge Compass, a crypto-agile P2P system that explicitly separates (i) negotiated cryptographic suites, (ii) platform-specific provider backends, and (iii) a policy layer that governs when (and whether) classic fallback is permissible. We introduce an actor-isolated handshake state machine with deterministic failure semantics and structured security-event emission, enabling end-to-end audit trails for downgrade, identity mismatch, and signature verification failures. We evaluate three configurations on macOS 26.x: classic (X25519 + Ed25519), PQC via liboqs (ML-KEM-768 + ML-DSA-65), and PQC via native CryptoKit (ML-KEM-768 + ML-DSA-65). End-to-end handshake completion latency (including event emission overhead) is 1.81 ms (p95 2.09 ms) for classic, 6.32 ms (p95 8.15 ms) for liboqs PQC, and 11.02 ms (p95 16.15 ms) for CryptoKit PQC over N=1000 iterations. The wire-format size grows from 819 B (classic) to 12,155 B (PQC), and we provide a conservative projection for a hybrid X-Wing-style exchange of approximately 12.4 KB. Beyond performance, we validate security-centric properties under fault injection and downgrade workloads, and we provide scripts and tests that reproduce all primary figures and tables from released artifacts.
+Peer-to-peer remote desktop and file transfer systems increasingly operate across heterogeneous devices, untrusted networks, and long lifecycles in which cryptographic assumptions may expire faster than products. Yet ``post-quantum readiness'' is often treated as a one-off algorithm swap rather than a migration problem with downgrade resistance, auditability, and reproducibility requirements. This paper presents SkyBridge Compass, a crypto-agile P2P handshake framework that explicitly separates (i) negotiated cryptographic suites, (ii) platform-specific provider backends, and (iii) a policy layer that governs when (and whether) classic fallback is permissible. We introduce an actor-isolated handshake state machine with deterministic failure semantics and structured security-event emission, enabling end-to-end audit trails for downgrade, identity mismatch, and signature verification failures. We evaluate three configurations on macOS 26.x: classic (X25519 + Ed25519), PQC via liboqs (ML-KEM-768 + ML-DSA-65), and PQC via native CryptoKit (ML-KEM-768 + ML-DSA-65). End-to-end handshake completion latency (including event emission overhead) is 1.648 ms (p95 1.794 ms) for classic, 2.526 ms (p95 3.241 ms) for liboqs PQC, and 10.104 ms (p95 15.418 ms) for CryptoKit PQC over N=1000 iterations. The wire-format size grows from 793 B (classic) to 12,129 B (liboqs PQC) / 12,163 B (CryptoKit PQC), and we provide a conservative projection for a hybrid X-Wing-style exchange of approximately 12.4 KB. Beyond performance, we validate security-centric properties under fault injection and downgrade workloads, and we provide scripts and tests that reproduce all primary figures and tables from released artifacts.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -451,13 +451,13 @@ implementations without modifying caller code.
     \KeywordTok{var} \VariableTok{providerName}\OperatorTok{:}\NormalTok{ String }\OperatorTok{\{} \KeywordTok{get} \OperatorTok{\}}
     \KeywordTok{var} \VariableTok{tier}\OperatorTok{:}\NormalTok{ CryptoTier }\OperatorTok{\{} \KeywordTok{get} \OperatorTok{\}}
     \KeywordTok{var} \VariableTok{activeSuite}\OperatorTok{:}\NormalTok{ CryptoSuite }\OperatorTok{\{} \KeywordTok{get} \OperatorTok{\}}
-    
-    \KeywordTok{func} \FunctionTok{kemDemSeal}\OperatorTok{(}\VariableTok{plaintext}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{,} \VariableTok{recipientPublicKey}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{,} 
+
+    \KeywordTok{func} \FunctionTok{kemDemSeal}\OperatorTok{(}\VariableTok{plaintext}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{,} \VariableTok{recipientPublicKey}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{,}
                     \VariableTok{info}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{)} \FunctionTok{async} \KeywordTok{throws}\NormalTok{ {-}\textgreater{} }\FunctionTok{KemDemSealedBox}
-    \KeywordTok{func} \FunctionTok{kemDemOpen}\OperatorTok{(}\VariableTok{sealedBox}\OperatorTok{:} \DataTypeTok{KemDemSealedBox}\OperatorTok{,} \VariableTok{privateKey}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{,} 
+    \KeywordTok{func} \FunctionTok{kemDemOpen}\OperatorTok{(}\VariableTok{sealedBox}\OperatorTok{:} \DataTypeTok{KemDemSealedBox}\OperatorTok{,} \VariableTok{privateKey}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{,}
                     \VariableTok{info}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{)} \FunctionTok{async} \KeywordTok{throws}\NormalTok{ {-}\textgreater{} }\FunctionTok{Data}
     \KeywordTok{func} \FunctionTok{sign}\OperatorTok{(}\VariableTok{data}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{,} \VariableTok{using} \VariableTok{key}\OperatorTok{:} \DataTypeTok{SigningKeyHandle}\OperatorTok{)} \FunctionTok{async} \KeywordTok{throws}\NormalTok{ {-}\textgreater{} }\FunctionTok{Data}
-    \KeywordTok{func} \FunctionTok{verify}\OperatorTok{(}\VariableTok{data}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{,} \VariableTok{signature}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{,} 
+    \KeywordTok{func} \FunctionTok{verify}\OperatorTok{(}\VariableTok{data}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{,} \VariableTok{signature}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{,}
                 \VariableTok{publicKey}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{)} \FunctionTok{async} \KeywordTok{throws}\NormalTok{ {-}\textgreater{} }\FunctionTok{Bool}
     \KeywordTok{func} \FunctionTok{generateKeyPair}\OperatorTok{(}\VariableTok{for} \VariableTok{usage}\OperatorTok{:} \DataTypeTok{KeyUsage}\OperatorTok{)} \FunctionTok{async} \KeywordTok{throws}\NormalTok{ {-}\textgreater{} }\FunctionTok{KeyPair}
 \OperatorTok{\}}
@@ -547,7 +547,7 @@ configuration:
         \ControlFlowTok{case}\NormalTok{ requirePQC     }\CommentTok{// Fail if PQC unavailable}
         \ControlFlowTok{case}\NormalTok{ classicOnly    }\CommentTok{// Force classic algorithms}
     \OperatorTok{\}}
-    
+
     \KeywordTok{public} \KeywordTok{static} \KeywordTok{func} \FunctionTok{make}\OperatorTok{(}
         \VariableTok{policy}\OperatorTok{:} \DataTypeTok{SelectionPolicy} \OperatorTok{=} \OperatorTok{.}\NormalTok{preferPQC}\OperatorTok{,}
         \VariableTok{environment}\OperatorTok{:} \DataTypeTok{any} \VariableTok{CryptoEnvironment} \OperatorTok{=}\NormalTok{ SystemCryptoEnvironment}\OperatorTok{.}\NormalTok{system}
@@ -706,8 +706,8 @@ compile-time data race prevention:
     \KeywordTok{private} \KeywordTok{var} \VariableTok{pendingContinuation}\OperatorTok{:}\NormalTok{ CheckedContinuation}\OperatorTok{\textless{}}\NormalTok{SessionKeys}\OperatorTok{,}\NormalTok{ Error}\OperatorTok{\textgreater{}?}
     \KeywordTok{private} \KeywordTok{var} \VariableTok{timeoutTask}\OperatorTok{:}\NormalTok{ Task}\OperatorTok{\textless{}}\NormalTok{Void}\OperatorTok{,}\NormalTok{ Never}\OperatorTok{\textgreater{}?}
     \KeywordTok{private} \KeywordTok{var} \VariableTok{pendingResult}\OperatorTok{:}\NormalTok{ Result}\OperatorTok{\textless{}}\NormalTok{SessionKeys}\OperatorTok{,}\NormalTok{ Error}\OperatorTok{\textgreater{}?}
-    
-    \KeywordTok{public} \KeywordTok{func} \FunctionTok{initiateHandshake}\OperatorTok{(}\VariableTok{with} \VariableTok{peer}\OperatorTok{:} \DataTypeTok{PeerIdentifier}\OperatorTok{)} 
+
+    \KeywordTok{public} \KeywordTok{func} \FunctionTok{initiateHandshake}\OperatorTok{(}\VariableTok{with} \VariableTok{peer}\OperatorTok{:} \DataTypeTok{PeerIdentifier}\OperatorTok{)}
         \FunctionTok{async} \KeywordTok{throws}\NormalTok{ {-}\textgreater{} }\FunctionTok{SessionKeys}
     \KeywordTok{public} \KeywordTok{func} \FunctionTok{handleMessage}\OperatorTok{(}\VariableTok{\_} \VariableTok{data}\OperatorTok{:} \DataTypeTok{Data}\OperatorTok{,} \VariableTok{from} \VariableTok{peer}\OperatorTok{:} \DataTypeTok{PeerIdentifier}\OperatorTok{)} \FunctionTok{async}
     \KeywordTok{public} \KeywordTok{func} \FunctionTok{cancel}\OperatorTok{()} \FunctionTok{async}
@@ -725,7 +725,7 @@ material:
     \KeywordTok{private} \KeywordTok{var} \VariableTok{ephemeralPrivateKey}\OperatorTok{:}\NormalTok{ SecureBytes}\OperatorTok{?}
     \KeywordTok{private} \KeywordTok{var} \VariableTok{transcriptHash}\OperatorTok{:}\NormalTok{ SecureBytes}\OperatorTok{?}
     \KeywordTok{private} \KeywordTok{var} \VariableTok{isZeroized}\OperatorTok{:}\NormalTok{ Bool }\OperatorTok{=} \KeywordTok{false}
-    
+
     \KeywordTok{public} \KeywordTok{func} \FunctionTok{zeroize}\OperatorTok{()}
 \OperatorTok{\}}
 \end{Highlighting}
@@ -795,7 +795,7 @@ handshake completion:
     \CommentTok{// Cancel timeout}
 \NormalTok{    timeoutTask}\OperatorTok{?.}\NormalTok{cancel}\OperatorTok{()}
 \NormalTok{    timeoutTask }\OperatorTok{=} \KeywordTok{nil}
-    
+
     \CommentTok{// Guard against double resume}
     \ControlFlowTok{guard} \KeywordTok{let} \VariableTok{continuation} \OperatorTok{=}\NormalTok{ pendingContinuation }\ControlFlowTok{else} \OperatorTok{\{}
         \CommentTok{// MessageB arrived before continuation established}
@@ -803,7 +803,7 @@ handshake completion:
         \KeywordTok{return}
     \OperatorTok{\}}
 \NormalTok{    pendingContinuation }\OperatorTok{=} \KeywordTok{nil}  \CommentTok{// Immediately nil to prevent reuse}
-    
+
     \ControlFlowTok{switch}\NormalTok{ result }\OperatorTok{\{}
     \ControlFlowTok{case} \OperatorTok{.}\NormalTok{success}\OperatorTok{(}\KeywordTok{let} \VariableTok{keys}\OperatorTok{):}\NormalTok{ continuation}\OperatorTok{.}\NormalTok{resume}\OperatorTok{(}\NormalTok{returning}\OperatorTok{:}\NormalTok{ keys}\OperatorTok{)}
     \ControlFlowTok{case} \OperatorTok{.}\NormalTok{failure}\OperatorTok{(}\KeywordTok{let} \VariableTok{error}\OperatorTok{):}\NormalTok{ continuation}\OperatorTok{.}\NormalTok{resume}\OperatorTok{(}\NormalTok{throwing}\OperatorTok{:}\NormalTok{ error}\OperatorTok{)}
@@ -832,11 +832,11 @@ COW-induced secret proliferation.
 \KeywordTok{public} \KeywordTok{final} \KeywordTok{class}\NormalTok{ SecureBytes}\OperatorTok{:} \AttributeTok{@unchecked}\NormalTok{ Sendable }\OperatorTok{\{}
     \KeywordTok{private} \KeywordTok{let} \VariableTok{pointer}\OperatorTok{:}\NormalTok{ UnsafeMutableRawPointer}
     \KeywordTok{private} \KeywordTok{let} \VariableTok{count}\OperatorTok{:}\NormalTok{ Int}
-    
+
     \CommentTok{/// Injectable wiping function for test verification}
-\NormalTok{    nonisolated}\OperatorTok{(}\NormalTok{unsafe}\OperatorTok{)} \KeywordTok{public} \KeywordTok{static} \KeywordTok{var} \VariableTok{wipingFunction}\OperatorTok{:} 
+\NormalTok{    nonisolated}\OperatorTok{(}\NormalTok{unsafe}\OperatorTok{)} \KeywordTok{public} \KeywordTok{static} \KeywordTok{var} \VariableTok{wipingFunction}\OperatorTok{:}
         \OperatorTok{(}\NormalTok{UnsafeMutableRawPointer}\OperatorTok{,}\NormalTok{ Int}\OperatorTok{)} \OperatorTok{{-}\textgreater{}}\NormalTok{ Void }\OperatorTok{=}\NormalTok{ secureZero}
-    
+
     \KeywordTok{deinit} \OperatorTok{\{}
         \ControlFlowTok{if}\NormalTok{ count }\OperatorTok{\textgreater{}} \DecValTok{0} \OperatorTok{\{}
 \NormalTok{            Self}\OperatorTok{.}\NormalTok{wipingFunction}\OperatorTok{(}\NormalTok{pointer}\OperatorTok{,}\NormalTok{ count}\OperatorTok{)}
@@ -1168,14 +1168,14 @@ APIs with a KEM-based authenticated encryption construction:
         \CommentTok{// KEM encapsulation}
         \KeywordTok{let} \VariableTok{publicKey} \OperatorTok{=} \ControlFlowTok{try}\NormalTok{ MLKEM768}\OperatorTok{.}\NormalTok{PublicKey}\OperatorTok{(}\NormalTok{rawRepresentation}\OperatorTok{:}\NormalTok{ recipientPublicKey}\OperatorTok{)}
         \KeywordTok{let} \VariableTok{encapsulationResult} \OperatorTok{=} \ControlFlowTok{try}\NormalTok{ publicKey}\OperatorTok{.}\NormalTok{encapsulate}\OperatorTok{()}
-        
+
         \CommentTok{// Key derivation (HKDF{-}SHA256)}
         \KeywordTok{let} \VariableTok{salt} \OperatorTok{=}\NormalTok{ SHA256}\OperatorTok{(}\NormalTok{DS}\OperatorTok{(}\StringTok{"SkyBridge{-}KDF{-}Salt{-}v1|"}\OperatorTok{)} \OperatorTok{||}\NormalTok{ info}\OperatorTok{)}
         \KeywordTok{let} \VariableTok{derivedKey} \OperatorTok{=}\NormalTok{ HKDF}\OperatorTok{\textless{}}\NormalTok{SHA256}\OperatorTok{\textgreater{}.}\NormalTok{deriveKey}\OperatorTok{(}
 \NormalTok{            inputKeyMaterial}\OperatorTok{:}\NormalTok{ encapsulationResult}\OperatorTok{.}\NormalTok{sharedSecret}\OperatorTok{,}
 \NormalTok{            salt}\OperatorTok{:}\NormalTok{ salt}\OperatorTok{,}\NormalTok{ info}\OperatorTok{:}\NormalTok{ info}\OperatorTok{,}\NormalTok{ outputByteCount}\OperatorTok{:} \DecValTok{32}
         \OperatorTok{)}
-        
+
         \CommentTok{// Authenticated encryption (AES{-}256{-}GCM)}
         \KeywordTok{let} \VariableTok{sealedBox} \OperatorTok{=} \ControlFlowTok{try}\NormalTok{ AES}\OperatorTok{.}\NormalTok{GCM}\OperatorTok{.}\NormalTok{seal}\OperatorTok{(}\NormalTok{plaintext}\OperatorTok{,}\NormalTok{ using}\OperatorTok{:}\NormalTok{ derivedKey}\OperatorTok{)}
         \KeywordTok{return}\NormalTok{ KemDemSealedBox}\OperatorTok{(}
@@ -1416,13 +1416,13 @@ strategy:
 \OperatorTok{)} \KeywordTok{throws}\NormalTok{ {-}\textgreater{} }\FunctionTok{AttemptPreparation} \OperatorTok{\{}
     \CommentTok{// 1. Build homogeneous offeredSuites from provider\textquotesingle{}s supported suites}
     \KeywordTok{let} \VariableTok{buildResult} \OperatorTok{=}\NormalTok{ HandshakeOfferedSuites}\OperatorTok{.}\NormalTok{build}\OperatorTok{(}\NormalTok{strategy}\OperatorTok{:}\NormalTok{ strategy}\OperatorTok{,}\NormalTok{ cryptoProvider}\OperatorTok{:}\NormalTok{ cryptoProvider}\OperatorTok{)}
-    
+
     \CommentTok{// 2. Select signature algorithm based on suites}
     \KeywordTok{let} \VariableTok{sigAAlgorithm} \OperatorTok{=}\NormalTok{ PreNegotiationSignatureSelector}\OperatorTok{.}\NormalTok{selectForMessageAResult}\OperatorTok{(}\NormalTok{offeredSuites}\OperatorTok{:}\NormalTok{ suites}\OperatorTok{)}
-    
+
     \CommentTok{// 3. Get matching signature provider}
     \KeywordTok{let} \VariableTok{signatureProvider} \OperatorTok{=}\NormalTok{ PreNegotiationSignatureSelector}\OperatorTok{.}\NormalTok{selectProvider}\OperatorTok{(}\ControlFlowTok{for}\OperatorTok{:}\NormalTok{ sigAAlgorithm}\OperatorTok{)}
-    
+
     \KeywordTok{return}\NormalTok{ AttemptPreparation}\OperatorTok{(}\NormalTok{strategy}\OperatorTok{,}\NormalTok{ suites}\OperatorTok{,}\NormalTok{ sigAAlgorithm}\OperatorTok{,}\NormalTok{ signatureProvider}\OperatorTok{)}
 \OperatorTok{\}}
 \end{Highlighting}

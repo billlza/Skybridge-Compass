@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import Combine
 
 // MARK: - 远程桌面设置数据模型
 
@@ -19,6 +20,7 @@ public final class RemoteDesktopSettings: ObservableObject, @unchecked Sendable 
     
  // MARK: - 初始化
     public init() {}
+
 }
 
 // MARK: - 显示设置
@@ -64,8 +66,17 @@ public struct DisplaySettings: Codable, Sendable {
     public var encodingProfile: EncodingProfile = .auto
  /// 低延迟模式（减少GOP、关闭B帧等）
     public var lowLatencyMode: Bool = false
-    
+ /// P2P 远程桌面观看渲染层级（Stable/Fluid/Reference）。引擎在开流时按硬件能力解析并可单向降级。
+    public var renderingMode: RenderingMode = .stable
+ /// 要采集的显示器（CGDirectDisplayID）。nil = 主屏。仅在多显示器开启时生效，用于选择被控端的某块屏幕。
+    public var captureDisplayID: UInt32? = nil
+
     public init() {}
+
+    public var boundedCompressionLevelPercent: Int {
+        let rounded = compressionLevel.isFinite ? Int(compressionLevel.rounded()) : 50
+        return max(0, min(rounded, 100))
+    }
 }
 
 /// 视频编码器选项（设置层使用，避免与硬件编码器枚举重名）
@@ -90,6 +101,7 @@ public enum ResolutionSetting: String, CaseIterable, Codable, Sendable {
     case resolution1920x1080 = "1920x1080"
     case resolution2560x1440 = "2560x1440"
     case resolution3840x2160 = "3840x2160"
+    case resolution5120x2880 = "5120x2880"
     case custom = "custom"
     
     public var displayName: String {
@@ -101,6 +113,7 @@ public enum ResolutionSetting: String, CaseIterable, Codable, Sendable {
         case .resolution1920x1080: return "1920 × 1080 (Full HD)"
         case .resolution2560x1440: return "2560 × 1440 (2K)"
         case .resolution3840x2160: return "3840 × 2160 (4K)"
+        case .resolution5120x2880: return "5120 × 2880 (5K)"
         case .custom: return "自定义"
         }
     }
@@ -114,6 +127,7 @@ public enum ResolutionSetting: String, CaseIterable, Codable, Sendable {
         case .resolution1920x1080: return (1920, 1080)
         case .resolution2560x1440: return (2560, 1440)
         case .resolution3840x2160: return (3840, 2160)
+        case .resolution5120x2880: return (5120, 2880)
         }
     }
 }
@@ -180,7 +194,7 @@ public struct InteractionSettings: Codable, Sendable {
     public var enableClipboardSync: Bool = true
     
  /// 启用音频重定向
-    public var enableAudioRedirection: Bool = true
+    public var enableAudioRedirection: Bool = false
     
  /// 启用打印机重定向
     public var enablePrinterRedirection: Bool = false
@@ -201,6 +215,10 @@ public struct InteractionSettings: Codable, Sendable {
     public var enableContextMenu: Bool = true
     
     public init() {}
+
+    public var boundedDoubleClickIntervalMilliseconds: Int {
+        max(200, min(doubleClickInterval, 1_000))
+    }
 }
 
 /// 键盘映射模式
@@ -224,6 +242,10 @@ public enum KeyboardMapping: String, CaseIterable, Codable, Sendable {
 
 /// 网络优化相关设置配置
 public struct NetworkSettings: Codable, Sendable {
+    public static let defaultBufferSizeKB = 1024
+    public static let minimumBufferSizeKB = 256
+    public static let maximumBufferSizeKB = 8192
+
  /// 连接类型
     public var connectionType: ConnectionType = .auto
     
@@ -249,7 +271,7 @@ public struct NetworkSettings: Codable, Sendable {
     public var enableAdaptiveQuality: Bool = true
     
  /// 缓冲区大小 (KB)
-    public var bufferSize: Int = 1024
+    public var bufferSize: Int = Self.defaultBufferSizeKB
     
  /// 启用网络统计
     public var enableNetworkStats: Bool = true
@@ -267,6 +289,59 @@ public struct NetworkSettings: Codable, Sendable {
     public var encryptionAlgorithm: EncryptionAlgorithm = .tls13
     
     public init() {}
+
+    public var boundedBandwidthLimitMbps: Double {
+        max(0, min(bandwidthLimit, 1000))
+    }
+
+    public var boundedCompressionLevel: Int {
+        max(0, min(compressionLevel, 9))
+    }
+
+    public var boundedBufferSizeKB: Int {
+        max(Self.minimumBufferSizeKB, min(bufferSize, Self.maximumBufferSizeKB))
+    }
+
+    public var boundedConnectionTimeoutSeconds: Int {
+        max(10, min(connectionTimeout, 120))
+    }
+
+    public var boundedMaxReconnectAttempts: Int {
+        max(0, min(maxReconnectAttempts, 10))
+    }
+
+    public var boundedReconnectBackoffInitialMilliseconds: Int {
+        max(100, min(reconnectBackoffInitialMs, 5_000))
+    }
+
+    public var boundedReconnectBackoffMaxMilliseconds: Int {
+        max(boundedReconnectBackoffInitialMilliseconds, max(1_000, min(reconnectBackoffMaxMs, 60_000)))
+    }
+
+    public var boundedReconnectBackoffMultiplier: Double {
+        reconnectBackoffMultiplier.isFinite
+            ? max(1.1, min(reconnectBackoffMultiplier, 4.0))
+            : 2.0
+    }
+
+    public func reconnectBackoffDelayMilliseconds(forAttempt attempt: Int) -> Int {
+        let safeAttempt = max(0, attempt)
+        let initial = Double(boundedReconnectBackoffInitialMilliseconds)
+        let maximum = Double(boundedReconnectBackoffMaxMilliseconds)
+        let scaled = initial * pow(boundedReconnectBackoffMultiplier, Double(safeAttempt))
+        return Int(min(maximum, scaled).rounded())
+    }
+
+    public var maxBufferedAmountOverrideBytes: UInt64? {
+        let bounded = boundedBufferSizeKB
+        guard bounded != Self.defaultBufferSizeKB else { return nil }
+        return UInt64(bounded) * 1024
+    }
+
+    public mutating func enforceStrictTransportSecurity() {
+        enableEncryption = true
+        encryptionAlgorithm = .tls13
+    }
 }
 
 /// 加密算法选项
@@ -301,6 +376,10 @@ public enum ConnectionType: String, CaseIterable, Codable, Sendable {
         case .satellite: return "卫星网络"
         }
     }
+
+    public var remoteDesktopScopeDescription: String {
+        "仅影响 Legacy RDP 配置；P2P/WebRTC 路由由 ICE 和当前网络路径协商决定"
+    }
 }
 
 // MARK: - 设置持久化管理器
@@ -310,17 +389,22 @@ public enum ConnectionType: String, CaseIterable, Codable, Sendable {
 @MainActor
 public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
     public static let shared = RemoteDesktopSettingsManager()
+    private nonisolated static let isPrinterRedirectionAvailable = false
     
     @Published public var settings = RemoteDesktopSettings()
     
     private let userDefaults = UserDefaults.standard
     private let settingsKey = "com.skybridge.compass.remote_desktop_settings"
+    private var settingsCancellables = Set<AnyCancellable>()
+    private var isLoadingSettings = false
+    private var isSavingSettings = false
     
  // MARK: - 生命周期管理属性
     private var isStarted = false
     
     private init() {
         loadSettings()
+        bindSettingsAutosave()
     }
     
  // MARK: - 生命周期管理方法
@@ -375,12 +459,16 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
         
  // 重置设置为默认值
         settings = RemoteDesktopSettings()
+        bindSettingsAutosave()
         
         SkyBridgeLogger.ui.debugOnly("✅ RemoteDesktopSettingsManager 清理完成")
     }
     
  /// 加载设置
     public func loadSettings() {
+        isLoadingSettings = true
+        defer { isLoadingSettings = false }
+
  // 使用 UserDefaults 分别加载各个设置项
         loadDisplaySettings()
         loadInteractionSettings()
@@ -390,6 +478,10 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
     
  /// 保存设置
     public func saveSettings() {
+        guard !isSavingSettings else { return }
+        isSavingSettings = true
+        defer { isSavingSettings = false }
+
  // 使用 UserDefaults 分别保存各个设置项
         saveDisplaySettings()
         saveInteractionSettings()
@@ -400,6 +492,7 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
  /// 重置为默认设置
     public func resetToDefaults() {
         settings = RemoteDesktopSettings()
+        bindSettingsAutosave()
         saveSettings()
         SkyBridgeLogger.ui.debugOnly("设置已重置为默认值")
     }
@@ -450,6 +543,36 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
             return false
         }
     }
+
+    private func bindSettingsAutosave() {
+        settingsCancellables.removeAll()
+
+        settings.$displaySettings
+            .dropFirst()
+            .sink { [weak self] _ in
+                self?.persistRuntimeSettingsChange()
+            }
+            .store(in: &settingsCancellables)
+
+        settings.$interactionSettings
+            .dropFirst()
+            .sink { [weak self] _ in
+                self?.persistRuntimeSettingsChange()
+            }
+            .store(in: &settingsCancellables)
+
+        settings.$networkSettings
+            .dropFirst()
+            .sink { [weak self] _ in
+                self?.persistRuntimeSettingsChange()
+            }
+            .store(in: &settingsCancellables)
+    }
+
+    private func persistRuntimeSettingsChange() {
+        guard !isLoadingSettings, !isSavingSettings else { return }
+        saveSettings()
+    }
     
  // MARK: - 私有方法 - 显示设置
     
@@ -469,8 +592,14 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
         userDefaults.set(settings.displaySettings.targetFrameRate, forKey: "\(prefix)targetFrameRate")
         userDefaults.set(settings.displaySettings.encodingProfile.rawValue, forKey: "\(prefix)encodingProfile")
         userDefaults.set(settings.displaySettings.lowLatencyMode, forKey: "\(prefix)lowLatencyMode")
+        userDefaults.set(settings.displaySettings.renderingMode.rawValue, forKey: "\(prefix)renderingMode")
+        if let captureDisplayID = settings.displaySettings.captureDisplayID {
+            userDefaults.set(Int(captureDisplayID), forKey: "\(prefix)captureDisplayID")
+        } else {
+            userDefaults.removeObject(forKey: "\(prefix)captureDisplayID")
+        }
     }
-    
+
     private func loadDisplaySettings() {
         let prefix = "\(settingsKey).display."
         
@@ -534,10 +663,18 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
         if userDefaults.object(forKey: "\(prefix)lowLatencyMode") != nil {
             settings.displaySettings.lowLatencyMode = userDefaults.bool(forKey: "\(prefix)lowLatencyMode")
         }
+        if let renderingModeString = userDefaults.object(forKey: "\(prefix)renderingMode") as? String,
+           let mode = RenderingMode(rawValue: renderingModeString) {
+            settings.displaySettings.renderingMode = mode
+        }
+        if userDefaults.object(forKey: "\(prefix)captureDisplayID") != nil {
+            let raw = userDefaults.integer(forKey: "\(prefix)captureDisplayID")
+            settings.displaySettings.captureDisplayID = raw > 0 ? UInt32(raw) : nil
+        }
     }
     
     private func displaySettingsToDict() -> [String: Any] {
-        return [
+        var dict: [String: Any] = [
             "resolution": settings.displaySettings.resolution.rawValue,
             "colorDepth": settings.displaySettings.colorDepth.rawValue,
             "refreshRate": settings.displaySettings.refreshRate.rawValue,
@@ -546,8 +683,19 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
             "enableHardwareAcceleration": settings.displaySettings.enableHardwareAcceleration,
             "enableAppleSiliconOptimization": settings.displaySettings.enableAppleSiliconOptimization,
             "fullScreenMode": settings.displaySettings.fullScreenMode,
-            "multiMonitorSupport": settings.displaySettings.multiMonitorSupport
+            "multiMonitorSupport": settings.displaySettings.multiMonitorSupport,
+            "preferredCodec": settings.displaySettings.preferredCodec.rawValue,
+            "keyFrameInterval": settings.displaySettings.keyFrameInterval,
+            "targetFrameRate": settings.displaySettings.targetFrameRate,
+            "encodingProfile": settings.displaySettings.encodingProfile.rawValue,
+            "lowLatencyMode": settings.displaySettings.lowLatencyMode
         ]
+        dict["renderingMode"] = settings.displaySettings.renderingMode.rawValue
+        // captureDisplayID 为可选；JSONSerialization 无法编码 nil，仅在存在时写入。
+        if let id = settings.displaySettings.captureDisplayID {
+            dict["captureDisplayID"] = Int(id)
+        }
+        return dict
     }
     
     private func loadDisplaySettingsFromDict(_ dict: [String: Any]) {
@@ -590,18 +738,62 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
         if let multiMonitorSupport = dict["multiMonitorSupport"] as? Bool {
             settings.displaySettings.multiMonitorSupport = multiMonitorSupport
         }
+        if let codecString = dict["preferredCodec"] as? String,
+           let codec = PreferredVideoCodec(rawValue: codecString) {
+            settings.displaySettings.preferredCodec = codec
+        }
+        if let keyFrameInterval = dict["keyFrameInterval"] as? Int {
+            settings.displaySettings.keyFrameInterval = keyFrameInterval
+        }
+        if let targetFrameRate = dict["targetFrameRate"] as? Int {
+            settings.displaySettings.targetFrameRate = targetFrameRate
+        }
+        if let profileString = dict["encodingProfile"] as? String,
+           let profile = EncodingProfile(rawValue: profileString) {
+            settings.displaySettings.encodingProfile = profile
+        }
+        if let lowLatencyMode = dict["lowLatencyMode"] as? Bool {
+            settings.displaySettings.lowLatencyMode = lowLatencyMode
+        }
+        if let renderingModeString = dict["renderingMode"] as? String,
+           let mode = RenderingMode(rawValue: renderingModeString) {
+            settings.displaySettings.renderingMode = mode
+        }
+        if let raw = dict["captureDisplayID"] as? Int {
+            settings.displaySettings.captureDisplayID = raw > 0 ? UInt32(raw) : nil
+        }
     }
-    
+
  // MARK: - 私有方法 - 交互设置
     
     private func saveInteractionSettings() {
         let prefix = "\(settingsKey).interaction."
+        let audioRedirectionKey = "\(prefix)enableAudioRedirection"
+        let printerRedirectionKey = "\(prefix)enablePrinterRedirection"
+        let enableAudioRedirection = sanitizeAudioRedirectionPreference(
+            settings.interactionSettings.enableAudioRedirection,
+            source: "本地设置保存",
+            persistedKey: audioRedirectionKey
+        )
+        let enablePrinterRedirection = sanitizePrinterRedirectionPreference(
+            settings.interactionSettings.enablePrinterRedirection,
+            source: "本地设置保存",
+            persistedKey: printerRedirectionKey
+        )
+
+        if settings.interactionSettings.enableAudioRedirection != enableAudioRedirection {
+            settings.interactionSettings.enableAudioRedirection = enableAudioRedirection
+        }
+        if settings.interactionSettings.enablePrinterRedirection != enablePrinterRedirection {
+            settings.interactionSettings.enablePrinterRedirection = enablePrinterRedirection
+        }
+
         userDefaults.set(settings.interactionSettings.mouseSensitivity, forKey: "\(prefix)mouseSensitivity")
         userDefaults.set(settings.interactionSettings.enableMouseAcceleration, forKey: "\(prefix)enableMouseAcceleration")
         userDefaults.set(settings.interactionSettings.keyboardMapping.rawValue, forKey: "\(prefix)keyboardMapping")
         userDefaults.set(settings.interactionSettings.enableClipboardSync, forKey: "\(prefix)enableClipboardSync")
-        userDefaults.set(settings.interactionSettings.enableAudioRedirection, forKey: "\(prefix)enableAudioRedirection")
-        userDefaults.set(settings.interactionSettings.enablePrinterRedirection, forKey: "\(prefix)enablePrinterRedirection")
+        userDefaults.set(enableAudioRedirection, forKey: audioRedirectionKey)
+        userDefaults.set(enablePrinterRedirection, forKey: printerRedirectionKey)
         userDefaults.set(settings.interactionSettings.enableFileTransfer, forKey: "\(prefix)enableFileTransfer")
         userDefaults.set(settings.interactionSettings.enableTrackpadGestures, forKey: "\(prefix)enableTrackpadGestures")
         userDefaults.set(settings.interactionSettings.scrollSensitivity, forKey: "\(prefix)scrollSensitivity")
@@ -611,6 +803,8 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
     
     private func loadInteractionSettings() {
         let prefix = "\(settingsKey).interaction."
+        let audioRedirectionKey = "\(prefix)enableAudioRedirection"
+        let printerRedirectionKey = "\(prefix)enablePrinterRedirection"
         
         if userDefaults.object(forKey: "\(prefix)mouseSensitivity") != nil {
             settings.interactionSettings.mouseSensitivity = userDefaults.double(forKey: "\(prefix)mouseSensitivity")
@@ -629,13 +823,23 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
             settings.interactionSettings.enableClipboardSync = userDefaults.bool(forKey: "\(prefix)enableClipboardSync")
         }
         
-        if userDefaults.object(forKey: "\(prefix)enableAudioRedirection") != nil {
-            settings.interactionSettings.enableAudioRedirection = userDefaults.bool(forKey: "\(prefix)enableAudioRedirection")
-        }
+        let persistedAudioRedirectionValue = userDefaults.object(forKey: audioRedirectionKey) != nil
+            ? userDefaults.bool(forKey: audioRedirectionKey)
+            : settings.interactionSettings.enableAudioRedirection
+        settings.interactionSettings.enableAudioRedirection = sanitizeAudioRedirectionPreference(
+            persistedAudioRedirectionValue,
+            source: "本地已保存设置",
+            persistedKey: audioRedirectionKey
+        )
         
-        if userDefaults.object(forKey: "\(prefix)enablePrinterRedirection") != nil {
-            settings.interactionSettings.enablePrinterRedirection = userDefaults.bool(forKey: "\(prefix)enablePrinterRedirection")
-        }
+        let persistedPrinterRedirectionValue = userDefaults.object(forKey: printerRedirectionKey) != nil
+            ? userDefaults.bool(forKey: printerRedirectionKey)
+            : settings.interactionSettings.enablePrinterRedirection
+        settings.interactionSettings.enablePrinterRedirection = sanitizePrinterRedirectionPreference(
+            persistedPrinterRedirectionValue,
+            source: "本地已保存设置",
+            persistedKey: printerRedirectionKey
+        )
         
         if userDefaults.object(forKey: "\(prefix)enableFileTransfer") != nil {
             settings.interactionSettings.enableFileTransfer = userDefaults.bool(forKey: "\(prefix)enableFileTransfer")
@@ -659,13 +863,29 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
     }
     
     private func interactionSettingsToDict() -> [String: Any] {
+        let enableAudioRedirection = sanitizeAudioRedirectionPreference(
+            settings.interactionSettings.enableAudioRedirection,
+            source: "设置导出"
+        )
+        let enablePrinterRedirection = sanitizePrinterRedirectionPreference(
+            settings.interactionSettings.enablePrinterRedirection,
+            source: "设置导出"
+        )
+
+        if settings.interactionSettings.enableAudioRedirection != enableAudioRedirection {
+            settings.interactionSettings.enableAudioRedirection = enableAudioRedirection
+        }
+        if settings.interactionSettings.enablePrinterRedirection != enablePrinterRedirection {
+            settings.interactionSettings.enablePrinterRedirection = enablePrinterRedirection
+        }
+
         return [
             "mouseSensitivity": settings.interactionSettings.mouseSensitivity,
             "enableMouseAcceleration": settings.interactionSettings.enableMouseAcceleration,
             "keyboardMapping": settings.interactionSettings.keyboardMapping.rawValue,
             "enableClipboardSync": settings.interactionSettings.enableClipboardSync,
-            "enableAudioRedirection": settings.interactionSettings.enableAudioRedirection,
-            "enablePrinterRedirection": settings.interactionSettings.enablePrinterRedirection,
+            "enableAudioRedirection": enableAudioRedirection,
+            "enablePrinterRedirection": enablePrinterRedirection,
             "enableFileTransfer": settings.interactionSettings.enableFileTransfer,
             "enableTrackpadGestures": settings.interactionSettings.enableTrackpadGestures,
             "scrollSensitivity": settings.interactionSettings.scrollSensitivity,
@@ -692,13 +912,15 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
             settings.interactionSettings.enableClipboardSync = enableClipboardSync
         }
         
-        if let enableAudioRedirection = dict["enableAudioRedirection"] as? Bool {
-            settings.interactionSettings.enableAudioRedirection = enableAudioRedirection
-        }
+        settings.interactionSettings.enableAudioRedirection = sanitizeAudioRedirectionPreference(
+            dict["enableAudioRedirection"] as? Bool ?? settings.interactionSettings.enableAudioRedirection,
+            source: "导入配置"
+        )
         
-        if let enablePrinterRedirection = dict["enablePrinterRedirection"] as? Bool {
-            settings.interactionSettings.enablePrinterRedirection = enablePrinterRedirection
-        }
+        settings.interactionSettings.enablePrinterRedirection = sanitizePrinterRedirectionPreference(
+            dict["enablePrinterRedirection"] as? Bool ?? settings.interactionSettings.enablePrinterRedirection,
+            source: "导入配置"
+        )
         
         if let enableFileTransfer = dict["enableFileTransfer"] as? Bool {
             settings.interactionSettings.enableFileTransfer = enableFileTransfer
@@ -724,16 +946,25 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
  // MARK: - 私有方法 - 网络设置
     
     private func saveNetworkSettings() {
+        settings.networkSettings.enforceStrictTransportSecurity()
+        settings.networkSettings.compressionLevel = settings.networkSettings.boundedCompressionLevel
+        settings.networkSettings.bufferSize = settings.networkSettings.boundedBufferSizeKB
+        settings.networkSettings.connectionTimeout = settings.networkSettings.boundedConnectionTimeoutSeconds
+        settings.networkSettings.maxReconnectAttempts = settings.networkSettings.boundedMaxReconnectAttempts
+        settings.networkSettings.reconnectBackoffInitialMs = settings.networkSettings.boundedReconnectBackoffInitialMilliseconds
+        settings.networkSettings.reconnectBackoffMaxMs = settings.networkSettings.boundedReconnectBackoffMaxMilliseconds
+        settings.networkSettings.reconnectBackoffMultiplier = settings.networkSettings.boundedReconnectBackoffMultiplier
+
         let prefix = "\(settingsKey).network."
         userDefaults.set(settings.networkSettings.connectionType.rawValue, forKey: "\(prefix)connectionType")
         userDefaults.set(settings.networkSettings.bandwidthLimit, forKey: "\(prefix)bandwidthLimit")
-        userDefaults.set(settings.networkSettings.compressionLevel, forKey: "\(prefix)compressionLevel")
-        userDefaults.set(settings.networkSettings.enableEncryption, forKey: "\(prefix)enableEncryption")
+        userDefaults.set(settings.networkSettings.boundedCompressionLevel, forKey: "\(prefix)compressionLevel")
+        userDefaults.set(true, forKey: "\(prefix)enableEncryption")
         userDefaults.set(settings.networkSettings.enableUDPTransport, forKey: "\(prefix)enableUDPTransport")
         userDefaults.set(settings.networkSettings.connectionTimeout, forKey: "\(prefix)connectionTimeout")
         userDefaults.set(settings.networkSettings.keepAliveInterval, forKey: "\(prefix)keepAliveInterval")
         userDefaults.set(settings.networkSettings.enableAdaptiveQuality, forKey: "\(prefix)enableAdaptiveQuality")
-        userDefaults.set(settings.networkSettings.bufferSize, forKey: "\(prefix)bufferSize")
+        userDefaults.set(settings.networkSettings.boundedBufferSizeKB, forKey: "\(prefix)bufferSize")
         userDefaults.set(settings.networkSettings.enableNetworkStats, forKey: "\(prefix)enableNetworkStats")
         userDefaults.set(settings.networkSettings.maxReconnectAttempts, forKey: "\(prefix)maxReconnectAttempts")
         userDefaults.set(settings.networkSettings.reconnectBackoffInitialMs, forKey: "\(prefix)reconnectBackoffInitialMs")
@@ -756,10 +987,8 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
         if userDefaults.object(forKey: "\(prefix)compressionLevel") != nil {
             settings.networkSettings.compressionLevel = userDefaults.integer(forKey: "\(prefix)compressionLevel")
         }
-        
-        if userDefaults.object(forKey: "\(prefix)enableEncryption") != nil {
-            settings.networkSettings.enableEncryption = userDefaults.bool(forKey: "\(prefix)enableEncryption")
-        }
+        settings.networkSettings.enforceStrictTransportSecurity()
+        userDefaults.set(true, forKey: "\(prefix)enableEncryption")
         
         if userDefaults.object(forKey: "\(prefix)enableUDPTransport") != nil {
             settings.networkSettings.enableUDPTransport = userDefaults.bool(forKey: "\(prefix)enableUDPTransport")
@@ -780,6 +1009,7 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
         if userDefaults.object(forKey: "\(prefix)bufferSize") != nil {
             settings.networkSettings.bufferSize = userDefaults.integer(forKey: "\(prefix)bufferSize")
         }
+        settings.networkSettings.bufferSize = settings.networkSettings.boundedBufferSizeKB
         
         if userDefaults.object(forKey: "\(prefix)enableNetworkStats") != nil {
             settings.networkSettings.enableNetworkStats = userDefaults.bool(forKey: "\(prefix)enableNetworkStats")
@@ -803,15 +1033,18 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
         return [
             "connectionType": settings.networkSettings.connectionType.rawValue,
             "bandwidthLimit": settings.networkSettings.bandwidthLimit,
-            "compressionLevel": settings.networkSettings.compressionLevel,
-            "enableEncryption": settings.networkSettings.enableEncryption,
+            "compressionLevel": settings.networkSettings.boundedCompressionLevel,
+            "enableEncryption": true,
             "enableUDPTransport": settings.networkSettings.enableUDPTransport,
             "connectionTimeout": settings.networkSettings.connectionTimeout,
             "keepAliveInterval": settings.networkSettings.keepAliveInterval,
             "enableAdaptiveQuality": settings.networkSettings.enableAdaptiveQuality,
-            "bufferSize": settings.networkSettings.bufferSize,
+            "bufferSize": settings.networkSettings.boundedBufferSizeKB,
             "enableNetworkStats": settings.networkSettings.enableNetworkStats,
-            "maxReconnectAttempts": settings.networkSettings.maxReconnectAttempts
+            "maxReconnectAttempts": settings.networkSettings.maxReconnectAttempts,
+            "reconnectBackoffInitialMs": settings.networkSettings.reconnectBackoffInitialMs,
+            "reconnectBackoffMaxMs": settings.networkSettings.reconnectBackoffMaxMs,
+            "reconnectBackoffMultiplier": settings.networkSettings.reconnectBackoffMultiplier
         ]
     }
     
@@ -828,10 +1061,7 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
         if let compressionLevel = dict["compressionLevel"] as? Int {
             settings.networkSettings.compressionLevel = compressionLevel
         }
-        
-        if let enableEncryption = dict["enableEncryption"] as? Bool {
-            settings.networkSettings.enableEncryption = enableEncryption
-        }
+        settings.networkSettings.enforceStrictTransportSecurity()
         
         if let enableUDPTransport = dict["enableUDPTransport"] as? Bool {
             settings.networkSettings.enableUDPTransport = enableUDPTransport
@@ -852,6 +1082,7 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
         if let bufferSize = dict["bufferSize"] as? Int {
             settings.networkSettings.bufferSize = bufferSize
         }
+        settings.networkSettings.bufferSize = settings.networkSettings.boundedBufferSizeKB
         
         if let enableNetworkStats = dict["enableNetworkStats"] as? Bool {
             settings.networkSettings.enableNetworkStats = enableNetworkStats
@@ -860,6 +1091,49 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
         if let maxReconnectAttempts = dict["maxReconnectAttempts"] as? Int {
             settings.networkSettings.maxReconnectAttempts = maxReconnectAttempts
         }
+        if let reconnectBackoffInitialMs = dict["reconnectBackoffInitialMs"] as? Int {
+            settings.networkSettings.reconnectBackoffInitialMs = reconnectBackoffInitialMs
+        }
+        if let reconnectBackoffMaxMs = dict["reconnectBackoffMaxMs"] as? Int {
+            settings.networkSettings.reconnectBackoffMaxMs = reconnectBackoffMaxMs
+        }
+        if let reconnectBackoffMultiplier = dict["reconnectBackoffMultiplier"] as? Double {
+            settings.networkSettings.reconnectBackoffMultiplier = reconnectBackoffMultiplier
+        }
+    }
+
+    private func sanitizeAudioRedirectionPreference(
+        _ requestedValue: Bool,
+        source: String,
+        persistedKey: String? = nil
+    ) -> Bool {
+        guard !requestedValue || AudioRedirectionManager.isFeatureAvailable else {
+            if let persistedKey {
+                userDefaults.set(false, forKey: persistedKey)
+            }
+
+            SkyBridgeLogger.ui.debugOnly("⚠️ 音频重定向当前版本未开放，已将\(source)中的启用配置重置为关闭")
+            return false
+        }
+
+        return requestedValue
+    }
+
+    private func sanitizePrinterRedirectionPreference(
+        _ requestedValue: Bool,
+        source: String,
+        persistedKey: String? = nil
+    ) -> Bool {
+        guard !requestedValue || Self.isPrinterRedirectionAvailable else {
+            if let persistedKey {
+                userDefaults.set(false, forKey: persistedKey)
+            }
+
+            SkyBridgeLogger.ui.debugOnly("⚠️ 打印机重定向当前版本未开放，已将\(source)中的启用配置重置为关闭")
+            return false
+        }
+
+        return requestedValue
     }
 }
 /// 编码档位（ProfileLevel）

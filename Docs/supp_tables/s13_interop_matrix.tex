@@ -1,0 +1,21 @@
+\begin{table*}[!tp]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{2pt}
+\caption{Cross-platform interop matrix (measured external Linux paths + static contract-consistency pairs).}
+\label{tab:supp-interop-matrix}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{(\linewidth - 16\tabcolsep) * \real{0.16}}>{\raggedright\arraybackslash}p{(\linewidth - 16\tabcolsep) * \real{0.15}}>{\raggedright\arraybackslash}p{(\linewidth - 16\tabcolsep) * \real{0.10}}>{\raggedright\arraybackslash}p{(\linewidth - 16\tabcolsep) * \real{0.13}}>{\raggedright\arraybackslash}p{(\linewidth - 16\tabcolsep) * \real{0.14}}>{\centering\arraybackslash}p{(\linewidth - 16\tabcolsep) * \real{0.06}}>{\centering\arraybackslash}p{(\linewidth - 16\tabcolsep) * \real{0.07}}>{\centering\arraybackslash}p{(\linewidth - 16\tabcolsep) * \real{0.06}}>{\centering\arraybackslash}p{(\linewidth - 16\tabcolsep) * \real{0.06}}@{}}
+\toprule
+Initiator & Responder & Evidence & Suite mode & Path label & $n$ & Success & p50 (ms) & p95 (ms) \\
+\midrule
+iOS/macOS client & Ubuntu EC2 & measured & classic & \texttt{home-wifi} & 50 & 1.0000 & 0.497 & 0.641 \\
+iOS/macOS client & Ubuntu EC2 & measured & pqc-v1 & \texttt{home-wifi} & 50 & 1.0000 & 0.446 & 0.620 \\
+iOS/macOS client & Ubuntu EC2 & measured & classic & \texttt{hotspot-5ga} & 50 & 1.0000 & 0.507 & 0.656 \\
+iOS/macOS client & Ubuntu EC2 & measured & pqc-v1 & \texttt{hotspot-5ga} & 50 & 1.0000 & 0.501 & 0.602 \\
+iOS/macOS & Android & static\_contract & catalog+policy-contract & \texttt{static-contract} & 1 & 1.0000 & - & - \\
+iOS/macOS & Ubuntu & static\_contract & catalog+policy-contract & \texttt{static-contract} & 1 & 1.0000 & - & - \\
+Android & Ubuntu & static\_contract & catalog+policy-contract & \texttt{static-contract} & 1 & 1.0000 & - & - \\
+\bottomrule
+\end{tabular}
+\vspace{2pt}\par\raggedright\footnotesize\textit{Notes:} Measured rows use \texttt{Artifacts/realnet\_e2e\_summary\_2026-01-23\_*.csv}; static-contract rows derive from \texttt{Scripts/check\_cross\_platform\_interop.py} output.
+\end{table*}

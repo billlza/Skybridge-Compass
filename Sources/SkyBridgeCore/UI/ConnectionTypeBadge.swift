@@ -1,3 +1,8 @@
+// macOS-exclusive: built on macOS-only APIs (AppKit / IOKit / ScreenCaptureKit / CoreWLAN /
+// MetalFX / ServiceManagement / ApplicationServices / CoreGraphics display services).
+// Excluded from other platforms so SkyBridgeCore can be the single shared core for iOS as
+// well. No behaviour changes on macOS.
+#if os(macOS)
 import SwiftUI
 
 /// 连接方式标签组件
@@ -71,6 +76,8 @@ public struct ConnectionTypeBadge: View {
         switch connectionType {
         case .wifi:
             return .blue
+        case .cellular:
+            return .green
         case .ethernet:
             return .orange
         case .usb:
@@ -128,6 +135,7 @@ public struct MultiConnectionTypeBadge: View {
             .thunderbolt,
             .ethernet,
             .usb,
+            .cellular,
             .wifi,
             .bluetooth,
             .unknown
@@ -170,6 +178,8 @@ public struct ConnectionTypeIndicator: View {
         switch connectionType {
         case .wifi:
             return .blue
+        case .cellular:
+            return .green
         case .ethernet:
             return .orange
         case .usb:
@@ -241,4 +251,4 @@ struct ConnectionTypeBadge_Previews: PreviewProvider {
     }
 }
 #endif
-
+#endif

@@ -1,3 +1,8 @@
+// macOS-exclusive: built on macOS-only APIs (AppKit / IOKit / ScreenCaptureKit / CoreWLAN /
+// MetalFX / ServiceManagement / ApplicationServices / CoreGraphics display services).
+// Excluded from other platforms so SkyBridgeCore can be the single shared core for iOS as
+// well. No behaviour changes on macOS.
+#if os(macOS)
 //
 // PatternMatcher.swift
 // SkyBridgeCore
@@ -222,10 +227,12 @@ public actor SignatureDatabaseLoader {
         currentVersion
     }
     
+#if DEBUG || SKYBRIDGE_TESTING
  /// 重置版本（仅用于测试）
     internal func resetVersion() {
         currentVersion = 0
     }
+#endif
 }
 
 // MARK: - SignatureDatabaseError
@@ -904,3 +911,4 @@ public actor PatternMatcher {
         return nil
     }
 }
+#endif

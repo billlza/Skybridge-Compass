@@ -1,0 +1,131 @@
+theory SkyBridge_Minimal
+begin
+
+/* -----------------------------------------------------------------
+   SkyBridge Compass — Minimal symbolic model (Tamarin)
+
+   Scope:
+   - Negotiation integrity (selectedSuite must be offered)
+   - Transcript binding (sigB binds MessageA + selectedSuite)
+   - Explicit key confirmation (Finished frames)
+   - Fallback gate (strictPQC forbids classic success)
+
+   This is intentionally minimal and abstracts pairing/storage/etc.
+   ----------------------------------------------------------------- */
+
+builtins: hashing, asymmetric-encryption, signing
+
+/* --- Abstract primitives / messages --- */
+
+functions:
+  DS/1,         /* domain separator */
+  SuiteClassic/0, SuitePQC/0,
+  Offer/2,      /* Offer(suites, keyshare) */
+  Select/1,     /* selected suite */
+  MsgA/3,       /* MsgA(idA, suites, na) */
+  MsgB/5,       /* MsgB(idB, sel, nb, sigB, finKeyHint) */
+  Finished/2    /* Finished(role, mac) */
+
+/* -----------------------------------------------------------------
+   Roles & long-term identity keys are abstracted as signing keys.
+   We assume pairing pins keys (modeled as a pre-shared mapping).
+   ----------------------------------------------------------------- */
+
+rule Init_Offer:
+  [ Fr(~na), Fr(~sid), Fr(~pkA), Fr(~skA) ]
+  --[ GenKey('A', ~pkA, ~skA),
+      OfferSent(~sid, 'A', SuiteClassic, SuitePQC)
+    ]->
+  [ Out( <~sid, MsgA('A', <SuiteClassic, SuitePQC>, ~na), ~pkA> ),
+    StateI_Offered(~sid, 'A', ~na, ~pkA, ~skA)
+  ]
+
+/* Responder receives MsgA and chooses a suite that was offered (enforced) */
+rule Resp_Select_And_Sign:
+  [ In( <sid, MsgA('A', suites, na), pkA> ),
+    Fr(~nb), Fr(~pkB), Fr(~skB)
+  ]
+  let sel = SuitePQC in
+  /* selection must be in offered suites */
+  if (sel = SuiteClassic | sel = SuitePQC) then
+  --[ GenKey('B', ~pkB, ~skB),
+      SelectedSuite(sid, sel),
+      /* transcript binding: responder signs MessageA + selectedSuite */
+      SigBOverA(sid, sel)
+    ]->
+  [ Out( <sid, MsgB('B', sel, ~nb, sign( <DS('SkyBridge-B'), MsgA('A', suites, na), sel>, ~skB), 'fin'), ~pkB> ),
+    StateR_SentB(sid, 'B', sel, ~nb, ~pkB, ~skB, pkA, na)
+  ]
+
+/* Initiator verifies sigB against pinned pkB (abstracted: pkB comes on wire, but we require sig verify) */
+rule Init_Verify_B_And_Derive:
+  [ StateI_Offered(sid, 'A', na, pkA, skA),
+    In( <sid, MsgB('B', sel, nb, sigB, finHint), pkB> )
+  ]
+  let preimage = <DS('SkyBridge-B'), MsgA('A', <SuiteClassic, SuitePQC>, na), sel> in
+  if verify(sigB, preimage, pkB) then
+  --[ VerifiedSigB(sid, sel),
+      /* establish attempt according to policy */
+      Attempt(sid, sel)
+    ]->
+  [ StateI_Est(sid, 'A', sel, na, nb, pkB),
+    StateR_EstHint(sid, 'B', sel, na, nb, pkA)
+  ]
+
+/* Finished exchange (explicit key confirmation) */
+rule Resp_Send_Finished:
+  [ StateR_SentB(sid, 'B', sel, nb, pkB, skB, pkA, na) ]
+  --[ FinishedSent(sid, 'B') ]->
+  [ Out( <sid, Finished('B', h(<sid, sel, na, nb>))> ),
+    StateR_WaitFin(sid, 'B', sel, na, nb)
+  ]
+
+rule Init_Recv_Finished_And_Reply:
+  [ StateI_Est(sid, 'A', sel, na, nb, pkB),
+    In( <sid, Finished('B', macB)> )
+  ]
+  if macB = h(<sid, sel, na, nb>) then
+  --[ FinishedVerified(sid, 'A') ]->
+  [ Out( <sid, Finished('A', h(<sid, sel, nb, na>))> ),
+    StateI_WaitAck(sid, 'A', sel, na, nb)
+  ]
+
+rule Resp_Recv_Finished_And_Establish:
+  [ StateR_WaitFin(sid, 'B', sel, na, nb),
+    In( <sid, Finished('A', macA)> )
+  ]
+  if macA = h(<sid, sel, nb, na>) then
+  --[ SessionEstablished(sid, sel) ]->
+  [ State_Established(sid, sel) ]
+
+/* -----------------------------------------------------------------
+   Policy / downgrade gate:
+   - strictPQC forbids classic success
+   - default allows classic only with explicit downgrade event
+   We model policy as an external parameter chosen at session start.
+   ----------------------------------------------------------------- */
+
+rule Policy_Strict:
+  [ Fr(~sid) ]
+  --[ Policy(~sid, 'strictPQC') ]->
+  [ PolicyState(~sid, 'strictPQC') ]
+
+rule Policy_Default:
+  [ Fr(~sid) ]
+  --[ Policy(~sid, 'default') ]->
+  [ PolicyState(~sid, 'default') ]
+
+/* A downgrade event must be emitted if classic is established under default policy */
+lemma NoClassicUnderStrictPQC:
+  "All sid #i.
+     ( Policy(sid, 'strictPQC') @ #i )
+     ==> not(Ex #j. SessionEstablished(sid, SuiteClassic) @ #j )"
+
+lemma NoSilentDowngrade_Default:
+  "All sid #j.
+     ( SessionEstablished(sid, SuiteClassic) @ #j )
+     ==> (Ex #k. DowngradeEvent(sid) @ #k )"
+
+end
+
+

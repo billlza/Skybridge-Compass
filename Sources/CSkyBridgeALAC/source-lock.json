@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "version": "8.1.3",
+  "archive": "https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz",
+  "archiveSha256": "7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3",
+  "signature": "https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz.asc",
+  "signatureSha256": "5f2880c7fea01f8694d30cb9d06362f77241ee67ce5926b157a226b18f08a538",
+  "signingKey": "https://ffmpeg.org/ffmpeg-devel.asc",
+  "signingKeySha256": "397b3becedcd5a98769967ff1ff8501ddc89f8368b8f766e4701377d7dbaabe5",
+  "signingKeyFingerprint": "FCF986EA15E6E293A5644F10B4322F04D67658D8",
+  "providerContract": 1,
+  "patch": {
+    "path": "ffmpeg-strict-errors.patch",
+    "sha256": "dcc4b485de545b3233de8e42b7eab31110fee3f06c027212e46c69d7688c3391",
+    "files": [
+      {
+        "path": "libavcodec/alac.c",
+        "originalSha256": "76fda3b1079c6a1bbea717e36e060ca8444a855f007acfd8523bcc30ce758333",
+        "patchedSha256": "296d012f67f4532b31f62e89d2375b8c1ba2e088afe0ca5ddc1da0b4e0a5e7e0"
+      },
+      {
+        "path": "libavcodec/avcodec.h",
+        "originalSha256": "909f5c2fe7caf26601c39cd96acbc6f58f49ec5a78914d2e5b524a3fc2571afc",
+        "patchedSha256": "8c8ebf923c89f75b8442ca21d9cf9ab9d6c1dce6ab92b9316111f5ea35e6f165"
+      }
+    ]
+  },
+  "licenses": {
+    "COPYING.LGPLv2.1": "246041b6ecf9bc32d718a62c57877c78b5eb397b6467e74ed7ae2626ab189c30",
+    "LICENSE.md": "2e1d16c72fd74e12063776371da757322f8b77589386532f4fd8634bde7de1af"
+  },
+  "scope": "ALAC packet decoding only; no container, protocol, resampler, capture or output runtime. SDK and product/playback qualification are separate.",
+  "buildPatch": {
+    "path": "ffmpeg-build-probes.patch",
+    "sha256": "14fad52cb5a9a05f470dcd07056ab7d37128b43d4cd6187a7bf780051f31283d",
+    "files": [
+      {
+        "path": "configure",
+        "originalSha256": "90a34b121a93da888a5ba0d340cae0190dc7329fc3a6cecb22873af4d5cb9f47",
+        "patchedSha256": "4832339d26d453301e7c949ff29a566f9adca658563516db8a95de151c8d135d"
+      },
+      {
+        "path": "ffbuild/common.mak",
+        "originalSha256": "2d2a581e53e729feacf4adfd6f236ce979aa2f9ca6ebad603e9b836951c8a9ff",
+        "patchedSha256": "48032c86b3b443076de84c40fcf7db858cb91b76c4024e3fbcd5f349044a78d2"
+      }
+    ]
+  },
+  "gitSource": {
+    "name": "ffmpeg-alac",
+    "version": "8.1.3",
+    "ref": "n8.1.3",
+    "commit": "1041abdc962f4cc4f394aa8de9dc5236c0c3b9e7",
+    "repository": "https://github.com/FFmpeg/FFmpeg.git",
+    "git_tree": "4617f177ba2b559e393d7ca16cb8bba1bbde6ed2",
+    "source_archive_sha256": "801838344d51651d45ab3ce6502a2627da7746492475711ff2adfb723aeaf7b6"
+  }
+}

@@ -7,6 +7,7 @@
 
 import Foundation
 
+#if DEBUG || SKYBRIDGE_TESTING
 /// 测试期间收集 SecurityEvent 的 actor
 ///
 /// **用途**：
@@ -125,3 +126,4 @@ public actor SecurityEventCollector {
         eventsByType[event.type] = events
     }
 }
+#endif

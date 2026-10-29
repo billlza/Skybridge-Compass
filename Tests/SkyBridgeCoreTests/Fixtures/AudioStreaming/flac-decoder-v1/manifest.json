@@ -1,0 +1,346 @@
+{
+  "version": 1,
+  "description": "RFC 9639 verbatim frames and independently generated integer PCM, plus encoded reference files. Golden PCM is not derived by the decoder under test. Corrupt streams must fail.",
+  "files": [
+    {
+      "path": "golden-4-1.flac",
+      "sha256": "b75935f081b005a7a8eec0824759c7221ab6b209ed182ebdaf3480ea2064ee31",
+      "bytes": 68
+    },
+    {
+      "path": "golden-4-1.pcm",
+      "sha256": "836298fbcb4ba1a03d2c5318ecd28db44bcb52443e40ad02638f21e598b412b0",
+      "bytes": 31
+    },
+    {
+      "path": "golden-4-2.flac",
+      "sha256": "69c002f5c96117979aef2083df33d7b92ea8831c7d14ae76d5417a0cdc9b90c5",
+      "bytes": 84
+    },
+    {
+      "path": "golden-4-2.pcm",
+      "sha256": "90112a166812596b580503e27e8880e311516bc53e96ca79fdf7d5ad0fdceaaf",
+      "bytes": 62
+    },
+    {
+      "path": "golden-4-6.flac",
+      "sha256": "859b51445cd945be4615d51f16b33741d5694782ec497abd4b1df8ebcbfd3c3c",
+      "bytes": 150
+    },
+    {
+      "path": "golden-4-6.pcm",
+      "sha256": "64850dda45fde0a058ef3917b57801dd190b34182aa12d7ef2838c1cb00568f5",
+      "bytes": 186
+    },
+    {
+      "path": "golden-4-8.flac",
+      "sha256": "c0a90ca4e899fe39c7831998f4f5ab92c6d9945afe5e047c544581824c2df012",
+      "bytes": 183
+    },
+    {
+      "path": "golden-4-8.pcm",
+      "sha256": "dc47f6f30aeed8bf52d8b8a19e841572bd75a6c25ef5a49de5463925c39d3279",
+      "bytes": 248
+    },
+    {
+      "path": "golden-8-1.flac",
+      "sha256": "58508cff187f11050bbd8c03a518b6c6b095b1043dbb684a447f50674dc19191",
+      "bytes": 83
+    },
+    {
+      "path": "golden-8-1.pcm",
+      "sha256": "6ff052858893c5497bf50876c74ff47d632beef8326bc2bf5cc7474180752fd8",
+      "bytes": 31
+    },
+    {
+      "path": "golden-8-2.flac",
+      "sha256": "5b7318bdedea6965487e6ebd8f55090dd9442b485e666b68292d34981f42a287",
+      "bytes": 115
+    },
+    {
+      "path": "golden-8-2.pcm",
+      "sha256": "2313b6e892463d487caa2ca82ec1e33f9236add1dba5e8e40e2d6209d1892e7d",
+      "bytes": 62
+    },
+    {
+      "path": "golden-8-6.flac",
+      "sha256": "f0c684cf72b4d84525b003ddae0c1a70b7e8c89e975ad5ce90081ab3fb7689f4",
+      "bytes": 243
+    },
+    {
+      "path": "golden-8-6.pcm",
+      "sha256": "8b99906f684b77e238640ae063148d9dba9fa5a8b4fdf4d8589f24c619131e81",
+      "bytes": 186
+    },
+    {
+      "path": "golden-8-8.flac",
+      "sha256": "7b97685525c030e9233099fb4a800c57ea7cd351c80b4783a73f61307f8638f9",
+      "bytes": 307
+    },
+    {
+      "path": "golden-8-8.pcm",
+      "sha256": "3770a02dcf719bb6b4366815d273d02ea7929224d9e9313bdc22df227d66ea5e",
+      "bytes": 248
+    },
+    {
+      "path": "golden-12-1.flac",
+      "sha256": "d428d776f2dacb823f78a18d253411165d7cb26f6a01a025a28ef141d7eebca9",
+      "bytes": 99
+    },
+    {
+      "path": "golden-12-1.pcm",
+      "sha256": "691761b7dabbc312cecf2c033a1c336e4ccd831b397dab13720cf6402cb0d09a",
+      "bytes": 62
+    },
+    {
+      "path": "golden-12-2.flac",
+      "sha256": "3243ef70b447e03522ed9a7085bd45ced16a6767d6032d21bc2a14b6736178e3",
+      "bytes": 146
+    },
+    {
+      "path": "golden-12-2.pcm",
+      "sha256": "fa35151f1ff0561721ef3b334663225b067515e08f723bc0557db1facd6b6f7d",
+      "bytes": 124
+    },
+    {
+      "path": "golden-12-6.flac",
+      "sha256": "16db06c815e3f11569cf64599fa791c7fd2d7bd9a2858f01f33126c0e89d4889",
+      "bytes": 336
+    },
+    {
+      "path": "golden-12-6.pcm",
+      "sha256": "1257eb30b987dd04cca077e1553b4be3d67fea376b7a89fbb691a98f15749b55",
+      "bytes": 372
+    },
+    {
+      "path": "golden-12-8.flac",
+      "sha256": "fb6478c4a06b91264161a0933492550d3f4c53ff40b813e2d2d5c6f3752e3b06",
+      "bytes": 431
+    },
+    {
+      "path": "golden-12-8.pcm",
+      "sha256": "3b7bbc64aba14eef7617e472e90da399e068e9f5bbeee4995130459058f6ea6d",
+      "bytes": 496
+    },
+    {
+      "path": "golden-16-1.flac",
+      "sha256": "8e0259838955457791468b83ec4d830f1b0186aa4ebfd91dcccda5de30bc291e",
+      "bytes": 114
+    },
+    {
+      "path": "golden-16-1.pcm",
+      "sha256": "968b90043d522558a1a0a7417871f73fa59a773c0611198b0bfd850907b52ca3",
+      "bytes": 62
+    },
+    {
+      "path": "golden-16-2.flac",
+      "sha256": "b2e5504c2254064d04055476ba43583083b58f652a2de3e4c2fbf43c06c65062",
+      "bytes": 177
+    },
+    {
+      "path": "golden-16-2.pcm",
+      "sha256": "0b6cfbf3f9ca6e3265330f770bb9d1c71f8dbc9b676d2e93dff16185d64b87ab",
+      "bytes": 124
+    },
+    {
+      "path": "golden-16-6.flac",
+      "sha256": "369ef0276110da75f521119301db07054b27550b6f0d9d7136c4d4417abfef86",
+      "bytes": 429
+    },
+    {
+      "path": "golden-16-6.pcm",
+      "sha256": "6f64fcc31016fc27681acd0c13376cdbeb0964cf4d195162eb9730145f9404f5",
+      "bytes": 372
+    },
+    {
+      "path": "golden-16-8.flac",
+      "sha256": "84bccd1c756a9d223524b5d2b4a967dd8d07cad068c135fe91a4be9d4dc74280",
+      "bytes": 555
+    },
+    {
+      "path": "golden-16-8.pcm",
+      "sha256": "fa3cd4e55cbf4a70e397eae46b6d42c4f3fcff86a1aa8e4cf85793c0a50b6567",
+      "bytes": 496
+    },
+    {
+      "path": "golden-20-1.flac",
+      "sha256": "f4016fb796876f0537e2f2fa3f60ed275fc970535b69575ed0a494799b13e7ca",
+      "bytes": 130
+    },
+    {
+      "path": "golden-20-1.pcm",
+      "sha256": "99213d4562ac32fb5c51c37a86bade000677a547c5eeabcbcde9e56d0f9b1bd6",
+      "bytes": 93
+    },
+    {
+      "path": "golden-20-2.flac",
+      "sha256": "749efc6ba931a0e3823186f4e4b0f0b1c1ad8a81f974c6b8793ed9cbaa3f2cca",
+      "bytes": 208
+    },
+    {
+      "path": "golden-20-2.pcm",
+      "sha256": "c59d9d2b209ba78bffa44ee1ea6d3eb25215dcea41973fdd7640e067913b66d1",
+      "bytes": 186
+    },
+    {
+      "path": "golden-20-6.flac",
+      "sha256": "598fc09d36c58ea480a148afe0ca26284143229a6cc291d7d704f7cdde39f129",
+      "bytes": 522
+    },
+    {
+      "path": "golden-20-6.pcm",
+      "sha256": "4df124a55cde0c0eba8c663e78c597c0a23e38ccf55fc31dc8d48fa0b54ce44a",
+      "bytes": 558
+    },
+    {
+      "path": "golden-20-8.flac",
+      "sha256": "6acef8d1c11a4a500383bcea6ad4fc542a34c262bf3ee166e95a1e1ca69e9211",
+      "bytes": 679
+    },
+    {
+      "path": "golden-20-8.pcm",
+      "sha256": "67de5c32e248186ae0f9a3b37e527fe3326e2bc4ba08283df5b7507f8fbc9a23",
+      "bytes": 744
+    },
+    {
+      "path": "golden-24-1.flac",
+      "sha256": "288b176f45c3e1b6bfb5e4043a616fd906bc613df41a695b9d88cd2a0a2c4500",
+      "bytes": 145
+    },
+    {
+      "path": "golden-24-1.pcm",
+      "sha256": "d7f564fa4def45495054ec12c7f8cf354bc3a461e7f31ad6600db3fdc8ed07a4",
+      "bytes": 93
+    },
+    {
+      "path": "golden-24-2.flac",
+      "sha256": "e41aefa00934e8730488519437393164d6f87733956083084a212eae1d741a94",
+      "bytes": 239
+    },
+    {
+      "path": "golden-24-2.pcm",
+      "sha256": "9272f79a175e0433b93676deaace97309314707dbd1fe1142a293e3630fa9734",
+      "bytes": 186
+    },
+    {
+      "path": "golden-24-6.flac",
+      "sha256": "4cea9de380bdc11c030368c643770e2e801f53661a9cc9d8f3521ea64464fd79",
+      "bytes": 615
+    },
+    {
+      "path": "golden-24-6.pcm",
+      "sha256": "f052d66b6b7502af64aa1fedfc2a9b2ee65ef88f690763d2e2dc35a76b0d70ba",
+      "bytes": 558
+    },
+    {
+      "path": "golden-24-8.flac",
+      "sha256": "f66f9033cd911e02c3531a6570dd4d04051f5abf0e8159415f538ccd2e5eca49",
+      "bytes": 803
+    },
+    {
+      "path": "golden-24-8.pcm",
+      "sha256": "928ff9fac1123053cd9afc39ad087b3f35fababcd7de000b7fcc5ebefed983d9",
+      "bytes": 744
+    },
+    {
+      "path": "golden-32-1.flac",
+      "sha256": "0d6acd075d971a2e5346cb052a1fcce0536775edcaa04722bc68920680eb3b8f",
+      "bytes": 176
+    },
+    {
+      "path": "golden-32-1.pcm",
+      "sha256": "485bf31e565d7060aee7c6e6071b6285616ff02eccc750483d7ee652be30a868",
+      "bytes": 124
+    },
+    {
+      "path": "golden-32-2.flac",
+      "sha256": "4e598178741caeebaaedf1a9aee8acc291e09e6cfcebcd5367e1487f11f77910",
+      "bytes": 301
+    },
+    {
+      "path": "golden-32-2.pcm",
+      "sha256": "29d1e08fb6b865df12c39e499b3065f9d1fab296d0bc8c1a84a8a9d440f2862c",
+      "bytes": 248
+    },
+    {
+      "path": "golden-32-6.flac",
+      "sha256": "d396bcd0fcf4bb2e42682e3c5e95d1f169735dde3cc4e005b1b1629068a87618",
+      "bytes": 801
+    },
+    {
+      "path": "golden-32-6.pcm",
+      "sha256": "73c0638aeca6cce83dfa09a3229dc1d1ec277a9eacf9d399227c5d5643811fbe",
+      "bytes": 744
+    },
+    {
+      "path": "golden-32-8.flac",
+      "sha256": "a415bfe9ea3e3594659feb2fa78e1a19af7d545b999a627e63314ac5b461eb17",
+      "bytes": 1051
+    },
+    {
+      "path": "golden-32-8.pcm",
+      "sha256": "7abafaf3465d1faabfbac202a7237e4ac4da329e4b381e7ab5b091a7efb9d028",
+      "bytes": 992
+    },
+    {
+      "path": "three-valid-frames.flac",
+      "sha256": "3042962429aa07bea32d0ccaefc2b5c7d90e677c0982da6f3e2876e27ab66bf1",
+      "bytes": 651
+    },
+    {
+      "path": "three-valid-frames.pcm",
+      "sha256": "a574a6ea946344fe71e8a0948a0d3ca11b9b42d88d0dbe61f95da76819605a97",
+      "bytes": 576
+    },
+    {
+      "path": "md5-explicitly-unavailable.flac",
+      "sha256": "35d78afe7a726868af06e247a66606bc91bb33704a9ce36bcc91eee50e3dd4f3",
+      "bytes": 245
+    },
+    {
+      "path": "md5-explicitly-unavailable.pcm",
+      "sha256": "70c553d910f5a4a0b6fbcf385715503b8dbba1eb734f7cc57f36d9170cb5d237",
+      "bytes": 192
+    },
+    {
+      "path": "reference-true32-stereo.flac",
+      "sha256": "fbea2af0bfc1f59b4065c3cedbe611729a7d80b750300800a01b3a3a7118506c",
+      "bytes": 532635
+    },
+    {
+      "path": "reference-true32-stereo.pcm",
+      "sha256": "55bd8195329bedc91a8bed656d0483b78d40041a7acdc8fc8e77231040a94dd2",
+      "bytes": 524296
+    },
+    {
+      "path": "reference-s24-48000-6ch.flac",
+      "sha256": "3937071e6de0cf1141781a1c41157ef25c74ca80b98a72fe24f65d17aaea0c49",
+      "bytes": 1188176
+    },
+    {
+      "path": "reference-s24-48000-6ch.pcm",
+      "sha256": "8a7367538c0b30a6040775fa25f9be47b2c63ace9aa2f6225b48df851b6c4882",
+      "bytes": 1179666
+    },
+    {
+      "path": "frame-crc-mismatch.flac",
+      "sha256": "27939b8fd1a3d389b11229963b32311e6044f6750b3078ce8e75b411c5c2b46c",
+      "bytes": 245
+    },
+    {
+      "path": "valid-crc-wrong-pcm-md5.flac",
+      "sha256": "dc8263efa31854e96aa03ebc7f2634717039362a39715d94758d5e1ca3dda48f",
+      "bytes": 245
+    },
+    {
+      "path": "missing-silent-middle-must-not-recover.flac",
+      "sha256": "193744507f50d179a9eb11db21a4e57c61ede7cd0b19c731aefb0a8cc683da0d",
+      "bytes": 448
+    },
+    {
+      "path": "unknown-length-not-admitted-by-finite-decoder.flac",
+      "sha256": "f006da20cb0e1718c4548f66fe05f9839ba953286073dace1a02435a92050468",
+      "bytes": 245
+    }
+  ]
+}

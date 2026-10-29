@@ -7,14 +7,17 @@ import SkyBridgeCore
 struct StarryBackground: View {
     @EnvironmentObject var settingsManager: SettingsManager
     @ObservedObject var bgControl = BackgroundControlManager.shared
-    @State private var time: TimeInterval = 0
+    private static let animationEpoch = Date()
     
     var body: some View {
  // 性能优化：根据设置动态调整帧率
  // 当处于暂停状态时，不进行重绘以节省资源
         Group {
             if !bgControl.isPaused {
-                TimelineView(.periodic(from: .now, by: 1.0 / bgControl.getEffectiveFPS(base: settingsManager.performanceMode.targetFPS))) { timeline in
+                let baseFPS = settingsManager.performanceMode.targetFPS
+                TimelineView(.periodic(from: .now, by: bgControl.stableTimelineInterval(base: baseFPS))) { timeline in
+                    let elapsed = timeline.date.timeIntervalSince(Self.animationEpoch)
+                    let time = bgControl.throttledAnimationTime(elapsed, baseFPS: baseFPS)
                     ZStack {
  // 1. 基础夜空背景 (更丰富的渐变 - 动态微调)
                         LinearGradient(
@@ -53,10 +56,6 @@ struct StarryBackground: View {
                         
  // 5. 优化的流星层
                         EnhancedMeteorLayer(time: time)
-                    }
-                    .onChange(of: timeline.date) { oldDate, newDate in
-                        let delta = newDate.timeIntervalSince(oldDate)
-                        time += delta
                     }
                 }
             } else {

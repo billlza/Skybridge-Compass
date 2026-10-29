@@ -5,10 +5,10 @@ import CryptoKit
 final class OQSSessionTokenTests: XCTestCase {
     func testSessionDerivationAndTokenSignVerify() async throws {
  // 中文注释：使用 OQSProvider 在旧系统（macOS 14/15）上进行 ML‑KEM‑768 会话协商与 ML‑DSA‑65 令牌签名/验签
-        guard let provider = PQCProviderFactory.makeProvider() else {
-            XCTFail("PQCProvider 不可用")
-            return
-        }
+        let keychain = PQCKeychainTestContext()
+        let provider = try requireMLKEMMLDSAProvider(
+            scopeSource: keychain.scopeSource
+        )
 
         let peer = "session-peer"
 
@@ -41,9 +41,19 @@ final class OQSSessionTokenTests: XCTestCase {
  // 中文注释：ML‑DSA‑65 签名令牌
         let tokenSig = try await provider.sign(data: payload, peerId: peer, algorithm: "ML-DSA-65")
 
- // 中文注释：ML‑DSA‑65 验证令牌
-        let ok = await provider.verify(data: payload, signature: tokenSig, peerId: peer, algorithm: "ML-DSA-65")
+ // 中文注释：测试信任边界显式认证签名公钥后再验证令牌
+        let authenticatedPublicKey = try await authenticateLocalSigningKeyForTesting(
+            signer: provider,
+            verifier: provider,
+            peerId: peer
+        )
+        let ok = try await SessionTokenKit.verifyToken(
+            provider: provider,
+            payload: payload,
+            signature: tokenSig,
+            peerId: peer,
+            authenticatedPublicKey: authenticatedPublicKey
+        )
         XCTAssertTrue(ok)
     }
 }
-

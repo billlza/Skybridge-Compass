@@ -3,25 +3,115 @@ options:
   bundleIdPrefix: com.skybridge.compass
   deploymentTarget:
     macOS: "14.0"
-  xcodeVersion: "15.0"
+  xcodeVersion: "26.6"
   developmentLanguage: zh-Hans
 
 settings:
   base:
+    # Note: SWIFT_VERSION is the Swift language major (6.0). Minor (6.3+) is determined by the selected stable Xcode 26.6+ toolchain.
     SWIFT_VERSION: "6.0"
     MACOSX_DEPLOYMENT_TARGET: "14.0"
     SWIFT_STRICT_CONCURRENCY: complete
     CODE_SIGN_STYLE: Manual
     CODE_SIGN_IDENTITY: "-"
-    CODE_SIGNING_REQUIRED: NO
-    CODE_SIGNING_ALLOWED: NO
+    CODE_SIGNING_REQUIRED: YES
+    CODE_SIGNING_ALLOWED: YES
     ONLY_ACTIVE_ARCH: YES
+    ARCHS: arm64
+    MARKETING_VERSION: "1.0.2"
+    CURRENT_PROJECT_VERSION: "1.0.2"
 
 packages:
   SkyBridgeCompassApp:
     path: .
+  swift-collections:
+    url: https://github.com/apple/swift-collections
+    from: "1.4.1"
 
 targets:
+  SkyBridgeCompassMac:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/SkyBridgeCompassApp
+        excludes:
+          - "**/*.plist"
+          - "**/*.entitlements"
+          - "Resources/AppIcon.icon/**"
+          - "Resources/Assets.xcassets/**"
+          - "Resources/AppIcon.icns"
+          - "Resources/AppIcon.png"
+          - "Resources/AppIconDock.icns"
+          - "Resources/AppIconDock.png"
+          - "Resources/AppIconMaster.png"
+          - "Resources/AppIconMaster.svg"
+          - "Resources/BrandIcon.png"
+          - "Resources/SidebarBrandIcon.png"
+          - "Resources/Icons/about-main-icon.svg"
+          - "Resources/Icons/custom-globe.svg"
+          - "Resources/app-icon.svg"
+          - "Resources/app_icon.png"
+      - path: XcodeSupport/SkyBridgeCompassMac/BundleModule.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.skybridge.compass.pro
+        PRODUCT_NAME: SkyBridge Compass Pro
+        EXECUTABLE_NAME: SkyBridgeCompassApp
+        INFOPLIST_FILE: XcodeSupport/SkyBridgeCompassMac/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        CODE_SIGN_ENTITLEMENTS: XcodeSupport/SkyBridgeCompassMac/SkyBridgeCompassMac.local.entitlements
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        GCC_TREAT_WARNINGS_AS_ERRORS: YES
+        LD_RUNPATH_SEARCH_PATHS:
+          - $(inherited)
+          - "@executable_path/../Frameworks"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) APPLE_SILICON_OPTIMIZED ARM64_NATIVE"
+        OTHER_SWIFT_FLAGS: "$(inherited)"
+        OTHER_CFLAGS: "$(inherited)"
+        OTHER_CPLUSPLUSFLAGS: "$(inherited)"
+    dependencies:
+      - package: SkyBridgeCompassApp
+        product: SkyBridgeCore
+      - package: SkyBridgeCompassApp
+        product: SkyBridgeUI
+      - package: SkyBridgeCompassApp
+        product: SkyBridgeVisualParity
+      - package: SkyBridgeCompassApp
+        product: SkyBridgeProtocolCore
+      - package: swift-collections
+        product: OrderedCollections
+      - target: SkyBridgeCompassWidgetsExtension
+        embed: true
+      - framework: AppIntents.framework
+        embed: false
+      - framework: WidgetKit.framework
+        embed: false
+      - framework: SwiftUI.framework
+        embed: false
+      - framework: AuthenticationServices.framework
+        embed: false
+      - framework: WebKit.framework
+        embed: false
+      - framework: UserNotifications.framework
+        embed: false
+    postBuildScripts:
+      - path: Scripts/compile_xcode_icon_composer_assets.sh
+        name: Compile Icon Composer AppIcon
+        basedOnDependencyAnalysis: true
+        inputFiles:
+          - "$(SRCROOT)/Scripts/compile_xcode_icon_composer_assets.sh"
+          - "$(SRCROOT)/Sources/SkyBridgeCompassApp/Resources/AppIcon.png"
+          - "$(SRCROOT)/Sources/SkyBridgeCompassApp/Resources/BrandIcon.png"
+          - "$(SRCROOT)/Sources/SkyBridgeCompassApp/Resources/SidebarBrandIcon.png"
+          - "$(SRCROOT)/Sources/SkyBridgeCompassApp/Resources/AppIcon.icon/icon.json"
+          - "$(SRCROOT)/Sources/SkyBridgeCompassApp/Resources/AppIcon.icon/Assets/Image.png"
+        outputFiles:
+          - "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Assets.car"
+          - "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/AppIcon.icns"
+          - "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/BrandIcon.png"
+          - "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/SidebarBrandIcon.png"
+
   SkyBridgeCompassWidgetsExtension:
     type: app-extension
     platform: macOS
@@ -32,9 +122,11 @@ targets:
           - "**/*.entitlements"
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.skybridge.compass.widgets
+        PRODUCT_BUNDLE_IDENTIFIER: com.skybridge.compass.pro.widgets
         INFOPLIST_FILE: Sources/SkyBridgeCompassWidgets/Info.plist
         SKIP_INSTALL: YES
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        GCC_TREAT_WARNINGS_AS_ERRORS: YES
         LD_RUNPATH_SEARCH_PATHS:
           - $(inherited)
           - "@executable_path/../Frameworks"
@@ -51,6 +143,15 @@ targets:
         embed: false
 
 schemes:
+  SkyBridgeCompassMac:
+    build:
+      targets:
+        SkyBridgeCompassMac: all
+    run:
+      config: Release
+    archive:
+      config: Release
+
   SkyBridgeCompassWidgetsExtension:
     build:
       targets:

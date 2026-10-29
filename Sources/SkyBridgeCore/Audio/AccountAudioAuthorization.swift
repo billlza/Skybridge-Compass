@@ -1,0 +1,5 @@
+import SkyBridgeProtocolCore
+
+typealias AccountAudioAuthorization = SkyBridgeProtocolCore.AccountAudioAuthorization
+typealias AccountAudioAuthorizationState = SkyBridgeProtocolCore.AccountAudioAuthorizationState
+typealias AudioAccountRefreshFailurePolicy = SkyBridgeProtocolCore.AudioAccountRefreshFailurePolicy

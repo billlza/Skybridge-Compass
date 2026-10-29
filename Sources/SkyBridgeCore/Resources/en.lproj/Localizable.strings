@@ -29,7 +29,7 @@
 
 /* Smart Code */
 "connection.smartCode.title" = "Smart Connection Code";
-"connection.smartCode.fullDescription" = "Generate a 6-digit alphanumeric code for all scenarios. Supports P2P direct and smart relay.";
+"connection.smartCode.fullDescription" = "Generate a short-lived alphanumeric code for all scenarios. Supports P2P direct and smart relay.";
 "connection.smartCode.highlight" = "✨ Highlight: Short Code + Smart Routing + 10-min Validity";
 "connection.device.this" = "On This Device";
 "connection.smartCode.shareInstruction" = "Share this code to connect";
@@ -38,10 +38,16 @@
 "connection.smartCode.generate" = "Generate Code";
 "connection.smartCode.placeholder" = "Enter Connection Code";
 "connection.smartCode.connect" = "Connect";
+"connection.codeMode.title" = "Code Mode";
+"connection.codeMode.short" = "Short-Lived";
+"connection.codeMode.day" = "One Day";
+"connection.codeMode.shortHint" = "Default secure mode. The code is short-lived and rotates automatically.";
+"connection.codeMode.dayHint" = "Keeps the same code for 24 hours, useful after temporary power saving or reconnecting later.";
 "connection.fast" = "High Speed";
 "connection.p2p.priority" = "P2P Priority";
 "connection.smart.relay" = "Smart Relay";
 "connection.validity.10min" = "Valid for 10 mins";
+"connection.validity.1day" = "Valid for 24 hours";
 
 /* Dashboard */
 "dashboard.unknownIP" = "Unknown IP";
@@ -118,6 +124,29 @@
 "discovery.searchPlaceholder" = "Search devices...";
 "discovery.noMatch" = "No matching devices";
 "discovery.adjustSearch" = "Try adjusting your search terms";
+"discovery.diagnostics.title" = "Discovery Diagnostics";
+"discovery.diagnostics.permission" = "Permissions & Configuration";
+"discovery.diagnostics.network" = "Network Status";
+"discovery.diagnostics.scanning" = "Scanning Status";
+"discovery.diagnostics.failures" = "Recent Failures";
+"discovery.diagnostics.localNetwork" = "Local Network";
+"discovery.diagnostics.bonjourWhitelist" = "Bonjour Whitelist";
+"discovery.diagnostics.connection" = "Connection";
+"discovery.diagnostics.localDiscovery" = "Local Discovery";
+"discovery.diagnostics.localIP" = "Local IP";
+"discovery.diagnostics.discoveredDevices" = "Discovered Devices";
+"discovery.diagnostics.scanningServices" = "Scanning Services";
+"discovery.diagnostics.lastScan" = "Last Scan";
+"discovery.diagnostics.clear" = "Clear";
+"discovery.diagnostics.configured" = "Configured";
+"discovery.diagnostics.incomplete" = "Incomplete";
+"discovery.diagnostics.available" = "Available";
+"discovery.diagnostics.unavailable" = "Unavailable";
+"discovery.diagnostics.missingServices" = "Missing Bonjour service declarations:";
+"discovery.diagnostics.justNow" = "Just now";
+"discovery.diagnostics.minutesAgo" = "%d minutes ago";
+"discovery.diagnostics.hoursAgo" = "%d hours ago";
+"discovery.diagnostics.daysAgo" = "%d days ago";
 "dashboard.noDevicesFound" = "No Devices Found";
 "dashboard.checkNetwork" = "Check your network connection";
 
@@ -180,6 +209,11 @@
 "settings.general.dataManagement" = "Data Management";
 "settings.general.clearCache" = "Clear cache";
 "settings.general.cacheSize" = "Current cache: %@";
+"settings.general.cacheSize.unavailable" = "Unavailable";
+"settings.general.cache.clearing" = "Clearing cache...";
+"settings.general.cache.clearComplete" = "Cache cleared. Freed %@.";
+"settings.general.cache.clearFailed" = "Cache clear failed: %@";
+"settings.general.cache.sizeFailed" = "Cache size unavailable: %@";
 "settings.general.exportSettings" = "Export settings";
 "settings.general.importSettings" = "Import settings";
 "settings.general.resetSettings" = "Reset to defaults";
@@ -231,7 +265,7 @@
 
 /* Smart Code */
 "discovery.smartCode.title" = "Smart Connection Code";
-"discovery.smartCode.description" = "6-digit code, valid for 10 mins, for remote assistance";
+"discovery.smartCode.description" = "Short-lived code, valid for 10 mins, for remote assistance";
 "discovery.smartCode.onThisDevice" = "On This Device";
 "discovery.smartCode.shareInstruction" = "Share this code to connect";
 "discovery.smartCode.copy" = "Copy";
@@ -248,7 +282,7 @@
 "discovery.mode.subtitle.localScan" = "Same Network";
 "discovery.mode.subtitle.qrCode" = "Scan";
 "discovery.mode.subtitle.cloudLink" = "Zero Config";
-"discovery.mode.subtitle.connectionCode" = "6-Digit Code";
+"discovery.mode.subtitle.connectionCode" = "Short-Lived Code";
 
 /* Cloud Link Section */
 "discovery.icloud.status.syncing" = "Syncing...";
@@ -276,7 +310,7 @@
 "discovery.capability.messages" = "Messages";
 
 /* Smart Code Section (Additional) */
-"discovery.code.enterPrompt" = "Enter 6-digit code";
+"discovery.code.enterPrompt" = "Enter connection code";
 "discovery.code.connect" = "Connect";
 
 /* Settings - Network */
@@ -294,6 +328,13 @@
 "settings.network.discovery.timeout" = "Discovery timeout:";
 "settings.network.discovery.customServiceType" = "Custom service type:";
 "settings.network.discovery.customServiceTypeExample" = "e.g., _custom._tcp.";
+"settings.network.topBar.title" = "Top Bar Network Info";
+"settings.network.topBar.showIPLocation" = "Show IP city and proxy status";
+"settings.network.topBar.showIPLocation.help" = "Show the public IP exit city in the top navigation and mark whether the system proxy is enabled";
+"settings.network.topBar.showSpeed" = "Show live network speed";
+"settings.network.topBar.showSpeed.help" = "Show current download and upload throughput in the top navigation";
+"settings.network.topBar.showLatency" = "Show network latency";
+"settings.network.topBar.showLatency.help" = "Show the HTTPS network latency probe result in the top navigation";
 "settings.network.connection.title" = "Connection Settings";
 "settings.network.connection.timeout" = "Connection timeout:";
 "settings.network.connection.retryCount" = "Retry count:";
@@ -322,6 +363,7 @@
 "status.idle" = "Idle";
 "status.enabled" = "Enabled";
 "status.disabled" = "Disabled";
+"status.unavailable" = "Unavailable";
 "status.optimized" = "Optimized";
 "status.needsAdjust" = "Needs Adjustment";
 "status.load.high" = "High Load";
@@ -337,6 +379,8 @@
 "action.resetNetworkSettings" = "Reset Network Settings";
 "action.resetToDefaults" = "Reset to Defaults";
 "action.resetMonitorData" = "Reset Monitor Data";
+"action.exportMonitorData" = "Export Monitor Data";
+"action.clearMonitorHistory" = "Clear Monitor History";
 
 "unit.dbm" = "dBm";
 "unit.count.short" = "count";
@@ -415,7 +459,7 @@
 "settings.advanced.debug.logLevel" = "Log Level:";
 
 "settings.advanced.performance.title" = "Performance Optimization";
-"settings.advanced.performance.mode" = "Performance Mode:";
+"settings.advanced.performance.mode" = "Rendering Mode (MetalFX):";
 "settings.advanced.currentMode" = "Current: %@";
 "settings.advanced.performance.details.title" = "Configuration Details:";
 "settings.advanced.performance.renderScale.range" = "Render Scale: 50%–100%";
@@ -432,7 +476,8 @@
 "settings.advanced.performance.shadowQuality.format" = "Shadow Quality: %@";
 "settings.advanced.performance.postProcessing.format" = "Post Processing: %@";
 "settings.advanced.performance.showRealtimeFPS" = "Show real-time FPS";
-"settings.advanced.performance.showRealtimeFPS.help" = "Show Metal rendering FPS in top navigation; shows placeholder — FPS when unavailable";
+"settings.advanced.performance.showRealtimeFPS.help" = "Actual on-screen FPS of the weather background (rain, clouds and haze), averaged over one second. Other UI and remote sessions are not included. Shows — FPS when unavailable.";
+"metric.frameRate.paused" = "Paused";
 "settings.advanced.hardware.enableAcceleration" = "Enable hardware acceleration";
 "settings.advanced.memory.optimize" = "Optimize memory usage";
 "settings.advanced.backgroundScanning" = "Background scanning";
@@ -459,10 +504,13 @@
 "settings.advanced.pqc.title" = "Post-Quantum Security";
 "settings.advanced.pqc.enableAppLayer" = "Enable post-quantum cryptography (app layer)";
 "settings.advanced.pqc.enableHybridTLS" = "Enable TLS hybrid negotiation (when supported by system)";
+"settings.advanced.pqc.preferXWing" = "Prefer X-Wing hybrid suite (macOS 26+)";
+"settings.advanced.pqc.preferXWing.help" = "Keep both ML-KEM-768 and X-Wing advertised at startup; this switch only changes suite priority.";
+"settings.advanced.pqc.preferXWing.caption" = "When enabled, X-Wing is prioritized; when disabled, ML-KEM-768 is prioritized (both are still advertised).";
 "settings.advanced.pqc.signatureAlgorithm" = "Signature Algorithm:";
 "settings.advanced.pqc.useSecureEnclaveMLDSA" = "Use Secure Enclave for ML-DSA";
 "settings.advanced.pqc.useSecureEnclaveMLKEM" = "Use Secure Enclave for ML-KEM";
-"settings.advanced.pqc.note" = "Secure Enclave PQC is available only on macOS 26+ (CryptoKit). macOS 14–15 falls back to liboqs (ML-KEM-768/ML-DSA-65) or Classic (X25519/Ed25519) when OQS is unavailable.";
+"settings.advanced.pqc.note" = "X-Wing (hybrid) and ML-KEM-768 (pure PQC) are available on macOS 26+ (CryptoKit), where Secure Enclave PQC is also available. macOS 14–15 falls back to liboqs (ML-KEM-768/ML-DSA-65) or Classic (X25519/Ed25519) when OQS is unavailable.";
 
 "settings.advanced.smoothing.title" = "Device Signal Smoothing";
 "settings.advanced.smoothing.alpha" = "Smoothing Factor (EMA)";
@@ -476,13 +524,25 @@
 "settings.fileTransfer.defaultPath" = "Default transfer path:";
 "settings.fileTransfer.maxConcurrentTransfers" = "Max concurrent transfers:";
 "settings.fileTransfer.bufferSize" = "Transfer buffer size:";
+"settings.fileTransfer.chunkSize" = "Chunk size:";
+"settings.fileTransfer.rateLimit" = "Transfer rate limit:";
+"settings.fileTransfer.rateLimit.unlimited" = "Unlimited";
+"settings.fileTransfer.pathFallback.title" = "Default save path updated";
+"settings.fileTransfer.pathFallback.message" = "The configured path is unavailable. Fallback path: %@";
+"settings.fileTransfer.pathFailure.title" = "Could not configure the receive folder";
+"settings.fileTransfer.pathFailure.message" = "Check the folder permissions or select another writable location. The previous receive folder remains unchanged.";
 "settings.fileTransfer.options.title" = "Transfer Options";
 "settings.fileTransfer.options.showNotification" = "Show notification when transfer completes";
 "settings.fileTransfer.options.autoRetryFailed" = "Auto retry failed transfers";
+"settings.fileTransfer.options.resumeEnabled" = "Enable resumable transfer (retry on failure)";
 "settings.fileTransfer.options.keepHistory" = "Keep transfer history";
 "settings.fileTransfer.options.keepAwake" = "Keep system awake during transfer";
 "settings.fileTransfer.security.title" = "Security Settings";
 "settings.fileTransfer.security.enableEncrypt" = "Enable transfer encryption";
+"settings.fileTransfer.security.encryption.alwaysOn" = "File transfer encryption is always on";
+"settings.fileTransfer.security.encryption.alwaysOn.detail" = "The classic transfer protocol requires AES-256-GCM and cannot be downgraded to plaintext.";
+"settings.security.certificateValidation.alwaysOn" = "Certificate validation is always enabled";
+"settings.security.certificateValidation.alwaysOn.detail" = "This version always enforces strict certificate validation.";
 "settings.fileTransfer.security.verifyIntegrity" = "Verify file integrity";
 "settings.fileTransfer.security.scanVirus" = "Scan transferred files for viruses";
 "settings.fileTransfer.security.algorithm" = "Encryption Algorithm:";
@@ -512,6 +572,7 @@
 "settings.videoTransfer.enableAdaptiveBitrate.help" = "Adjust bitrate automatically based on network conditions";
 "settings.videoTransfer.compressionQuality" = "Compression Quality:";
 
+"settings.remote.qualityPerformance.title" = "Quality & Performance";
 "settings.remote.display.title" = "Display Settings";
 "settings.remote.display.videoQuality" = "Video Quality:";
 "settings.remote.display.compressionLevel" = "Compression Level:";
@@ -520,6 +581,10 @@
 "settings.remote.interaction.title" = "Interaction Settings";
 "settings.remote.interaction.clipboardSync" = "Enable clipboard sync";
 "settings.remote.interaction.audioRedirection" = "Enable audio redirection";
+"settings.remote.interaction.audioUnavailable.title" = "Audio redirection is unavailable";
+"settings.remote.interaction.audioUnavailable.body" = "This capability is still being refined. It is disabled in this build and cannot be enabled manually.";
+"settings.remote.interaction.audioPrinterUnavailable.title" = "Audio and printer redirection are unavailable";
+"settings.remote.interaction.audioPrinterUnavailable.body" = "These capabilities are still being refined. They are disabled in this build and cannot be enabled manually.";
 "settings.remote.interaction.fileTransfer" = "Enable file transfer";
 "settings.remote.interaction.trackpadGestures" = "Enable trackpad gestures";
 "settings.remote.interaction.mouseSensitivity" = "Mouse sensitivity:";
@@ -527,6 +592,7 @@
 "settings.remote.network.title" = "Network Optimization";
 "settings.remote.network.enableBandwidthAdaptive" = "Enable bandwidth adaptive";
 "settings.remote.network.enableUDP" = "Enable UDP transport";
+"settings.remote.network.enableEncryption" = "Enable network encryption";
 "settings.remote.network.enableCompression" = "Enable data compression";
 "settings.remote.network.bandwidthLimit" = "Bandwidth limit (Mbps):";
 "settings.remote.network.bufferSize" = "Buffer size:";
@@ -534,9 +600,10 @@
 "settings.systemMonitor.config.title" = "Monitoring Configuration";
 "settings.systemMonitor.config.refreshInterval" = "Refresh Interval:";
 "settings.systemMonitor.config.enableRealtime" = "Enable real-time monitoring";
-"settings.systemMonitor.config.enableHistory" = "Enable history";
+"settings.systemMonitor.config.enableHistory" = "Show trend indicators";
 "settings.systemMonitor.config.enablePerformanceAlerts" = "Enable performance alerts";
 "settings.systemMonitor.config.retentionDays" = "Data retention (days):";
+"settings.systemMonitor.config.maxHistoryPoints" = "Maximum history points:";
 "settings.systemMonitor.display.title" = "Display Options";
 "settings.systemMonitor.display.cpu" = "Show CPU usage";
 "settings.systemMonitor.display.memory" = "Show memory usage";
@@ -545,10 +612,17 @@
 "settings.systemMonitor.display.temperature" = "Show temperature";
 "settings.systemMonitor.display.fanSpeed" = "Show fan speed";
 "settings.systemMonitor.display.chartType" = "Chart Type:";
+"settings.systemMonitor.display.noneEnabled" = "All monitor metrics are hidden";
+"settings.systemMonitor.display.noneEnabled.detail" = "Enable at least one of CPU, memory, temperature, or fan speed.";
 "settings.systemMonitor.alerts.title" = "Alert Settings";
 "settings.systemMonitor.alerts.cpuThreshold" = "CPU alert threshold:";
 "settings.systemMonitor.alerts.memoryThreshold" = "Memory alert threshold:";
 "settings.systemMonitor.alerts.diskThreshold" = "Disk alert threshold:";
+"settings.systemMonitor.alerts.enableTemperatureMonitoring" = "Enable temperature monitoring";
+"settings.systemMonitor.alerts.temperatureThreshold" = "Temperature alert threshold:";
+"settings.systemMonitor.alerts.enableFanSpeedMonitoring" = "Enable fan speed monitoring";
+"settings.systemMonitor.alerts.fanSpeedThreshold" = "Fan speed alert threshold:";
+"settings.systemMonitor.alerts.thermalThrottling" = "Enable thermal throttling alerts";
 "settings.systemMonitor.alerts.enableSound" = "Enable sound alerts";
 "settings.systemMonitor.alerts.enableNotificationCenter" = "Enable Notification Center";
 "settings.systemMonitor.advanced.title" = "Advanced Options";
@@ -556,6 +630,8 @@
 "settings.systemMonitor.advanced.exportData" = "Export monitoring data";
 "settings.systemMonitor.advanced.enableRemoteMonitoring" = "Enable remote monitoring";
 "settings.systemMonitor.advanced.samplingPrecision" = "Sampling precision:";
+"settings.systemMonitor.unsupported" = "Not active";
+"settings.systemMonitor.unsupported.detail" = "This option is not wired to the monitoring pipeline in this release.";
 
 "fileTransfer.connectionStatus" = "Connection Status";
 "status.transferring" = "Transferring";
@@ -579,18 +655,17 @@
 "fileTransfer.history.clear" = "Clear History";
 "fileTransfer.history.emptyTitle" = "No transfer history";
 "fileTransfer.history.emptySubtitle" = "Completed transfers will appear here";
-"fileTransfer.debug.title" = "Debug Panel";
-"fileTransfer.debug.hmacTagHex" = "HMAC Tag (Hex)";
-"fileTransfer.debug.signatureResult" = "File Signature Verification Result";
 "common.none" = "None";
 "action.preview" = "Preview";
 "transferStatus.preparing" = "Preparing";
 "transferStatus.transferring" = "Transferring";
 "transferStatus.paused" = "Paused";
 "transferStatus.completed" = "Completed";
+"fileTransfer.receiptDeliveryUnknown" = "File saved, but sender confirmation is unknown. Do not retransmit automatically.";
 "transferStatus.failed" = "Failed";
 "transferStatus.cancelled" = "Cancelled";
 "action.close" = "Close";
+"action.disconnect" = "Disconnect";
 "action.share" = "Share";
 "status.idle" = "Idle";
 "status.adaptiveTuning" = "Adaptive Tuning";
@@ -620,7 +695,7 @@
 "remote.newConnection" = "New Connection";
 "remote.overlay.connectingTo" = "Connecting to %@...";
 "remote.empty.title" = "Select a session to start Remote Desktop";
-"remote.empty.subtitle" = "Choose an active session on the left, or create a new connection";
+"remote.empty.subtitle" = "Recommended: use Device Discovery for one‑tap connection. Manual RDP/VNC/SSH is an advanced fallback.";
 "remote.toolbar.newConnection.help" = "Create a remote connection";
 "remote.toolbar.refresh.help" = "Refresh sessions";
 "remote.performance.monitor" = "Metal 4 Performance Monitor";
@@ -630,8 +705,8 @@
 "remote.connectionMode.near" = "Near";
 "remote.connectionMode.far" = "Far";
 "remote.connectionMode.auto.description" = "Automatically selects the best mode (prefers near-field on same network)";
-"remote.connectionMode.near.description" = "Near-field hardware mirroring — low latency on same network (ScreenCaptureKit + HEVC + QUIC)";
-"remote.connectionMode.far.description" = "Far-field RDP — stable across networks (FreeRDP 3.x + GFX-AVC444)";
+"remote.connectionMode.near.description" = "View and control devices on the same network";
+"remote.connectionMode.far.description" = "Manual RDP (restricted preview) — FreeRDP 3.30 software GDI, strict certificate validation, no channel redirection";
 "common.unknown" = "Unknown";
 "profile.title" = "Profile";
 "action.close" = "Close";
@@ -648,6 +723,16 @@
 "about.title" = "About SkyBridge Compass Pro";
 "about.checkingUpdates" = "Checking for updates...";
 "about.checkUpdates" = "Check for Updates";
+"update.available.title" = "A new version is available";
+"update.available.message" = "SkyBridge Compass Pro %@ (Build %@) is available and requires macOS %@ or later. The update package is a Developer ID-signed and notarized DMG; macOS Gatekeeper will verify it after download.";
+"update.latest.title" = "You are up to date";
+"update.latest.message" = "SkyBridge Compass Pro %@ is the current stable version.";
+"update.unsupported.title" = "A new version is available, but this Mac is unsupported";
+"update.unsupported.message" = "Version %@ requires macOS %@ or later. This Mac is running macOS %@.";
+"update.failed.title" = "Update Check Failed";
+"update.failed.message" = "The update check could not be completed: %@";
+"update.download" = "Download Update";
+"update.later" = "Later";
 "about.systemInfo" = "System Info";
 "about.diagnostics" = "Diagnostics";
 "about.feedback" = "Send Feedback";
@@ -660,7 +745,23 @@
 "brand.title" = "SkyBridge Compass";
 "brand.tagline" = "Connect without borders";
 "auth.selectMethod" = "Choose a sign-in method";
+"auth.method.apple.title" = "Apple ID";
+"auth.method.nebula.title" = "Nebula";
+"auth.method.phone.title" = "Phone";
+"auth.method.email.title" = "Email";
+"auth.method.apple.subtitle" = "Use Face ID or Touch ID for a fast sign-in.";
+"auth.method.nebula.subtitle" = "Enterprise-grade Nebula identity authentication.";
+"auth.method.phone.subtitle" = "Secure sign-in with SMS verification.";
+"auth.method.email.subtitle" = "Traditional email and password sign-in.";
 "auth.apple.tip" = "Sign in with Apple ID";
+"auth.apple.web.button" = "Continue with Apple";
+"auth.apple.web.tip" = "SkyBridge Compass Pro will open Apple's secure web sign-in flow and return you to the app automatically.";
+"auth.apple.unavailable" = "Apple sign-in is not available right now. Please use Nebula, phone, or email.";
+"auth.apple.native.enabled" = "This build uses native Sign in with Apple. Please use the Apple sign-in button.";
+"auth.apple.web.only" = "This version completes Apple sign-in in a browser. Please click the Apple sign-in button again.";
+"auth.apple.credential.missing" = "Unable to retrieve Apple ID credentials.";
+"auth.apple.identityToken.missing" = "Unable to retrieve the identity token.";
+"auth.apple.context.expired" = "Apple sign-in context expired. Please try again.";
 "auth.nebula.toggle.hasAccount" = "Have an account? Sign in";
 "auth.nebula.toggle.noAccount" = "No account? Sign up";
 "auth.nebula.account" = "Nebula Account";
@@ -675,7 +776,16 @@
 "auth.emailAddress.placeholder" = "Enter email address";
 "auth.nebula.register" = "Register Nebula";
 "auth.nebula.login" = "Sign in to Nebula";
+"auth.nebula.browser.action.register" = "Create account in secure browser";
+"auth.nebula.browser.action.login" = "Sign in in secure browser";
+"auth.nebula.browser.recommended.register" = "Recommended: register in secure browser";
+"auth.nebula.browser.recommended.login" = "Recommended: sign in in secure browser";
+"auth.nebula.browser.description.register" = "Nebula sign-up completes in the system browser so email verification and secondary checks stay inside the browser authorization session.";
+"auth.nebula.browser.description.login" = "Nebula sign-in completes in the system browser so authorization and secondary checks stay inside the browser authorization session.";
+"auth.nebula.browser.capability.register" = "Supports PKCE, in-browser sign-up, and MFA";
+"auth.nebula.browser.capability.login" = "Supports PKCE and in-browser MFA";
 "auth.mfa.code" = "MFA Code";
+"auth.mfa.code.placeholder" = "Enter MFA code";
 "auth.mfa.verify" = "Verify MFA";
 "auth.phone.toggle.hasAccount" = "Have an account? Sign in";
 "auth.phone.toggle.noAccount" = "No account? Sign up";
@@ -697,6 +807,77 @@
 "auth.email.register" = "Register";
 "auth.email.login" = "Sign in with Email";
 "auth.password.forgot" = "Forgot password?";
+"auth.security.verification.cancelled" = "Security verification was canceled.";
+"auth.turnstile.cancelled" = "Cloudflare Turnstile verification was canceled.";
+"auth.turnstile.failed" = "Cloudflare Turnstile verification failed: %@";
+"auth.turnstile.missingConfig" = "Missing Cloudflare Turnstile configuration. Check TURNSTILE_SITE_KEY.";
+"auth.preview.unsupportedOS" = "Requires macOS 14.0 or later";
+"auth.displayName.default.user" = "User";
+"auth.displayName.default.newUser" = "New User";
+"auth.displayName.default.apple" = "Apple User";
+"auth.displayName.default.nebula" = "Nebula User";
+"auth.displayName.default.guest" = "Guest User";
+"auth.list.separator" = ", ";
+"auth.security.retryAfter.hours" = "%@ (retry in about %d hours)";
+"auth.security.retryAfter.minutes" = "%@ (retry in about %d minutes)";
+"auth.security.deviceVerificationFailed" = "Device verification failed. Please try again.";
+"auth.security.rateLimited.local" = "Too many requests. Please try again later.";
+"auth.security.rateLimited.remote" = "This request triggered additional risk controls. Please try again later.";
+"auth.security.captchaRequired" = "Please complete the security verification first.";
+"auth.security.checkUnavailable" = "Authentication security checks are temporarily unavailable. Please try again later.";
+"auth.captcha.verificationFailed" = "Verification failed. Please try again.";
+"auth.nebula.credentials.required" = "Enter both your account and password.";
+"auth.browser.flow.apple.name" = "Apple sign-in";
+"auth.browser.flow.nebula.name" = "Nebula sign-in";
+"auth.browser.flow.cancelled" = "%@ was canceled.";
+"auth.browser.flow.startFailed" = "Unable to start %@.";
+"auth.apple.browser.callbackSessionMissing" = "The Apple sign-in callback did not include session information.";
+"auth.nebula.browser.invalidCallback" = "The Nebula callback URL is invalid.";
+"auth.nebula.browser.stateMismatch" = "Nebula sign-in state validation failed.";
+"auth.nebula.browser.authorizationCodeMissing" = "Nebula did not return an authorization code.";
+"auth.code.required" = "Enter the verification code.";
+"auth.mfa.verificationFailedWithReason" = "MFA verification failed: %@";
+"auth.phone.invalid" = "Enter a valid phone number.";
+"auth.phone.code.sent" = "Verification code sent.";
+"auth.phone.code.resent" = "Verification code sent again.";
+"auth.phone.code.resendFailedWithReason" = "Failed to resend the code: %@";
+"auth.phone.code.sendFailedWithReason" = "Failed to send the code: %@";
+"auth.password.strength.weak" = "Weak";
+"auth.password.strength.medium" = "Medium";
+"auth.password.strength.strong" = "Strong";
+"auth.password.strength.veryStrong" = "Very Strong";
+"auth.password.tooShort" = "Password must be at least 8 characters.";
+"auth.password.tooLong" = "Password must be 128 characters or fewer.";
+"auth.password.requirement.uppercase" = "uppercase letters";
+"auth.password.requirement.lowercase" = "lowercase letters";
+"auth.password.requirement.number" = "numbers";
+"auth.password.requirement.specialCharacter" = "special characters";
+"auth.password.strengthInsufficient" = "Password strength is too weak.";
+"auth.password.strengthInsufficientWithSuggestions" = "Password strength is too weak. Consider adding: %@";
+"auth.password.weakGeneric" = "Password strength is too weak.";
+"auth.password.confirmationMismatch" = "The passwords do not match.";
+"auth.username.tooShort" = "Username must be at least 4 characters.";
+"auth.username.tooLong" = "Username must be 20 characters or fewer.";
+"auth.username.invalidCharacters" = "Username can only contain letters, numbers, and underscores.";
+"auth.username.reserved" = "This username is reserved.";
+"auth.username.cannotStartWithNumber" = "Username cannot start with a number.";
+"auth.username.invalid" = "Username format is invalid.";
+"auth.email.invalid" = "Enter a valid email address.";
+"auth.email.disposableNotSupported" = "Disposable email addresses are not supported for sign-up.";
+"auth.registration.identifierGenerationFailed" = "Failed to generate an ID. Please try again.";
+"auth.registration.verifyEmailSent" = "Sign-up succeeded. Check your email and click the verification link.";
+"auth.registration.failedWithReason" = "Sign-up failed: %@";
+"auth.registration.pendingAdminApproval" = "Sign-up succeeded. Your account is waiting for administrator approval.";
+"auth.registration.failed" = "Sign-up failed.";
+"auth.phone.required" = "Enter your phone number.";
+"auth.profile.displayName.required" = "Enter a display name.";
+"auth.profile.displayName.tooLong" = "Display name must be 50 characters or fewer.";
+"auth.email.required" = "Enter your email address.";
+"auth.password.required" = "Enter your password.";
+"auth.passwordReset.emailSent" = "Password reset email sent. Check your inbox.";
+"auth.passwordReset.emailSendFailedWithReason" = "Failed to send the password reset email: %@";
+"auth.passwordReset.sessionMissing" = "There is no active password reset session. Reopen the link from your email.";
+"auth.session.notLoggedIn" = "You are not signed in.";
 "guest.mode" = "Guest mode";
 "monitor.noData" = "No data";
 "monitor.axis.time" = "Time";
@@ -719,6 +900,15 @@
 "auth.username" = "Username";
 "remote.form.connect" = "Connect";
 "remote.form.connectFailed" = "Connection Failed";
+
+// New: recommended entry + advanced disclosure
+"remote.connect.recommended" = "Connect via Device Discovery (Recommended)";
+"remote.connect.advanced" = "Advanced: Manual (RDP/VNC/SSH)";
+"remote.form.recommended.section" = "Recommended";
+"remote.form.recommended.body" = "Most users don't need to enter IP/port manually. Go to Device Discovery and pick a device to connect.";
+"remote.form.openDeviceDiscovery" = "Open Device Discovery";
+"remote.form.advanced.section" = "Advanced: Manual Setup (RDP/VNC/SSH)";
+"remote.form.rdp.certificateNotice" = "RDP accepts only endpoints whose certificate chain is trusted by macOS and whose hostname matches. Unknown, self-signed, or changed certificates that require manual trust are rejected; this version has no certificate enrollment or TOFU flow.";
 "monitor.title" = "System Monitor";
 "monitor.status.monitoring" = "Monitoring";
 "monitor.status.initializing" = "Initializing...";
@@ -729,6 +919,33 @@
 "monitor.helper.enable" = "Enable Advanced Monitoring…";
 "monitor.helper.uninstall.tip" = "You can uninstall the elevated Helper to restore defaults.";
 "monitor.helper.uninstall" = "Uninstall Helper…";
+"monitor.metric.unavailableWithReason" = "Unavailable (%@)";
+"monitor.metric.stale" = "Stale";
+"monitor.metric.staleSuffix" = "(stale)";
+"monitor.metric.reason.unsupported" = "Not supported by hardware or system";
+"monitor.metric.reason.permissionDenied" = "Advanced monitoring permission required";
+"monitor.metric.reason.notProvidedByOS" = "Metric is not provided by hardware or OS";
+"monitor.metric.reason.helperUnavailable" = "Advanced monitoring Helper is unavailable";
+"monitor.metric.reason.helperOutdated" = "Advanced monitoring Helper is outdated";
+"monitor.metric.reason.parsingFailed" = "Sampling parse failed";
+"monitor.metric.reason.sampling" = "Sampling";
+"monitor.metric.reason.requiresExpertMode" = "Requires expert mode";
+"monitor.metric.reason.temporarilyInitializing" = "Initializing";
+"monitor.metric.source.kernelAPI" = "Kernel API";
+"monitor.metric.source.ioAccelerator" = "IOAccelerator";
+"monitor.metric.source.smc" = "SMC";
+"monitor.metric.source.iohid" = "IOHID";
+"monitor.metric.source.ioreport" = "IOReport";
+"monitor.metric.source.powermetrics" = "powermetrics";
+"monitor.metric.source.processInfoThermalState" = "thermalState";
+"monitor.metric.availability.available" = "Available";
+"monitor.metric.availability.unavailable" = "Unavailable";
+"monitor.metric.availability.stale" = "Stale";
+"monitor.metric.age.seconds" = "%d sec ago";
+"monitor.mode.title" = "Mode";
+"monitor.mode.standard" = "Standard";
+"monitor.mode.expert" = "Expert";
+"monitor.diagnostics.title" = "Metric Diagnostics";
 "monitor.overview" = "Overview";
 "monitor.cpu.details" = "CPU Details";
 "monitor.memory.details" = "Memory Details";
@@ -755,6 +972,96 @@
 "monitor.network.totalUpload" = "Total Upload";
 "monitor.network.totalDownload" = "Total Download";
 "monitor.network.activeConnections" = "Active Connections";
+
+/* Notifications */
+"notifications.center.title" = "Notification Center";
+"notifications.center.empty" = "No notifications yet";
+"notifications.discovery.trust.verified" = "Verified";
+"notifications.discovery.trust.unverified" = "Unverified";
+"notifications.discovery.detail" = "%@ · %@:%@ · %@";
+"notifications.discovery.reason" = "Reason: %@";
+"notifications.discovery.title" = "Device Ready to Connect";
+"notifications.discovery.title.unverified" = "Device Ready to Connect (Unverified)";
+"notifications.fileTransfer.completed" = "File Transfer Completed";
+"notifications.fileTransfer.failed" = "File Transfer Failed";
+"notifications.fileTransfer.savedTo" = "Saved to %@";
+"notifications.fileTransfer.completed.body" = "%@ transferred successfully";
+"notifications.fileTransfer.failed.body" = "%@ transfer failed";
+"notifications.fileReceived.completed" = "File Received";
+"notifications.fileReceived.savedTo" = "%@ saved to %@";
+"notifications.fileReceived.completedBody" = "%@ received successfully";
+"notifications.remoteDesktop.ended.title" = "Remote Desktop Ended";
+"notifications.remoteDesktop.ended.body" = "The remote desktop session ended normally.";
+"notifications.remoteDesktop.ended.bodyWithDevice" = "The remote desktop session with %@ ended normally.";
+"notifications.remoteDesktop.interrupted.title" = "Remote Desktop Interrupted";
+"notifications.remoteDesktop.interrupted.body" = "The remote desktop session was interrupted.";
+"notifications.remoteDesktop.interrupted.bodyWithDevice" = "The remote desktop session with %@ was interrupted.";
+"notifications.chunkVerification.passed" = "Chunk Verification Passed";
+"notifications.chunkVerification.failed" = "Chunk Verification Failed";
+"notifications.merkleVerification.passed" = "Merkle Verification Passed";
+"notifications.merkleVerification.failed" = "Merkle Verification Failed";
+"notifications.certificate.passed" = "Certificate Validation Passed";
+"notifications.certificate.failed" = "Certificate Validation Failed";
+"notifications.certificate.elapsed" = "%@ms";
+"notifications.merkleTiming.verify" = "Merkle Verify Time";
+"notifications.merkleTiming.compute" = "Merkle Compute Time";
+"notifications.welcome.greeting" = "%@, %@!";
+"notifications.welcome.title" = "%@, %@! Welcome to SkyBridge Compass";
+"notifications.welcome.detail" = "Start your cross-device journey";
+"notifications.greeting.lateNight" = "It's late";
+"notifications.greeting.earlyMorning" = "Good early morning";
+"notifications.greeting.morning" = "Good morning";
+"notifications.greeting.noon" = "Good noon";
+"notifications.greeting.afternoon" = "Good afternoon";
+"notifications.greeting.evening" = "Good evening";
+"notifications.greeting.default" = "Hello";
+"notifications.wellness.lateNight.title" = "Late night, time to rest";
+"notifications.wellness.lateNight.detail" = "Relax your eyes and protect your sleep quality";
+"notifications.rest.1h.title" = "You have been active for 1 hour";
+"notifications.rest.1h.detail" = "Take a short break, drink some water, and rest your eyes";
+"notifications.rest.duration.title" = "Usage duration reminder";
+"notifications.rest.duration.detail" = "Stand up and move a little. Sitting too long is not healthy";
+"notifications.rest.tip.title" = "Wellness tip";
+"notifications.rest.tip.detail" = "Look into the distance and let your eyes relax";
+"notifications.rest.breathe.title" = "Break recommended";
+"notifications.rest.breathe.detail" = "Take a few deep breaths to reduce fatigue";
+"notifications.rest.break.title" = "Take a short break";
+"notifications.rest.break.detail" = "Stretch and move a little to stay at your best";
+"notifications.rest.3h.title" = "3 hours of continuous use";
+"notifications.rest.3h.detail" = "Take a proper break, hydrate, and move around";
+"notifications.weather.aqi.veryUnhealthy.title" = "Air quality is very unhealthy (AQI: %@)";
+"notifications.weather.aqi.veryUnhealthy.detail" = "Reduce outdoor activity, wear a mask, and keep windows closed";
+"notifications.weather.aqi.unhealthy.title" = "Air quality is unhealthy (AQI: %@)";
+"notifications.weather.aqi.unhealthy.detail" = "Wear a mask and reduce outdoor activity when possible";
+"notifications.weather.aqi.sensitive.title" = "Air quality is elevated (AQI: %@)";
+"notifications.weather.aqi.sensitive.detail" = "Sensitive groups should wear a mask and limit outdoor time";
+"notifications.weather.aqi.caution.title" = "Air quality needs attention (AQI: %@)";
+"notifications.weather.aqi.caution.detail" = "Consider shortening outdoor time and keep an eye on live air quality";
+"notifications.weather.uv.strong.title" = "Strong UV alert";
+"notifications.weather.uv.strong.detail" = "Apply sunscreen, wear sunglasses, and limit sun exposure";
+"notifications.weather.uv.moderate.title" = "Sun protection reminder";
+"notifications.weather.uv.moderate.detail" = "UV is elevated. Be mindful of sun protection outdoors";
+"notifications.weather.clear.title" = "Beautiful weather";
+"notifications.weather.clear.detail" = "Great for going outside. Plan your sun exposure reasonably";
+"notifications.weather.rain.title" = "Rain reminder";
+"notifications.weather.rain.detail" = "Bring an umbrella and watch for slippery roads";
+"notifications.weather.snow.title" = "Snow reminder";
+"notifications.weather.snow.detail" = "Keep warm and watch for slippery surfaces";
+"notifications.weather.haze.title" = "Haze / fog reminder";
+"notifications.weather.haze.detail" = "Consider wearing a mask, going out less, and driving carefully";
+"notifications.weather.thunderstorm.title" = "Thunderstorm reminder";
+"notifications.weather.thunderstorm.detail" = "Reduce outdoor activity, bring rain gear, and stay lightning-safe";
+"notifications.weather.generic.title" = "Weather reminder";
+"notifications.weather.generic.detail" = "Current period (%@). Plan your trip according to the weather";
+"notifications.deviceDiscovered.title" = "New Device Found";
+"notifications.deviceDiscovered.body" = "Discovered device: %@";
+"notifications.action.showInFinder" = "Show in Finder";
+"notifications.action.retry" = "Retry";
+"notifications.common.unknownFile" = "Unknown File";
+"notifications.common.unknownError" = "Unknown Error";
+"notifications.common.id" = "ID: %@";
+"notifications.common.chunk" = "Chunk: %@";
+"notifications.common.expectedActual" = "Expected/Actual: %@ / %@";
 "monitor.network.quality" = "Network Quality";
 "qrcode.generateFailed" = "Failed to generate QR code";
 "qrcode.regenerate" = "Regenerate";
@@ -852,3 +1159,199 @@
 "common.yes" = "Yes";
 "common.no" = "No";
 "common.done" = "Done";
+
+/* Remote Control Security Notice */
+"remoteControl.securityNotice.windowTitle" = "Remote Control Security Notice";
+"remoteControl.securityNotice.appName" = "SkyBridge Compass";
+"remoteControl.securityNotice.pendingTitle" = "%@ is requesting approval for remote control";
+"remoteControl.securityNotice.activeTitle" = "%@ is being remotely controlled";
+"remoteControl.securityNotice.subtitle" = "Inbound %@ remote control uses an authenticated encrypted channel; PQC is shown only when the negotiated suite proves it.";
+"remoteControl.securityNotice.transport.p2p" = "P2P";
+"remoteControl.securityNotice.transport.webrtc" = "WebRTC";
+"remoteControl.securityNotice.remoteIP" = "IP";
+"remoteControl.securityNotice.transport" = "Transport";
+"remoteControl.securityNotice.account" = "Device-reported account";
+"remoteControl.securityNotice.nebulaID" = "Device-reported Nebula ID";
+"remoteControl.securityNotice.device" = "Device";
+"remoteControl.securityNotice.pqc" = "PQC Suite";
+"remoteControl.securityNotice.approve" = "Approve";
+"remoteControl.securityNotice.reject" = "Reject";
+"remoteControl.securityNotice.disconnect" = "Disconnect";
+"remoteControl.securityNotice.close" = "Close";
+"remoteControl.securityNotice.collapse" = "Collapse";
+"remoteControl.securityNotice.expand" = "Expand";
+"remoteControl.securityNotice.valueUnavailable" = "Not supplied";
+
+/* Top Bar Network Information */
+"topbar.network.ipLocation.pending" = "IP · …";
+"topbar.network.ipLocation.ready" = "%@ · %@";
+"topbar.network.ipLocation.failed" = "IP · Unavailable";
+"topbar.network.unknownCity" = "Unknown city";
+"topbar.network.unknownIp" = "Unknown IP";
+"topbar.network.proxy.enabled" = "Proxy";
+"topbar.network.proxy.disabled" = "Direct";
+"topbar.network.proxy.help.enabled" = "System proxy enabled";
+"topbar.network.proxy.help.disabled" = "System proxy disabled";
+"topbar.network.ipLocation.help.idle" = "Public IP city is waiting for a sample";
+"topbar.network.ipLocation.help.loading" = "Fetching public IP city and proxy state";
+"topbar.network.ipLocation.help.ready" = "%@ · %@ · %@";
+"topbar.network.ipLocation.help.failed" = "Failed to fetch public IP city: %@";
+"topbar.network.speed.pending" = "↓ … · ↑ …";
+"topbar.network.speed.ready" = "↓ %@ · ↑ %@";
+"topbar.network.speed.failed" = "Speed unavailable";
+"topbar.network.speed.help.idle" = "Network throughput is waiting for a sample";
+"topbar.network.speed.help.loading" = "Sampling network throughput";
+"topbar.network.speed.help.ready" = "Download %@, upload %@";
+"topbar.network.speed.help.failed" = "Network throughput sampling failed: %@";
+"topbar.network.latency.pending" = "Latency …";
+"topbar.network.latency.ready" = "%@ ms";
+"topbar.network.latency.failed" = "Latency unavailable";
+"topbar.network.latency.help.idle" = "Public network latency is waiting for a probe";
+"topbar.network.latency.help.loading" = "Probing public network latency";
+"topbar.network.latency.help.ready" = "HTTPS response latency to the SkyBridge web entry: %@ ms";
+"topbar.network.latency.help.failedUnavailable" = "Public network latency unavailable";
+"topbar.network.latency.help.failed" = "Public network latency probe failed: %@";
+
+/* Local camera streaming */
+"remote.camera.connect" = "Connect Local Camera";
+"remote.camera.defaultName" = "Local Camera";
+"remote.camera.name" = "Camera name (optional)";
+"remote.camera.endpoint" = "Exact RTSP/RTSPS URL";
+"remote.camera.contract" = "Enter a private IP literal and the exact stream path. This release supports H.264 video over RTSP interleaved TCP only; it does not guess paths or use vendor cloud relays.";
+"remote.camera.plaintextAcknowledgement" = "I understand that RTSP sends control data and video without transport encryption.";
+"remote.camera.tlsNotice" = "RTSPS uses system certificate trust and host verification. Invalid or self-signed certificates are rejected.";
+"remote.camera.protocol" = "Local Camera (RTSP)";
+"remote.camera.rendererUnavailable" = "Unable to initialize the video renderer.";
+"remote.camera.feedUnavailable.title" = "Video unavailable";
+"remote.camera.feedUnavailable.failed" = "The camera stream failed and its credentials and transport were released. Verify the exact URL, credentials, H.264 profile, and local network, then reconnect.";
+"remote.camera.feedUnavailable.released" = "The session renderer has been released. Reconnect to continue.";
+
+/* Account Devices (账号设备) */
+"discovery.mode.accountDevices" = "Account Devices";
+"discovery.mode.subtitle.accountDevices" = "Same Account";
+"discovery.accountDevices.title" = "Account Devices";
+"discovery.accountDevices.description" = "Devices signed in with the same account are recorded automatically: name, IP, OS and online state, across networks";
+"discovery.accountDevices.nebulaId" = "Nebula ID";
+"discovery.accountDevices.empty.title" = "No other devices yet";
+"discovery.accountDevices.empty.message" = "Sign in to SkyBridge with the same account on another device and it will appear here";
+"discovery.accountDevices.signedOut" = "Sign in to see the devices of this account";
+"discovery.accountDevices.loading" = "Syncing account devices…";
+"discovery.accountDevices.retryHint" = "Retrying automatically; you can also refresh";
+"discovery.accountDevices.stale" = "The list may be outdated (last update: %@)";
+"discovery.accountDevices.truncated" = "More than 200 devices; only the first 200 are shown";
+"discovery.accountDevices.lastUpdated" = "Updated %@";
+"discovery.accountDevices.status.lanReachable" = "LAN reachable";
+"discovery.accountDevices.status.online" = "Online";
+"discovery.accountDevices.status.offline" = "Offline";
+"discovery.accountDevices.capability.controllable" = "Controllable";
+"discovery.accountDevices.capability.controlOnly" = "Controller only";
+"discovery.accountDevices.lan" = "LAN";
+"discovery.accountDevices.public" = "Public";
+"discovery.accountDevices.deviceId" = "Device ID";
+"discovery.accountDevices.lastSeen" = "Last seen";
+"discovery.accountDevices.neverSeen" = "Never online";
+"discovery.accountDevices.registration.pending" = "Pending approval";
+"discovery.accountDevices.registration.frozen" = "Frozen";
+"discovery.accountDevices.action.useConnectionCode" = "Connect with code";
+"discovery.accountDevices.hint.online" = "This device is online, but no usable direct route has been found. Generate a connection code on it and enter it here";
+"discovery.accountDevices.copyAddress" = "Copy address";
+"discovery.accountDevices.copyDeviceId" = "Copy device ID";
+"discovery.accountDevices.failure.notAuthenticated" = "Not signed in";
+"discovery.accountDevices.failure.deviceNotActive" = "This device is not active in the account yet (%@)";
+"discovery.accountDevices.failure.rateLimited" = "Too many requests; retrying later";
+"discovery.accountDevices.failure.registryUnavailable" = "Device registry unavailable (%@)";
+"discovery.accountDevices.failure.serverRejected" = "The server rejected the request (HTTP %d)";
+"discovery.accountDevices.failure.transport" = "Cannot reach the signaling server";
+"discovery.accountDevices.failure.malformedResponse" = "The server response could not be parsed";
+"discovery.accountDevices.failure.localIdentityUnavailable" = "Local device identity is not ready yet";
+"discovery.accountDevices.failure.localAuthenticationUnavailable" = "Local sign-in state is unusable (%@)";
+"discovery.accountDevices.serviceInactive.title" = "Account device sync is not running";
+"discovery.accountDevices.serviceInactive.message" = "You are signed in, but account device sync has not started. Reopen the dashboard; restart the app if this persists.";
+"discovery.accountDevices.heartbeatFailed" = "Reporting this device as online failed; other devices may not see it";
+"dashboard.accountDevices" = "Account Devices";
+"dashboard.accountDevices.summary" = "%d devices · %d online";
+"dashboard.accountDevices.viewAll" = "View All";
+"dashboard.accountDevices.empty" = "Other devices signed in with the same account will appear here";
+
+"remoteControl.securityNotice.inputController" = "Input controller";
+
+"remoteControl.securityNotice.observer" = "View only";
+
+"remoteControl.securityNotice.transferInput" = "Transfer input control";
+
+"remoteControl.securityNotice.approveView" = "Allow viewing";
+
+"info.appleSilicon" = "Apple silicon";
+"info.optimizationEnabled" = "Optimizations enabled";
+"info.pCore" = "Performance cores";
+"info.eCore" = "Efficiency cores";
+"info.multiCoreOpt" = "Multicore optimization";
+"info.reqAppleSilicon" = "Apple silicon required";
+"info.deviceUnsupported" = "Unsupported device";
+"info.standardMode" = "Standard mode";
+
+"remoteControl.securityNotice.localInputController" = "This Mac has keyboard and mouse control. Remote viewing continues.";
+
+// Saved pairing identity status
+"discovery.trustedDevices.section" = "Trusted devices";
+"discovery.pendingPairings.section" = "Pairings needing verification";
+"discovery.pendingPairings.explanation" = "These records cannot currently verify a connection. This does not mean the devices were removed from your account. Select an account device or scan its current connection QR code.";
+
+// Account device removal
+"accountDevices.remove.action" = "Remove from account";
+"accountDevices.remove.title" = "Remove account device";
+"accountDevices.remove.message" = "Remove “%@” from your account? This device will lose access to account device services. Local files and saved pairings are retained.";
+"accountDevices.remove.confirm" = "Remove";
+"accountDevices.remove.cancel" = "Cancel";
+"accountDevices.remove.selfRemoved" = "This device was removed. Account device synchronization has stopped.";
+"accountDevices.remove.failed" = "Removal was not confirmed. Refresh and check the device before retrying.";
+
+"accountDevices.myDevices" = "My Devices";
+
+/* Weather dashboard labels and relative time. */
+"weather.metric.humidity" = "Humidity";
+"weather.metric.windSpeed" = "Wind speed";
+"weather.metric.visibility" = "Visibility";
+"weather.metric.aqi" = "AQI";
+"weather.status.loading" = "Fetching weather information…";
+"weather.status.loadingHint" = "The first load may take a few seconds";
+"weather.status.error" = "Unable to load weather data";
+"weather.action.retry" = "Retry";
+"weather.time.justNow" = "Just now";
+"weather.time.minutesAgo" = "%d minutes ago";
+"weather.time.hoursAgo" = "%d hours ago";
+
+"remote.session.hostStopped" = "The host stopped screen sharing.";
+
+"remote.session.permissionRevoked" = "The host revoked screen-sharing permission.";
+
+"remote.session.captureFailed" = "The host could not continue screen capture.";
+
+"audio.output.source_format" = "Source PCM format";
+
+"audio.authorization.renewal.waiting" = "Account authorization will be renewed automatically when available during playback.";
+"audio.authorization.renewal.checking" = "Verifying account devices to renew this playback authorization.";
+"audio.authorization.renewal.retry_pending" = "Authorization could not be updated yet. Playback continues within its original validity period; another attempt is scheduled.";
+"audio.authorization.renewal.unavailable" = "Authorization could not be updated. Playback can continue only until the current expiry.";
+"audio.authorization.renewal.failed" = "Playback authorization is no longer valid. Stopping playback.";
+
+"audio.output.endpoint_unavailable" = "The selected output is unavailable. Check its connection and select an available output in system sound settings.";
+
+"audio.output.format_mismatch" = "This output cannot currently use the source sample rate, channel count, PCM representation or bit depth. Select an output that supports the displayed format.";
+
+"audio.output.mixing_required" = "The current output path permits system mixing and does not meet strict playback requirements. Select a device that supports exclusive output in the source format.";
+
+"audio.output.unsupported_layout" = "The output channel layout does not match the source or is not yet supported for strict playback. Select an output with a matching channel layout.";
+
+"audio.output.unsupported_topology" = "This output channel arrangement is not yet supported for strict playback. Use another output device.";
+
+"audio.output.processing_active" = "Volume gain, mute or mono processing is active, preventing strict playback. Check the system and device sound settings.";
+
+"audio.output.device_busy" = "Exclusive access to this output could not be obtained. Stop other audio playback and try again.";
+
+"audio.output.variable_buffer_size" = "This output uses variable buffers, which are not yet supported for strict playback. Select another output device.";
+
+"audio.output.property_unavailable" = "Strict output checks could not be completed for this device. Reconnect it and try again.";
+
+/* Reconnect the current USB accessory through a fresh authenticated session. */
+"connection.usb.retryTimeout" = "USB connection timed out. Open SkyBridge on your phone and retry the connection.";

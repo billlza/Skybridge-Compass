@@ -1,0 +1,7 @@
+#if os(macOS)
+import SkyBridgeAudioFile
+
+typealias AudioFlacValidationError = SkyBridgeAudioFile.AudioFlacValidationError
+typealias AudioValidatedFlacFile = SkyBridgeAudioFile.AudioValidatedFlacFile
+typealias AudioFlacPCMReadSession = SkyBridgeAudioFile.AudioFlacPCMReadSession
+#endif

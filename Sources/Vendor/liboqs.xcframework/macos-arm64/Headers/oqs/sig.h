@@ -6,13 +6,13 @@
  *
  * The first example uses the individual scheme's algorithms directly and uses
  * no dynamic memory allocation -- all buffers are allocated on the stack, with
- * sizes indicated using preprocessor macros. Since algorithms can be disabled at
+ * sizes indicated using preprocessor macros.  Since algorithms can be disabled at
  * compile-time, the programmer should wrap the code in \#ifdefs.
  *
  * The second example uses an OQS_SIG object to use an algorithm specified at
- * runtime. Therefore it uses dynamic memory allocation -- all buffers must be
+ * runtime.  Therefore it uses dynamic memory allocation -- all buffers must be
  * malloc'ed by the programmer, with sizes indicated using the corresponding length
- * member of the OQS_SIG object in question. Since algorithms can be disabled at
+ * member of the OQS_SIG object in question.  Since algorithms can be disabled at
  * compile-time, the programmer should check that the OQS_SIG object is not `NULL`.
  *
  * SPDX-License-Identifier: MIT
@@ -46,30 +46,6 @@ extern "C" {
 #define OQS_SIG_alg_falcon_padded_512 "Falcon-padded-512"
 /** Algorithm identifier for Falcon-padded-1024 */
 #define OQS_SIG_alg_falcon_padded_1024 "Falcon-padded-1024"
-/** Algorithm identifier for SPHINCS+-SHA2-128f-simple */
-#define OQS_SIG_alg_sphincs_sha2_128f_simple "SPHINCS+-SHA2-128f-simple"
-/** Algorithm identifier for SPHINCS+-SHA2-128s-simple */
-#define OQS_SIG_alg_sphincs_sha2_128s_simple "SPHINCS+-SHA2-128s-simple"
-/** Algorithm identifier for SPHINCS+-SHA2-192f-simple */
-#define OQS_SIG_alg_sphincs_sha2_192f_simple "SPHINCS+-SHA2-192f-simple"
-/** Algorithm identifier for SPHINCS+-SHA2-192s-simple */
-#define OQS_SIG_alg_sphincs_sha2_192s_simple "SPHINCS+-SHA2-192s-simple"
-/** Algorithm identifier for SPHINCS+-SHA2-256f-simple */
-#define OQS_SIG_alg_sphincs_sha2_256f_simple "SPHINCS+-SHA2-256f-simple"
-/** Algorithm identifier for SPHINCS+-SHA2-256s-simple */
-#define OQS_SIG_alg_sphincs_sha2_256s_simple "SPHINCS+-SHA2-256s-simple"
-/** Algorithm identifier for SPHINCS+-SHAKE-128f-simple */
-#define OQS_SIG_alg_sphincs_shake_128f_simple "SPHINCS+-SHAKE-128f-simple"
-/** Algorithm identifier for SPHINCS+-SHAKE-128s-simple */
-#define OQS_SIG_alg_sphincs_shake_128s_simple "SPHINCS+-SHAKE-128s-simple"
-/** Algorithm identifier for SPHINCS+-SHAKE-192f-simple */
-#define OQS_SIG_alg_sphincs_shake_192f_simple "SPHINCS+-SHAKE-192f-simple"
-/** Algorithm identifier for SPHINCS+-SHAKE-192s-simple */
-#define OQS_SIG_alg_sphincs_shake_192s_simple "SPHINCS+-SHAKE-192s-simple"
-/** Algorithm identifier for SPHINCS+-SHAKE-256f-simple */
-#define OQS_SIG_alg_sphincs_shake_256f_simple "SPHINCS+-SHAKE-256f-simple"
-/** Algorithm identifier for SPHINCS+-SHAKE-256s-simple */
-#define OQS_SIG_alg_sphincs_shake_256s_simple "SPHINCS+-SHAKE-256s-simple"
 /** Algorithm identifier for MAYO-1 */
 #define OQS_SIG_alg_mayo_1 "MAYO-1"
 /** Algorithm identifier for MAYO-2 */
@@ -162,6 +138,30 @@ extern "C" {
 #define OQS_SIG_alg_snova_SNOVA_60_10_4 "SNOVA_60_10_4"
 /** Algorithm identifier for SNOVA_29_6_5 */
 #define OQS_SIG_alg_snova_SNOVA_29_6_5 "SNOVA_29_6_5"
+/** Algorithm identifier for mqom2_cat1_gf16_fast_r3 */
+#define OQS_SIG_alg_mqom_mqom2_cat1_gf16_fast_r3 "mqom2_cat1_gf16_fast_r3"
+/** Algorithm identifier for mqom2_cat1_gf16_fast_r5 */
+#define OQS_SIG_alg_mqom_mqom2_cat1_gf16_fast_r5 "mqom2_cat1_gf16_fast_r5"
+/** Algorithm identifier for mqom2_cat1_gf16_short_r3 */
+#define OQS_SIG_alg_mqom_mqom2_cat1_gf16_short_r3 "mqom2_cat1_gf16_short_r3"
+/** Algorithm identifier for mqom2_cat1_gf16_short_r5 */
+#define OQS_SIG_alg_mqom_mqom2_cat1_gf16_short_r5 "mqom2_cat1_gf16_short_r5"
+/** Algorithm identifier for mqom2_cat3_gf16_fast_r3 */
+#define OQS_SIG_alg_mqom_mqom2_cat3_gf16_fast_r3 "mqom2_cat3_gf16_fast_r3"
+/** Algorithm identifier for mqom2_cat3_gf16_fast_r5 */
+#define OQS_SIG_alg_mqom_mqom2_cat3_gf16_fast_r5 "mqom2_cat3_gf16_fast_r5"
+/** Algorithm identifier for mqom2_cat3_gf16_short_r3 */
+#define OQS_SIG_alg_mqom_mqom2_cat3_gf16_short_r3 "mqom2_cat3_gf16_short_r3"
+/** Algorithm identifier for mqom2_cat3_gf16_short_r5 */
+#define OQS_SIG_alg_mqom_mqom2_cat3_gf16_short_r5 "mqom2_cat3_gf16_short_r5"
+/** Algorithm identifier for mqom2_cat5_gf16_fast_r3 */
+#define OQS_SIG_alg_mqom_mqom2_cat5_gf16_fast_r3 "mqom2_cat5_gf16_fast_r3"
+/** Algorithm identifier for mqom2_cat5_gf16_fast_r5 */
+#define OQS_SIG_alg_mqom_mqom2_cat5_gf16_fast_r5 "mqom2_cat5_gf16_fast_r5"
+/** Algorithm identifier for mqom2_cat5_gf16_short_r3 */
+#define OQS_SIG_alg_mqom_mqom2_cat5_gf16_short_r3 "mqom2_cat5_gf16_short_r3"
+/** Algorithm identifier for mqom2_cat5_gf16_short_r5 */
+#define OQS_SIG_alg_mqom_mqom2_cat5_gf16_short_r5 "mqom2_cat5_gf16_short_r5"
 ///// OQS_COPY_FROM_UPSTREAM_FRAGMENT_ALG_IDENTIFIER_END
 ///// OQS_COPY_FROM_SLH_DSA_FRAGMENT_ALGID_START
 /** Algorithm identifier for slh_dsa_pure_sha2_128s */
@@ -490,7 +490,7 @@ extern "C" {
 ///// OQS_COPY_FROM_UPSTREAM_FRAGMENT_ALGS_LENGTH_END
 
 /**
- * Returns identifiers for available signature schemes in liboqs. Used with OQS_SIG_new.
+ * Returns identifiers for available signature schemes in liboqs.  Used with OQS_SIG_new.
  *
  * Note that algorithm identifiers are present in this list even when the algorithm is disabled
  * at compile time.
@@ -501,7 +501,7 @@ extern "C" {
 OQS_API const char *OQS_SIG_alg_identifier(size_t i);
 
 /**
- * Returns the number of signature mechanisms in liboqs. They can be enumerated with
+ * Returns the number of signature mechanisms in liboqs.  They can be enumerated with
  * OQS_SIG_alg_identifier.
  *
  * Note that some mechanisms may be disabled at compile time.
@@ -527,11 +527,11 @@ typedef struct OQS_SIG {
 	const char *method_name;
 
 	/**
- * Printable string representing the version of the cryptographic algorithm.
- *
- * Implementations with the same method_name and same alg_version will be interoperable.
- * See README.md for information about algorithm compatibility.
- */
+	 * Printable string representing the version of the cryptographic algorithm.
+	 *
+	 * Implementations with the same method_name and same alg_version will be interoperable.
+	 * See README.md for information about algorithm compatibility.
+	 */
 	const char *alg_version;
 
 	/** The NIST security level (1, 2, 3, 4, 5) claimed in this algorithm's original NIST submission. */
@@ -554,76 +554,76 @@ typedef struct OQS_SIG {
 	size_t length_signature;
 
 	/**
- * Keypair generation algorithm.
- *
- * Caller is responsible for allocating sufficient memory for `public_key` and
- * `secret_key`, based on the `length_*` members in this object or the per-scheme
- * compile-time macros `OQS_SIG_*_length_*`.
- *
- * @param[out] public_key The public key represented as a byte string.
- * @param[out] secret_key The secret key represented as a byte string.
- * @return OQS_SUCCESS or OQS_ERROR
- */
+	 * Keypair generation algorithm.
+	 *
+	 * Caller is responsible for allocating sufficient memory for `public_key` and
+	 * `secret_key`, based on the `length_*` members in this object or the per-scheme
+	 * compile-time macros `OQS_SIG_*_length_*`.
+	 *
+	 * @param[out] public_key The public key represented as a byte string.
+	 * @param[out] secret_key The secret key represented as a byte string.
+	 * @return OQS_SUCCESS or OQS_ERROR
+	 */
 	OQS_STATUS (*keypair)(uint8_t *public_key, uint8_t *secret_key);
 
 	/**
- * Signature generation algorithm.
- *
- * Caller is responsible for allocating sufficient memory for `signature`,
- * based on the `length_*` members in this object or the per-scheme
- * compile-time macros `OQS_SIG_*_length_*`.
- *
- * @param[out] signature The signature on the message represented as a byte string.
- * @param[out] signature_len The actual length of the signature. May be smaller than `length_signature` for some algorithms since some algorithms have variable length signatures.
- * @param[in] message The message to sign represented as a byte string.
- * @param[in] message_len The length of the message to sign.
- * @param[in] secret_key The secret key represented as a byte string.
- * @return OQS_SUCCESS or OQS_ERROR
- */
+	 * Signature generation algorithm.
+	 *
+	 * Caller is responsible for allocating sufficient memory for `signature`,
+	 * based on the `length_*` members in this object or the per-scheme
+	 * compile-time macros `OQS_SIG_*_length_*`.
+	 *
+	 * @param[out] signature The signature on the message represented as a byte string.
+	 * @param[out] signature_len The actual length of the signature. May be smaller than `length_signature` for some algorithms since some algorithms have variable length signatures.
+	 * @param[in] message The message to sign represented as a byte string.
+	 * @param[in] message_len The length of the message to sign.
+	 * @param[in] secret_key The secret key represented as a byte string.
+	 * @return OQS_SUCCESS or OQS_ERROR
+	 */
 	OQS_STATUS (*sign)(uint8_t *signature, size_t *signature_len, const uint8_t *message, size_t message_len, const uint8_t *secret_key);
 
 	/**
- * Signature generation algorithm, with custom context string.
- *
- * Caller is responsible for allocating sufficient memory for `signature`,
- * based on the `length_*` members in this object or the per-scheme
- * compile-time macros `OQS_SIG_*_length_*`.
- *
- * @param[out] signature The signature on the message represented as a byte string.
- * @param[out] signature_len The actual length of the signature. May be smaller than `length_signature` for some algorithms since some algorithms have variable length signatures.
- * @param[in] message The message to sign represented as a byte string.
- * @param[in] message_len The length of the message to sign.
- * @param[in] ctx_str The context string used for the signature. This value can be set to NULL if a context string is not needed (i.e., for algorithms that do not support context strings or if an empty context string is used).
- * @param[in] ctx_str_len The context string used for the signature. This value can be set to 0 if a context string is not needed (i.e., for algorithms that do not support context strings or if an empty context string is used).
- * @param[in] secret_key The secret key represented as a byte string.
- * @return OQS_SUCCESS or OQS_ERROR
- */
+	 * Signature generation algorithm, with custom context string.
+	 *
+	 * Caller is responsible for allocating sufficient memory for `signature`,
+	 * based on the `length_*` members in this object or the per-scheme
+	 * compile-time macros `OQS_SIG_*_length_*`.
+	 *
+	 * @param[out] signature The signature on the message represented as a byte string.
+	 * @param[out] signature_len The actual length of the signature. May be smaller than `length_signature` for some algorithms since some algorithms have variable length signatures.
+	 * @param[in] message The message to sign represented as a byte string.
+	 * @param[in] message_len The length of the message to sign.
+	 * @param[in] ctx_str The context string used for the signature. This value can be set to NULL if a context string is not needed (i.e., for algorithms that do not support context strings or if an empty context string is used).
+	 * @param[in] ctx_str_len The context string used for the signature. This value can be set to 0 if a context string is not needed (i.e., for algorithms that do not support context strings or if an empty context string is used).
+	 * @param[in] secret_key The secret key represented as a byte string.
+	 * @return OQS_SUCCESS or OQS_ERROR
+	 */
 	OQS_STATUS (*sign_with_ctx_str)(uint8_t *signature, size_t *signature_len, const uint8_t *message, size_t message_len, const uint8_t *ctx_str, size_t ctx_str_len, const uint8_t *secret_key);
 
 	/**
- * Signature verification algorithm.
- *
- * @param[in] message The message represented as a byte string.
- * @param[in] message_len The length of the message.
- * @param[in] signature The signature on the message represented as a byte string.
- * @param[in] signature_len The length of the signature.
- * @param[in] public_key The public key represented as a byte string.
- * @return OQS_SUCCESS or OQS_ERROR
- */
+	 * Signature verification algorithm.
+	 *
+	 * @param[in] message The message represented as a byte string.
+	 * @param[in] message_len The length of the message.
+	 * @param[in] signature The signature on the message represented as a byte string.
+	 * @param[in] signature_len The length of the signature.
+	 * @param[in] public_key The public key represented as a byte string.
+	 * @return OQS_SUCCESS or OQS_ERROR
+	 */
 	OQS_STATUS (*verify)(const uint8_t *message, size_t message_len, const uint8_t *signature, size_t signature_len, const uint8_t *public_key);
 
 	/**
- * Signature verification algorithm, with custom context string.
- *
- * @param[in] message The message represented as a byte string.
- * @param[in] message_len The length of the message.
- * @param[in] signature The signature on the message represented as a byte string.
- * @param[in] signature_len The length of the signature.
- * @param[in] ctx_str The context string for the signature. This value can be set to NULL if a context string is not needed (i.e., for algorithms that do not support context strings or if an empty context string is used).
- * @param[in] ctx_str_len The length of the context string. This value can be set to 0 if a context string is not needed (i.e., for algorithms that do not support context strings or if an empty context string is used).
- * @param[in] public_key The public key represented as a byte string.
- * @return OQS_SUCCESS or OQS_ERROR
- */
+	 * Signature verification algorithm, with custom context string.
+	 *
+	 * @param[in] message The message represented as a byte string.
+	 * @param[in] message_len The length of the message.
+	 * @param[in] signature The signature on the message represented as a byte string.
+	 * @param[in] signature_len The length of the signature.
+	 * @param[in] ctx_str The context string for the signature. This value can be set to NULL if a context string is not needed (i.e., for algorithms that do not support context strings or if an empty context string is used).
+	 * @param[in] ctx_str_len The length of the context string. This value can be set to 0 if a context string is not needed (i.e., for algorithms that do not support context strings or if an empty context string is used).
+	 * @param[in] public_key The public key represented as a byte string.
+	 * @return OQS_SUCCESS or OQS_ERROR
+	 */
 	OQS_STATUS (*verify_with_ctx_str)(const uint8_t *message, size_t message_len, const uint8_t *signature, size_t signature_len, const uint8_t *ctx_str, size_t ctx_str_len, const uint8_t *public_key);
 
 
@@ -740,9 +740,6 @@ OQS_API bool OQS_SIG_supports_ctx_str(const char *alg_name);
 #ifdef OQS_ENABLE_SIG_FALCON
 #include <oqs/sig_falcon.h>
 #endif /* OQS_ENABLE_SIG_FALCON */
-#ifdef OQS_ENABLE_SIG_SPHINCS
-#include <oqs/sig_sphincs.h>
-#endif /* OQS_ENABLE_SIG_SPHINCS */
 #ifdef OQS_ENABLE_SIG_MAYO
 #include <oqs/sig_mayo.h>
 #endif /* OQS_ENABLE_SIG_MAYO */
@@ -755,6 +752,9 @@ OQS_API bool OQS_SIG_supports_ctx_str(const char *alg_name);
 #ifdef OQS_ENABLE_SIG_SNOVA
 #include <oqs/sig_snova.h>
 #endif /* OQS_ENABLE_SIG_SNOVA */
+#ifdef OQS_ENABLE_SIG_MQOM
+#include <oqs/sig_mqom.h>
+#endif /* OQS_ENABLE_SIG_MQOM */
 ///// OQS_COPY_FROM_UPSTREAM_FRAGMENT_INCLUDE_END
 ///// OQS_COPY_FROM_SLH_DSA_FRAGMENT_INCLUDE_START
 #ifdef OQS_ENABLE_SIG_SLH_DSA

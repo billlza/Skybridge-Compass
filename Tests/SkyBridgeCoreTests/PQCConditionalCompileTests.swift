@@ -22,7 +22,10 @@ final class PQCConditionalCompileTests: XCTestCase {
  /// SHALL return OQSProvider (if liboqs available) or nil, never ApplePQCProvider.
  /// **Validates: Requirements 2.2, 2.3**
     func testProperty1_ProviderSelectionFallback() {
-        let provider = PQCProviderFactory.makeProvider()
+        let keychain = PQCKeychainTestContext()
+        let provider = PQCProviderFactory.makeProvider(
+            scopeSource: keychain.scopeSource
+        )
         
         #if HAS_APPLE_PQC_SDK
  // 当有 Apple PQC SDK 时，可能返回 ApplePQCProvider 或 OQSProvider
@@ -49,8 +52,13 @@ final class PQCConditionalCompileTests: XCTestCase {
  /// SHALL accurately describe the provider type that would be returned by makeProvider().
  /// **Validates: Requirements 2.4**
     func testProperty2_ProviderStringConsistency() {
-        let provider = PQCProviderFactory.makeProvider()
-        let currentProviderString = PQCProviderFactory.currentProvider
+        let keychain = PQCKeychainTestContext()
+        let provider = PQCProviderFactory.makeProvider(
+            scopeSource: keychain.scopeSource
+        )
+        let currentProviderString = PQCProviderFactory.currentProvider(
+            scopeSource: keychain.scopeSource
+        )
         
         if let p = provider {
             switch p.backend {
@@ -77,7 +85,10 @@ final class PQCConditionalCompileTests: XCTestCase {
     func testOQSProviderAvailability() {
         #if canImport(OQSRAII)
  // 当 OQSRAII 可用时，OQSProvider 应该可用
-        let provider = PQCProviderFactory.makeProvider()
+        let keychain = PQCKeychainTestContext()
+        let provider = PQCProviderFactory.makeProvider(
+            scopeSource: keychain.scopeSource
+        )
         
         #if !HAS_APPLE_PQC_SDK
  // 无 Apple PQC SDK 时，必须使用 OQSProvider
@@ -125,16 +136,6 @@ final class PQCConditionalCompileTests: XCTestCase {
         XCTAssertEqual(PQCBackend.applePQC.rawValue, "applePQC")
         XCTAssertEqual(PQCBackend.liboqs.rawValue, "liboqs")
     }
-    
- /// 验证 MigrationPolicy 可用
-    func testMigrationPolicyAvailable() {
-        let policy = PQCProviderFactory.MigrationPolicy.current
-        
-        XCTAssertTrue(policy.dualWriteEnabled)
-        XCTAssertEqual(policy.stopV1WriteVersion, "3.0")
-        XCTAssertEqual(policy.fullRemoveV1TargetVersion, "5.0")
-    }
-    
  // MARK: - System Requirements Documentation
     
  /// 验证系统要求文档可用
@@ -149,5 +150,9 @@ final class PQCConditionalCompileTests: XCTestCase {
         XCTAssertTrue(details.contains("macOS"), "Should mention macOS")
         XCTAssertTrue(details.contains("ML-KEM") || details.contains("ML‑KEM"), "Should mention ML-KEM")
         XCTAssertTrue(details.contains("ML-DSA") || details.contains("ML‑DSA"), "Should mention ML-DSA")
+        XCTAssertTrue(status.contains("候选") || status.contains("不得显示为 Apple PQC 保护"))
+        XCTAssertTrue(details.contains("不代表当前连接已使用 PQC"))
+        XCTAssertTrue(details.contains("协商套件"))
+        XCTAssertFalse(status.contains("优先使用 Apple CryptoKit 原生 PQC"))
     }
 }

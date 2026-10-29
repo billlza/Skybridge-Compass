@@ -1,3 +1,8 @@
+// macOS-exclusive: this file is built on frameworks that exist only on macOS
+// (AppKit / IOKit / ScreenCaptureKit / CoreWLAN / MetalFX / ServiceManagement /
+// ApplicationServices). It is excluded from other platforms so SkyBridgeCore can be
+// the single shared core for iOS as well. No behaviour changes on macOS.
+#if os(macOS)
 //
 // BackgroundScanningService.swift
 // SkyBridgeCore
@@ -51,6 +56,7 @@ public class BackgroundScanningService: ObservableObject {
     private var currentBackgroundScanCount: Int = 0
     
     private init() {
+        isBackgroundScanningEnabled = SettingsManager.shared.enableBackgroundScanning
         setupSettingsObserver()
     }
     
@@ -160,7 +166,12 @@ public class BackgroundScanningService: ObservableObject {
  // 等待下一次扫描
                 do {
                     try await Task.sleep(nanoseconds: UInt64(self.backgroundScanInterval * 1_000_000_000))
+                } catch is CancellationError {
+                    break
                 } catch {
+                    self.logger.error(
+                        "❌ 后台扫描调度中止: errorType=\(String(reflecting: Swift.type(of: error)), privacy: .public)"
+                    )
                     break
                 }
             }
@@ -192,22 +203,37 @@ public class BackgroundScanningService: ObservableObject {
  // 使用轻量级扫描策略
         let discoveryManager = DeviceDiscoveryManagerOptimized()
         
- // 配置为低功耗模式
-        discoveryManager.enableCompatibilityMode = false
-        discoveryManager.enableCompanionLink = false
+ // 配置为低功耗模式，同时保留用户明确选择的地址族/算法设置。
+        discoveryManager.applyRuntimeSettings(
+            compatibilityMode: false,
+            companionLink: false,
+            ipv6Support: SettingsManager.shared.enableIPv6Support,
+            useNewDiscoveryAlgorithm: SettingsManager.shared.useNewDiscoveryAlgorithm,
+            enableBonjourDiscovery: SettingsManager.shared.enableBonjourDiscovery,
+            enableMDNSResolution: SettingsManager.shared.enableMDNSResolution,
+            scanCustomPorts: SettingsManager.shared.scanCustomPorts,
+            customServiceTypes: SettingsManager.shared.customServiceTypes,
+            discoveryTimeout: SettingsManager.shared.discoveryTimeout,
+            restartIfNeeded: false
+        )
         
- // 启动扫描
+        // 启动扫描
         discoveryManager.startScanning()
+        defer { discoveryManager.stopScanning() }
         
  // 等待扫描结果（限时 10 秒）
+        let scanWaitSeconds = min(max(TimeInterval(SettingsManager.shared.discoveryTimeout), 1), 60)
         do {
-            try await Task.sleep(nanoseconds: 10_000_000_000) // 10秒
+            try await Task.sleep(nanoseconds: UInt64(scanWaitSeconds * 1_000_000_000))
+        } catch is CancellationError {
+            logger.debug("ℹ️ 后台扫描已取消")
+            return
         } catch {
- // 任务被取消
+            logger.error(
+                "❌ 后台扫描等待中止: errorType=\(String(reflecting: Swift.type(of: error)), privacy: .public)"
+            )
+            return
         }
-        
- // 停止扫描
-        discoveryManager.stopScanning()
         
  // 收集发现的设备
         let newDevices = discoveryManager.discoveredDevices
@@ -279,4 +305,4 @@ public extension Notification.Name {
     static let deviceDiscoveredInBackground = Notification.Name("com.skybridge.deviceDiscoveredInBackground")
     static let mergeBackgroundDiscoveredDevices = Notification.Name("com.skybridge.mergeBackgroundDiscoveredDevices")
 }
-
+#endif

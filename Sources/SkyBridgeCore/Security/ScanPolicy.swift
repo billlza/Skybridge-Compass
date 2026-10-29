@@ -16,7 +16,7 @@ import Foundation
 public struct ScanPolicy: Sendable {
     
  /// The scan level this policy applies to
-    public let level: FileScanService.ScanLevel
+    public let level: FileScanLevel
     
  /// Security limits for reference
     private let limits: SecurityLimits
@@ -28,7 +28,7 @@ public struct ScanPolicy: Sendable {
  /// - Parameters:
  /// - level: The scan level to create policy for
  /// - limits: Security limits configuration (defaults to .default)
-    public init(level: FileScanService.ScanLevel, limits: SecurityLimits = .default) {
+    public init(level: FileScanLevel, limits: SecurityLimits = .default) {
         self.level = level
         self.limits = limits
     }

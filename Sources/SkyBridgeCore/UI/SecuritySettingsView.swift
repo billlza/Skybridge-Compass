@@ -1,3 +1,8 @@
+// macOS-exclusive: this file is built on frameworks that exist only on macOS
+// (AppKit / IOKit / ScreenCaptureKit / CoreWLAN / MetalFX / ServiceManagement /
+// ApplicationServices). It is excluded from other platforms so SkyBridgeCore can be
+// the single shared core for iOS as well. No behaviour changes on macOS.
+#if os(macOS)
 import SwiftUI
 import CryptoKit
 import os.log
@@ -12,14 +17,15 @@ public struct SecuritySettingsView: View {
     @ObservedObject var securityManager: P2PSecurityManager
     @Environment(\.dismiss) private var dismiss
     
-    @State private var showingTrustedDevices = true
-    @State private var showingEncryptionSettings = false
-    @State private var showingSecurityPolicies = false
     @State private var selectedDevice: P2PDevice?
     @State private var showingDeviceDetails = false
     @State private var showingTrustManagement = false
     
     private let logger = Logger(subsystem: "SkyBridgeCore", category: "SecuritySettingsView")
+    private var settingsManager: SettingsManager { SettingsManager.shared }
+    private var cryptoCapability: CryptoProviderFactory.Capability {
+        CryptoProviderFactory.detectCapability()
+    }
     
  // MARK: - 主界面
     
@@ -226,8 +232,11 @@ public struct SecuritySettingsView: View {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         if panel.runModal() == .OK, let url = panel.url, let data = try? Data(contentsOf: url) {
+            let password = p12Password
+            let deviceId = certDeviceId
+            // 重导入移出主线程（避免卡死/沙滩球）：await 期间主线程不被阻塞，仅 Bool 结果回主线程更新 UI。
             Task { @MainActor in
-                let ok = TLSSecurityManager().importIdentityFromPKCS12(data, password: p12Password, for: certDeviceId)
+                let ok = await TLSSecurityManager().importIdentityFromPKCS12OffMain(data, password: password, for: deviceId)
                 certStatusMessage = ok ? "✅ PKCS#12 身份已导入" : "❌ PKCS#12 导入失败"
             }
         }
@@ -235,10 +244,16 @@ public struct SecuritySettingsView: View {
 
  // 生成 CSR 并显示 PEM
     private func generateCSR() {
+        // 在主线程读取 @State 值并定型为不可变本地值，重操作放到后台执行（避免卡死）。
+        let dns = csrSanDNS.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
+        let ip = csrSanIP.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
+        let deviceId = certDeviceId
+        let cn = csrCN
+        let org = csrO.isEmpty ? nil : csrO
+        let ou = csrOU.isEmpty ? nil : csrOU
         Task { @MainActor in
-            let dns = csrSanDNS.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
-            let ip = csrSanIP.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
-            if let pem = TLSSecurityManager().generateCSRPEM(for: certDeviceId, commonName: csrCN, organization: csrO.isEmpty ? nil : csrO, organizationalUnit: csrOU.isEmpty ? nil : csrOU, sanDNS: dns, sanIP: ip) {
+            let pem = await TLSSecurityManager().generateCSRPEMOffMain(for: deviceId, commonName: cn, organization: org, organizationalUnit: ou, sanDNS: dns, sanIP: ip)
+            if let pem {
                 csrPEM = pem
                 certStatusMessage = "✅ CSR 已生成"
             } else {
@@ -291,9 +306,11 @@ public struct SecuritySettingsView: View {
 
  // 生成自签证书
     private func generateSelfSigned() {
+        let deviceId = certDeviceId
         Task { @MainActor in
-            let cert = TLSSecurityManager().generateSelfSignedCertificate(for: certDeviceId)
-            certStatusMessage = (cert != nil) ? "✅ 自签证书已生成" : "❌ 自签生成失败"
+            // await 期间主线程不阻塞；仅回传 Bool（SecCertificate 非 Sendable）。
+            let ok = await TLSSecurityManager().generateSelfSignedCertificateSucceedsOffMain(for: deviceId)
+            certStatusMessage = ok ? "✅ 自签证书已生成" : "❌ 自签生成失败"
         }
     }
     
@@ -347,24 +364,26 @@ public struct SecuritySettingsView: View {
     private var encryptionSettingsSection: some View {
         Group {
             EncryptionSettingRow(
-                title: "TLS版本",
-                value: "TLS 1.3",
-                description: "使用最新的TLS 1.3协议确保通信安全",
-                isEnabled: true
+                title: "握手策略",
+                value: "Strict-PQC",
+                description: "requirePQC=true, classic fallback=false",
+                isEnabled: cryptoCapability.hasApplePQC || cryptoCapability.hasLiboqs
             )
             
             EncryptionSettingRow(
-                title: "端到端加密",
-                value: "AES-256-GCM",
-                description: "使用AES-256-GCM算法进行端到端加密",
-                isEnabled: true
+                title: "KEM套件",
+                value: activePQCKeyExchangeText,
+                description: "来自当前运行时 Provider 能力",
+                isEnabled: cryptoCapability.hasApplePQC || cryptoCapability.hasLiboqs
             )
             
             EncryptionSettingRow(
-                title: "密钥交换",
-                value: "ECDH P-256",
-                description: "使用椭圆曲线Diffie-Hellman进行密钥交换",
-                isEnabled: true
+                title: "协议签名",
+                value: settingsManager.activeProtocolSigningAlgorithm.rawValue,
+                description: settingsManager.activeProtocolSigningKeyProtection == .secureEnclaveRequired
+                    ? "主协议私钥由本机 Secure Enclave 管理"
+                    : "主协议私钥由本机软件 Keychain 管理",
+                isEnabled: cryptoCapability.hasApplePQC || cryptoCapability.hasLiboqs
             )
             
             Divider()
@@ -382,6 +401,16 @@ public struct SecuritySettingsView: View {
                 .foregroundColor(.blue)
             }
         }
+    }
+
+    private var activePQCKeyExchangeText: String {
+        if cryptoCapability.hasApplePQC {
+            return settingsManager.preferXWingHybrid ? "X-Wing" : "ML-KEM-768"
+        }
+        if cryptoCapability.hasLiboqs {
+            return "ML-KEM-768"
+        }
+        return "不可用"
     }
     
  // MARK: - 安全策略部分
@@ -760,6 +789,8 @@ private struct TrustedDeviceRow: View {
             return "smartphone"
         case .linux:
             return "server.rack"
+        case .unknown:
+            return "questionmark.circle"
         }
     }
     
@@ -863,6 +894,7 @@ private struct TrustedDeviceDetailsView: View {
 struct PostQuantumCryptoSettingsView: View {
     @EnvironmentObject private var settingsManager: SettingsManager
     @State private var showingInfo = false
+    @State private var cryptoCapability = CryptoProviderFactory.detectCapability()
     
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -896,55 +928,51 @@ struct PostQuantumCryptoSettingsView: View {
                 }
             }
             
- // PQC启用开关
-            Toggle(isOn: $settingsManager.enablePQC) {
+ // PQC运行状态
+            HStack(spacing: 8) {
+                Image(systemName: "lock.shield.fill")
+                    .foregroundColor(.orange)
+
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("启用后量子加密")
+                    Text("后量子加密")
                         .font(.subheadline)
-                    
-                    Text(settingsManager.enablePQC ? 
-                         "混合模式：P256 + ML-DSA" : 
-                         "仅使用传统加密")
+
+                    Text("Strict-PQC 策略已请求，等待会话协商证明")
                         .font(.caption)
-                        .foregroundColor(settingsManager.enablePQC ? .green : .secondary)
+                        .foregroundColor(.orange)
                 }
+
+                Spacer()
             }
             .padding(.vertical, 4)
             
             VStack(alignment: .leading, spacing: 2) {
-                Text("• macOS 26+: CryptoKit（含 Secure Enclave PQC）")
-                Text("• macOS 14–15: liboqs（ML‑KEM‑768/ML‑DSA‑65）")
-                Text("• OQS 不可用: Classic（X25519/Ed25519）")
+                Text("• macOS 26+: CryptoKit 候选能力（需 runtime 与协商证明）")
+                Text("• macOS 14–15: liboqs 候选能力（ML‑KEM‑768/ML‑DSA‑65）")
+                Text("• OQS 不可用: Classic（非量子安全兼容）")
             }
             .font(.caption2)
             .foregroundColor(.secondary)
             
- // 算法选择（仅在启用PQC时显示）
-            if settingsManager.enablePQC {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("签名算法")
-                        .font(.caption)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("签名算法")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                Text("\(settingsManager.activeProtocolSigningAlgorithm.rawValue) · 协议身份绑定")
+                    .font(.callout.weight(.semibold))
+
+                HStack(spacing: 4) {
+                    Image(systemName: "info.circle.fill")
+                        .font(.caption2)
+                        .foregroundColor(.blue)
+
+                    Text(algorithmDescription)
+                        .font(.caption2)
                         .foregroundColor(.secondary)
-                    
-                    Picker("", selection: $settingsManager.pqcSignatureAlgorithm) {
-                        Text("ML-DSA-65 (推荐)").tag("ML-DSA-65")
-                        Text("ML-DSA-87 (高安全)").tag("ML-DSA-87")
-                    }
-                    .pickerStyle(.segmented)
-                    
-                    HStack(spacing: 4) {
-                        Image(systemName: "info.circle.fill")
-                            .font(.caption2)
-                            .foregroundColor(.blue)
-                        
-                        Text(algorithmDescription)
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
                 }
-                .padding(.vertical, 4)
-                .transition(.opacity)
             }
+            .padding(.vertical, 4)
             
  // 状态指示器
             HStack(spacing: 8) {
@@ -959,68 +987,50 @@ struct PostQuantumCryptoSettingsView: View {
             .padding(.vertical, 4)
         }
         .padding(.vertical, 4)
+        .onAppear {
+            cryptoCapability = CryptoProviderFactory.detectCapability()
+        }
     }
     
     private var algorithmDescription: String {
-        switch settingsManager.pqcSignatureAlgorithm {
-        case "ML-DSA-65":
-            return "NIST Level 2 安全级别，签名约3.3KB，适合大多数场景"
-        case "ML-DSA-87":
-            return "NIST Level 4 安全级别，签名约4.6KB，提供更高安全性"
-        default:
-            return "选择合适的后量子签名算法"
+        switch settingsManager.activeProtocolSigningAlgorithm {
+        case .mlDSA65:
+            return "NIST Category 3；与当前握手身份和 TrustRecord 公钥绑定"
+        case .mlDSA87:
+            return "NIST Category 5；仅对已认证并持久化 87 pin 的 peer 生效"
+        case .ed25519:
+            return "经典签名；仅用于 classic 握手"
         }
     }
     
     private var pqcStatusIcon: String {
-        if !settingsManager.enablePQC {
-            return "circle"
-        }
-        
-        if #available(macOS 26.0, *) {
- // macOS 26.0+ Apple原生PQC
+        if cryptoCapability.hasApplePQC {
             return "apple.logo"
-        } else {
-            #if canImport(OQSRAII)
-            return "checkmark.circle.fill"
-            #else
-            return "exclamationmark.triangle.fill"
-            #endif
         }
+        if cryptoCapability.hasLiboqs {
+            return "checkmark.circle.fill"
+        }
+        return "exclamationmark.triangle.fill"
     }
     
     private var pqcStatusColor: Color {
-        if !settingsManager.enablePQC {
-            return .gray
+        if cryptoCapability.hasApplePQC {
+            return .blue
         }
-        
-        if #available(macOS 26.0, *) {
- // macOS 26.0+ Apple原生PQC
-            return .blue  // Apple蓝色
-        } else {
-            #if canImport(OQSRAII)
+        if cryptoCapability.hasLiboqs {
             return .green
-            #else
-            return .orange
-            #endif
         }
+        return .red
     }
     
     private var pqcStatusText: String {
-        if !settingsManager.enablePQC {
-            return "未启用"
+        if cryptoCapability.hasApplePQC {
+            return "ApplePQC 候选就绪（\(cryptoCapability.osVersion)，等待协商证明）"
         }
-        
-        if #available(macOS 26.0, *) {
- // macOS 26.0+ 使用Apple原生PQC
-            return "Apple CryptoKit (原生)"
-        } else {
-            #if canImport(OQSRAII)
-            return "OQS/liboqs"
-            #else
-            return "PQC库未安装"
-            #endif
+        if cryptoCapability.hasLiboqs {
+            return "liboqs PQC 候选就绪（\(cryptoCapability.osVersion)，等待协商证明）"
         }
+        return "未检测到 PQC Provider"
     }
 }
 
@@ -1045,17 +1055,17 @@ struct PQCInfoView: View {
                     )
                     
                     InfoSection(
-                        title: "混合加密模式",
+                        title: "Strict-PQC模式",
                         icon: "shield.lefthalf.filled",
                         color: .blue,
-                        content: "SkyBridge使用混合模式：同时使用传统加密（P256）和后量子加密（ML-DSA）。只有两者都被破解才会失去安全性。"
+                        content: "SkyBridge 严格路径要求 PQC：握手使用 ML-KEM/X-Wing，协议身份和文件元数据使用 ML-DSA，禁用 classic fallback。"
                     )
                     
                     InfoSection(
                         title: "支持的算法",
                         icon: "cpu",
                         color: .green,
-                        content: "• ML-DSA-65: NIST Level 2，平衡安全性和性能\n• ML-DSA-87: NIST Level 4，提供更高安全级别\n• ML-KEM: 用于密钥封装机制"
+                        content: "• ML-DSA-65: Category 3 协议身份签名，绑定握手与 TrustRecord\n• ML-DSA-87: Category 5 协议身份签名，仅对已认证并持久化原始 87 公钥的 peer 生效\n• Secure Enclave: 保护所选主身份的 ML-DSA 私钥；该精确密钥槽失败时绝不回退软件密钥\n• 旧 peer 兼容: 在完成原始 87 公钥重新绑定前，会话可明确使用独立的 ML-DSA-65 软件兼容身份，并在连接状态中标记\n• ML-KEM: 用于密钥封装机制"
                     )
                     
                     InfoSection(
@@ -1066,10 +1076,10 @@ struct PQCInfoView: View {
                     )
                     
                     InfoSection(
-                        title: "何时启用？",
+                        title: "运行策略",
                         icon: "questionmark.circle",
                         color: .purple,
-                        content: "推荐在需要长期安全保护的场景中启用PQC，如：敏感数据传输、长期存档、高安全性要求的通信。"
+                        content: "发布配置中 PQC 是强制安全策略；没有可用 PQC Provider 时连接应失败关闭。"
                     )
                 }
             }
@@ -1110,4 +1120,5 @@ struct SecuritySettingsView_Previews: PreviewProvider {
         SecuritySettingsView(securityManager: P2PSecurityManager())
     }
 }
+#endif
 #endif

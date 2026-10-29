@@ -1,0 +1,593 @@
+//
+// CoreTypes.swift
+// SkyBridgeCompassiOS
+//
+// 核心类型定义 - 所有其他模块依赖的基础类型
+// 确保此文件在编译顺序中优先
+//
+
+import Foundation
+import CryptoKit
+import SkyBridgeProtocolCore
+#if canImport(Security)
+import Security
+#endif
+
+/// The iOS application now consumes the same secure-memory implementation as
+/// the shared macOS core. Keeping this alias in the existing core-types surface
+/// avoids a parallel type while callers migrate without wrapper allocations.
+public typealias SecureBytes = SkyBridgeProtocolCore.SecureBytes
+
+// MARK: - CryptoTier
+
+/// 加密提供者层级
+public enum CryptoTier: String, Sendable, Codable, Equatable {
+    /// Q-Periapt ABI2 authenticated policy-bound hybrid KEM
+    case qperiaptPQC = "qperiaptPQC"
+
+    /// Apple 原生 PQC（macOS 26+/iOS 26+）
+    case nativePQC = "nativePQC"
+    
+    /// liboqs PQC（较早系统版本）
+    case liboqsPQC = "liboqsPQC"
+    
+    /// 经典加密（X25519 + Ed25519）
+    case classic = "classic"
+}
+
+// MARK: - CryptoSuite
+
+/// 加密套件（与 macOS Wire 格式完全一致）
+public enum CryptoSuite: Sendable, Codable, Equatable, Hashable {
+    /// ML-KEM-768 + ML-DSA-65（纯 PQC）
+    case mlkem768
+
+    /// ML-KEM-768-FS + ML-DSA-65（前向安全增强变体）
+    case mlkem768fs
+    
+    /// X-Wing: X25519 + ML-KEM-768（混合）
+    case xwing
+
+    /// Q-Periapt ABI 1 ContextBound（仅保留历史 wire 解析）
+    case qperiaptContextBound
+
+    /// Q-Periapt ABI 2 authenticated-policy/application-context-bound hybrid KEM.
+    /// The suite identifier is negotiable only through a provider backed by an
+    /// activated immutable runtime session; wire recognition alone is not admission.
+    case qperiaptABI2PolicyBound
+    
+    /// X25519 + Ed25519（经典）
+    case x25519Ed25519
+    
+    /// X25519（经典 KEM）
+    case x25519
+    
+    /// P-256（经典，兼容）
+    case p256
+
+    /// 未知套件（前向兼容：解析保真，不做静默映射）
+    case unknown(UInt16)
+
+    public var rawValue: String {
+        switch self {
+        case .mlkem768:
+            return "ML-KEM-768"
+        case .mlkem768fs:
+            return "ML-KEM-768-FS"
+        case .xwing:
+            return "X-Wing"
+        case .qperiaptContextBound:
+            return "Q-Periapt-ContextBound"
+        case .qperiaptABI2PolicyBound:
+            return "Q-Periapt-ABI2-PolicyBound"
+        case .x25519Ed25519:
+            return "X25519-Ed25519"
+        case .x25519:
+            return "X25519"
+        case .p256:
+            return "P-256"
+        case .unknown(let wireId):
+            return "unknown-\(wireId)"
+        }
+    }
+
+    public init?(rawValue: String) {
+        switch rawValue {
+        case "ML-KEM-768":
+            self = .mlkem768
+        case "ML-KEM-768-FS":
+            self = .mlkem768fs
+        case "X-Wing":
+            self = .xwing
+        case "Q-Periapt-ContextBound":
+            self = .qperiaptContextBound
+        case "Q-Periapt-ABI2-PolicyBound":
+            self = .qperiaptABI2PolicyBound
+        case "X25519-Ed25519":
+            self = .x25519Ed25519
+        case "X25519":
+            self = .x25519
+        case "P-256":
+            self = .p256
+        default:
+            guard rawValue.hasPrefix("unknown-") else { return nil }
+            let suffix = String(rawValue.dropFirst("unknown-".count))
+            if let value = UInt16(suffix) {
+                self = .unknown(value)
+            } else if suffix.hasPrefix("0x"),
+                      let value = UInt16(suffix.dropFirst(2), radix: 16) {
+                self = .unknown(value)
+            } else {
+                return nil
+            }
+        }
+    }
+    
+    /// Wire ID（用于协议编码）
+    public var wireId: UInt16 {
+        switch self {
+        case .xwing: return 0x0001      // Hybrid: X-Wing
+        case .qperiaptContextBound: return 0x0011 // Legacy ABI 1; decode-only
+        case .qperiaptABI2PolicyBound: return 0x0012 // ABI 2 PolicyBound beta
+        case .mlkem768: return 0x0101   // PQC: ML-KEM-768
+        case .mlkem768fs: return 0x0102 // PQC: ML-KEM-768-FS
+        case .x25519Ed25519: return 0x1001  // Classic: X25519+Ed25519
+        case .x25519: return 0x1001     // Classic: X25519
+        case .p256: return 0x1002       // Classic: P-256
+        case .unknown(let wireId): return wireId
+        }
+    }
+    
+    /// 从 Wire ID 创建
+    public init(wireId: UInt16) {
+        switch wireId {
+        case 0x0001: self = .xwing
+        case 0x0011: self = .qperiaptContextBound
+        case 0x0012: self = .qperiaptABI2PolicyBound
+        case 0x0101: self = .mlkem768
+        case 0x0102: self = .mlkem768fs
+        case 0x1001: self = .x25519Ed25519
+        case 0x1002: self = .p256
+        default: self = .unknown(wireId)
+        }
+    }
+
+    public var isKnown: Bool {
+        if case .unknown = self {
+            return false
+        }
+        return true
+    }
+
+    /// 历史 ABI 1 套件仅可解析，禁止进入新协商或信任存储。
+    public var isLegacyOnly: Bool {
+        self == .qperiaptContextBound
+    }
+
+    /// Historical suites which this target parses but must never execute.
+    public var isDecodeOnly: Bool {
+        self == .qperiaptContextBound
+    }
+
+    public var isNegotiable: Bool {
+        isKnown && !isDecodeOnly
+    }
+    
+    /// 是否是 PQC 套件
+    public var isPQC: Bool {
+        switch self {
+        case .mlkem768: return true
+        case .mlkem768fs: return true
+        case .xwing: return true
+        case .qperiaptContextBound: return true
+        case .qperiaptABI2PolicyBound: return true
+        case .unknown(let wireId):
+            let tier = wireId >> 8
+            return tier == 0x00 || tier == 0x01
+        default: return false
+        }
+    }
+    
+    /// 是否是混合套件
+    public var isHybrid: Bool {
+        self == .xwing || self == .qperiaptContextBound || self == .qperiaptABI2PolicyBound
+    }
+    
+    /// 是否属于 PQC 组（用于签名算法选择）
+    public var isPQCGroup: Bool {
+        isPQC || isHybrid
+    }
+    
+    /// 所有 PQC 套件
+    public static var allPQCSuites: [CryptoSuite] {
+        [.mlkem768, .mlkem768fs, .xwing]
+    }
+
+    /// Beta suites are never inserted into a static global offer. Q-Periapt is
+    /// exposed dynamically only by a signed-policy-admitted provider/session.
+    public static var explicitBetaPQCSuites: [CryptoSuite] {
+        return []
+    }
+    
+    /// 所有 Classic 套件
+    public static var allClassicSuites: [CryptoSuite] {
+        [.x25519, .x25519Ed25519, .p256]
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let raw = try container.decode(String.self)
+        guard let suite = CryptoSuite(rawValue: raw) else {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Unknown CryptoSuite raw value: \(raw)"
+            )
+        }
+        self = suite
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
+// MARK: - macOS naming aliases (compat)
+
+public extension CryptoSuite {
+    /// macOS Core naming: X-Wing + ML-DSA-65 (v1 uses suite group for signature selection)
+    static let xwingMLDSA: CryptoSuite = .xwing
+    /// macOS Core naming: Q-Periapt ContextBound (beta)
+    static let qperiaptContextBoundMLDSA: CryptoSuite = .qperiaptContextBound
+    /// macOS Core naming: Q-Periapt ABI 2 PolicyBound (beta)
+    static let qperiaptABI2PolicyBoundMLDSA: CryptoSuite = .qperiaptABI2PolicyBound
+    /// macOS Core naming: ML-KEM-768 + ML-DSA-65
+    static let mlkem768MLDSA65: CryptoSuite = .mlkem768
+    /// macOS Core naming: ML-KEM-768-FS + ML-DSA-65
+    static let mlkem768MLDSA65FS: CryptoSuite = .mlkem768fs
+    /// macOS Core naming: P-256 + ECDSA (legacy)
+    static let p256ECDSA: CryptoSuite = .p256
+
+    /// 是否需要 v2 临时贡献字段（仅 ML-KEM-768-FS）
+    var requiresV2EphemeralContribution: Bool {
+        self == .mlkem768fs
+    }
+
+    /// Provider 兼容套件（用于 FS 与非 FS 视为同一 KEM 提供者族）
+    var providerCompatibilitySuite: CryptoSuite {
+        canonicalKEMSuite
+    }
+
+    /// 前向安全升级套件（由 v1 升级到 v2）
+    var forwardSecureUpgradeSuite: CryptoSuite? {
+        self == .mlkem768 ? .mlkem768fs : nil
+    }
+
+    /// KEM 规范化套件（FS 与非 FS 共享同一长期 KEM identity key）
+    var canonicalKEMSuite: CryptoSuite {
+        requiresV2EphemeralContribution ? .mlkem768 : self
+    }
+
+    /// KDF 组合标签（与 macOS SkyBridgeCore 对齐，用于防止跨版本 KDF 混淆）
+    var kdfCompositionLabel: String {
+        switch self {
+        case .qperiaptABI2PolicyBound:
+            return "qperiapt-abi2-policy-bound-v1"
+        default:
+            return requiresV2EphemeralContribution ? "v2-static+ephemeral" : "v1-single"
+        }
+    }
+}
+
+// MARK: - KeyUsage
+
+/// 密钥用途
+public enum KeyUsage: String, Sendable {
+    /// 密钥交换（KEM）
+    case keyExchange = "keyExchange"
+    
+    /// 数字签名
+    case signing = "signing"
+    
+    /// 临时密钥（握手用）
+    case ephemeral = "ephemeral"
+}
+
+// MARK: - KeyPair
+
+/// 密钥对
+public struct KeyPair: Sendable {
+    public let publicKey: KeyMaterial
+    public let privateKey: KeyMaterial
+    
+    public init(publicKey: KeyMaterial, privateKey: KeyMaterial) {
+        self.publicKey = publicKey
+        self.privateKey = privateKey
+    }
+    
+    public init(publicKey: Data, privateKey: Data) {
+        self.publicKey = KeyMaterial(data: publicKey)
+        self.privateKey = KeyMaterial(data: privateKey)
+    }
+}
+
+// MARK: - KeyMaterial
+
+/// 密钥材料（可以是 Data 或 SecureBytes）
+public struct KeyMaterial: Sendable {
+    private let storage: Storage
+    
+    private enum Storage: Sendable {
+        case data(Data)
+        case secure(SecureBytes)
+    }
+    
+    public init(data: Data) {
+        self.storage = .data(data)
+    }
+    
+    public init(secure: SecureBytes) {
+        self.storage = .secure(secure)
+    }
+    
+    /// 获取字节（会复制）
+    public var bytes: Data {
+        switch storage {
+        case .data(let data): return data
+        case .secure(let secure): return secure.data
+        }
+    }
+
+    /// Internal ownership-preserving access for persistence boundaries that
+    /// must not materialize an additional private-key `Data` copy.
+    var secureBytesReference: SecureBytes? {
+        guard case .secure(let secure) = storage else { return nil }
+        return secure
+    }
+}
+
+// MARK: - HPKESealedBox
+
+/// HPKE 密封盒（与 macOS SkyBridgeCore Wire 格式对齐）
+///
+/// **Header 格式（固化规范）**:
+/// ```
+/// magic(4B: "HPKE") || version(1B) || suiteWireId(2B little-endian) || flags(2B) ||
+/// encLen(2B little-endian) || nonceLen(1B) || tagLen(1B) || ctLen(4B little-endian) ||
+/// enc || nonce || ct || tag
+/// ```
+///
+/// **版本语义**:
+/// - v1: KEM-DEM 兼容封装（AES-GCM），nonce/tag 固定存在（12/16）
+/// - v2: 原生 HPKE 密文封装，允许 nonceLen/tagLen 为 0（nonce/tag 为空）
+public struct HPKESealedBox: Sendable {
+    public let encapsulatedKey: Data
+    public let nonce: Data
+    public let ciphertext: Data
+    public let tag: Data
+    
+    private static let magic: [UInt8] = [0x48, 0x50, 0x4B, 0x45] // "HPKE"
+    private static let headerSize = 17
+    private static let maxEncLen = 4096
+    private static let expectedNonceLen = 12
+    private static let expectedTagLen = 16
+    private static let maxCtLenHandshake = 64 * 1024
+    private static let maxCtLenPostAuth = 256 * 1024
+    
+    public init(encapsulatedKey: Data, ciphertext: Data, tag: Data, nonce: Data) {
+        self.encapsulatedKey = encapsulatedKey
+        self.ciphertext = ciphertext
+        self.tag = tag
+        self.nonce = nonce
+    }
+    
+    /// 从带 header 的合并格式解析
+    /// - Parameter isHandshake: true = 握手阶段（64KB 限制），false = 鉴权后（256KB 限制）
+    public init(combined: Data, isHandshake: Bool = true) throws {
+        // This control-plane payload is bounded. Rebase possible Data slices
+        // once so all protocol-relative offsets below are valid indices.
+        let combined = Data(combined)
+        guard combined.count >= Self.headerSize else {
+            throw HPKESealedBoxParseError.invalidSealedBox("Data too short for header")
+        }
+        guard combined.prefix(4).elementsEqual(Self.magic) else {
+            throw HPKESealedBoxParseError.invalidMagic
+        }
+        
+        let version = combined[4]
+        guard version == 1 || version == 2 else {
+            throw HPKESealedBoxParseError.unsupportedVersion(Int(version))
+        }
+        
+        // suiteWireId/flags reserved in v1; parsed by caller from outer message if needed.
+        let encLen = Int(combined[9]) | (Int(combined[10]) << 8)
+        let nonceLen = Int(combined[11])
+        let tagLen = Int(combined[12])
+        let ctLen = Int(combined[13]) | (Int(combined[14]) << 8) | (Int(combined[15]) << 16) | (Int(combined[16]) << 24)
+        
+        guard encLen <= Self.maxEncLen else {
+            throw HPKESealedBoxParseError.lengthExceeded("encLen", encLen, Self.maxEncLen)
+        }
+        
+        if version == 1 {
+            guard nonceLen == Self.expectedNonceLen else { throw HPKESealedBoxParseError.invalidNonceLength(nonceLen) }
+            guard tagLen == Self.expectedTagLen else { throw HPKESealedBoxParseError.invalidTagLength(tagLen) }
+        } else {
+            // Native HPKE keeps nonce/tag inside its ciphertext. Requiring both
+            // outer lengths to be zero prevents v2 aliases that would later be
+            // rewritten as v1 while constructing a signed transcript.
+            guard nonceLen == 0 else { throw HPKESealedBoxParseError.invalidNonceLength(nonceLen) }
+            guard tagLen == 0 else { throw HPKESealedBoxParseError.invalidTagLength(tagLen) }
+        }
+        
+        let maxCtLen = isHandshake ? Self.maxCtLenHandshake : Self.maxCtLenPostAuth
+        guard ctLen <= maxCtLen else {
+            throw HPKESealedBoxParseError.lengthExceeded("ctLen", ctLen, maxCtLen)
+        }
+        
+        var expectedTotal = Self.headerSize
+        let (sum1, o1) = expectedTotal.addingReportingOverflow(encLen)
+        let (sum2, o2) = sum1.addingReportingOverflow(nonceLen)
+        let (sum3, o3) = sum2.addingReportingOverflow(ctLen)
+        let (sum4, o4) = sum3.addingReportingOverflow(tagLen)
+        guard !o1 && !o2 && !o3 && !o4 else {
+            throw HPKESealedBoxParseError.lengthOverflow
+        }
+        expectedTotal = sum4
+        
+        guard combined.count == expectedTotal else {
+            throw HPKESealedBoxParseError.lengthMismatch(expected: expectedTotal, actual: combined.count)
+        }
+        
+        var offset = Self.headerSize
+        self.encapsulatedKey = Data(combined[offset..<(offset + encLen)])
+        offset += encLen
+        self.nonce = Data(combined[offset..<(offset + nonceLen)])
+        offset += nonceLen
+        self.ciphertext = Data(combined[offset..<(offset + ctLen)])
+        offset += ctLen
+        self.tag = Data(combined[offset..<(offset + tagLen)])
+    }
+    
+    /// 无 header 的合并格式（用于内部拼接）: enc || nonce || ct || tag
+    public var combined: Data {
+        var out = Data()
+        out.append(encapsulatedKey)
+        out.append(nonce)
+        out.append(ciphertext)
+        out.append(tag)
+        return out
+    }
+    
+    /// 生成带 header 的合并格式（用于握手消息 payload 传输/签名）
+    public func combinedWithHeader(suite: CryptoSuite) -> Data {
+        var out = Data()
+        out.append(contentsOf: Self.magic)
+        
+        let version: UInt8 = (nonce.count == Self.expectedNonceLen && tag.count == Self.expectedTagLen) ? 1 : 2
+        out.append(version)
+        
+        // suiteWireId (little-endian) + flags (reserved)
+        out.append(UInt8(suite.wireId & 0xFF))
+        out.append(UInt8(suite.wireId >> 8))
+        out.append(contentsOf: [0, 0])
+        
+        // lengths
+        out.append(UInt8(encapsulatedKey.count & 0xFF))
+        out.append(UInt8((encapsulatedKey.count >> 8) & 0xFF))
+        out.append(UInt8(nonce.count & 0xFF))
+        out.append(UInt8(tag.count & 0xFF))
+        out.append(UInt8(ciphertext.count & 0xFF))
+        out.append(UInt8((ciphertext.count >> 8) & 0xFF))
+        out.append(UInt8((ciphertext.count >> 16) & 0xFF))
+        out.append(UInt8((ciphertext.count >> 24) & 0xFF))
+        
+        out.append(encapsulatedKey)
+        out.append(nonce)
+        out.append(ciphertext)
+        out.append(tag)
+        return out
+    }
+}
+
+public enum HPKESealedBoxParseError: Error, Sendable {
+    case invalidSealedBox(String)
+    case invalidMagic
+    case unsupportedVersion(Int)
+    case invalidNonceLength(Int)
+    case invalidTagLength(Int)
+    case lengthExceeded(String, Int, Int)
+    case lengthOverflow
+    case lengthMismatch(expected: Int, actual: Int)
+}
+
+// MARK: - SigningCallback
+
+/// 签名回调协议
+public protocol SigningCallback: Sendable {
+    func sign(data: Data) async throws -> Data
+}
+
+// MARK: - SigningKeyHandle
+
+/// 签名密钥句柄
+public enum SigningKeyHandle: @unchecked Sendable {
+    case softwareKey(Data)
+    #if canImport(Security)
+    case secureEnclaveRef(SecKey)
+    #endif
+    case callback(any SigningCallback)
+}
+
+// MARK: - SessionKeys
+
+/// 会话密钥
+public struct SessionKeys: Sendable {
+    public let sendKey: Data
+    public let receiveKey: Data
+    public let negotiatedSuite: CryptoSuite
+    public let role: HandshakeRole
+    public let transcriptHash: Data
+    public let sessionId: String
+    public let createdAt: Date
+
+    public init(
+        sendKey: Data,
+        receiveKey: Data,
+        negotiatedSuite: CryptoSuite,
+        role: HandshakeRole = .initiator,
+        transcriptHash: Data,
+        sessionId: String? = nil,
+        createdAt: Date = Date()
+    ) {
+        self.sendKey = sendKey
+        self.receiveKey = receiveKey
+        self.negotiatedSuite = negotiatedSuite
+        self.role = role
+        self.transcriptHash = transcriptHash
+        self.sessionId = sessionId ?? Self.deterministicSessionId(transcriptHash: transcriptHash)
+        self.createdAt = createdAt
+    }
+
+    public static func deterministicSessionId(transcriptHash: Data) -> String {
+        var input = Data("SkyBridge-SessionId-v1|".utf8)
+        input.append(transcriptHash)
+        let digest = SHA256.hash(data: input)
+        let hex = digest.prefix(16).map { String(format: "%02x", $0) }.joined()
+        return "hs-\(hex)"
+    }
+}
+
+// MARK: - PeerIdentifier
+
+/// 对端标识
+public struct PeerIdentifier: Sendable, Hashable {
+    public let deviceId: String
+    public let endpoint: String?
+    
+    public init(deviceId: String, endpoint: String? = nil) {
+        self.deviceId = deviceId
+        self.endpoint = endpoint
+    }
+}
+
+// MARK: - HandshakeRole
+
+/// 握手角色
+public enum HandshakeRole: String, Sendable {
+    case initiator
+    case responder
+}
+
+// MARK: - HandshakeKeyShare
+
+/// 握手 KeyShare
+public struct HandshakeKeyShare: Sendable, Equatable {
+    public let suite: CryptoSuite
+    public let shareBytes: Data
+    
+    public init(suite: CryptoSuite, shareBytes: Data) {
+        self.suite = suite
+        self.shareBytes = shareBytes
+    }
+}

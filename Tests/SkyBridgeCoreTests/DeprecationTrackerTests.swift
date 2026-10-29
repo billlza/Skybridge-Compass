@@ -19,13 +19,13 @@ final class DeprecationTrackerTests: XCTestCase {
     
     override func setUp() {
         super.setUp()
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         tracker = DeprecationTracker.createForTesting()
         #endif
     }
     
     override func tearDown() {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         tracker?.reset()
         #endif
         tracker = nil
@@ -36,7 +36,7 @@ final class DeprecationTrackerTests: XCTestCase {
     
  /// Test that recordUsage tracks API calls
     func testRecordUsageTracksAPICalls() {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         tracker.recordUsage(
             api: "TestAPI.method()",
             replacement: "NewAPI.method()"
@@ -51,7 +51,7 @@ final class DeprecationTrackerTests: XCTestCase {
     
  /// Test that multiple calls to same API increment count
     func testMultipleCallsIncrementCount() {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         let api = "TestAPI.repeatedMethod()"
         let replacement = "NewAPI.repeatedMethod()"
         
@@ -67,7 +67,7 @@ final class DeprecationTrackerTests: XCTestCase {
     
  /// Test that different APIs are tracked separately
     func testDifferentAPIsTrackedSeparately() {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         tracker.recordUsage(api: "API1.method()", replacement: "New1.method()")
         tracker.recordUsage(api: "API2.method()", replacement: "New2.method()")
         tracker.recordUsage(api: "API1.method()", replacement: "New1.method()")
@@ -81,7 +81,7 @@ final class DeprecationTrackerTests: XCTestCase {
     
  /// Test that call sites are tracked
     func testCallSitesAreTracked() {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         tracker.recordUsage(
             api: "TestAPI.method()",
             replacement: "NewAPI.method()",
@@ -107,7 +107,7 @@ final class DeprecationTrackerTests: XCTestCase {
     
  /// Test that reset clears all data
     func testResetClearsAllData() {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         tracker.recordUsage(api: "API1.method()", replacement: "New1.method()")
         tracker.recordUsage(api: "API2.method()", replacement: "New2.method()")
         
@@ -123,7 +123,7 @@ final class DeprecationTrackerTests: XCTestCase {
     
  /// Test report generation
     func testReportGeneration() {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         tracker.recordUsage(api: "OldAPI.method()", replacement: "NewAPI.method()")
         
         let report = tracker.generateReport()
@@ -136,7 +136,7 @@ final class DeprecationTrackerTests: XCTestCase {
     
  /// Test empty report
     func testEmptyReport() {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         let report = tracker.generateReport()
         XCTAssertTrue(report.contains("No deprecated API usage detected"))
         #endif
@@ -146,15 +146,16 @@ final class DeprecationTrackerTests: XCTestCase {
     
  /// Test concurrent access is thread-safe
     func testConcurrentAccessIsThreadSafe() {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         let expectation = XCTestExpectation(description: "Concurrent access")
         expectation.expectedFulfillmentCount = 100
+        let tracker = tracker!
         
         let queue = DispatchQueue(label: "test.concurrent", attributes: .concurrent)
         
         for i in 0..<100 {
             queue.async {
-                self.tracker.recordUsage(
+                tracker.recordUsage(
                     api: "ConcurrentAPI.method\(i % 10)()",
                     replacement: "NewAPI.method\(i % 10)()"
                 )
@@ -179,16 +180,21 @@ final class DeprecationTrackerTests: XCTestCase {
 /// 2. Record the usage via DeprecationTracker (Requirement 10.2)
 /// **Validates: Requirements 10.1, 10.2**
 @available(macOS 14.0, iOS 17.0, *)
+@available(*, deprecated, message: "Intentional deprecated API forwarding coverage.")
 final class DeprecatedAPIForwardingTests: XCTestCase {
     
     override func setUp() {
         super.setUp()
+#if DEBUG || SKYBRIDGE_TESTING
  // Reset the shared tracker before each test
         DeprecationTracker.shared.reset()
+#endif
     }
     
     override func tearDown() {
+#if DEBUG || SKYBRIDGE_TESTING
         DeprecationTracker.shared.reset()
+#endif
         super.tearDown()
     }
     
@@ -197,7 +203,7 @@ final class DeprecatedAPIForwardingTests: XCTestCase {
  /// Test EnhancedDeviceDiscovery.init() records deprecation
     @MainActor
     func testProperty9_EnhancedDeviceDiscoveryInitRecordsDeprecation() {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
  // Create deprecated instance
         let _ = EnhancedDeviceDiscovery()
         
@@ -212,7 +218,7 @@ final class DeprecatedAPIForwardingTests: XCTestCase {
  /// Test EnhancedDeviceDiscovery.startScanning() records deprecation
     @MainActor
     func testProperty9_EnhancedDeviceDiscoveryStartScanningRecordsDeprecation() {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         let discovery = EnhancedDeviceDiscovery()
         DeprecationTracker.shared.reset()  // Reset after init
         
@@ -231,7 +237,7 @@ final class DeprecatedAPIForwardingTests: XCTestCase {
  /// Test EnhancedDeviceDiscovery.stopScanning() records deprecation
     @MainActor
     func testProperty9_EnhancedDeviceDiscoveryStopScanningRecordsDeprecation() {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         let discovery = EnhancedDeviceDiscovery()
         discovery.startScanning()
         DeprecationTracker.shared.reset()  // Reset after previous calls
@@ -253,7 +259,7 @@ final class DeprecatedAPIForwardingTests: XCTestCase {
  /// Test DeviceTypesHardwareRemoteController.init() records deprecation
     @MainActor
     func testProperty9_DeviceTypesHardwareRemoteControllerInitRecordsDeprecation() {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         let _ = DeviceTypesHardwareRemoteController()
         
         XCTAssertTrue(
@@ -266,7 +272,7 @@ final class DeprecatedAPIForwardingTests: XCTestCase {
  /// Test DeviceTypesHardwareRemoteController.disconnect() records deprecation
     @MainActor
     func testProperty9_DeviceTypesHardwareRemoteControllerDisconnectRecordsDeprecation() {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         let controller = DeviceTypesHardwareRemoteController()
         DeprecationTracker.shared.reset()  // Reset after init
         
@@ -288,7 +294,7 @@ final class DeprecatedAPIForwardingTests: XCTestCase {
  /// Test DeviceTypesSecurityManager.init() records deprecation
     @MainActor
     func testProperty9_DeviceTypesSecurityManagerInitRecordsDeprecation() {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         let _ = DeviceTypesSecurityManager()
         
         XCTAssertTrue(
@@ -301,7 +307,7 @@ final class DeprecatedAPIForwardingTests: XCTestCase {
  /// Test DeviceTypesSecurityManager.cleanup() records deprecation
     @MainActor
     func testProperty9_DeviceTypesSecurityManagerCleanupRecordsDeprecation() async {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         let manager = DeviceTypesSecurityManager()
         DeprecationTracker.shared.reset()  // Reset after init
         
@@ -324,7 +330,7 @@ final class DeprecatedAPIForwardingTests: XCTestCase {
  /// For any deprecated API in the compatibility bridges, calling it SHALL record usage
     @MainActor
     func testProperty9_AllDeprecatedAPIsRecordUsage() {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
  // Test EnhancedDeviceDiscovery
         let discovery = EnhancedDeviceDiscovery()
         discovery.startScanning()
@@ -335,7 +341,7 @@ final class DeprecatedAPIForwardingTests: XCTestCase {
         controller.disconnect()
         
  // Test DeviceTypesSecurityManager
-        let manager = DeviceTypesSecurityManager()
+        _ = DeviceTypesSecurityManager()
         
  // Verify all APIs were recorded
         let records = DeprecationTracker.shared.getUsageRecords()
@@ -371,7 +377,7 @@ final class DeprecatedAPIForwardingTests: XCTestCase {
  /// Test that replacement information is correctly recorded
     @MainActor
     func testProperty9_ReplacementInformationIsCorrect() {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         let _ = EnhancedDeviceDiscovery()
         
         let records = DeprecationTracker.shared.getUsageRecords()

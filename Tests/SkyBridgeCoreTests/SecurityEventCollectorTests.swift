@@ -8,7 +8,23 @@ import Foundation
 
 @available(macOS 14.0, iOS 17.0, *)
 final class SecurityEventCollectorTests: XCTestCase {
-    
+
+ // MARK: - Polling
+
+ /// Event delivery is asynchronous and fixed sleeps can overshoot by seconds on a loaded
+ /// host, so poll for the expected state under a deadline instead of sleeping a fixed interval.
+    private func pollUntil(
+        timeout: Duration = .seconds(5),
+        _ condition: () async -> Bool
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
+            if await condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
  // MARK: - Lifecycle Tests
     
  /// Test start/stop lifecycle
@@ -71,8 +87,12 @@ final class SecurityEventCollectorTests: XCTestCase {
         await emitter.emit(SecurityEvent.create(type: .cryptoDowngrade, message: "Test 3"))
         
  // Wait for events to be processed
-        try await Task.sleep(for: .milliseconds(50))
-        
+        try await pollUntil {
+            let handshake = await collector.handshakeFailedCount
+            let downgrade = await collector.cryptoDowngradeCount
+            return handshake == 2 && downgrade == 1
+        }
+
  // Verify counts
         let handshakeCount = await collector.handshakeFailedCount
         let downgradeCount = await collector.cryptoDowngradeCount
@@ -95,8 +115,12 @@ final class SecurityEventCollectorTests: XCTestCase {
         await emitter.emit(SecurityEvent.create(type: .limitExceeded, message: "Limit 2"))
         await emitter.emit(SecurityEvent.create(type: .rateLimitDisconnect, message: "Rate 1"))
         
-        try await Task.sleep(for: .milliseconds(50))
-        
+        try await pollUntil {
+            let limit = await collector.count(of: .limitExceeded)
+            let rate = await collector.count(of: .rateLimitDisconnect)
+            return limit == 2 && rate == 1
+        }
+
         let limitCount = await collector.count(of: .limitExceeded)
         let rateCount = await collector.count(of: .rateLimitDisconnect)
         let handshakeCount = await collector.count(of: .handshakeFailed)
@@ -121,8 +145,13 @@ final class SecurityEventCollectorTests: XCTestCase {
         await emitter.emit(SecurityEvent.create(type: .handshakeFailed, message: "Test"))
         await emitter.emit(SecurityEvent.create(type: .cryptoDowngrade, message: "Test"))
         
-        try await Task.sleep(for: .milliseconds(50))
-        
+ // Both events must be visible before asserting and before reset()
+        try await pollUntil {
+            let handshake = await collector.handshakeFailedCount
+            let downgrade = await collector.cryptoDowngradeCount
+            return handshake == 1 && downgrade == 1
+        }
+
  // Verify events were collected
         var handshakeCount = await collector.handshakeFailedCount
         XCTAssertEqual(handshakeCount, 1)
@@ -149,8 +178,12 @@ final class SecurityEventCollectorTests: XCTestCase {
         
  // Iteration 1
         await emitter.emit(SecurityEvent.create(type: .handshakeFailed, message: "Iter 1"))
-        try await Task.sleep(for: .milliseconds(30))
-        
+
+ // Quiesce delivery before reset() so no straggler leaks into iteration 2
+        try await pollUntil {
+            await collector.handshakeFailedCount == 1
+        }
+
         var count = await collector.handshakeFailedCount
         XCTAssertEqual(count, 1)
         
@@ -159,8 +192,11 @@ final class SecurityEventCollectorTests: XCTestCase {
  // Iteration 2
         await emitter.emit(SecurityEvent.create(type: .handshakeFailed, message: "Iter 2"))
         await emitter.emit(SecurityEvent.create(type: .handshakeFailed, message: "Iter 2"))
-        try await Task.sleep(for: .milliseconds(30))
-        
+
+        try await pollUntil {
+            await collector.handshakeFailedCount == 2
+        }
+
         count = await collector.handshakeFailedCount
         XCTAssertEqual(count, 2)
         
@@ -180,8 +216,10 @@ final class SecurityEventCollectorTests: XCTestCase {
         await emitter.emit(SecurityEvent.create(type: .cryptoDowngrade, message: "B"))
         await emitter.emit(SecurityEvent.create(type: .limitExceeded, message: "C"))
         
-        try await Task.sleep(for: .milliseconds(50))
-        
+        try await pollUntil {
+            await collector.allEvents().count == 3
+        }
+
         let allEvents = await collector.allEvents()
         XCTAssertEqual(allEvents.count, 3)
         
@@ -198,12 +236,16 @@ final class SecurityEventCollectorTests: XCTestCase {
         await emitter.emit(SecurityEvent.create(type: .handshakeFailed, message: "Fail 1"))
         await emitter.emit(SecurityEvent.create(type: .handshakeFailed, message: "Fail 2"))
         
-        try await Task.sleep(for: .milliseconds(50))
-        
+        try await pollUntil {
+            await collector.events(of: .handshakeFailed).count == 2
+        }
+
         let events = await collector.events(of: .handshakeFailed)
         XCTAssertEqual(events.count, 2)
-        XCTAssertEqual(events[0].message, "Fail 1")
-        XCTAssertEqual(events[1].message, "Fail 2")
+        if events.count == 2 {
+            XCTAssertEqual(events[0].message, "Fail 1")
+            XCTAssertEqual(events[1].message, "Fail 2")
+        }
         
         await collector.stopCollecting()
     }
@@ -231,8 +273,10 @@ final class SecurityEventCollectorTests: XCTestCase {
             }
             
  // Wait for processing
-            try await Task.sleep(for: .milliseconds(50))
-            
+            try await pollUntil {
+                await collector.allEvents().count == eventCount
+            }
+
  // Verify all events were captured
             let capturedCount = await collector.allEvents().count
             XCTAssertEqual(
@@ -267,8 +311,12 @@ final class SecurityEventCollectorTests: XCTestCase {
                 await emitter.emit(SecurityEvent.create(type: .cryptoDowngrade, message: "D"))
             }
             
-            try await Task.sleep(for: .milliseconds(50))
-            
+            try await pollUntil {
+                let actualHandshake = await collector.handshakeFailedCount
+                let actualDowngrade = await collector.cryptoDowngradeCount
+                return actualHandshake == handshakeCount && actualDowngrade == downgradeCount
+            }
+
  // Verify counts match
             let actualHandshake = await collector.handshakeFailedCount
             let actualDowngrade = await collector.cryptoDowngradeCount

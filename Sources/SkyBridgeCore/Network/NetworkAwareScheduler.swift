@@ -236,6 +236,12 @@ public struct SchedulingPolicy: Codable, Sendable {
 /// 网络感知传输调度服务
 @MainActor
 public final class NetworkAwareScheduler: ObservableObject {
+    private static let policyStore = CodablePersistenceStore<SchedulingPolicy>(
+        location: .protectedApplicationSupport(
+            path: "Network/scheduling-policy.json",
+            legacyUserDefaultsKey: "com.skybridge.network.policy"
+        )
+    )
 
     // MARK: - Singleton
 
@@ -522,16 +528,10 @@ public final class NetworkAwareScheduler: ObservableObject {
     // MARK: - Persistence
 
     private func savePolicy() {
-        if let data = try? JSONEncoder().encode(policy) {
-            UserDefaults.standard.set(data, forKey: "com.skybridge.network.policy")
-        }
+        try? Self.policyStore.save(policy)
     }
 
     private static func loadPolicy() -> SchedulingPolicy? {
-        guard let data = UserDefaults.standard.data(forKey: "com.skybridge.network.policy"),
-              let policy = try? JSONDecoder().decode(SchedulingPolicy.self, from: data) else {
-            return nil
-        }
-        return policy
+        Self.policyStore.load()
     }
 }

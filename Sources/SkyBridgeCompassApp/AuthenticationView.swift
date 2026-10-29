@@ -1,18 +1,57 @@
 import SwiftUI
+import AppKit
 import SkyBridgeCore
 import AuthenticationServices
+import SkyBridgeUI
 
 /// 现代化登录界面，遵循macOS 2025设计规范
 /// 采用革命性彩色Liquid Glass设计语言，支持多种登录方式
 /// 应用Apple 2025高性能最佳实践，针对Apple Silicon优化
 @available(macOS 14.0, *)
 struct AuthenticationView: View {
-    @StateObject private var viewModel = AuthenticationViewModel()
-    @StateObject private var hazeClearManager = InteractiveClearManager()
+    private enum SupabaseTurnstileAction {
+        case signInWithApple
+        case registerEmail
+        case loginEmail
+        case sendPhoneOTP
+        case resetPassword
+
+        var actionName: String {
+            switch self {
+            case .signInWithApple: return "apple_signin"
+            case .registerEmail: return "signup"
+            case .loginEmail: return "password_login"
+            case .sendPhoneOTP: return "phone_otp"
+            case .resetPassword: return "password_reset"
+            }
+        }
+    }
+
+    @EnvironmentObject private var viewModel: AuthenticationViewModel
+    @StateObject private var weatherInteraction = WeatherInteractionOwner()
+    private var hazeClearManager: InteractiveClearManager { weatherInteraction.manager }
     @EnvironmentObject private var themeConfiguration: ThemeConfiguration
+    @ObservedObject private var localizationManager = LocalizationManager.shared
     @Environment(\.colorScheme) private var colorScheme
     @State private var isAnimating = false
     @State private var selectedTab = 0
+    @State private var pendingSupabaseTurnstileContext: SupabaseTurnstileChallengeContext?
+    @State private var pendingSupabaseTurnstileAction: SupabaseTurnstileAction?
+    @State private var pendingAppleAuthorization: ASAuthorization?
+    @State private var nativeAppleSignInRequestID = UUID()
+    @State private var isNativeAppleSignInRequestPending = false
+    @State private var isAuthenticationSubmitInFlight = false
+
+    private func t(_ key: String) -> String {
+        localizationManager.localizedString(key)
+    }
+
+    private func formatted(_ key: String, _ arguments: CVarArg...) -> String {
+        let format = t(key)
+        return withVaList(arguments) { pointer in
+            NSString(format: format, locale: localizationManager.locale as NSLocale, arguments: pointer) as String
+        }
+    }
     
     var body: some View {
         GeometryReader { geometry in
@@ -33,6 +72,12 @@ struct AuthenticationView: View {
             }
         }
         .ignoresSafeArea()
+        .onSubmit {
+            submitSelectedLoginMethod()
+        }
+        .overlay(alignment: .topLeading) {
+            defaultAuthenticationSubmitButton
+        }
         .onAppear {
  // 使用Apple 2025推荐的弹性动画
             withAnimation(.interactiveSpring(response: 0.6, dampingFraction: 0.8)) {
@@ -44,6 +89,33 @@ struct AuthenticationView: View {
             let pt = locationValue.pointValue
             let flipped = CGPoint(x: pt.x, y: pt.y)
             hazeClearManager.handleMouseMove(flipped)
+        }
+        .sheet(isPresented: $viewModel.showCaptchaView) {
+            BehaviorCaptchaView { success, error in
+                viewModel.onCaptchaVerificationComplete(success: success, error: error)
+            } onCancel: {
+                viewModel.onCaptchaVerificationComplete(success: false, error: t("auth.security.verification.cancelled"))
+            }
+            .presentationDetents([.medium])
+        }
+        .sheet(item: $pendingSupabaseTurnstileContext, onDismiss: {
+            if pendingSupabaseTurnstileAction != nil || pendingAppleAuthorization != nil {
+                cancelSupabaseTurnstileChallenge()
+            }
+        }) { context in
+            SupabaseTurnstileSheet(
+                context: context,
+                onToken: { token in
+                    completeSupabaseTurnstileChallenge(token: token)
+                },
+                onCancel: {
+                    cancelSupabaseTurnstileChallenge()
+                },
+                onError: { message in
+                    failSupabaseTurnstileChallenge(message)
+                }
+            )
+            .presentationDetents([.medium])
         }
     }
     
@@ -118,7 +190,6 @@ struct AuthenticationView: View {
                         .shadow(color: primary.opacity(0.35), radius: 24, x: 0, y: 14)
                     
                     CustomGlobeIconView(cornerRadius: 12)
-                        .padding(6)
                         .frame(width: 40, height: 40)
                 }
                 .frame(width: 40, height: 40)
@@ -221,7 +292,7 @@ struct AuthenticationView: View {
             
  // 使用HStack替代LazyVGrid，提升性能
             HStack(spacing: 12) {
-                ForEach(Array(AuthenticationViewModel.LoginMethod.allCases.enumerated()), id: \.element) { index, method in
+                ForEach(Array(viewModel.availableLoginMethods.enumerated()), id: \.element) { index, method in
                     macOSNativeMethodButton(method: method, index: index)
                         .frame(maxWidth: .infinity)
                 }
@@ -342,38 +413,73 @@ struct AuthenticationView: View {
     
     private var appleLoginForm: some View {
         VStack(spacing: 20) {
+            switch viewModel.appleSignInPresentationMode {
+            case .native:
  // Apple登录按钮 - 彩色液态玻璃风格
-            SignInWithAppleButton(.signIn) { request in
-                request.requestedScopes = [.fullName, .email]
-            } onCompletion: { result in
-                Task {
-                    switch result {
-                    case .success(let authorization):
-                        await viewModel.handleAppleAuthorization(authorization)
-                    case .failure(let error):
-                        await MainActor.run {
-                            viewModel.errorMessage = error.localizedDescription
-                        }
-                    }
+                NativeAppleSignInButton(
+                    nativeAppleSignInRequestID: nativeAppleSignInRequestID,
+                    configureRequest: { request in
+                    request.requestedScopes = [
+                        ASAuthorization.Scope.fullName,
+                        ASAuthorization.Scope.email
+                    ]
+                    viewModel.configureAppleSignInRequest(request)
+                }, onRequestStarted: {
+                    isNativeAppleSignInRequestPending = true
+                }, onCompletion: { result in
+                    handleAppleSignInResult(result)
+                })
+                .frame(height: 50)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(
+                            LinearGradient(
+                                colors: [Color.white.opacity(0.3), Color.clear],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 1
+                        )
                 }
-            }
-            .signInWithAppleButtonStyle(.black)
-            .frame(height: 50)
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay {
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(
-                        LinearGradient(
-                            colors: [Color.white.opacity(0.3), Color.clear],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 1
+                .shadow(color: Color.black.opacity(0.2), radius: 8, x: 0, y: 4)
+            case .webSession, .disabled:
+                Button {
+                    submitSelectedLoginMethod()
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "applelogo")
+                            .font(.system(size: 18, weight: .semibold))
+                        Text(LocalizationManager.shared.localizedString("auth.apple.web.button"))
+                            .font(.headline)
+                    }
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, minHeight: 50)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.black)
                     )
+                }
+                .buttonStyle(.plain)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(
+                            LinearGradient(
+                                colors: [Color.white.opacity(0.3), Color.clear],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 1
+                        )
+                }
+                .shadow(color: .black.opacity(0.2), radius: 8, x: 0, y: 4)
             }
-            .shadow(color: .black.opacity(0.2), radius: 8, x: 0, y: 4)
             
-            Text(LocalizationManager.shared.localizedString("auth.apple.tip"))
+            Text(
+                viewModel.appleSignInPresentationMode == .native
+                    ? LocalizationManager.shared.localizedString("auth.apple.tip")
+                    : LocalizationManager.shared.localizedString("auth.apple.web.tip")
+            )
                 .font(.caption)
                 .foregroundColor(.secondary)
         }
@@ -398,188 +504,25 @@ struct AuthenticationView: View {
                 
                 Spacer()
             }
-            
- // 用户名输入（带可用性检查）
-            VStack(alignment: .leading, spacing: 8) {
-                if #available(macOS 14.0, *) {
-                    LiquidGlassTextField(
-                        title: LocalizationManager.shared.localizedString("auth.nebula.account"),
-                        text: $viewModel.nebulaAccount,
-                        icon: "person.circle.fill",
-                        primaryColor: .purple
-                    )
-                    .onChange(of: viewModel.nebulaAccount) { _, _ in
- // 星云账号文本变化时，注册模式下触发可用性检查
-                        if viewModel.isNebulaRegistrationMode {
-                            Task {
-                                await viewModel.checkUsernameAvailability()
-                            }
-                        }
-                    }
-                } else {
-                    ModernTextField(
-                        title: LocalizationManager.shared.localizedString("auth.nebula.account"),
-                        text: $viewModel.nebulaAccount,
-                        placeholder: LocalizationManager.shared.localizedString("auth.nebula.account.placeholder"),
-                        icon: "person.circle.fill"
-                    )
-                    .onChange(of: viewModel.nebulaAccount) { _, _ in
- // 兼容旧版 UI 的星云账号变化监听，触发可用性检查
-                        if viewModel.isNebulaRegistrationMode {
-                            Task {
-                                await viewModel.checkUsernameAvailability()
-                            }
-                        }
-                    }
-                }
-                
- // 用户名可用性提示
-                if viewModel.isNebulaRegistrationMode && !viewModel.nebulaAccount.isEmpty {
-                    HStack(spacing: 8) {
-                        if viewModel.usernameCheckInProgress {
-                            ProgressView()
-                                .scaleEffect(0.6)
-                                .progressViewStyle(CircularProgressViewStyle(tint: .purple))
-                        } else if let isAvailable = viewModel.isUsernameAvailable {
-                            Image(systemName: isAvailable ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                .font(.caption)
-                                .foregroundColor(isAvailable ? .green : .red)
-                            
-                            Text(isAvailable ? "用户名可用" : "用户名已被占用")
-                                .font(.caption)
-                                .foregroundColor(isAvailable ? .green : .red)
-                        }
-                        
-                        Spacer()
-                    }
-                    .padding(.horizontal, 16)
-                    .transition(.asymmetric(
-                        insertion: .opacity.combined(with: .move(edge: .top)).combined(with: .move(edge: .top)),
-                        removal: .opacity.combined(with: .move(edge: .top)).combined(with: .move(edge: .top))
-                    ))
-                }
-            }
-            
- // 密码输入
-            if #available(macOS 14.0, *) {
-                    LiquidGlassSecureField(
-                        title: LocalizationManager.shared.localizedString("auth.password"),
-                    text: $viewModel.nebulaPassword,
-                    icon: "lock.circle.fill",
-                    primaryColor: .purple
-                )
-            } else {
-                    ModernSecureField(
-                        title: LocalizationManager.shared.localizedString("auth.password"),
-                    text: $viewModel.nebulaPassword,
-                        placeholder: LocalizationManager.shared.localizedString("auth.password.placeholder"),
-                    icon: "lock.circle.fill"
-                )
-            }
-            
- // 注册模式下的额外字段
-            if viewModel.isNebulaRegistrationMode {
-                if #available(macOS 14.0, *) {
-                    LiquidGlassSecureField(
-                        title: LocalizationManager.shared.localizedString("auth.confirmPassword"),
-                        text: $viewModel.nebulaConfirmPassword,
-                        icon: "lock.shield.fill",
-                        primaryColor: .purple
-                    )
-                    .transition(.asymmetric(
-                        insertion: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 0.95)),
-                        removal: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 1.05))
-                    ))
-                } else {
-                    ModernSecureField(
-                        title: LocalizationManager.shared.localizedString("auth.confirmPassword"),
-                        text: $viewModel.nebulaConfirmPassword,
-                        placeholder: LocalizationManager.shared.localizedString("auth.confirmPassword.placeholder"),
-                        icon: "lock.shield.fill"
-                    )
-                    .transition(.asymmetric(
-                        insertion: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 0.95)),
-                        removal: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 1.05))
-                    ))
-                }
-                
-                if #available(macOS 14.0, *) {
-                    LiquidGlassTextField(
-                        title: LocalizationManager.shared.localizedString("auth.displayName"),
-                        text: $viewModel.nebulaDisplayName,
-                        icon: "person.text.rectangle.fill",
-                        primaryColor: .purple
-                    )
-                    .transition(.asymmetric(
-                        insertion: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 0.95)),
-                        removal: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 1.05))
-                    ))
-                } else {
-                    ModernTextField(
-                        title: LocalizationManager.shared.localizedString("auth.displayName"),
-                        text: $viewModel.nebulaDisplayName,
-                        placeholder: LocalizationManager.shared.localizedString("auth.displayName.placeholder"),
-                        icon: "person.text.rectangle.fill"
-                    )
-                    .transition(.asymmetric(
-                        insertion: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 0.95)),
-                        removal: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 1.05))
-                    ))
-                }
-                
-                if #available(macOS 14.0, *) {
-                    LiquidGlassTextField(
-                        title: LocalizationManager.shared.localizedString("auth.emailAddress"),
-                        text: $viewModel.nebulaEmail,
-                        icon: "envelope.circle.fill",
-                        primaryColor: .purple
-                    )
-                    .transition(.asymmetric(
-                        insertion: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 0.95)),
-                        removal: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 1.05))
-                    ))
-                } else {
-                    ModernTextField(
-                        title: LocalizationManager.shared.localizedString("auth.emailAddress"),
-                        text: $viewModel.nebulaEmail,
-                        placeholder: LocalizationManager.shared.localizedString("auth.emailAddress.placeholder"),
-                        icon: "envelope.circle.fill"
-                    )
-                    .transition(.asymmetric(
-                        insertion: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 0.95)),
-                        removal: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 1.05))
-                    ))
-                }
-            }
-            
+
+            nebulaBrowserLoginHint
+
  // 主要操作按钮
-            if #available(macOS 14.0, *) {
+                if #available(macOS 14.0, *) {
                     LiquidGlassButton(
-                        title: viewModel.isNebulaRegistrationMode ? LocalizationManager.shared.localizedString("auth.nebula.register") : LocalizationManager.shared.localizedString("auth.nebula.login"),
-                    icon: viewModel.isNebulaRegistrationMode ? "person.badge.plus.fill" : "sparkles",
+                        title: viewModel.isNebulaRegistrationMode ? t("auth.nebula.browser.action.register") : t("auth.nebula.browser.action.login"),
+                    icon: viewModel.isNebulaRegistrationMode ? "person.badge.plus.fill" : "safari.fill",
                     primaryColor: .purple,
                     isLoading: viewModel.isProcessing
                 ) {
-                    Task {
-                        if viewModel.isNebulaRegistrationMode {
-                            await viewModel.registerWithNebula()
-                        } else {
-                            await viewModel.loginWithNebula()
-                        }
-                    }
+                    submitSelectedLoginMethod()
                 }
-            } else {
-                ModernButton(
-                    title: viewModel.isNebulaRegistrationMode ? LocalizationManager.shared.localizedString("auth.nebula.register") : LocalizationManager.shared.localizedString("auth.nebula.login"),
+                } else {
+                    ModernButton(
+                    title: viewModel.isNebulaRegistrationMode ? t("auth.nebula.browser.action.register") : t("auth.nebula.browser.action.login"),
                     isLoading: viewModel.isProcessing
                 ) {
-                    Task {
-                        if viewModel.isNebulaRegistrationMode {
-                            await viewModel.registerWithNebula()
-                        } else {
-                            await viewModel.loginWithNebula()
-                        }
-                    }
+                    submitSelectedLoginMethod()
                 }
             }
             
@@ -600,7 +543,7 @@ struct AuthenticationView: View {
                     ModernTextField(
                         title: LocalizationManager.shared.localizedString("auth.mfa.code"),
                         text: $viewModel.mfaCode,
-                        placeholder: "请输入多因素认证码",
+                        placeholder: t("auth.mfa.code.placeholder"),
                         icon: "shield.lefthalf.filled"
                     )
                     .transition(.asymmetric(
@@ -616,22 +559,50 @@ struct AuthenticationView: View {
                         primaryColor: .purple,
                         isLoading: viewModel.isProcessing
                     ) {
-                        Task {
-                            await viewModel.verifyMFA()
-                        }
+                        submitSelectedLoginMethod()
                     }
                 } else {
                     ModernButton(
                         title: LocalizationManager.shared.localizedString("auth.mfa.verify"),
                         isLoading: viewModel.isProcessing
                     ) {
-                        Task {
-                            await viewModel.verifyMFA()
-                        }
+                        submitSelectedLoginMethod()
                     }
                 }
             }
         }
+    }
+
+    private var nebulaBrowserLoginHint: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(viewModel.isNebulaRegistrationMode ? t("auth.nebula.browser.recommended.register") : t("auth.nebula.browser.recommended.login"), systemImage: "lock.shield.fill")
+                .font(.headline)
+                .foregroundStyle(.purple)
+
+            Text(viewModel.isNebulaRegistrationMode
+                 ? t("auth.nebula.browser.description.register")
+                 : t("auth.nebula.browser.description.login"))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark.seal.fill")
+                    .foregroundStyle(.green)
+                Text(viewModel.isNebulaRegistrationMode ? t("auth.nebula.browser.capability.register") : t("auth.nebula.browser.capability.login"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(18)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(themeConfiguration.cardBackgroundMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(themeConfiguration.borderColor.opacity(0.7), lineWidth: 0.8)
+                )
+        )
     }
     
  // MARK: - 手机号登录表单
@@ -755,17 +726,7 @@ struct AuthenticationView: View {
                     primaryColor: .green,
                     isLoading: viewModel.isProcessing
                 ) {
-                    Task {
-                        if viewModel.isPhoneCodeSent {
-                            if viewModel.isPhoneRegistrationMode {
-                                await viewModel.registerWithPhone()
-                            } else {
-                                await viewModel.loginWithPhone()
-                            }
-                        } else {
-                            await viewModel.sendPhoneVerificationCode()
-                        }
-                    }
+                    submitSelectedLoginMethod()
                 }
             } else {
                 ModernButton(
@@ -778,26 +739,14 @@ struct AuthenticationView: View {
                     }(),
                     isLoading: viewModel.isProcessing
                 ) {
-                    Task {
-                        if viewModel.isPhoneCodeSent {
-                            if viewModel.isPhoneRegistrationMode {
-                                await viewModel.registerWithPhone()
-                            } else {
-                                await viewModel.loginWithPhone()
-                            }
-                        } else {
-                            await viewModel.sendPhoneVerificationCode()
-                        }
-                    }
+                    submitSelectedLoginMethod()
                 }
             }
             
  // 重新发送验证码按钮（倒计时结束后显示）
             if viewModel.isPhoneCodeSent && viewModel.phoneCodeCountdown == 0 {
                 Button {
-                    Task {
-                        await viewModel.resendPhoneVerificationCode()
-                    }
+                    beginSupabaseTurnstileAction(.sendPhoneOTP)
                 } label: {
                     Text(LocalizationManager.shared.localizedString("auth.phone.resendCode"))
                         .font(.caption)
@@ -983,35 +932,21 @@ struct AuthenticationView: View {
                     primaryColor: .blue,
                     isLoading: viewModel.isProcessing
                 ) {
-                    Task {
-                        if viewModel.isRegistrationMode {
-                            await viewModel.registerWithEmail()
-                        } else {
-                            await viewModel.loginWithEmail()
-                        }
-                    }
+                    submitSelectedLoginMethod()
                 }
             } else {
                 ModernButton(
                     title: viewModel.isRegistrationMode ? LocalizationManager.shared.localizedString("auth.email.register") : LocalizationManager.shared.localizedString("auth.email.login"),
                     isLoading: viewModel.isProcessing
                 ) {
-                    Task {
-                        if viewModel.isRegistrationMode {
-                            await viewModel.registerWithEmail()
-                        } else {
-                            await viewModel.loginWithEmail()
-                        }
-                    }
+                    submitSelectedLoginMethod()
                 }
             }
             
  // 登录模式下显示重置密码选项
             if !viewModel.isRegistrationMode {
                 Button {
-                    Task {
-                        await viewModel.resetPassword()
-                    }
+                    beginSupabaseTurnstileAction(.resetPassword)
                 } label: {
                     Text(LocalizationManager.shared.localizedString("auth.password.forgot"))
                         .font(.caption)
@@ -1046,7 +981,7 @@ struct AuthenticationView: View {
                         )
                     )
                 
-                Text("游客模式体验")
+                Text(t("guest.mode"))
                     .font(.headline)
                     .fontWeight(.medium)
                     .foregroundColor(.secondary)
@@ -1095,6 +1030,293 @@ struct AuthenticationView: View {
         }
         .buttonStyle(.plain)
         .contentShape(Rectangle())
+    }
+
+    private var canSubmitSelectedLoginMethod: Bool {
+        !viewModel.isProcessing
+            && !viewModel.showCaptchaView
+            && !isNativeAppleSignInRequestPending
+            && !isAuthenticationSubmitInFlight
+            && pendingSupabaseTurnstileContext == nil
+            && pendingSupabaseTurnstileAction == nil
+    }
+
+    private var defaultAuthenticationSubmitButton: some View {
+        Button(action: submitSelectedLoginMethod) {
+            EmptyView()
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut(.defaultAction)
+        .frame(width: 0, height: 0)
+        .opacity(0)
+        .accessibilityHidden(true)
+        .disabled(!canSubmitSelectedLoginMethod)
+    }
+
+    private func submitSelectedLoginMethod() {
+        guard canSubmitSelectedLoginMethod else { return }
+
+        switch viewModel.selectedMethod {
+        case .apple:
+            submitAppleLoginForm()
+        case .nebula:
+            submitNebulaLoginForm()
+        case .phone:
+            submitPhoneLoginForm()
+        case .email:
+            beginSupabaseTurnstileAction(viewModel.isRegistrationMode ? .registerEmail : .loginEmail)
+        }
+    }
+
+    private func submitAppleLoginForm() {
+        switch viewModel.appleSignInPresentationMode {
+        case .native:
+            isNativeAppleSignInRequestPending = true
+            nativeAppleSignInRequestID = UUID()
+        case .webSession, .disabled:
+            beginSupabaseTurnstileAction(.signInWithApple)
+        }
+    }
+
+    private func submitNebulaLoginForm() {
+        isAuthenticationSubmitInFlight = true
+
+        if viewModel.showMFAInput {
+            Task { @MainActor in
+                defer { isAuthenticationSubmitInFlight = false }
+                await viewModel.verifyMFA()
+            }
+            return
+        }
+
+        Task { @MainActor in
+            defer { isAuthenticationSubmitInFlight = false }
+            if viewModel.isNebulaRegistrationMode {
+                await viewModel.registerWithNebula()
+            } else {
+                await viewModel.loginWithNebula()
+            }
+        }
+    }
+
+    private func submitPhoneLoginForm() {
+        if viewModel.isPhoneCodeSent {
+            isAuthenticationSubmitInFlight = true
+            Task { @MainActor in
+                defer { isAuthenticationSubmitInFlight = false }
+                if viewModel.isPhoneRegistrationMode {
+                    await viewModel.completePhoneRegistration()
+                } else {
+                    await viewModel.loginWithPhone()
+                }
+            }
+            return
+        }
+
+        beginSupabaseTurnstileAction(.sendPhoneOTP)
+    }
+
+    private func beginSupabaseTurnstileAction(_ action: SupabaseTurnstileAction) {
+        pendingAppleAuthorization = nil
+
+        guard let originURL =
+                SupabaseConfiguration.shared.resolvedConfiguration?.url
+                    ?? SupabaseService.Configuration.fromEnvironment()?.url else {
+            failSupabaseTurnstileChallenge("turnstile_origin_missing")
+            return
+        }
+
+        guard let baseContext = SupabaseTurnstileConfig.current(originURL: originURL) else {
+            if SupabaseTurnstileConfig.requiresSiteKey(for: originURL) {
+                viewModel.errorMessage = t("auth.turnstile.missingConfig")
+                return
+            }
+
+            runSupabaseTurnstileAction(action, token: nil)
+            return
+        }
+
+        pendingSupabaseTurnstileAction = action
+        pendingSupabaseTurnstileContext = SupabaseTurnstileChallengeContext(
+            siteKey: baseContext.siteKey,
+            originURL: baseContext.originURL,
+            action: action.actionName
+        )
+    }
+
+    private func beginAppleSignInFlow(with authorization: ASAuthorization) {
+        guard let originURL =
+                SupabaseConfiguration.shared.resolvedConfiguration?.url
+                    ?? SupabaseService.Configuration.fromEnvironment()?.url else {
+            failSupabaseTurnstileChallenge("turnstile_origin_missing")
+            return
+        }
+
+        guard let baseContext = SupabaseTurnstileConfig.current(originURL: originURL) else {
+            if SupabaseTurnstileConfig.requiresSiteKey(for: originURL) {
+                viewModel.errorMessage = t("auth.turnstile.missingConfig")
+                return
+            }
+
+            Task { await viewModel.handleAppleAuthorization(authorization) }
+            return
+        }
+
+        pendingAppleAuthorization = authorization
+        pendingSupabaseTurnstileAction = .signInWithApple
+        pendingSupabaseTurnstileContext = SupabaseTurnstileChallengeContext(
+            siteKey: baseContext.siteKey,
+            originURL: baseContext.originURL,
+            action: SupabaseTurnstileAction.signInWithApple.actionName
+        )
+    }
+
+    private func handleAppleSignInResult(_ result: Result<ASAuthorization, Error>) {
+        isNativeAppleSignInRequestPending = false
+
+        switch result {
+        case .success(let authorization):
+            beginAppleSignInFlow(with: authorization)
+        case .failure(let error):
+            if let authError = error as? ASAuthorizationError, authError.code == .canceled {
+                return
+            }
+            viewModel.errorMessage = error.localizedDescription
+        }
+    }
+
+    private func completeSupabaseTurnstileChallenge(token: String) {
+        guard let action = pendingSupabaseTurnstileAction else {
+            failSupabaseTurnstileChallenge("turnstile_action_missing")
+            return
+        }
+
+        pendingSupabaseTurnstileAction = nil
+        pendingSupabaseTurnstileContext = nil
+        runSupabaseTurnstileAction(action, token: token)
+    }
+
+    private func cancelSupabaseTurnstileChallenge() {
+        pendingSupabaseTurnstileAction = nil
+        pendingSupabaseTurnstileContext = nil
+        pendingAppleAuthorization = nil
+        viewModel.errorMessage = t("auth.turnstile.cancelled")
+    }
+
+    private func failSupabaseTurnstileChallenge(_ message: String) {
+        pendingSupabaseTurnstileAction = nil
+        pendingSupabaseTurnstileContext = nil
+        pendingAppleAuthorization = nil
+        viewModel.errorMessage = formatted("auth.turnstile.failed", message)
+    }
+
+    private func runSupabaseTurnstileAction(_ action: SupabaseTurnstileAction, token: String?) {
+        switch action {
+        case .signInWithApple:
+            if let authorization = pendingAppleAuthorization {
+                pendingAppleAuthorization = nil
+                Task { await viewModel.handleAppleAuthorization(authorization, captchaToken: token) }
+            } else {
+                Task { await viewModel.loginWithApple(captchaToken: token) }
+            }
+        case .registerEmail:
+            Task { await viewModel.registerWithEmail(captchaToken: token) }
+        case .loginEmail:
+            Task { await viewModel.loginWithEmail(captchaToken: token) }
+        case .sendPhoneOTP:
+            Task { await viewModel.sendPhoneVerificationCode(captchaToken: token) }
+        case .resetPassword:
+            Task { await viewModel.resetPassword(captchaToken: token) }
+        }
+    }
+}
+
+private struct NativeAppleSignInButton: NSViewRepresentable {
+    let nativeAppleSignInRequestID: UUID
+    let configureRequest: @MainActor (ASAuthorizationAppleIDRequest) -> Void
+    let onRequestStarted: @MainActor () -> Void
+    let onCompletion: @MainActor (Result<ASAuthorization, Error>) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            nativeAppleSignInRequestID: nativeAppleSignInRequestID,
+            configureRequest: configureRequest,
+            onRequestStarted: onRequestStarted,
+            onCompletion: onCompletion
+        )
+    }
+
+    func makeNSView(context: Context) -> ASAuthorizationAppleIDButton {
+        let button = ASAuthorizationAppleIDButton(
+            authorizationButtonType: .signIn,
+            authorizationButtonStyle: .black
+        )
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.performRequest)
+        return button
+    }
+
+    func updateNSView(_ nsView: ASAuthorizationAppleIDButton, context: Context) {
+        context.coordinator.performRequestIfNeeded(for: nativeAppleSignInRequestID)
+    }
+
+    final class Coordinator: NSObject, ASAuthorizationControllerDelegate, ASAuthorizationControllerPresentationContextProviding {
+        private var nativeAppleSignInRequestID: UUID
+        private let configureRequest: @MainActor (ASAuthorizationAppleIDRequest) -> Void
+        private let onRequestStarted: @MainActor () -> Void
+        private let onCompletion: @MainActor (Result<ASAuthorization, Error>) -> Void
+
+        init(
+            nativeAppleSignInRequestID: UUID,
+            configureRequest: @escaping @MainActor (ASAuthorizationAppleIDRequest) -> Void,
+            onRequestStarted: @escaping @MainActor () -> Void,
+            onCompletion: @escaping @MainActor (Result<ASAuthorization, Error>) -> Void
+        ) {
+            self.nativeAppleSignInRequestID = nativeAppleSignInRequestID
+            self.configureRequest = configureRequest
+            self.onRequestStarted = onRequestStarted
+            self.onCompletion = onCompletion
+        }
+
+        @MainActor func performRequestIfNeeded(for requestID: UUID) {
+            guard requestID != nativeAppleSignInRequestID else { return }
+            nativeAppleSignInRequestID = requestID
+            performRequest()
+        }
+
+        @objc @MainActor func performRequest() {
+            onRequestStarted()
+
+            let request = ASAuthorizationAppleIDProvider().createRequest()
+            configureRequest(request)
+
+            let controller = ASAuthorizationController(authorizationRequests: [request])
+            controller.delegate = self
+            controller.presentationContextProvider = self
+            controller.performRequests()
+        }
+
+        func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {
+            NSApp.keyWindow ?? NSApp.mainWindow ?? NSWindow()
+        }
+
+        func authorizationController(
+            controller: ASAuthorizationController,
+            didCompleteWithAuthorization authorization: ASAuthorization
+        ) {
+            Task { @MainActor [onCompletion] in
+                onCompletion(.success(authorization))
+            }
+        }
+
+        func authorizationController(
+            controller: ASAuthorizationController,
+            didCompleteWithError error: Error
+        ) {
+            Task { @MainActor [onCompletion] in
+                onCompletion(.failure(error))
+            }
+        }
     }
 }
 
@@ -1484,15 +1706,17 @@ struct ModernButton: View {
 // MARK: - 预览
 
 struct AuthenticationView_Previews: PreviewProvider {
+    @MainActor
     static var previews: some View {
         if #available(macOS 14.0, *) {
             AuthenticationView()
                 .frame(width: 800, height: 600)
+                .environmentObject(AuthenticationViewModel())
                 .environmentObject(ThemeConfiguration.shared)
                 .environmentObject(WeatherIntegrationManager.shared)
                 .environmentObject(WeatherEffectsSettings.shared)
         } else {
-            Text("需要 macOS 14.0 或更高版本")
+            Text(LocalizationManager.shared.localizedString("auth.preview.unsupportedOS"))
         }
     }
 }

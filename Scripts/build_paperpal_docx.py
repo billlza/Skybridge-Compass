@@ -414,7 +414,7 @@ def main() -> int:
     build_dir = project_dir / ".build" / "paperpal_docx"
     build_dir.mkdir(parents=True, exist_ok=True)
 
-    src_tex = docs_dir / "IEEE_Paper_SkyBridge_Compass_patched.tex"
+    src_tex = docs_dir / "TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.tex"
     if not src_tex.exists():
         raise RuntimeError(f"Source tex not found: {src_tex}")
 

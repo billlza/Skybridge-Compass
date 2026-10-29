@@ -6,6 +6,11 @@
 > Swift 版本: 6.2.3 (Strict Concurrency)
 > 架构策略: 渐进增强 (Progressive Enhancement)
 
+> **⚠️ 状态说明（2026-06-16 更新）**：本文是 **功能设计方案（design proposal）**，不是已完成功能清单。下方“支持矩阵”的 ✅ 表示**设计目标**，落地程度不一：
+> - **已落地**：剪贴板同步（实现为 `ClipboardRedirection`/`ClipboardRedirectionManager`，非本文命名的 `ClipboardSyncManager`）、带宽限速、离线消息队列、多因素审批、网络感知调度。
+> - **部分/规划中**：硬件性能监控、云端备份（CKSyncEngine）、ML 异常检测（Foundation Models —— 按既定约束**禁止进入握手/加密/媒体热路径**，仅诊断旁路）。
+> 本文档当前的工具链描述（Swift 6.2.3、仅到 macOS 26）已落后于仓库实际（**Swift 6.3 / Xcode 26.5**，并已通过 `#available(... *)` 加性支持 **OS 27**，部署底线仍为 macOS 14 / iOS 17）。引用本文前请以代码与 `Package.swift` 为准；逐功能的真实状态/代码路径应在后续 `ROADMAP.md` 中维护。
+
 ---
 
 ## 🎯 多版本兼容策略

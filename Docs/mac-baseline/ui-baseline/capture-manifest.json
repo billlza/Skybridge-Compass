@@ -1,0 +1,76 @@
+{
+  "captures": [
+    {
+      "id": "UI-CAP-001",
+      "page": "Login",
+      "state": "Default",
+      "theme": "light",
+      "locale": "en",
+      "critical": true
+    },
+    {
+      "id": "UI-CAP-002",
+      "page": "Dashboard",
+      "state": "Connected",
+      "theme": "dark",
+      "locale": "en",
+      "critical": true
+    },
+    {
+      "id": "UI-CAP-003",
+      "page": "Devices",
+      "state": "Discovering",
+      "theme": "dark",
+      "locale": "en",
+      "critical": true
+    },
+    {
+      "id": "UI-CAP-004",
+      "page": "USB",
+      "state": "Attached",
+      "theme": "dark",
+      "locale": "en",
+      "critical": true
+    },
+    {
+      "id": "UI-CAP-005",
+      "page": "Transfers",
+      "state": "Connected",
+      "theme": "dark",
+      "locale": "en",
+      "critical": true
+    },
+    {
+      "id": "UI-CAP-006",
+      "page": "Remote",
+      "state": "Connected",
+      "theme": "dark",
+      "locale": "en",
+      "critical": true
+    },
+    {
+      "id": "UI-CAP-007",
+      "page": "Monitor",
+      "state": "Active",
+      "theme": "dark",
+      "locale": "en",
+      "critical": true
+    },
+    {
+      "id": "UI-CAP-008",
+      "page": "Settings",
+      "state": "Security",
+      "theme": "dark",
+      "locale": "en",
+      "critical": true
+    },
+    {
+      "id": "UI-CAP-009",
+      "page": "Tray/Notifications",
+      "state": "Connected",
+      "theme": "dark",
+      "locale": "en",
+      "critical": false
+    }
+  ]
+}

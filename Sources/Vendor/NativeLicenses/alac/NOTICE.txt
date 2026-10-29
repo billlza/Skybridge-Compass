@@ -1,0 +1,6 @@
+SkyBridge ALAC decoder uses FFmpeg 8.1.3 with the source-locked strict-error and build patches.
+Only ALAC decoding is enabled; GPL, nonfree and version-3 configurations are disabled.
+See COPYING.LGPLv2.1 and LICENSE.md. The exact upstream archive, patches, bridge sources and
+slice build scripts accompany this SDK under Sources/Vendor/NativeSources/alac.
+The framework is dynamically linked and exposes only the six sbalac C entry points.
+SDK qualification is not an application-release or output-device acceptance claim.

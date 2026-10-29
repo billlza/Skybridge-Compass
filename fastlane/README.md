@@ -29,7 +29,7 @@ For _fastlane_ installation instructions, see [Installing _fastlane_](https://do
 [bundle exec] fastlane mac build_signed
 ```
 
-构建并签名应用（包含 Widget）
+低层步骤：构建并签名带 Widget 的 Developer ID .app（Apple 登录采用 web_session，不生成最终 DMG）
 
 ### mac notarize_app
 
@@ -37,7 +37,7 @@ For _fastlane_ installation instructions, see [Installing _fastlane_](https://do
 [bundle exec] fastlane mac notarize_app
 ```
 
-公证应用（用于分发）
+低层步骤：仅公证现有 .app（不生成最终 DMG）
 
 ### mac release
 
@@ -45,7 +45,7 @@ For _fastlane_ installation instructions, see [Installing _fastlane_](https://do
 [bundle exec] fastlane mac release
 ```
 
-完整构建流程：构建 + 签名 + 公证
+最终 Developer ID 发布链：构建、签名、公证 .app/.dmg，Apple 登录固定走 web_session，并执行严格 release readiness 校验
 
 ----
 

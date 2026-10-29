@@ -29,7 +29,7 @@
 
 /* Smart Code */
 "connection.smartCode.title" = "スマート接続コード";
-"connection.smartCode.fullDescription" = "すべてのシナリオに対応する6桁の英数字コードを生成します。P2P直接接続とスマートリレーをサポート。";
+"connection.smartCode.fullDescription" = "すべてのシナリオに対応する短期英数字コードを生成します。P2P直接接続とスマートリレーをサポート。";
 "connection.smartCode.highlight" = "✨ 革新：ショートコード + スマートルーティング + 10分間有効";
 "connection.device.this" = "このデバイスで";
 "connection.smartCode.shareInstruction" = "このコードを共有して接続";
@@ -38,10 +38,16 @@
 "connection.smartCode.generate" = "コード生成";
 "connection.smartCode.placeholder" = "コードを入力";
 "connection.smartCode.connect" = "接続";
+"connection.codeMode.title" = "コードモード";
+"connection.codeMode.short" = "短期";
+"connection.codeMode.day" = "1日固定";
+"connection.codeMode.shortHint" = "標準の安全モードです。接続コードは短時間で自動更新されます。";
+"connection.codeMode.dayHint" = "24時間同じコードを維持します。一時的に省電力に入っても再接続しやすくなります。";
 "connection.fast" = "高速接続";
 "connection.p2p.priority" = "P2P優先";
 "connection.smart.relay" = "スマートリレー";
 "connection.validity.10min" = "10分間有効";
+"connection.validity.1day" = "24時間有効";
 
 /* Dashboard */
 "dashboard.unknownIP" = "不明なIP";
@@ -180,6 +186,11 @@
 "settings.general.dataManagement" = "データ管理";
 "settings.general.clearCache" = "キャッシュを削除";
 "settings.general.cacheSize" = "現在のキャッシュ：%@";
+"settings.general.cacheSize.unavailable" = "計算できません";
+"settings.general.cache.clearing" = "キャッシュを削除中...";
+"settings.general.cache.clearComplete" = "キャッシュを削除しました。%@ を解放しました。";
+"settings.general.cache.clearFailed" = "キャッシュの削除に失敗しました：%@";
+"settings.general.cache.sizeFailed" = "キャッシュサイズを取得できません：%@";
 "settings.general.exportSettings" = "設定をエクスポート";
 "settings.general.importSettings" = "設定をインポート";
 "settings.general.resetSettings" = "デフォルトにリセット";
@@ -231,7 +242,7 @@
 
 /* Smart Code */
 "discovery.smartCode.title" = "スマート接続コード";
-"discovery.smartCode.description" = "6桁のショートコード、10分間有効、リモートアシスタンス用";
+"discovery.smartCode.description" = "短期コード、10分間有効、リモートアシスタンス用";
 "discovery.smartCode.onThisDevice" = "このデバイスで";
 "discovery.smartCode.shareInstruction" = "このコードを相手に共有してください";
 "discovery.smartCode.copy" = "コピー";
@@ -248,7 +259,7 @@
 "discovery.mode.subtitle.localScan" = "同ネットワーク";
 "discovery.mode.subtitle.qrCode" = "スキャン";
 "discovery.mode.subtitle.cloudLink" = "設定不要";
-"discovery.mode.subtitle.connectionCode" = "6桁コード";
+"discovery.mode.subtitle.connectionCode" = "短期コード";
 
 /* Cloud Link Section */
 "discovery.icloud.status.syncing" = "同期中...";
@@ -276,7 +287,7 @@
 "discovery.capability.messages" = "メッセージ";
 
 /* Smart Code Section (Additional) */
-"discovery.code.enterPrompt" = "6桁のコードを入力";
+"discovery.code.enterPrompt" = "接続コードを入力";
 "discovery.code.connect" = "接続";
 
 /* Settings - Network */
@@ -294,6 +305,13 @@
 "settings.network.discovery.timeout" = "検出タイムアウト:";
 "settings.network.discovery.customServiceType" = "カスタムサービス種別:";
 "settings.network.discovery.customServiceTypeExample" = "例: _custom._tcp.";
+"settings.network.topBar.title" = "トップバーのネットワーク情報";
+"settings.network.topBar.showIPLocation" = "IP都市とプロキシ状態を表示";
+"settings.network.topBar.showIPLocation.help" = "トップナビに公開IPの出口都市を表示し、システムプロキシの有効状態を示します";
+"settings.network.topBar.showSpeed" = "リアルタイム速度を表示";
+"settings.network.topBar.showSpeed.help" = "トップナビに現在のダウンロード/アップロードスループットを表示します";
+"settings.network.topBar.showLatency" = "ネットワーク遅延を表示";
+"settings.network.topBar.showLatency.help" = "トップナビにHTTPSネットワーク遅延の測定結果を表示します";
 "settings.network.connection.title" = "接続設定";
 "settings.network.connection.timeout" = "接続タイムアウト:";
 "settings.network.connection.retryCount" = "再試行回数:";
@@ -322,6 +340,7 @@
 "status.idle" = "待機中";
 "status.enabled" = "有効";
 "status.disabled" = "無効";
+"status.unavailable" = "利用不可";
 "status.optimized" = "最適化";
 "status.needsAdjust" = "調整が必要";
 "status.load.high" = "高負荷";
@@ -337,6 +356,8 @@
 "action.resetNetworkSettings" = "ネットワーク設定をリセット";
 "action.resetToDefaults" = "デフォルトにリセット";
 "action.resetMonitorData" = "モニターデータをリセット";
+"action.exportMonitorData" = "監視データをエクスポート";
+"action.clearMonitorHistory" = "監視履歴をクリア";
 
 "unit.dbm" = "dBm";
 "unit.count.short" = "件";
@@ -415,7 +436,7 @@
 "settings.advanced.debug.logLevel" = "ログレベル:";
 
 "settings.advanced.performance.title" = "性能最適化";
-"settings.advanced.performance.mode" = "性能モード:";
+"settings.advanced.performance.mode" = "レンダリング性能 (MetalFX):";
 "settings.advanced.currentMode" = "現在: %@";
 "settings.advanced.performance.details.title" = "構成詳細:";
 "settings.advanced.performance.renderScale.range" = "レンダースケール: 50%–100%";
@@ -432,7 +453,8 @@
 "settings.advanced.performance.shadowQuality.format" = "シャドウ品質: %@";
 "settings.advanced.performance.postProcessing.format" = "後処理: %@";
 "settings.advanced.performance.showRealtimeFPS" = "リアルタイムFPSを表示";
-"settings.advanced.performance.showRealtimeFPS.help" = "トップナビにMetalレンダリングFPSを表示。未取得時は占位 — FPS";
+"settings.advanced.performance.showRealtimeFPS.help" = "天気の背景（雨・雲・もや）が実際に画面に表示されたフレーム数を1秒単位で表示します。他のUIやリモートセッションは含みません。測定できない場合は — FPS と表示します。";
+"metric.frameRate.paused" = "一時停止中";
 "settings.advanced.hardware.enableAcceleration" = "ハードウェアアクセラレーションを有効化";
 "settings.advanced.memory.optimize" = "メモリ使用を最適化";
 "settings.advanced.backgroundScanning" = "バックグラウンドスキャン";
@@ -453,10 +475,13 @@
 "settings.advanced.pqc.title" = "量子耐性セキュリティ";
 "settings.advanced.pqc.enableAppLayer" = "ポスト量子暗号（アプリ層）を有効化";
 "settings.advanced.pqc.enableHybridTLS" = "TLSハイブリッドネゴシエーションを有効化（システム対応時）";
+"settings.advanced.pqc.preferXWing" = "X-Wing ハイブリッドスイートを優先（macOS 26+）";
+"settings.advanced.pqc.preferXWing.help" = "起動時に ML-KEM-768 と X-Wing の両方を宣言し、このスイッチは優先順位のみを変更します。";
+"settings.advanced.pqc.preferXWing.caption" = "有効時は X-Wing を優先し、無効時は ML-KEM-768 を優先します（どちらも宣言は維持）。";
 "settings.advanced.pqc.signatureAlgorithm" = "署名アルゴリズム:";
 "settings.advanced.pqc.useSecureEnclaveMLDSA" = "ML-DSAにSecure Enclaveを使用";
 "settings.advanced.pqc.useSecureEnclaveMLKEM" = "ML-KEMにSecure Enclaveを使用";
-"settings.advanced.pqc.note" = "Secure Enclave PQCは macOS 26+（CryptoKit）のみ。macOS 14–15 は liboqs（ML‑KEM‑768/ML‑DSA‑65）へ、OQS 不可の場合は Classic（X25519/Ed25519）へフォールバック。";
+"settings.advanced.pqc.note" = "X-Wing（ハイブリッド）と ML-KEM-768（純PQC）は macOS 26+（CryptoKit）で利用可能で、Secure Enclave PQC も同条件で有効です。macOS 14–15 は liboqs（ML‑KEM‑768/ML‑DSA‑65）へ、OQS 不可の場合は Classic（X25519/Ed25519）へフォールバック。";
 
 "settings.advanced.smoothing.title" = "デバイス信号スムージング";
 "settings.advanced.smoothing.alpha" = "スムージング係数（EMA）";
@@ -470,13 +495,25 @@
 "settings.fileTransfer.defaultPath" = "デフォルト転送パス:";
 "settings.fileTransfer.maxConcurrentTransfers" = "最大同時転送:";
 "settings.fileTransfer.bufferSize" = "転送バッファサイズ:";
+"settings.fileTransfer.chunkSize" = "チャンクサイズ:";
+"settings.fileTransfer.rateLimit" = "転送速度制限:";
+"settings.fileTransfer.rateLimit.unlimited" = "無制限";
+"settings.fileTransfer.pathFallback.title" = "保存先を更新しました";
+"settings.fileTransfer.pathFallback.message" = "設定されたパスが利用できないため、次のパスへ自動変更しました: %@";
+"settings.fileTransfer.pathFailure.title" = "ファイル受信フォルダを設定できません";
+"settings.fileTransfer.pathFailure.message" = "フォルダの権限を確認するか、書き込み可能な別の場所を選択してください。従来の受信フォルダは変更されません。";
 "settings.fileTransfer.options.title" = "転送オプション";
 "settings.fileTransfer.options.showNotification" = "転送完了時に通知を表示";
 "settings.fileTransfer.options.autoRetryFailed" = "失敗した転送を自動再試行";
+"settings.fileTransfer.options.resumeEnabled" = "レジューム転送を有効化（失敗時に再試行）";
 "settings.fileTransfer.options.keepHistory" = "転送履歴を保持";
 "settings.fileTransfer.options.keepAwake" = "転送中にシステムをスリープさせない";
 "settings.fileTransfer.security.title" = "セキュリティ設定";
 "settings.fileTransfer.security.enableEncrypt" = "転送暗号化を有効化";
+"settings.fileTransfer.security.encryption.alwaysOn" = "ファイル転送の暗号化は常に有効です";
+"settings.fileTransfer.security.encryption.alwaysOn.detail" = "従来の転送プロトコルは AES-256-GCM を必須とし、平文へのダウングレードはできません。";
+"settings.security.certificateValidation.alwaysOn" = "証明書検証は常に有効です";
+"settings.security.certificateValidation.alwaysOn.detail" = "このバージョンでは厳格な証明書検証を常時適用します。";
 "settings.fileTransfer.security.verifyIntegrity" = "ファイル整合性を検証";
 "settings.fileTransfer.security.scanVirus" = "転送ファイルをウイルススキャン";
 "settings.fileTransfer.security.algorithm" = "暗号アルゴリズム:";
@@ -506,6 +543,7 @@
 "settings.videoTransfer.enableAdaptiveBitrate.help" = "ネットワーク状況に応じてビットレートを自動調整";
 "settings.videoTransfer.compressionQuality" = "圧縮品質:";
 
+"settings.remote.qualityPerformance.title" = "画質とパフォーマンス";
 "settings.remote.display.title" = "表示設定";
 "settings.remote.display.videoQuality" = "動画品質:";
 "settings.remote.display.compressionLevel" = "圧縮レベル:";
@@ -514,6 +552,10 @@
 "settings.remote.interaction.title" = "インタラクション設定";
 "settings.remote.interaction.clipboardSync" = "クリップボード同期を有効化";
 "settings.remote.interaction.audioRedirection" = "オーディオリダイレクトを有効化";
+"settings.remote.interaction.audioUnavailable.title" = "オーディオリダイレクトは現在利用できません";
+"settings.remote.interaction.audioUnavailable.body" = "この機能は現在も調整中です。このビルドでは無効化されており、手動で有効にできません。";
+"settings.remote.interaction.audioPrinterUnavailable.title" = "オーディオとプリンターのリダイレクトは現在利用できません";
+"settings.remote.interaction.audioPrinterUnavailable.body" = "これらの機能は現在も調整中です。このビルドでは無効化されており、手動で有効にできません。";
 "settings.remote.interaction.fileTransfer" = "ファイル転送を有効化";
 "settings.remote.interaction.trackpadGestures" = "トラックパッドジェスチャを有効化";
 "settings.remote.interaction.mouseSensitivity" = "マウス感度:";
@@ -521,6 +563,7 @@
 "settings.remote.network.title" = "ネットワーク最適化";
 "settings.remote.network.enableBandwidthAdaptive" = "帯域幅の自動適応を有効化";
 "settings.remote.network.enableUDP" = "UDP転送を有効化";
+"settings.remote.network.enableEncryption" = "ネットワーク暗号化を有効化";
 "settings.remote.network.enableCompression" = "データ圧縮を有効化";
 "settings.remote.network.bandwidthLimit" = "帯域幅制限（Mbps）:";
 "settings.remote.network.bufferSize" = "バッファサイズ:";
@@ -528,9 +571,10 @@
 "settings.systemMonitor.config.title" = "モニタ設定";
 "settings.systemMonitor.config.refreshInterval" = "更新間隔:";
 "settings.systemMonitor.config.enableRealtime" = "リアルタイム監視を有効化";
-"settings.systemMonitor.config.enableHistory" = "履歴を有効化";
+"settings.systemMonitor.config.enableHistory" = "トレンドインジケーターを表示";
 "settings.systemMonitor.config.enablePerformanceAlerts" = "性能アラートを有効化";
 "settings.systemMonitor.config.retentionDays" = "データ保持（日数):";
+"settings.systemMonitor.config.maxHistoryPoints" = "最大履歴ポイント:";
 "settings.systemMonitor.display.title" = "表示オプション";
 "settings.systemMonitor.display.cpu" = "CPU使用率を表示";
 "settings.systemMonitor.display.memory" = "メモリ使用率を表示";
@@ -539,10 +583,17 @@
 "settings.systemMonitor.display.temperature" = "温度情報を表示";
 "settings.systemMonitor.display.fanSpeed" = "ファン回転数を表示";
 "settings.systemMonitor.display.chartType" = "グラフ種類:";
+"settings.systemMonitor.display.noneEnabled" = "表示する監視指標がありません";
+"settings.systemMonitor.display.noneEnabled.detail" = "CPU・メモリ・温度・ファンのいずれかを有効にしてください。";
 "settings.systemMonitor.alerts.title" = "アラート設定";
 "settings.systemMonitor.alerts.cpuThreshold" = "CPUアラート閾値:";
 "settings.systemMonitor.alerts.memoryThreshold" = "メモリアラート閾値:";
 "settings.systemMonitor.alerts.diskThreshold" = "ディスクアラート閾値:";
+"settings.systemMonitor.alerts.enableTemperatureMonitoring" = "温度監視を有効化";
+"settings.systemMonitor.alerts.temperatureThreshold" = "温度アラート閾値:";
+"settings.systemMonitor.alerts.enableFanSpeedMonitoring" = "ファン回転数監視を有効化";
+"settings.systemMonitor.alerts.fanSpeedThreshold" = "ファン回転数アラート閾値:";
+"settings.systemMonitor.alerts.thermalThrottling" = "サーマルスロットリング警報を有効化";
 "settings.systemMonitor.alerts.enableSound" = "サウンドアラートを有効化";
 "settings.systemMonitor.alerts.enableNotificationCenter" = "通知センターを有効化";
 "settings.systemMonitor.advanced.title" = "詳細オプション";
@@ -550,6 +601,8 @@
 "settings.systemMonitor.advanced.exportData" = "モニタデータをエクスポート";
 "settings.systemMonitor.advanced.enableRemoteMonitoring" = "リモート監視を有効化";
 "settings.systemMonitor.advanced.samplingPrecision" = "サンプリング精度:";
+"settings.systemMonitor.unsupported" = "未対応";
+"settings.systemMonitor.unsupported.detail" = "この項目は現在のバージョンで監視パイプラインに未接続です。";
 
 "fileTransfer.connectionStatus" = "接続状態";
 "status.transferring" = "転送中";
@@ -573,18 +626,17 @@
 "fileTransfer.history.clear" = "履歴をクリア";
 "fileTransfer.history.emptyTitle" = "転送履歴はありません";
 "fileTransfer.history.emptySubtitle" = "完了した転送がここに表示されます";
-"fileTransfer.debug.title" = "デバッグパネル";
-"fileTransfer.debug.hmacTagHex" = "HMACタグ（16進）";
-"fileTransfer.debug.signatureResult" = "ファイル署名検証結果";
 "common.none" = "なし";
 "action.preview" = "プレビュー";
 "transferStatus.preparing" = "準備中";
 "transferStatus.transferring" = "転送中";
 "transferStatus.paused" = "一時停止";
 "transferStatus.completed" = "完了";
+"fileTransfer.receiptDeliveryUnknown" = "ファイルは保存されましたが、送信側の確認状態は不明です。自動再送しないでください。";
 "transferStatus.failed" = "失敗";
 "transferStatus.cancelled" = "キャンセル済み";
 "action.close" = "閉じる";
+"action.disconnect" = "切断";
 "action.share" = "共有";
 "status.idle" = "待機中";
 "status.adaptiveTuning" = "アダプティブ調整";
@@ -614,7 +666,7 @@
 "remote.newConnection" = "新しい接続";
 "remote.overlay.connectingTo" = "%@ に接続中...";
 "remote.empty.title" = "セッションを選択してリモートデスクトップを開始";
-"remote.empty.subtitle" = "左のリストからアクティブなセッションを選ぶか、新しい接続を作成";
+"remote.empty.subtitle" = "おすすめ：デバイス検出でワンタップ接続。手動の RDP/VNC/SSH は上級者向けの代替手段です。";
 "remote.toolbar.newConnection.help" = "リモート接続を作成";
 "remote.toolbar.refresh.help" = "セッションを更新";
 "remote.performance.monitor" = "Metal 4 パフォーマンスモニタ";
@@ -624,8 +676,8 @@
 "remote.connectionMode.near" = "近距離";
 "remote.connectionMode.far" = "遠距離";
 "remote.connectionMode.auto.description" = "最適なモードを自動選択（同一ネットワークでは近距離を優先）";
-"remote.connectionMode.near.description" = "近距離ハードウェアミラーリング — 同一ネットワークで低遅延（ScreenCaptureKit + HEVC + QUIC）";
-"remote.connectionMode.far.description" = "遠距離 RDP — ネットワークを跨いでも安定（FreeRDP 3.x + GFX-AVC444）";
+"remote.connectionMode.near.description" = "同じネットワーク内のデバイスを表示・操作";
+"remote.connectionMode.far.description" = "手動 RDP（制限付きプレビュー）— FreeRDP 3.30 ソフトウェア GDI、厳密な証明書検証、チャネルリダイレクトなし";
 "common.unknown" = "不明";
 "profile.title" = "プロフィール";
 "action.close" = "閉じる";
@@ -642,6 +694,16 @@
 "about.title" = "SkyBridge Compass Pro について";
 "about.checkingUpdates" = "更新を確認中...";
 "about.checkUpdates" = "更新を確認";
+"update.available.title" = "新しいバージョンがあります";
+"update.available.message" = "SkyBridge Compass Pro %@ (Build %@) を利用できます。macOS %@ 以降が必要です。更新パッケージは Developer ID 署名済みで公証済みの DMG で、ダウンロード後に macOS Gatekeeper が検証します。";
+"update.latest.title" = "最新バージョンです";
+"update.latest.message" = "SkyBridge Compass Pro %@ は現在の安定版です。";
+"update.unsupported.title" = "新しいバージョンがありますが、この Mac では利用できません";
+"update.unsupported.message" = "バージョン %@ には macOS %@ 以降が必要です。現在の macOS は %@ です。";
+"update.failed.title" = "更新確認に失敗しました";
+"update.failed.message" = "更新確認を完了できませんでした: %@";
+"update.download" = "更新をダウンロード";
+"update.later" = "あとで";
 "about.systemInfo" = "システム情報";
 "about.diagnostics" = "診断ツール";
 "about.feedback" = "フィードバックを送信";
@@ -652,7 +714,23 @@
 "brand.title" = "SkyBridge Compass";
 "brand.tagline" = "境界なくつながる";
 "auth.selectMethod" = "サインイン方法を選択";
+"auth.method.apple.title" = "Apple ID";
+"auth.method.nebula.title" = "Nebula";
+"auth.method.phone.title" = "電話番号";
+"auth.method.email.title" = "メール";
+"auth.method.apple.subtitle" = "Face ID または Touch ID で素早くサインイン";
+"auth.method.nebula.subtitle" = "企業向けの Nebula アイデンティティ認証";
+"auth.method.phone.subtitle" = "SMS 認証コードで安全にサインイン";
+"auth.method.email.subtitle" = "メールアドレスとパスワードでサインイン";
 "auth.apple.tip" = "Apple IDでサインイン";
+"auth.apple.web.button" = "Appleで続ける";
+"auth.apple.web.tip" = "SkyBridge Compass Pro は Apple の安全なWebサインインを開き、認証後に自動でアプリへ戻ります。";
+"auth.apple.unavailable" = "現在 Apple サインインは利用できません。Nebula、電話番号、またはメールをご利用ください。";
+"auth.apple.native.enabled" = "このビルドではネイティブの Sign in with Apple を使用します。Apple サインインボタンを使ってください。";
+"auth.apple.web.only" = "このバージョンではブラウザで Apple サインインを完了します。もう一度 Apple サインインボタンを押してください。";
+"auth.apple.credential.missing" = "Apple ID の認証情報を取得できません。";
+"auth.apple.identityToken.missing" = "ID トークンを取得できません。";
+"auth.apple.context.expired" = "Apple サインインのコンテキストが期限切れになりました。再試行してください。";
 "auth.nebula.toggle.hasAccount" = "アカウントをお持ちですか？ ログイン";
 "auth.nebula.toggle.noAccount" = "アカウントがありませんか？ 登録";
 "auth.nebula.account" = "Nebula アカウント";
@@ -667,7 +745,16 @@
 "auth.emailAddress.placeholder" = "メールアドレスを入力";
 "auth.nebula.register" = "Nebula登録";
 "auth.nebula.login" = "Nebulaにログイン";
+"auth.nebula.browser.action.register" = "安全なブラウザで登録";
+"auth.nebula.browser.action.login" = "安全なブラウザでログイン";
+"auth.nebula.browser.recommended.register" = "推奨: 安全なブラウザで登録";
+"auth.nebula.browser.recommended.login" = "推奨: 安全なブラウザでログイン";
+"auth.nebula.browser.description.register" = "Nebula の登録はシステムブラウザで完了し、メール確認や二段階確認もブラウザ認証セッション内で行われます。";
+"auth.nebula.browser.description.login" = "Nebula のログインはシステムブラウザで完了し、認可や二段階確認もブラウザ認証セッション内で行われます。";
+"auth.nebula.browser.capability.register" = "PKCE、ブラウザ内登録、MFA に対応";
+"auth.nebula.browser.capability.login" = "PKCE とブラウザ内 MFA に対応";
 "auth.mfa.code" = "MFAコード";
+"auth.mfa.code.placeholder" = "MFAコードを入力";
 "auth.mfa.verify" = "MFAを確認";
 "auth.phone.toggle.hasAccount" = "アカウントあり？ ログイン";
 "auth.phone.toggle.noAccount" = "アカウントなし？ 登録";
@@ -689,6 +776,77 @@
 "auth.email.register" = "アカウント登録";
 "auth.email.login" = "メールでログイン";
 "auth.password.forgot" = "パスワードをお忘れですか？";
+"auth.security.verification.cancelled" = "セキュリティ確認をキャンセルしました。";
+"auth.turnstile.cancelled" = "Cloudflare Turnstile の確認をキャンセルしました。";
+"auth.turnstile.failed" = "Cloudflare Turnstile の確認に失敗しました: %@";
+"auth.turnstile.missingConfig" = "Cloudflare Turnstile の設定が不足しています。TURNSTILE_SITE_KEY を確認してください。";
+"auth.preview.unsupportedOS" = "macOS 14.0 以降が必要です";
+"auth.displayName.default.user" = "ユーザー";
+"auth.displayName.default.newUser" = "新規ユーザー";
+"auth.displayName.default.apple" = "Appleユーザー";
+"auth.displayName.default.nebula" = "Nebulaユーザー";
+"auth.displayName.default.guest" = "ゲストユーザー";
+"auth.list.separator" = "、";
+"auth.security.retryAfter.hours" = "%@（約 %d 時間後に再試行できます）";
+"auth.security.retryAfter.minutes" = "%@（約 %d 分後に再試行できます）";
+"auth.security.deviceVerificationFailed" = "デバイスの確認に失敗しました。もう一度お試しください。";
+"auth.security.rateLimited.local" = "リクエストが多すぎます。しばらくしてからもう一度お試しください。";
+"auth.security.rateLimited.remote" = "このリクエストは追加のリスク制御によりブロックされました。しばらくしてからもう一度お試しください。";
+"auth.security.captchaRequired" = "先にセキュリティ確認を完了してください。";
+"auth.security.checkUnavailable" = "認証のセキュリティチェックは一時的に利用できません。しばらくしてからもう一度お試しください。";
+"auth.captcha.verificationFailed" = "確認に失敗しました。もう一度お試しください。";
+"auth.nebula.credentials.required" = "アカウントとパスワードを入力してください。";
+"auth.browser.flow.apple.name" = "Appleサインイン";
+"auth.browser.flow.nebula.name" = "Nebulaサインイン";
+"auth.browser.flow.cancelled" = "%@はキャンセルされました。";
+"auth.browser.flow.startFailed" = "%@を開始できません。";
+"auth.apple.browser.callbackSessionMissing" = "Appleサインインのコールバックにセッション情報が含まれていません。";
+"auth.nebula.browser.invalidCallback" = "Nebula のコールバック URL が無効です。";
+"auth.nebula.browser.stateMismatch" = "Nebula サインインの状態検証に失敗しました。";
+"auth.nebula.browser.authorizationCodeMissing" = "Nebula から認可コードが返されませんでした。";
+"auth.code.required" = "確認コードを入力してください。";
+"auth.mfa.verificationFailedWithReason" = "MFA の確認に失敗しました: %@";
+"auth.phone.invalid" = "有効な電話番号を入力してください。";
+"auth.phone.code.sent" = "確認コードを送信しました。";
+"auth.phone.code.resent" = "確認コードを再送しました。";
+"auth.phone.code.resendFailedWithReason" = "コードの再送に失敗しました: %@";
+"auth.phone.code.sendFailedWithReason" = "コードの送信に失敗しました: %@";
+"auth.password.strength.weak" = "弱い";
+"auth.password.strength.medium" = "普通";
+"auth.password.strength.strong" = "強い";
+"auth.password.strength.veryStrong" = "非常に強い";
+"auth.password.tooShort" = "パスワードは 8 文字以上で入力してください。";
+"auth.password.tooLong" = "パスワードは 128 文字以内で入力してください。";
+"auth.password.requirement.uppercase" = "大文字";
+"auth.password.requirement.lowercase" = "小文字";
+"auth.password.requirement.number" = "数字";
+"auth.password.requirement.specialCharacter" = "特殊文字";
+"auth.password.strengthInsufficient" = "パスワード強度が不足しています。";
+"auth.password.strengthInsufficientWithSuggestions" = "パスワード強度が不足しています。追加をおすすめします: %@";
+"auth.password.weakGeneric" = "パスワード強度が不足しています。";
+"auth.password.confirmationMismatch" = "入力したパスワードが一致しません。";
+"auth.username.tooShort" = "ユーザー名は 4 文字以上で入力してください。";
+"auth.username.tooLong" = "ユーザー名は 20 文字以内で入力してください。";
+"auth.username.invalidCharacters" = "ユーザー名には英字、数字、アンダースコアのみ使用できます。";
+"auth.username.reserved" = "このユーザー名は予約済みです。";
+"auth.username.cannotStartWithNumber" = "ユーザー名を数字で始めることはできません。";
+"auth.username.invalid" = "ユーザー名の形式が正しくありません。";
+"auth.email.invalid" = "有効なメールアドレスを入力してください。";
+"auth.email.disposableNotSupported" = "使い捨てメールアドレスでは登録できません。";
+"auth.registration.identifierGenerationFailed" = "ID の生成に失敗しました。もう一度お試しください。";
+"auth.registration.verifyEmailSent" = "登録が完了しました。メールを確認して認証リンクを開いてください。";
+"auth.registration.failedWithReason" = "登録に失敗しました: %@";
+"auth.registration.pendingAdminApproval" = "登録が完了しました。現在、管理者の承認待ちです。";
+"auth.registration.failed" = "登録に失敗しました。";
+"auth.phone.required" = "電話番号を入力してください。";
+"auth.profile.displayName.required" = "表示名を入力してください。";
+"auth.profile.displayName.tooLong" = "表示名は 50 文字以内で入力してください。";
+"auth.email.required" = "メールアドレスを入力してください。";
+"auth.password.required" = "パスワードを入力してください。";
+"auth.passwordReset.emailSent" = "パスワード再設定メールを送信しました。メールをご確認ください。";
+"auth.passwordReset.emailSendFailedWithReason" = "パスワード再設定メールの送信に失敗しました: %@";
+"auth.passwordReset.sessionMissing" = "利用可能なパスワード再設定セッションがありません。メール内のリンクをもう一度開いてください。";
+"auth.session.notLoggedIn" = "ログインしていません。";
 "guest.mode" = "ゲストモード";
 "monitor.noData" = "データなし";
 "monitor.axis.time" = "時間";
@@ -711,6 +869,15 @@
 "auth.username" = "ユーザー名";
 "remote.form.connect" = "接続";
 "remote.form.connectFailed" = "接続に失敗しました";
+
+// New: recommended entry + advanced disclosure
+"remote.connect.recommended" = "デバイス検出で接続（推奨）";
+"remote.connect.advanced" = "上級：手動（RDP/VNC/SSH）";
+"remote.form.recommended.section" = "推奨";
+"remote.form.recommended.body" = "多くの場合、IP/ポートの手入力は不要です。デバイス検出でデバイスを選んで接続してください。";
+"remote.form.openDeviceDiscovery" = "デバイス検出を開く";
+"remote.form.advanced.section" = "上級：手動設定（RDP/VNC/SSH）";
+"remote.form.rdp.certificateNotice" = "RDP は、証明書チェーンが macOS に信頼され、ホスト名が一致するエンドポイントのみを受け入れます。手動の信頼が必要な未知、自己署名、または変更された証明書は拒否されます。このバージョンには証明書登録や TOFU フローはありません。";
 "monitor.title" = "システム監視";
 "monitor.status.monitoring" = "監視中";
 "monitor.status.initializing" = "初期化中...";
@@ -721,6 +888,33 @@
 "monitor.helper.enable" = "高度監視を有効化…";
 "monitor.helper.uninstall.tip" = "昇格Helperをアンインストールして既定状態に戻せます。";
 "monitor.helper.uninstall" = "Helper をアンインストール…";
+"monitor.metric.unavailableWithReason" = "利用不可（%@）";
+"monitor.metric.stale" = "期限切れ";
+"monitor.metric.staleSuffix" = "(期限切れ)";
+"monitor.metric.reason.unsupported" = "ハードウェアまたはOSが未対応";
+"monitor.metric.reason.permissionDenied" = "高度監視の権限が必要";
+"monitor.metric.reason.notProvidedByOS" = "ハードウェアまたはOSがこの指標を提供していません";
+"monitor.metric.reason.helperUnavailable" = "高度監視 Helper が利用できません";
+"monitor.metric.reason.helperOutdated" = "高度監視 Helper のバージョンが古いです";
+"monitor.metric.reason.parsingFailed" = "サンプリング解析に失敗";
+"monitor.metric.reason.sampling" = "サンプリング中";
+"monitor.metric.reason.requiresExpertMode" = "エキスパートモードが必要です";
+"monitor.metric.reason.temporarilyInitializing" = "初期化中";
+"monitor.metric.source.kernelAPI" = "Kernel API";
+"monitor.metric.source.ioAccelerator" = "IOAccelerator";
+"monitor.metric.source.smc" = "SMC";
+"monitor.metric.source.iohid" = "IOHID";
+"monitor.metric.source.ioreport" = "IOReport";
+"monitor.metric.source.powermetrics" = "powermetrics";
+"monitor.metric.source.processInfoThermalState" = "thermalState";
+"monitor.metric.availability.available" = "利用可能";
+"monitor.metric.availability.unavailable" = "利用不可";
+"monitor.metric.availability.stale" = "期限切れ";
+"monitor.metric.age.seconds" = "%d秒前";
+"monitor.mode.title" = "監視モード";
+"monitor.mode.standard" = "標準";
+"monitor.mode.expert" = "エキスパート";
+"monitor.diagnostics.title" = "監視診断";
 "monitor.overview" = "概要";
 "monitor.cpu.details" = "CPU 詳細";
 "monitor.memory.details" = "メモリ詳細";
@@ -747,6 +941,292 @@
 "monitor.network.totalUpload" = "総アップロード";
 "monitor.network.totalDownload" = "総ダウンロード";
 "monitor.network.activeConnections" = "アクティブ接続";
+
+/* Notifications */
+"notifications.center.title" = "通知センター";
+"notifications.center.empty" = "通知はまだありません";
+"notifications.discovery.trust.verified" = "検証済み";
+"notifications.discovery.trust.unverified" = "未検証";
+"notifications.discovery.detail" = "%@ · %@:%@ · %@";
+"notifications.discovery.reason" = "理由: %@";
+"notifications.discovery.title" = "接続可能なデバイスを検出";
+"notifications.discovery.title.unverified" = "接続可能なデバイスを検出（未検証）";
+"notifications.fileTransfer.completed" = "ファイル転送完了";
+"notifications.fileTransfer.failed" = "ファイル転送失敗";
+"notifications.fileTransfer.savedTo" = "%@ に保存済み";
+"notifications.fileTransfer.completed.body" = "%@ の転送が完了しました";
+"notifications.fileTransfer.failed.body" = "%@ の転送に失敗しました";
+"notifications.fileReceived.completed" = "ファイル受信完了";
+"notifications.fileReceived.savedTo" = "%@ を %@ に保存しました";
+"notifications.fileReceived.completedBody" = "%@ の受信が完了しました";
+"notifications.remoteDesktop.ended.title" = "リモートデスクトップ終了";
+"notifications.remoteDesktop.ended.body" = "リモートデスクトップセッションは正常に終了しました。";
+"notifications.remoteDesktop.ended.bodyWithDevice" = "%@ とのリモートデスクトップセッションは正常に終了しました。";
+"notifications.remoteDesktop.interrupted.title" = "リモートデスクトップが中断";
+"notifications.remoteDesktop.interrupted.body" = "リモートデスクトップセッションが予期せず中断されました。";
+"notifications.remoteDesktop.interrupted.bodyWithDevice" = "%@ とのリモートデスクトップセッションが予期せず中断されました。";
+"notifications.chunkVerification.passed" = "チャンク検証成功";
+"notifications.chunkVerification.failed" = "チャンク検証失敗";
+"notifications.merkleVerification.passed" = "Merkle 検証成功";
+"notifications.merkleVerification.failed" = "Merkle 検証失敗";
+"notifications.certificate.passed" = "証明書検証成功";
+"notifications.certificate.failed" = "証明書検証失敗";
+"notifications.certificate.elapsed" = "所要時間 %@ms";
+"notifications.merkleTiming.verify" = "Merkle 検証時間";
+"notifications.merkleTiming.compute" = "Merkle 計算時間";
+"notifications.welcome.greeting" = "%@さん、%@！";
+"notifications.welcome.title" = "%@さん、%@！SkyBridge Compass へようこそ";
+"notifications.welcome.detail" = "デバイスをまたぐ接続を始めましょう";
+"notifications.greeting.lateNight" = "夜更かしですね";
+"notifications.greeting.earlyMorning" = "おはようございます";
+"notifications.greeting.morning" = "おはようございます";
+"notifications.greeting.noon" = "こんにちは";
+"notifications.greeting.afternoon" = "こんにちは";
+"notifications.greeting.evening" = "こんばんは";
+"notifications.greeting.default" = "こんにちは";
+"notifications.wellness.lateNight.title" = "夜更かしにご注意ください";
+"notifications.wellness.lateNight.detail" = "目を休めて、睡眠の質を守りましょう";
+"notifications.rest.1h.title" = "1時間連続で使用しています";
+"notifications.rest.1h.detail" = "少し休憩して、水分補給と目のリフレッシュをしましょう";
+"notifications.rest.duration.title" = "利用時間のお知らせ";
+"notifications.rest.duration.detail" = "立ち上がって少し動きましょう。座りっぱなしは体に良くありません";
+"notifications.rest.tip.title" = "健康メモ";
+"notifications.rest.tip.detail" = "遠くを見て、目をリラックスさせましょう";
+"notifications.rest.breathe.title" = "休憩のおすすめ";
+"notifications.rest.breathe.detail" = "深呼吸をして、疲れを和らげましょう";
+"notifications.rest.break.title" = "ひと休みしましょう";
+"notifications.rest.break.detail" = "軽く体を動かして、よい状態を保ちましょう";
+"notifications.rest.3h.title" = "3時間連続で使用しています";
+"notifications.rest.3h.detail" = "しっかり休憩して、水分補給と軽い運動をしましょう";
+"notifications.weather.aqi.veryUnhealthy.title" = "空気質が非常に悪いです (AQI: %@)";
+"notifications.weather.aqi.veryUnhealthy.detail" = "外出を控え、マスク着用と換気抑制をおすすめします";
+"notifications.weather.aqi.unhealthy.title" = "空気質が悪いです (AQI: %@)";
+"notifications.weather.aqi.unhealthy.detail" = "マスクを着用し、できるだけ屋外活動を減らしましょう";
+"notifications.weather.aqi.sensitive.title" = "空気質が高めです (AQI: %@)";
+"notifications.weather.aqi.sensitive.detail" = "敏感な方はマスクを着け、外出時間を短めにしましょう";
+"notifications.weather.aqi.caution.title" = "空気質に注意 (AQI: %@)";
+"notifications.weather.aqi.caution.detail" = "屋外時間を少し短くし、最新の空気質を確認しましょう";
+"notifications.weather.uv.strong.title" = "強い紫外線に注意";
+"notifications.weather.uv.strong.detail" = "日焼け止めやサングラスを使い、日差しを避けましょう";
+"notifications.weather.uv.moderate.title" = "紫外線対策のお知らせ";
+"notifications.weather.uv.moderate.detail" = "紫外線がやや強めです。外出時は日差し対策を";
+"notifications.weather.clear.title" = "よい天気です";
+"notifications.weather.clear.detail" = "外出向きですが、日差しの浴びすぎにはご注意ください";
+"notifications.weather.rain.title" = "雨への備え";
+"notifications.weather.rain.detail" = "傘を持って、滑りやすい路面に注意しましょう";
+"notifications.weather.snow.title" = "雪への備え";
+"notifications.weather.snow.detail" = "暖かくして、足元の滑りに注意してください";
+"notifications.weather.haze.title" = "もや・霧への注意";
+"notifications.weather.haze.detail" = "マスクの着用、外出控えめ、安全運転をおすすめします";
+"notifications.weather.thunderstorm.title" = "雷雨に注意";
+"notifications.weather.thunderstorm.detail" = "外出を控え、雨具を持ち、落雷に注意してください";
+"notifications.weather.generic.title" = "天気のお知らせ";
+"notifications.weather.generic.detail" = "現在の時間帯（%@）に合わせて、天気を見て行動を調整しましょう";
+"notifications.deviceDiscovered.title" = "新しいデバイスを検出";
+"notifications.deviceDiscovered.body" = "検出されたデバイス: %@";
+"notifications.action.showInFinder" = "Finder で表示";
+"notifications.action.retry" = "再試行";
+"notifications.common.unknownFile" = "不明なファイル";
+"notifications.common.unknownError" = "不明なエラー";
+"notifications.common.id" = "ID: %@";
+"notifications.common.chunk" = "チャンク: %@";
+"notifications.common.expectedActual" = "期待値/実値: %@ / %@";
 "monitor.network.quality" = "ネットワーク品質";
 "qrcode.generateFailed" = "QRコードの生成に失敗";
 "qrcode.regenerate" = "再生成";
+
+/* Remote Control Security Notice */
+"remoteControl.securityNotice.windowTitle" = "リモート制御セキュリティ通知";
+"remoteControl.securityNotice.appName" = "SkyBridge Compass";
+"remoteControl.securityNotice.pendingTitle" = "%@ がリモート制御の承認を求めています";
+"remoteControl.securityNotice.activeTitle" = "%@ はリモート制御されています";
+"remoteControl.securityNotice.subtitle" = "受信 %@ リモート制御は認証済み暗号化チャネルを使用します。PQC はネゴシエート済みスイートで証明された場合のみ表示されます。";
+"remoteControl.securityNotice.transport.p2p" = "P2P";
+"remoteControl.securityNotice.transport.webrtc" = "WebRTC";
+"remoteControl.securityNotice.remoteIP" = "IP";
+"remoteControl.securityNotice.transport" = "転送";
+"remoteControl.securityNotice.account" = "デバイス申告アカウント";
+"remoteControl.securityNotice.nebulaID" = "デバイス申告 Nebula ID";
+"remoteControl.securityNotice.device" = "デバイス";
+"remoteControl.securityNotice.pqc" = "PQC スイート";
+"remoteControl.securityNotice.approve" = "承認";
+"remoteControl.securityNotice.reject" = "拒否";
+"remoteControl.securityNotice.disconnect" = "切断";
+"remoteControl.securityNotice.close" = "閉じる";
+"remoteControl.securityNotice.collapse" = "折りたたむ";
+"remoteControl.securityNotice.expand" = "展開";
+"remoteControl.securityNotice.valueUnavailable" = "未提供";
+
+/* トップバーのネットワーク情報 */
+"topbar.network.ipLocation.pending" = "IP · …";
+"topbar.network.ipLocation.ready" = "%@ · %@";
+"topbar.network.ipLocation.failed" = "IP · 利用不可";
+"topbar.network.unknownCity" = "不明な都市";
+"topbar.network.unknownIp" = "不明な IP";
+"topbar.network.proxy.enabled" = "プロキシ";
+"topbar.network.proxy.disabled" = "直接";
+"topbar.network.proxy.help.enabled" = "システムプロキシはオン";
+"topbar.network.proxy.help.disabled" = "システムプロキシはオフ";
+"topbar.network.ipLocation.help.idle" = "パブリック IP の都市情報はサンプル待ちです";
+"topbar.network.ipLocation.help.loading" = "パブリック IP の都市とプロキシ状態を取得中";
+"topbar.network.ipLocation.help.ready" = "%@ · %@ · %@";
+"topbar.network.ipLocation.help.failed" = "パブリック IP の都市情報取得に失敗: %@";
+"topbar.network.speed.pending" = "↓ … · ↑ …";
+"topbar.network.speed.ready" = "↓ %@ · ↑ %@";
+"topbar.network.speed.failed" = "速度を利用できません";
+"topbar.network.speed.help.idle" = "ネットワークスループットはサンプル待ちです";
+"topbar.network.speed.help.loading" = "ネットワークスループットをサンプリング中";
+"topbar.network.speed.help.ready" = "ダウンロード %@、アップロード %@";
+"topbar.network.speed.help.failed" = "ネットワークスループットのサンプリングに失敗: %@";
+"topbar.network.latency.pending" = "遅延 …";
+"topbar.network.latency.ready" = "%@ ms";
+"topbar.network.latency.failed" = "遅延を利用できません";
+"topbar.network.latency.help.idle" = "パブリックネットワーク遅延はプローブ待ちです";
+"topbar.network.latency.help.loading" = "パブリックネットワーク遅延をプローブ中";
+"topbar.network.latency.help.ready" = "SkyBridge Web エントリへの HTTPS 応答遅延: %@ ms";
+"topbar.network.latency.help.failedUnavailable" = "パブリックネットワーク遅延を利用できません";
+"topbar.network.latency.help.failed" = "パブリックネットワーク遅延のプローブに失敗: %@";
+
+/* ローカルカメラストリーミング */
+"remote.camera.connect" = "ローカルカメラに接続";
+"remote.camera.defaultName" = "ローカルカメラ";
+"remote.camera.name" = "カメラ名（任意）";
+"remote.camera.endpoint" = "正確な RTSP/RTSPS URL";
+"remote.camera.contract" = "プライベート IP リテラルと正確なストリームパスを入力してください。現行版は H.264 と RTSP インターリーブ TCP 映像のみ対応し、パス推測やベンダークラウド中継は行いません。";
+"remote.camera.plaintextAcknowledgement" = "RTSP の制御データと映像が転送時に暗号化されないことを理解しています。";
+"remote.camera.tlsNotice" = "RTSPS はシステム証明書の信頼とホスト検証を使用し、無効または自己署名の証明書を拒否します。";
+"remote.camera.protocol" = "ローカルカメラ（RTSP）";
+"remote.camera.rendererUnavailable" = "映像レンダラーを初期化できません。";
+"remote.camera.feedUnavailable.title" = "映像を利用できません";
+"remote.camera.feedUnavailable.failed" = "カメラストリームが失敗し、資格情報と通信リソースは解放されました。正確な URL、資格情報、H.264 プロファイル、ローカルネットワークを確認して再接続してください。";
+"remote.camera.feedUnavailable.released" = "セッションのレンダリングリソースは解放されました。再接続してください。";
+
+/* Account Devices (账号设备) */
+"discovery.mode.accountDevices" = "アカウント端末";
+"discovery.mode.subtitle.accountDevices" = "同じアカウント";
+"discovery.accountDevices.title" = "アカウント端末";
+"discovery.accountDevices.description" = "同じアカウントでサインインした端末は名前・IP・OS・オンライン状態が自動で記録され、別ネットワークからも確認できます";
+"discovery.accountDevices.nebulaId" = "Nebula ID";
+"discovery.accountDevices.empty.title" = "まだ他の端末はありません";
+"discovery.accountDevices.empty.message" = "別の端末で同じアカウントで SkyBridge にサインインするとここに表示されます";
+"discovery.accountDevices.signedOut" = "サインインするとこのアカウントの端末が表示されます";
+"discovery.accountDevices.loading" = "アカウント端末を同期中…";
+"discovery.accountDevices.retryHint" = "自動的に再試行します。更新ボタンも使えます";
+"discovery.accountDevices.stale" = "一覧が古い可能性があります（最終更新：%@）";
+"discovery.accountDevices.truncated" = "端末が 200 台を超えています。先頭の 200 台のみ表示しています";
+"discovery.accountDevices.lastUpdated" = "%@に更新";
+"discovery.accountDevices.status.lanReachable" = "LAN で到達可能";
+"discovery.accountDevices.status.online" = "オンライン";
+"discovery.accountDevices.status.offline" = "オフライン";
+"discovery.accountDevices.capability.controllable" = "被制御可";
+"discovery.accountDevices.capability.controlOnly" = "操作側のみ";
+"discovery.accountDevices.lan" = "LAN";
+"discovery.accountDevices.public" = "パブリック";
+"discovery.accountDevices.deviceId" = "端末 ID";
+"discovery.accountDevices.lastSeen" = "最終アクティブ";
+"discovery.accountDevices.neverSeen" = "未接続";
+"discovery.accountDevices.registration.pending" = "承認待ち";
+"discovery.accountDevices.registration.frozen" = "凍結中";
+"discovery.accountDevices.action.useConnectionCode" = "コードで接続";
+"discovery.accountDevices.hint.online" = "この端末はオンラインですが、利用可能な直接接続経路がまだ見つかりません。相手側で接続コードを生成して入力してください";
+"discovery.accountDevices.copyAddress" = "アドレスをコピー";
+"discovery.accountDevices.copyDeviceId" = "端末 ID をコピー";
+"discovery.accountDevices.failure.notAuthenticated" = "未サインイン";
+"discovery.accountDevices.failure.deviceNotActive" = "この端末はまだアカウントで有効化されていません（%@）";
+"discovery.accountDevices.failure.rateLimited" = "リクエストが多すぎます。しばらくして再試行します";
+"discovery.accountDevices.failure.registryUnavailable" = "端末レジストリを利用できません（%@）";
+"discovery.accountDevices.failure.serverRejected" = "サーバーがリクエストを拒否しました（HTTP %d）";
+"discovery.accountDevices.failure.transport" = "シグナリングサーバーに接続できません";
+"discovery.accountDevices.failure.malformedResponse" = "サーバー応答を解析できません";
+"discovery.accountDevices.failure.localIdentityUnavailable" = "この端末の ID がまだ準備できていません";
+"discovery.accountDevices.failure.localAuthenticationUnavailable" = "本機のログイン状態が利用できません（%@）";
+"discovery.accountDevices.serviceInactive.title" = "アカウントデバイス同期が動作していません";
+"discovery.accountDevices.serviceInactive.message" = "ログイン済みですが、アカウントデバイス同期が開始されていません。ダッシュボードを開き直してください。改善しない場合はアプリを再起動してください。";
+"discovery.accountDevices.heartbeatFailed" = "このデバイスのオンライン報告に失敗しました。他のデバイスから見えない可能性があります";
+"dashboard.accountDevices" = "アカウント端末";
+"dashboard.accountDevices.summary" = "%d 台 · %d 台オンライン";
+"dashboard.accountDevices.viewAll" = "すべて表示";
+"dashboard.accountDevices.empty" = "同じアカウントでサインインした他の端末がここに表示されます";
+
+"remoteControl.securityNotice.inputController" = "入力操作中";
+
+"remoteControl.securityNotice.observer" = "閲覧のみ";
+
+"remoteControl.securityNotice.transferInput" = "入力操作を引き継ぐ";
+
+"remoteControl.securityNotice.approveView" = "閲覧を許可";
+
+"info.appleSilicon" = "Appleシリコン";
+"info.optimizationEnabled" = "最適化有効";
+"info.pCore" = "高性能コア";
+"info.eCore" = "高効率コア";
+"info.multiCoreOpt" = "マルチコア最適化";
+"info.reqAppleSilicon" = "Appleシリコンが必要です";
+"info.deviceUnsupported" = "非対応のデバイス";
+"info.standardMode" = "標準モード";
+
+"remoteControl.securityNotice.localInputController" = "この Mac がキーボードとマウスの操作権を持っています。リモート閲覧は継続します。";
+
+// Saved pairing identity status
+"discovery.trustedDevices.section" = "信頼済みデバイス";
+"discovery.pendingPairings.section" = "確認が必要なペアリング記録";
+"discovery.pendingPairings.explanation" = "これらの記録は現在、接続の本人確認に使えません。端末がアカウントから削除されたわけではありません。アカウント端末を選ぶか、現在の接続用 QR コードを読み取ってください。";
+
+// Account device removal
+"accountDevices.remove.action" = "アカウントから削除";
+"accountDevices.remove.title" = "アカウントのデバイスを削除";
+"accountDevices.remove.message" = "「%@」をアカウントから削除しますか？このデバイスはアカウントのデバイスサービスを利用できなくなります。ローカルファイルと保存済みのペアリングは保持されます。";
+"accountDevices.remove.confirm" = "削除";
+"accountDevices.remove.cancel" = "キャンセル";
+"accountDevices.remove.selfRemoved" = "このデバイスは削除されました。アカウントのデバイス同期を停止しました。";
+"accountDevices.remove.failed" = "削除を確認できませんでした。更新してデバイスの状態を確認してから再試行してください。";
+
+"accountDevices.myDevices" = "自分のデバイス";
+
+/* Weather dashboard labels and relative time. */
+"weather.metric.humidity" = "湿度";
+"weather.metric.windSpeed" = "風速";
+"weather.metric.visibility" = "視程";
+"weather.metric.aqi" = "AQI";
+"weather.status.loading" = "天気情報を取得中…";
+"weather.status.loadingHint" = "初回の読み込みには数秒かかります";
+"weather.status.error" = "天気情報を取得できませんでした";
+"weather.action.retry" = "再試行";
+"weather.time.justNow" = "たった今";
+"weather.time.minutesAgo" = "%d分前";
+"weather.time.hoursAgo" = "%d時間前";
+
+"remote.session.hostStopped" = "接続先が画面共有を停止しました。";
+
+"remote.session.permissionRevoked" = "接続先が画面共有の許可を取り消しました。";
+
+"remote.session.captureFailed" = "接続先の画面キャプチャに失敗し、共有が終了しました。";
+
+"audio.output.source_format" = "音源の PCM 形式";
+
+"audio.authorization.renewal.waiting" = "再生中はアカウントの認可の自動更新を試みます。";
+"audio.authorization.renewal.checking" = "今回の再生認可を更新するため、アカウントのデバイスを確認しています。";
+"audio.authorization.renewal.retry_pending" = "認可をまだ更新できません。元の有効期限内で再生を続け、後で自動的に再試行します。";
+"audio.authorization.renewal.unavailable" = "認可を更新できませんでした。現在の有効期限までのみ再生を続けられます。";
+"audio.authorization.renewal.failed" = "再生認可が無効になりました。再生を停止しています。";
+
+"audio.output.endpoint_unavailable" = "選択した出力を現在使用できません。接続を確認し、システムのサウンド設定で利用可能な出力を選んでください。";
+
+"audio.output.format_mismatch" = "この出力では現在、音源のサンプルレート、チャンネル数、PCM 表現、またはビット深度を使用できません。表示された形式に対応する出力を選んでください。";
+
+"audio.output.mixing_required" = "現在の出力経路はシステムミキシングを許可するため、厳密な再生の条件を満たしません。音源と同じ形式で排他的に出力できる機器を選んでください。";
+
+"audio.output.unsupported_layout" = "出力のチャンネル配置が音源と一致しないか、厳密な再生でまだ対応していません。配置が一致する出力を選んでください。";
+
+"audio.output.unsupported_topology" = "現在の出力チャンネル構成は、厳密な再生でまだ対応していません。別の出力機器を使用してください。";
+
+"audio.output.processing_active" = "音量ゲイン、ミュート、またはモノラル処理が有効なため、厳密な再生を開始できません。システムと機器のサウンド設定を確認してください。";
+
+"audio.output.device_busy" = "この出力への排他的アクセスを取得できませんでした。他の音声再生を停止してから再試行してください。";
+
+"audio.output.variable_buffer_size" = "この出力は可変バッファを使用しており、厳密な再生でまだ対応していません。別の出力機器を選んでください。";
+
+"audio.output.property_unavailable" = "この機器の厳密な出力チェックを完了できませんでした。機器を再接続してから再試行してください。";
+
+/* Reconnect the current USB accessory through a fresh authenticated session. */
+"connection.usb.retryTimeout" = "USB 接続がタイムアウトしました。スマートフォンで SkyBridge を開き、接続をやり直してください。";

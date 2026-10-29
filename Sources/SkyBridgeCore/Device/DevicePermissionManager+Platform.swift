@@ -1,3 +1,8 @@
+// macOS-exclusive: this file is built on frameworks that exist only on macOS
+// (AppKit / IOKit / ScreenCaptureKit / CoreWLAN / MetalFX / ServiceManagement /
+// ApplicationServices). It is excluded from other platforms so SkyBridgeCore can be
+// the single shared core for iOS as well. No behaviour changes on macOS.
+#if os(macOS)
 //
 // DevicePermissionManager+Platform.swift
 // SkyBridgeCore
@@ -11,6 +16,7 @@
 import Foundation
 import ScreenCaptureKit
 import AppKit
+import CoreGraphics
 import OSLog
 import Combine
 
@@ -24,27 +30,16 @@ extension DevicePermissionManager {
  /// 检查屏幕录制权限
  /// - Returns: 权限状态
     public func checkScreenRecordingPermission() async -> SBPermissionStatus {
-        do {
-            _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            return .authorized
-        } catch {
-            return .denied
-        }
+        await ScreenCaptureAuthorizationProbe.shared.isAuthorized() ? .authorized : .denied
     }
     
  /// 请求屏幕录制权限
  /// 注意：macOS 不支持直接请求屏幕录制权限，需要用户手动授权
  /// - Returns: 是否已授权
     public func requestScreenRecordingPermission() async -> Bool {
- // 触发权限请求（通过尝试获取屏幕内容）
-        let status = await checkScreenRecordingPermission()
-        if status == .authorized {
-            return true
+        await ScreenCaptureAuthorizationProbe.shared.requestAuthorizationIfNeeded {
+            ScreenCapturePermissionSettingsOpener.open()
         }
-        
- // 如果未授权，打开系统偏好设置
-        openScreenRecordingSettings()
-        return false
     }
     
  /// 打开屏幕录制权限设置
@@ -91,8 +86,9 @@ extension DevicePermissionManager {
  // 检查辅助功能权限
         results[.accessibility] = checkAccessibilityPermission()
         
- // 本地网络权限在 macOS 上始终授权
-        results[.localNetwork] = .authorized
+        // macOS Local Network privacy has no reliable static query API.
+        // Route attempts surface denial through Network.framework.
+        results[.localNetwork] = .notDetermined
         
         return results
     }
@@ -215,15 +211,11 @@ public final class PlatformPermissionMonitor: ObservableObject {
  // MARK: - Private Methods
     
     private func checkScreenRecordingPermissionInternal() async -> SBPermissionStatus {
-        do {
-            _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            return .authorized
-        } catch {
-            return .denied
-        }
+        await ScreenCaptureAuthorizationProbe.shared.isAuthorized() ? .authorized : .denied
     }
     
     private nonisolated func checkAccessibilityPermissionInternal() -> SBPermissionStatus {
         return AXIsProcessTrusted() ? .authorized : .denied
     }
 }
+#endif

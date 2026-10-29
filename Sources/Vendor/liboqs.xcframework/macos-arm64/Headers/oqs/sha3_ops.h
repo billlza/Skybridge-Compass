@@ -53,188 +53,188 @@ typedef struct {
  */
 struct OQS_SHA3_callbacks {
 	/**
- * Implementation of function OQS_SHA3_sha3_256.
- */
+	 * Implementation of function OQS_SHA3_sha3_256.
+	 */
 	void (*SHA3_sha3_256)(uint8_t *output, const uint8_t *input, size_t inplen);
 
 	/**
- * Implementation of function OQS_SHA3_sha3_256_inc_init.
- */
+	 * Implementation of function OQS_SHA3_sha3_256_inc_init.
+	 */
 	void (*SHA3_sha3_256_inc_init)(OQS_SHA3_sha3_256_inc_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA3_sha3_256_inc_absorb.
- */
+	 * Implementation of function OQS_SHA3_sha3_256_inc_absorb.
+	 */
 	void (*SHA3_sha3_256_inc_absorb)(OQS_SHA3_sha3_256_inc_ctx *state, const uint8_t *input, size_t inlen);
 
 	/**
- * Implementation of function OQS_SHA3_sha3_256_inc_finalize.
- */
+	 * Implementation of function OQS_SHA3_sha3_256_inc_finalize.
+	 */
 	void (*SHA3_sha3_256_inc_finalize)(uint8_t *output, OQS_SHA3_sha3_256_inc_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA3_sha3_256_inc_ctx_release.
- */
+	 * Implementation of function OQS_SHA3_sha3_256_inc_ctx_release.
+	 */
 	void (*SHA3_sha3_256_inc_ctx_release)(OQS_SHA3_sha3_256_inc_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA3_sha3_256_inc_ctx_reset.
- */
+	 * Implementation of function OQS_SHA3_sha3_256_inc_ctx_reset.
+	 */
 	void (*SHA3_sha3_256_inc_ctx_reset)(OQS_SHA3_sha3_256_inc_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA3_sha3_256_inc_ctx_clone.
- */
+	 * Implementation of function OQS_SHA3_sha3_256_inc_ctx_clone.
+	 */
 	void (*SHA3_sha3_256_inc_ctx_clone)(OQS_SHA3_sha3_256_inc_ctx *dest, const OQS_SHA3_sha3_256_inc_ctx *src);
 
 	/**
- * Implementation of function OQS_SHA3_sha3_384.
- */
+	 * Implementation of function OQS_SHA3_sha3_384.
+	 */
 	void (*SHA3_sha3_384)(uint8_t *output, const uint8_t *input, size_t inplen);
 
 	/**
- * Implementation of function OQS_SHA3_sha3_384_inc_init.
- */
+	 * Implementation of function OQS_SHA3_sha3_384_inc_init.
+	 */
 	void (*SHA3_sha3_384_inc_init)(OQS_SHA3_sha3_384_inc_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA3_sha3_384_inc_absorb.
- */
+	 * Implementation of function OQS_SHA3_sha3_384_inc_absorb.
+	 */
 	void (*SHA3_sha3_384_inc_absorb)(OQS_SHA3_sha3_384_inc_ctx *state, const uint8_t *input, size_t inlen);
 
 	/**
- * Implementation of function OQS_SHA3_sha3_384_inc_finalize.
- */
+	 * Implementation of function OQS_SHA3_sha3_384_inc_finalize.
+	 */
 	void (*SHA3_sha3_384_inc_finalize)(uint8_t *output, OQS_SHA3_sha3_384_inc_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA3_sha3_384_inc_ctx_release.
- */
+	 * Implementation of function OQS_SHA3_sha3_384_inc_ctx_release.
+	 */
 	void (*SHA3_sha3_384_inc_ctx_release)(OQS_SHA3_sha3_384_inc_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA3_sha3_384_inc_ctx_reset.
- */
+	 * Implementation of function OQS_SHA3_sha3_384_inc_ctx_reset.
+	 */
 	void (*SHA3_sha3_384_inc_ctx_reset)(OQS_SHA3_sha3_384_inc_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA3_sha3_384_inc_ctx_clone.
- */
+	 * Implementation of function OQS_SHA3_sha3_384_inc_ctx_clone.
+	 */
 	void (*SHA3_sha3_384_inc_ctx_clone)(OQS_SHA3_sha3_384_inc_ctx *dest, const OQS_SHA3_sha3_384_inc_ctx *src);
 
 	/**
- * Implementation of function OQS_SHA3_sha3_512.
- */
+	 * Implementation of function OQS_SHA3_sha3_512.
+	 */
 	void (*SHA3_sha3_512)(uint8_t *output, const uint8_t *input, size_t inplen);
 
 	/**
- * Implementation of function OQS_SHA3_sha3_512_inc_init.
- */
+	 * Implementation of function OQS_SHA3_sha3_512_inc_init.
+	 */
 	void (*SHA3_sha3_512_inc_init)(OQS_SHA3_sha3_512_inc_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA3_sha3_512_inc_absorb.
- */
+	 * Implementation of function OQS_SHA3_sha3_512_inc_absorb.
+	 */
 	void (*SHA3_sha3_512_inc_absorb)(OQS_SHA3_sha3_512_inc_ctx *state, const uint8_t *input, size_t inlen);
 
 	/**
- * Implementation of function OQS_SHA3_sha3_512_inc_finalize.
- */
+	 * Implementation of function OQS_SHA3_sha3_512_inc_finalize.
+	 */
 	void (*SHA3_sha3_512_inc_finalize)(uint8_t *output, OQS_SHA3_sha3_512_inc_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA3_sha3_512_inc_ctx_release.
- */
+	 * Implementation of function OQS_SHA3_sha3_512_inc_ctx_release.
+	 */
 	void (*SHA3_sha3_512_inc_ctx_release)(OQS_SHA3_sha3_512_inc_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA3_sha3_512_inc_ctx_reset.
- */
+	 * Implementation of function OQS_SHA3_sha3_512_inc_ctx_reset.
+	 */
 	void (*SHA3_sha3_512_inc_ctx_reset)(OQS_SHA3_sha3_512_inc_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA3_sha3_512_inc_ctx_clone.
- */
+	 * Implementation of function OQS_SHA3_sha3_512_inc_ctx_clone.
+	 */
 	void (*SHA3_sha3_512_inc_ctx_clone)(OQS_SHA3_sha3_512_inc_ctx *dest, const OQS_SHA3_sha3_512_inc_ctx *src);
 
 	/**
- * Implementation of function OQS_SHA3_shake128.
- */
+	 * Implementation of function OQS_SHA3_shake128.
+	 */
 	void (*SHA3_shake128)(uint8_t *output, size_t outlen, const uint8_t *input, size_t inplen);
 
 	/**
- * Implementation of function OQS_SHA3_shake128_inc_init.
- */
+	 * Implementation of function OQS_SHA3_shake128_inc_init.
+	 */
 	void (*SHA3_shake128_inc_init)(OQS_SHA3_shake128_inc_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA3_shake128_inc_absorb.
- */
+	 * Implementation of function OQS_SHA3_shake128_inc_absorb.
+	 */
 	void (*SHA3_shake128_inc_absorb)(OQS_SHA3_shake128_inc_ctx *state, const uint8_t *input, size_t inlen);
 
 	/**
- * Implementation of function OQS_SHA3_shake128_inc_finalize.
- */
+	 * Implementation of function OQS_SHA3_shake128_inc_finalize.
+	 */
 	void (*SHA3_shake128_inc_finalize)(OQS_SHA3_shake128_inc_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA3_shake128_inc_squeeze.
- */
+	 * Implementation of function OQS_SHA3_shake128_inc_squeeze.
+	 */
 	void (*SHA3_shake128_inc_squeeze)(uint8_t *output, size_t outlen, OQS_SHA3_shake128_inc_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA3_shake128_inc_ctx_release.
- */
+	 * Implementation of function OQS_SHA3_shake128_inc_ctx_release.
+	 */
 	void (*SHA3_shake128_inc_ctx_release)(OQS_SHA3_shake128_inc_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA3_shake128_inc_ctx_clone.
- */
+	 * Implementation of function OQS_SHA3_shake128_inc_ctx_clone.
+	 */
 	void (*SHA3_shake128_inc_ctx_clone)(OQS_SHA3_shake128_inc_ctx *dest, const OQS_SHA3_shake128_inc_ctx *src);
 
 	/**
- * Implementation of function OQS_SHA3_shake128_inc_ctx_reset.
- */
+	 * Implementation of function OQS_SHA3_shake128_inc_ctx_reset.
+	 */
 	void (*SHA3_shake128_inc_ctx_reset)(OQS_SHA3_shake128_inc_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA3_shake256.
- */
+	 * Implementation of function OQS_SHA3_shake256.
+	 */
 	void (*SHA3_shake256)(uint8_t *output, size_t outlen, const uint8_t *input, size_t inplen);
 
 	/**
- * Implementation of function OQS_SHA3_shake256_inc_init.
- */
+	 * Implementation of function OQS_SHA3_shake256_inc_init.
+	 */
 	void (*SHA3_shake256_inc_init)(OQS_SHA3_shake256_inc_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA3_shake256_inc_absorb.
- */
+	 * Implementation of function OQS_SHA3_shake256_inc_absorb.
+	 */
 	void (*SHA3_shake256_inc_absorb)(OQS_SHA3_shake256_inc_ctx *state, const uint8_t *input, size_t inlen);
 
 	/**
- * Implementation of function OQS_SHA3_shake256_inc_finalize.
- */
+	 * Implementation of function OQS_SHA3_shake256_inc_finalize.
+	 */
 	void (*SHA3_shake256_inc_finalize)(OQS_SHA3_shake256_inc_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA3_shake256_inc_squeeze.
- */
+	 * Implementation of function OQS_SHA3_shake256_inc_squeeze.
+	 */
 	void (*SHA3_shake256_inc_squeeze)(uint8_t *output, size_t outlen, OQS_SHA3_shake256_inc_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA3_shake256_inc_ctx_release.
- */
+	 * Implementation of function OQS_SHA3_shake256_inc_ctx_release.
+	 */
 	void (*SHA3_shake256_inc_ctx_release)(OQS_SHA3_shake256_inc_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA3_shake256_inc_ctx_clone.
- */
+	 * Implementation of function OQS_SHA3_shake256_inc_ctx_clone.
+	 */
 	void (*SHA3_shake256_inc_ctx_clone)(OQS_SHA3_shake256_inc_ctx *dest, const OQS_SHA3_shake256_inc_ctx *src);
 
 	/**
- * Implementation of function OQS_SHA3_shake256_inc_ctx_reset.
- */
+	 * Implementation of function OQS_SHA3_shake256_inc_ctx_reset.
+	 */
 	void (*SHA3_shake256_inc_ctx_reset)(OQS_SHA3_shake256_inc_ctx *state);
 };
 

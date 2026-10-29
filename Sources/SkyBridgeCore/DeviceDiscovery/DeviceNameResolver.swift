@@ -1,3 +1,8 @@
+// macOS-exclusive: built on macOS-only APIs (AppKit / IOKit / ScreenCaptureKit / CoreWLAN /
+// MetalFX / ServiceManagement / ApplicationServices / CoreGraphics display services).
+// Excluded from other platforms so SkyBridgeCore can be the single shared core for iOS as
+// well. No behaviour changes on macOS.
+#if os(macOS)
 import Foundation
 import Network
 import OSLog
@@ -177,9 +182,11 @@ public class DeviceNameResolver: ObservableObject {
                     }
                 }
                 
-                if status == 0, let addr = result {
+                if status == 0,
+                   let addr = result,
+                   let addressPtr = addr.pointee.ai_addr {
                     var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                    let status = getnameinfo(addr.pointee.ai_addr, addr.pointee.ai_addrlen,
+                    let status = getnameinfo(addressPtr, addr.pointee.ai_addrlen,
                                            &hostname, socklen_t(hostname.count),
                                            nil, 0, NI_NAMEREQD)
                     
@@ -384,7 +391,7 @@ public class DeviceNameResolver: ObservableObject {
  /// 解析Apple设备标准命名格式 - 基于用户论文的命名规则
     private nonisolated func parseAppleDeviceNameFormat(_ name: String) -> String? {
  // Apple设备命名格式：用户名's 设备类型 型号
- // 例如：Ziang's iPhone 16 Pro, John's MacBook Pro
+ // 例如：Alex's iPhone 16 Pro, John's MacBook Pro
         let patterns = [
             #"^(.+)'s\s+(iPhone|iPad|Mac|MacBook|Apple\s*TV|HomePod|Apple\s*Watch)\s*(.*)$"#,
             #"^(.+)的\s*(iPhone|iPad|Mac|MacBook|Apple\s*TV|HomePod|Apple\s*Watch)\s*(.*)$"#,
@@ -988,3 +995,4 @@ public class DeviceNameResolver: ObservableObject {
         return (count, oldestEntry)
     }
 }
+#endif

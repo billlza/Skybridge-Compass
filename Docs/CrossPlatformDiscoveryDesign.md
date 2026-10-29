@@ -1,8 +1,15 @@
+> **历史背景，非现行实现说明。** 原文保留供来源审计和回归读取；当前协议、平台范围与验收从 [现行文档入口](README.md) 开始，旧版本、旧示例及完成措辞不代表当前候选。
+
 # SkyBridge Compass: Cross-Platform Device Discovery and PQC Encryption Design
 
 **Version:** 1.0
 **Date:** 2026-01-11
 **Status:** Draft Design Document
+
+> **⚠️ 实现状态（2026-06-16）**：本文是**架构目标设计（architectural target）**，不是当前已实现功能。
+> 当前发布仅覆盖 **macOS / iOS**；SkyBridge-native P2P（QUIC/WebRTC + PQC）目前只在 **Apple↔Apple** 之间工作。
+> **Windows / Android / Linux 尚无 SkyBridge 原生客户端**（可移植的 Rust 核心已就绪，但客户端外壳未落地——见 `ROADMAP.md` 的 Phase 0–3）。
+> 注意区分：macOS 远程桌面有独立的手动 **RDP / VNC / SSH** 入口，这与“SkyBridge 原生跨平台 P2P”是两回事。RDP 当前仅是 core-only、严格证书策略下的受限预览，真实 Windows 端点验收前不得描述为完整或稳定的跨网能力。当前 scope 以 `README.md` 与 `ROADMAP.md` 为准。
 
 ---
 
@@ -16,16 +23,16 @@ This document outlines the architectural design for extending SkyBridge Compass 
 
 ### 1.1 Motivation
 
-SkyBridge Compass currently operates primarily on Apple platforms (macOS 26+ and iOS 26+) with native CryptoKit PQC support. Extending to other platforms requires:
+SkyBridge Compass currently operates primarily on Apple platforms with a deployment floor of **macOS 14+ / iOS 17+**. Native CryptoKit PQC (HPKE X-Wing, ML-KEM, ML-DSA) is used on macOS 26+/iOS 26+; older versions fall back to liboqs/OQSRAII PQC, so the floor is held without dropping post-quantum security. Extending to other platforms requires:
 
 1. **Unified Device Discovery**: A protocol that works across diverse network stacks
 2. **PQC Interoperability**: Using standardized algorithms (ML-KEM, ML-DSA) with platform-appropriate libraries
-3. **Graceful Degradation**: Classic fallback for devices without PQC capability
+3. **Graceful Degradation**: Explicit policy-controlled fallback for devices without negotiated PQC capability
 
 ### 1.2 Goals
 
 - Zero-configuration device discovery on local networks
-- End-to-end PQC encryption where supported
+- End-to-end encryption with PQC only when the negotiated suite and runtime proof support it
 - Seamless classic fallback for legacy devices
 - Auditable security decisions across all platforms
 

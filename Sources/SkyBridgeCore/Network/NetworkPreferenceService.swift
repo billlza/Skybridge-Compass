@@ -1,3 +1,8 @@
+// macOS-exclusive: this file is built on frameworks that exist only on macOS
+// (AppKit / IOKit / ScreenCaptureKit / CoreWLAN / MetalFX / ServiceManagement /
+// ApplicationServices). It is excluded from other platforms so SkyBridgeCore can be
+// the single shared core for iOS as well. No behaviour changes on macOS.
+#if os(macOS)
 //
 // NetworkPreferenceService.swift
 // SkyBridgeCore
@@ -110,133 +115,185 @@ public class NetworkPreferenceService: ObservableObject {
  // MARK: - 私有属性
     
     private let logger = Logger(subsystem: "com.skybridge.network", category: "Preference")
-    private var wifiClient: CWWiFiClient?
-    private var wifiInterface: CWInterface?
+    private let radio: any WiFiRadioAccess
+    private let defaults: UserDefaults
+    private var scanTask: Task<Void, Never>?
+    private var refreshTask: Task<Void, Never>?
+    private var connectionTask: Task<Bool, Never>?
+    private var monitoringGeneration = UUID()
     private var cancellables = Set<AnyCancellable>()
     private var scanTimer: Timer?
+    private var scanIntervalSeconds: Int = 10
+    private var shouldMonitorNetworks = true
+    private var isMonitoringStarted = false
     
-    private init() {
-        setupWiFiClient()
+    private convenience init() {
+        self.init(radio: CoreWLANClient.shared, defaults: .standard)
         setupSettingsObserver()
+        applyRuntimeSettingsSnapshot(startMonitoringIfNeeded: false)
+        updateCurrentNetwork()
+    }
+
+    init(radio: any WiFiRadioAccess, defaults: UserDefaults) {
+        self.radio = radio
+        self.defaults = defaults
         loadKnownNetworks()
     }
-    
+
  // MARK: - 初始化
-    
-    private func setupWiFiClient() {
-        wifiClient = CWWiFiClient.shared()
-        wifiInterface = wifiClient?.interface()
-        
-        if wifiInterface == nil {
-            logger.warning("⚠️ 无法获取 WiFi 接口")
-        } else {
-            logger.info("✅ WiFi 客户端初始化成功")
-            updateCurrentNetwork()
-        }
-    }
     
     private func setupSettingsObserver() {
  // 监听设置变化
         SettingsManager.shared.$prefer5GHz
+            .dropFirst()
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] enabled in
-                self?.prefer5GHz = enabled
+            .sink { [weak self] _ in
+                self?.applyRuntimeSettingsSnapshot(startMonitoringIfNeeded: true)
             }
             .store(in: &cancellables)
         
         SettingsManager.shared.$autoConnectKnownNetworks
+            .dropFirst()
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] enabled in
-                self?.autoConnectKnownNetworks = enabled
+            .sink { [weak self] _ in
+                self?.applyRuntimeSettingsSnapshot(startMonitoringIfNeeded: true)
             }
             .store(in: &cancellables)
+
+        SettingsManager.shared.$wifiScanTimeout
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.applyRuntimeSettingsSnapshot(startMonitoringIfNeeded: true)
+            }
+            .store(in: &cancellables)
+    }
+
+    public func applyRuntimeSettings(
+        prefer5GHz: Bool,
+        autoConnectKnownNetworks: Bool,
+        scanIntervalSeconds: Int,
+        startMonitoringIfNeeded: Bool = false
+    ) {
+        if self.prefer5GHz != prefer5GHz {
+            self.prefer5GHz = prefer5GHz
+        }
+        if self.autoConnectKnownNetworks != autoConnectKnownNetworks {
+            self.autoConnectKnownNetworks = autoConnectKnownNetworks
+        }
+        self.scanIntervalSeconds = max(10, scanIntervalSeconds)
+        shouldMonitorNetworks = prefer5GHz || autoConnectKnownNetworks
+
+        updateRecommendedNetwork()
+
+        guard startMonitoringIfNeeded || isMonitoringStarted else {
+            return
+        }
+
+        if shouldMonitorNetworks {
+            startNetworkMonitoring(interval: TimeInterval(self.scanIntervalSeconds))
+        } else {
+            stopNetworkMonitoring()
+        }
+    }
+
+    public func startConfiguredNetworkMonitoring() {
+        guard shouldMonitorNetworks else {
+            stopNetworkMonitoring()
+            return
+        }
+        startNetworkMonitoring(interval: TimeInterval(scanIntervalSeconds))
+    }
+
+    private func applyRuntimeSettingsSnapshot(startMonitoringIfNeeded: Bool) {
+        let settings = SettingsManager.shared
+        applyRuntimeSettings(
+            prefer5GHz: settings.prefer5GHz,
+            autoConnectKnownNetworks: settings.autoConnectKnownNetworks,
+            scanIntervalSeconds: settings.wifiScanTimeout,
+            startMonitoringIfNeeded: startMonitoringIfNeeded
+        )
     }
     
     private func loadKnownNetworks() {
  // 从 UserDefaults 加载已知网络列表
-        if let saved = UserDefaults.standard.stringArray(forKey: "KnownNetworkSSIDs") {
+        if let saved = defaults.stringArray(forKey: "KnownNetworkSSIDs") {
             knownNetworkSSIDs = Set(saved)
             logger.info("📋 加载了 \(saved.count) 个已知网络")
         }
     }
     
     private func saveKnownNetworks() {
-        UserDefaults.standard.set(Array(knownNetworkSSIDs), forKey: "KnownNetworkSSIDs")
+        defaults.set(Array(knownNetworkSSIDs), forKey: "KnownNetworkSSIDs")
     }
     
  // MARK: - 公共方法
     
  /// 扫描可用网络
     public func scanAvailableNetworks() async {
-        guard let interface = wifiInterface else {
-            logger.warning("⚠️ WiFi 接口不可用")
-            return
+        // Share an in-flight scan; timer ticks must not queue additional radio work.
+        let generation = monitoringGeneration
+        while let scanTask {
+            let wasCancelled = scanTask.isCancelled
+            await scanTask.value
+            guard wasCancelled, !Task.isCancelled, monitoringGeneration == generation else { return }
         }
-        
-        logger.info("🔍 开始扫描可用网络...")
-        
-        do {
-            let networks = try interface.scanForNetworks(withSSID: nil)
-            
-            var networkList: [NetworkInfo] = []
-            
-            for network in networks {
-                let ssid = network.ssid ?? "Unknown"
-                let bssid = network.bssid ?? "Unknown"
-                let channel = network.wlanChannel?.channelNumber ?? 0
-                let band = WiFiBand.from(channel: channel, channelBand: network.wlanChannel?.channelBand)
-                let rssi = network.rssiValue
- // 检查网络是否安全
- // 如果网络有 BSSID 且不是开放网络，则认为是安全的
-                let isSecure = (network.bssid != nil)
-                let isKnown = knownNetworkSSIDs.contains(ssid)
-                
-                let info = NetworkInfo(
-                    ssid: ssid,
-                    bssid: bssid,
-                    channel: channel,
-                    rssi: rssi,
-                    isSecure: isSecure,
-                    isKnown: isKnown,
-                    band: band
-                )
-                
-                networkList.append(info)
-            }
-            
- // 按信号强度排序
-            networkList.sort { $0.rssi > $1.rssi }
-            
-            await MainActor.run {
-                self.availableNetworks = networkList
+        guard !Task.isCancelled else { return }
+        let task = Task { [weak self, radio] in
+            defer { self?.scanTask = nil }
+            do {
+                let snapshot = try await radio.scan()
+                guard let self, !Task.isCancelled, self.monitoringGeneration == generation else { return }
+                self.applyCurrentNetwork(snapshot.connection)
+                self.availableNetworks = snapshot.networks.map { network in
+                    let ssid = network.ssid ?? "Unknown"
+                    return NetworkInfo(
+                        ssid: ssid, bssid: network.bssid ?? "Unknown", channel: network.channel,
+                        rssi: network.rssi, isSecure: network.bssid != nil,
+                        isKnown: self.knownNetworkSSIDs.contains(ssid), band: network.band
+                    )
+                }.sorted { $0.rssi > $1.rssi }
                 self.updateRecommendedNetwork()
+                self.autoConnectRecommendedNetworkIfAppropriate()
+                self.logger.info("✅ 扫描完成，发现 \(snapshot.networks.count) 个网络")
+            } catch is CancellationError {
+                self?.logger.debug("网络扫描已取消，丢弃过期结果")
+            } catch {
+                self?.logger.error("❌ 网络扫描失败: \(error.localizedDescription)")
             }
-            
-            logger.info("✅ 扫描完成，发现 \(networkList.count) 个网络")
-            
-        } catch {
-            logger.error("❌ 网络扫描失败: \(error.localizedDescription)")
         }
+        scanTask = task
+        await task.value
     }
     
  /// 更新当前连接的网络信息
     public func updateCurrentNetwork() {
-        guard let interface = wifiInterface else { return }
-        
-        if let ssid = interface.ssid(),
-           let bssid = interface.bssid() {
-            let channel = interface.wlanChannel()?.channelNumber ?? 0
-            let band = WiFiBand.from(channel: channel, channelBand: interface.wlanChannel()?.channelBand)
-            let rssi = interface.rssiValue()
-            
+        guard refreshTask == nil else { return }
+        let generation = monitoringGeneration
+        refreshTask = Task { [weak self, radio] in
+            defer { self?.refreshTask = nil }
+            do {
+                let snapshot = try await radio.connection()
+                guard let self, !Task.isCancelled, self.monitoringGeneration == generation else { return }
+                self.applyCurrentNetwork(snapshot)
+            } catch is CancellationError {
+                self?.logger.debug("网络状态更新已取消")
+            } catch {
+                self?.logger.error("❌ 更新网络状态失败: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func applyCurrentNetwork(_ snapshot: WiFiRadioConnection) {
+        if let ssid = snapshot.ssid, let bssid = snapshot.bssid {
             let info = NetworkInfo(
                 ssid: ssid,
                 bssid: bssid,
-                channel: channel,
-                rssi: rssi,
+                channel: snapshot.channel,
+                rssi: snapshot.rssi,
                 isSecure: true, // 假设已连接的网络是安全的
                 isKnown: knownNetworkSSIDs.contains(ssid),
-                band: band
+                band: snapshot.band
             )
             
             currentNetwork = info
@@ -248,7 +305,7 @@ public class NetworkPreferenceService: ObservableObject {
                 logger.info("📋 已添加到已知网络: \(ssid)")
             }
             
-            logger.info("📶 当前网络: \(ssid) (\(info.band.rawValue), 信道 \(channel))")
+            logger.info("📶 当前网络: \(ssid) (\(info.band.rawValue), 信道 \(snapshot.channel))")
         } else {
             currentNetwork = nil
             logger.info("📶 当前未连接 WiFi")
@@ -334,41 +391,62 @@ public class NetworkPreferenceService: ObservableObject {
     
  /// 尝试连接到推荐网络
     public func connectToRecommendedNetwork() async -> Bool {
-        guard let recommended = recommendedNetwork,
-              let interface = wifiInterface else {
+        guard connectionTask == nil else {
+            logger.warning("已有 WiFi 连接操作正在进行")
             return false
         }
-        
-        logger.info("🔗 尝试连接到推荐网络: \(recommended.ssid)")
-        
- // 查找对应的 CWNetwork
-        do {
-            let networks = try interface.scanForNetworks(withSSID: recommended.ssid.data(using: .utf8))
-            
-            if let network = networks.first(where: { $0.bssid == recommended.bssid }) {
-                try interface.associate(to: network, password: nil)
-                logger.info("✅ 成功连接到: \(recommended.ssid)")
-                
- // 更新当前网络
-                updateCurrentNetwork()
+        guard let recommended = recommendedNetwork else { return false }
+        let generation = monitoringGeneration
+        let task = Task { [weak self, radio] in
+            defer { self?.connectionTask = nil }
+            do {
+                let snapshot = try await radio.connect(ssid: recommended.ssid, bssid: recommended.bssid, password: nil)
+                guard let self, !Task.isCancelled, self.monitoringGeneration == generation else { return false }
+                self.applyCurrentNetwork(snapshot.connection)
+                self.logger.info("✅ 成功连接到: \(recommended.ssid)")
                 return true
+            } catch is CancellationError {
+                self?.logger.debug("网络连接请求已取消")
+            } catch {
+                self?.logger.error("❌ 连接失败: \(error.localizedDescription)")
             }
-        } catch {
-            logger.error("❌ 连接失败: \(error.localizedDescription)")
+            return false
         }
-        
-        return false
+        connectionTask = task
+        return await task.value
+    }
+
+    private func autoConnectRecommendedNetworkIfAppropriate() {
+        guard autoConnectKnownNetworks,
+              currentNetwork == nil,
+              recommendedNetwork?.isKnown == true else {
+            return
+        }
+
+        let generation = monitoringGeneration
+        Task { @MainActor [weak self] in
+            guard let self, self.monitoringGeneration == generation,
+                  self.autoConnectKnownNetworks, self.currentNetwork == nil,
+                  self.recommendedNetwork?.isKnown == true else { return }
+            _ = await self.connectToRecommendedNetwork()
+        }
     }
     
  /// 启动周期性网络监控
     public func startNetworkMonitoring(interval: TimeInterval = 30) {
         stopNetworkMonitoring()
+        isMonitoringStarted = true
         
         scanTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.updateCurrentNetwork()
-                await self?.scanAvailableNetworks()
+                guard let self, self.isMonitoringStarted, self.scanTask == nil else { return }
+                await self.scanAvailableNetworks()
             }
+        }
+
+        Task { @MainActor [weak self] in
+            guard let self, self.isMonitoringStarted else { return }
+            await self.scanAvailableNetworks()
         }
         
         logger.info("🔄 启动网络监控 (间隔: \(interval)秒)")
@@ -378,6 +456,13 @@ public class NetworkPreferenceService: ObservableObject {
     public func stopNetworkMonitoring() {
         scanTimer?.invalidate()
         scanTimer = nil
+        isMonitoringStarted = false
+        monitoringGeneration = UUID()
+        // Keep task handles until the synchronous system call actually returns.
+        // Clearing them here would allow overlapping scans on stop/start cycles.
+        scanTask?.cancel()
+        refreshTask?.cancel()
+        connectionTask?.cancel()
         logger.info("⏹️ 停止网络监控")
     }
 
@@ -411,3 +496,4 @@ public extension Notification.Name {
     static let betterNetworkAvailable = Notification.Name("com.skybridge.betterNetworkAvailable")
     static let networkConnectionChanged = Notification.Name("com.skybridge.networkConnectionChanged")
 }
+#endif

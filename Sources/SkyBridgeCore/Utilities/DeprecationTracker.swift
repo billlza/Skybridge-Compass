@@ -90,7 +90,7 @@ public final class DeprecationTracker: @unchecked Sendable {
  // MARK: - Initialization
     
     private init() {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         self.isEnabled = true
         #else
         self.isEnabled = false
@@ -231,17 +231,19 @@ public final class DeprecationTracker: @unchecked Sendable {
  /// Clear all recorded usage data.
  ///
  /// Primarily for testing purposes.
+#if DEBUG || SKYBRIDGE_TESTING
     public func reset() {
         lock.lock()
         defer { lock.unlock() }
         
         records.removeAll()
     }
+#endif
 }
 
 // MARK: - Testing Support
 
-#if DEBUG
+#if DEBUG || SKYBRIDGE_TESTING
 @available(macOS 14.0, iOS 17.0, *)
 extension DeprecationTracker {
  /// Create a test instance (not singleton) for isolated testing.

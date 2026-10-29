@@ -1,0 +1,15 @@
+\begin{table}[!t]
+\centering
+\footnotesize
+\caption{Handshake vs data-plane AEAD selection (v1).}
+\label{tab:aead-mapping}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Layer & AEAD & Negotiation source \\
+\midrule
+Handshake payloads & AES-256-GCM & Suite tuple \\
+Data-plane traffic & AES-256-GCM & Fixed (v1) \\
+\bottomrule
+\end{tabular}
+\end{table}
+

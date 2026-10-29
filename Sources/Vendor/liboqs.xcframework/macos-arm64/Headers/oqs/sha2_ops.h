@@ -63,98 +63,98 @@ typedef struct {
  */
 struct OQS_SHA2_callbacks {
 	/**
- * Implementation of function OQS_SHA2_sha256.
- */
+	 * Implementation of function OQS_SHA2_sha256.
+	 */
 	void (*SHA2_sha256)(uint8_t *output, const uint8_t *input, size_t inplen);
 
 	/**
- * Implementation of function OQS_SHA2_sha256_inc_init.
- */
+	 * Implementation of function OQS_SHA2_sha256_inc_init.
+	 */
 	void (*SHA2_sha256_inc_init)(OQS_SHA2_sha256_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA2_sha256_inc_ctx_clone.
- */
+	 * Implementation of function OQS_SHA2_sha256_inc_ctx_clone.
+	 */
 	void (*SHA2_sha256_inc_ctx_clone)(OQS_SHA2_sha256_ctx *dest, const OQS_SHA2_sha256_ctx *src);
 
 	/**
- * Implementation of function OQS_SHA2_sha256_inc.
- */
+	 * Implementation of function OQS_SHA2_sha256_inc.
+	 */
 	void (*SHA2_sha256_inc)(OQS_SHA2_sha256_ctx *state, const uint8_t *in, size_t len);
 
 	/**
- * Implementation of function OQS_SHA2_sha256_inc_blocks.
- */
+	 * Implementation of function OQS_SHA2_sha256_inc_blocks.
+	 */
 	void (*SHA2_sha256_inc_blocks)(OQS_SHA2_sha256_ctx *state, const uint8_t *in, size_t inblocks);
 
 	/**
- * Implementation of function OQS_SHA2_sha256_inc_finalize.
- */
+	 * Implementation of function OQS_SHA2_sha256_inc_finalize.
+	 */
 	void (*SHA2_sha256_inc_finalize)(uint8_t *out, OQS_SHA2_sha256_ctx *state, const uint8_t *in, size_t inlen);
 
 	/**
- * Implementation of function OQS_SHA2_sha256_inc_ctx_release.
- */
+	 * Implementation of function OQS_SHA2_sha256_inc_ctx_release.
+	 */
 	void (*SHA2_sha256_inc_ctx_release)(OQS_SHA2_sha256_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA2_sha384.
- */
+	 * Implementation of function OQS_SHA2_sha384.
+	 */
 	void (*SHA2_sha384)(uint8_t *output, const uint8_t *input, size_t inplen);
 
 	/**
- * Implementation of function OQS_SHA2_sha384_inc_init.
- */
+	 * Implementation of function OQS_SHA2_sha384_inc_init.
+	 */
 	void (*SHA2_sha384_inc_init)(OQS_SHA2_sha384_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA2_sha384_inc_ctx_clone.
- */
+	 * Implementation of function OQS_SHA2_sha384_inc_ctx_clone.
+	 */
 	void (*SHA2_sha384_inc_ctx_clone)(OQS_SHA2_sha384_ctx *dest, const OQS_SHA2_sha384_ctx *src);
 
 	/**
- * Implementation of function OQS_SHA2_sha384_inc_blocks.
- */
+	 * Implementation of function OQS_SHA2_sha384_inc_blocks.
+	 */
 	void (*SHA2_sha384_inc_blocks)(OQS_SHA2_sha384_ctx *state, const uint8_t *in, size_t inblocks);
 
 	/**
- * Implementation of function OQS_SHA2_sha384_inc_finalize.
- */
+	 * Implementation of function OQS_SHA2_sha384_inc_finalize.
+	 */
 	void (*SHA2_sha384_inc_finalize)(uint8_t *out, OQS_SHA2_sha384_ctx *state, const uint8_t *in, size_t inlen);
 
 	/**
- * Implementation of function OQS_SHA2_sha384_inc_ctx_release.
- */
+	 * Implementation of function OQS_SHA2_sha384_inc_ctx_release.
+	 */
 	void (*SHA2_sha384_inc_ctx_release)(OQS_SHA2_sha384_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA2_sha512.
- */
+	 * Implementation of function OQS_SHA2_sha512.
+	 */
 	void (*SHA2_sha512)(uint8_t *output, const uint8_t *input, size_t inplen);
 
 	/**
- * Implementation of function OQS_SHA2_sha512_inc_init.
- */
+	 * Implementation of function OQS_SHA2_sha512_inc_init.
+	 */
 	void (*SHA2_sha512_inc_init)(OQS_SHA2_sha512_ctx *state);
 
 	/**
- * Implementation of function OQS_SHA2_sha512_inc_ctx_clone.
- */
+	 * Implementation of function OQS_SHA2_sha512_inc_ctx_clone.
+	 */
 	void (*SHA2_sha512_inc_ctx_clone)(OQS_SHA2_sha512_ctx *dest, const OQS_SHA2_sha512_ctx *src);
 
 	/**
- * Implementation of function OQS_SHA2_sha512_inc_blocks.
- */
+	 * Implementation of function OQS_SHA2_sha512_inc_blocks.
+	 */
 	void (*SHA2_sha512_inc_blocks)(OQS_SHA2_sha512_ctx *state, const uint8_t *in, size_t inblocks);
 
 	/**
- * Implementation of function OQS_SHA2_sha512_inc_finalize.
- */
+	 * Implementation of function OQS_SHA2_sha512_inc_finalize.
+	 */
 	void (*SHA2_sha512_inc_finalize)(uint8_t *out, OQS_SHA2_sha512_ctx *state, const uint8_t *in, size_t inlen);
 
 	/**
- * Implementation of function OQS_SHA2_sha512_inc_ctx_release.
- */
+	 * Implementation of function OQS_SHA2_sha512_inc_ctx_release.
+	 */
 	void (*SHA2_sha512_inc_ctx_release)(OQS_SHA2_sha512_ctx *state);
 };
 

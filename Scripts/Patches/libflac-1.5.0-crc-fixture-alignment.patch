@@ -1,0 +1,36 @@
+--- a/src/test_libFLAC/crc.c
++++ b/src/test_libFLAC/crc.c
+@@ -26,6 +26,7 @@
+ #include "share/compat.h"
+ #include "private/crc.h"
+ #include "crc.h"
++#include <string.h>
+ 
+ static FLAC__uint8 crc8_update_ref(FLAC__byte byte, FLAC__uint8 crc);
+ static FLAC__uint16 crc16_update_ref(FLAC__byte byte, FLAC__uint16 crc);
+@@ -42,6 +43,8 @@
+ {
+ 	uint32_t i;
+ 	FLAC__byte data[DATA_SIZE] = { 0 };
++	FLAC__uint32 words32[DATA_SIZE / 4];
++	FLAC__uint64 words64[DATA_SIZE / 8];
+ 
+ 	/* Initialize data reproducibly with pseudo-random values. */
+ 	for (i = 1; i < DATA_SIZE; i++)
+@@ -58,10 +61,12 @@
+ 	if (! test_crc16_update(data, DATA_SIZE))
+ 		return false;
+ 
+-	if (! test_crc16_32bit_words((FLAC__uint32 *)data, DATA_SIZE / 4))
+-		return false;
+-
+-	if (! test_crc16_64bit_words((FLAC__uint64 *)data, DATA_SIZE / 8))
++	memcpy(words32, data, sizeof(words32));
++	if (! test_crc16_32bit_words(words32, DATA_SIZE / 4))
++		return false;
++
++	memcpy(words64, data, sizeof(words64));
++	if (! test_crc16_64bit_words(words64, DATA_SIZE / 8))
+ 		return false;
+ 
+ 	printf("\nPASSED!\n");

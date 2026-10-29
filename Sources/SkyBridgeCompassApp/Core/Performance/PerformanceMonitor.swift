@@ -11,6 +11,7 @@ import Metal
 import OSLog
 import IOKit
 import IOKit.ps
+import Darwin
 @preconcurrency import SkyBridgeCore
 
 /// 性能监控器 - 实时收集系统性能指标
@@ -360,55 +361,22 @@ public final class SystemInfoCollector: Sendable {
     
  /// 获取 CPU 使用率
     public func getCPUUsage() async -> Double {
-        var info = mach_task_basic_info()
-        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size)/4
-        
-        let kerr: kern_return_t = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
-                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
-            }
-        }
-        
-        if kerr == KERN_SUCCESS {
- // 这里需要更复杂的 CPU 使用率计算
- // 简化版本，实际应该使用 host_processor_info
-            return Double(info.resident_size) / Double(1024 * 1024) // 临时使用内存作为指标
-        }
-        
-        return 0.0
+        let snapshot = await UnifiedMetricsBackend.shared.collectSnapshot(force: false)
+        return snapshot.cpuUsage
     }
     
  /// 获取内存使用率
     public func getMemoryUsage() async -> Double {
-        let physicalMemory = ProcessInfo.processInfo.physicalMemory
-        
-        var info = mach_task_basic_info()
-        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size)/4
-        
-        let kerr: kern_return_t = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
-                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
-            }
-        }
-        
-        if kerr == KERN_SUCCESS {
-            let usedMemory = Double(info.resident_size)
-            return (usedMemory / Double(physicalMemory)) * 100.0
-        }
-        
-        return 0.0
+        let snapshot = await UnifiedMetricsBackend.shared.collectSnapshot(force: false)
+        return snapshot.memoryUsage
     }
     
  /// 获取 GPU 使用率
     public func getGPUUsage(device: MTLDevice?) async -> Double {
- // 使用新的GPU使用率监控器获取真实数据
-        if #available(macOS 14.0, *) {
-            let gpuMonitor = GPUUsageMonitor()
-            return await gpuMonitor.getCurrentGPUUsage()
-        } else {
- // 对于较旧的macOS版本，返回估算值
-            return 0.0
-        }
+        let _ = device
+        let snapshot = await UnifiedMetricsBackend.shared.collectSnapshot(force: false)
+        guard snapshot.gpuUsageState.availability != .unavailable else { return 0.0 }
+        return snapshot.gpuUsage
     }
     
  /// 获取热状态
@@ -441,8 +409,28 @@ public final class SystemInfoCollector: Sendable {
     
  /// 获取网络统计
     public func getNetworkStats() async -> NetworkStats {
- // 简化版本，实际应该使用系统 API 获取网络统计
-        return NetworkStats(bytesIn: 0, bytesOut: 0)
+        var totalIn: UInt64 = 0
+        var totalOut: UInt64 = 0
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else {
+            return NetworkStats(bytesIn: 0, bytesOut: 0)
+        }
+        defer { freeifaddrs(first) }
+
+        var ptr: UnsafeMutablePointer<ifaddrs>? = first
+        while let current = ptr {
+            defer { ptr = current.pointee.ifa_next }
+            guard let addr = current.pointee.ifa_addr else { continue }
+            guard addr.pointee.sa_family == UInt8(AF_LINK) else { continue }
+            if (Int32(current.pointee.ifa_flags) & IFF_LOOPBACK) != 0 { continue }
+            guard let data = current.pointee.ifa_data else { continue }
+            let stats = data.assumingMemoryBound(to: if_data.self).pointee
+            totalIn &+= UInt64(stats.ifi_ibytes)
+            totalOut &+= UInt64(stats.ifi_obytes)
+        }
+
+        return NetworkStats(bytesIn: totalIn, bytesOut: totalOut)
     }
 }
 

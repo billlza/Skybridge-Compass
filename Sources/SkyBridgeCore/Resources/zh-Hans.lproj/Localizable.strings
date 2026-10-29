@@ -29,8 +29,8 @@
 
 /* Smart Code */
 "connection.smartCode.title" = "智能连接码";
-"connection.smartCode.fullDescription" = "生成6位字母数字连接码，适用于所有场景。支持 P2P 直连和智能中继。";
-"connection.smartCode.highlight" = "✨ 创新点：短码 + 智能路由 + 10分钟有效期";
+"connection.smartCode.fullDescription" = "生成服务端签发的短期连接码，适用于所有场景。支持 P2P 直连、TURN 中继与短期信令鉴权。";
+"connection.smartCode.highlight" = "✨ 创新点：短期连接码 + 智能路由 + 信令鉴权";
 "connection.device.this" = "在此设备上";
 "connection.smartCode.shareInstruction" = "分享此码以连接";
 "connection.copy" = "复制";
@@ -38,10 +38,16 @@
 "connection.smartCode.generate" = "生成连接码";
 "connection.smartCode.placeholder" = "输入连接码";
 "connection.smartCode.connect" = "连接";
+"connection.codeMode.title" = "连接码模式";
+"connection.codeMode.short" = "短时码";
+"connection.codeMode.day" = "全天固定码";
+"connection.codeMode.shortHint" = "默认安全模式，连接码短时有效并自动轮换。";
+"connection.codeMode.dayHint" = "24 小时内保持同一个连接码，适合省电后再连接。";
 "connection.fast" = "高速连接";
 "connection.p2p.priority" = "P2P 优先";
 "connection.smart.relay" = "智能中继";
 "connection.validity.10min" = "10分钟有效";
+"connection.validity.1day" = "24小时有效";
 
 /* Dashboard */
 "dashboard.unknownIP" = "未知 IP";
@@ -118,6 +124,29 @@
 "discovery.searchPlaceholder" = "搜索设备...";
 "discovery.noMatch" = "未找到匹配设备";
 "discovery.adjustSearch" = "尝试调整搜索关键词";
+"discovery.diagnostics.title" = "发现诊断";
+"discovery.diagnostics.permission" = "权限与配置";
+"discovery.diagnostics.network" = "网络状态";
+"discovery.diagnostics.scanning" = "扫描状态";
+"discovery.diagnostics.failures" = "最近失败记录";
+"discovery.diagnostics.localNetwork" = "本地网络";
+"discovery.diagnostics.bonjourWhitelist" = "Bonjour 白名单";
+"discovery.diagnostics.connection" = "连接";
+"discovery.diagnostics.localDiscovery" = "本地发现";
+"discovery.diagnostics.localIP" = "本地 IP";
+"discovery.diagnostics.discoveredDevices" = "已发现设备";
+"discovery.diagnostics.scanningServices" = "扫描服务";
+"discovery.diagnostics.lastScan" = "上次扫描";
+"discovery.diagnostics.clear" = "清除";
+"discovery.diagnostics.configured" = "已配置";
+"discovery.diagnostics.incomplete" = "不完整";
+"discovery.diagnostics.available" = "可用";
+"discovery.diagnostics.unavailable" = "不可用";
+"discovery.diagnostics.missingServices" = "缺失的 Bonjour 服务声明：";
+"discovery.diagnostics.justNow" = "刚刚";
+"discovery.diagnostics.minutesAgo" = "%d分钟前";
+"discovery.diagnostics.hoursAgo" = "%d小时前";
+"discovery.diagnostics.daysAgo" = "%d天前";
 "dashboard.noDevicesFound" = "未发现设备";
 "dashboard.checkNetwork" = "请检查网络连接";
 
@@ -180,6 +209,11 @@
 "settings.general.dataManagement" = "数据管理";
 "settings.general.clearCache" = "清理缓存";
 "settings.general.cacheSize" = "当前缓存：%@";
+"settings.general.cacheSize.unavailable" = "无法计算";
+"settings.general.cache.clearing" = "正在清理缓存...";
+"settings.general.cache.clearComplete" = "缓存已清理，释放 %@。";
+"settings.general.cache.clearFailed" = "缓存清理失败：%@";
+"settings.general.cache.sizeFailed" = "缓存大小不可用：%@";
 "settings.general.exportSettings" = "导出设置";
 "settings.general.importSettings" = "导入设置";
 "settings.general.resetSettings" = "恢复默认设置";
@@ -232,7 +266,7 @@
 
 /* Smart Code */
 "discovery.smartCode.title" = "智能连接码";
-"discovery.smartCode.description" = "6位短码，10分钟有效期，适用于远程协助";
+"discovery.smartCode.description" = "服务端签发的短期连接码，适用于远程协助";
 "discovery.smartCode.onThisDevice" = "在此设备上";
 "discovery.smartCode.shareInstruction" = "将此连接码告知对方";
 "discovery.smartCode.copy" = "复制";
@@ -249,7 +283,7 @@
 "discovery.mode.subtitle.localScan" = "同网络";
 "discovery.mode.subtitle.qrCode" = "扫一扫";
 "discovery.mode.subtitle.cloudLink" = "零配置";
-"discovery.mode.subtitle.connectionCode" = "6位短码";
+"discovery.mode.subtitle.connectionCode" = "短期连接码";
 
 /* Cloud Link Section */
 "discovery.icloud.status.syncing" = "同步中...";
@@ -277,7 +311,7 @@
 "discovery.capability.messages" = "消息";
 
 /* Smart Code Section (Additional) */
-"discovery.code.enterPrompt" = "输入6位连接码";
+"discovery.code.enterPrompt" = "输入连接码";
 "discovery.code.connect" = "连接";
 
 /* User Profile */
@@ -321,6 +355,13 @@
 "settings.network.discovery.timeout" = "发现超时:";
 "settings.network.discovery.customServiceType" = "自定义服务类型:";
 "settings.network.discovery.customServiceTypeExample" = "例如: _custom._tcp.";
+"settings.network.topBar.title" = "顶部网络信息";
+"settings.network.topBar.showIPLocation" = "显示 IP 城市与代理状态";
+"settings.network.topBar.showIPLocation.help" = "在顶部导航显示公网 IP 出口城市，并标注系统代理是否开启";
+"settings.network.topBar.showSpeed" = "显示实时网速";
+"settings.network.topBar.showSpeed.help" = "在顶部导航显示当前网络下载和上传吞吐";
+"settings.network.topBar.showLatency" = "显示网络延迟";
+"settings.network.topBar.showLatency.help" = "在顶部导航显示 HTTPS 网络延迟探测结果";
 "settings.network.connection.title" = "连接设置";
 "settings.network.connection.timeout" = "连接超时:";
 "settings.network.connection.retryCount" = "重试次数:";
@@ -349,6 +390,7 @@
 "status.idle" = "空闲";
 "status.enabled" = "已启用";
 "status.disabled" = "已禁用";
+"status.unavailable" = "不可用";
 "status.optimized" = "已优化";
 "status.needsAdjust" = "需调整";
 "status.load.high" = "高负载";
@@ -364,6 +406,8 @@
 "action.resetNetworkSettings" = "重置网络设置";
 "action.resetToDefaults" = "重置为默认";
 "action.resetMonitorData" = "重置监控数据";
+"action.exportMonitorData" = "导出监控数据";
+"action.clearMonitorHistory" = "清除监控历史";
 
 "unit.dbm" = "dBm";
 "unit.count.short" = "数量";
@@ -442,7 +486,7 @@
 "settings.advanced.debug.logLevel" = "日志级别:";
 
 "settings.advanced.performance.title" = "性能优化";
-"settings.advanced.performance.mode" = "性能模式:";
+"settings.advanced.performance.mode" = "渲染性能模式 (MetalFX):";
 "settings.advanced.currentMode" = "当前: %@";
 "settings.advanced.performance.details.title" = "配置详情:";
 "settings.advanced.performance.renderScale.range" = "渲染缩放: 50%-100%";
@@ -459,7 +503,8 @@
 "settings.advanced.performance.shadowQuality.format" = "阴影质量: %@";
 "settings.advanced.performance.postProcessing.format" = "后处理: %@";
 "settings.advanced.performance.showRealtimeFPS" = "显示实时FPS";
-"settings.advanced.performance.showRealtimeFPS.help" = "在顶部导航显示Metal渲染FPS；无数据时显示占位字符 — FPS";
+"settings.advanced.performance.showRealtimeFPS.help" = "显示天气背景（雨、云和霾）实际呈现到屏幕的每秒平均帧数，不包含其他界面和远程会话；无可用测量时显示 — FPS。";
+"metric.frameRate.paused" = "已暂停";
 "settings.advanced.hardware.enableAcceleration" = "启用硬件加速";
 "settings.advanced.memory.optimize" = "优化内存使用";
 "settings.advanced.backgroundScanning" = "后台扫描";
@@ -486,10 +531,13 @@
 "settings.advanced.pqc.title" = "量子安全";
 "settings.advanced.pqc.enableAppLayer" = "启用后量子密码（应用层）";
 "settings.advanced.pqc.enableHybridTLS" = "启用TLS混合协商（系统支持时）";
+"settings.advanced.pqc.preferXWing" = "优先 X-Wing 混合套件（macOS 26+）";
+"settings.advanced.pqc.preferXWing.help" = "启动时会同时声明 ML-KEM-768 与 X-Wing；此开关仅调整套件优先级。";
+"settings.advanced.pqc.preferXWing.caption" = "启用后优先协商 X-Wing；关闭则优先 ML-KEM-768（两者能力仍会一并声明）。";
 "settings.advanced.pqc.signatureAlgorithm" = "签名算法:";
 "settings.advanced.pqc.useSecureEnclaveMLDSA" = "ML-DSA 使用 Secure Enclave";
 "settings.advanced.pqc.useSecureEnclaveMLKEM" = "ML-KEM 使用 Secure Enclave";
-"settings.advanced.pqc.note" = "Secure Enclave PQC 仅在 macOS 26+（CryptoKit）可用；macOS 14–15 回退到 liboqs（ML‑KEM‑768/ML‑DSA‑65），OQS 不可用则回退 Classic（X25519/Ed25519）。";
+"settings.advanced.pqc.note" = "X-Wing（混合）与 ML-KEM-768（纯 PQC）在 macOS 26+（CryptoKit）可用；Secure Enclave PQC 也仅在该条件下生效。macOS 14–15 回退到 liboqs（ML‑KEM‑768/ML‑DSA‑65），OQS 不可用则回退 Classic（X25519/Ed25519）。";
 
 "settings.advanced.smoothing.title" = "设备强度平滑";
 "settings.advanced.smoothing.alpha" = "强度平滑系数 (EMA)";
@@ -503,13 +551,25 @@
 "settings.fileTransfer.defaultPath" = "默认传输路径:";
 "settings.fileTransfer.maxConcurrentTransfers" = "最大并发传输:";
 "settings.fileTransfer.bufferSize" = "传输缓冲区大小:";
+"settings.fileTransfer.chunkSize" = "分片大小:";
+"settings.fileTransfer.rateLimit" = "传输速率限制:";
+"settings.fileTransfer.rateLimit.unlimited" = "不限速";
+"settings.fileTransfer.pathFallback.title" = "已切换默认保存位置";
+"settings.fileTransfer.pathFallback.message" = "原默认路径不可用，已自动回退到：%@";
+"settings.fileTransfer.pathFailure.title" = "无法配置文件接收目录";
+"settings.fileTransfer.pathFailure.message" = "请检查目录权限或选择其他可写入位置。原接收目录保持不变。";
 "settings.fileTransfer.options.title" = "传输选项";
 "settings.fileTransfer.options.showNotification" = "传输完成后显示通知";
 "settings.fileTransfer.options.autoRetryFailed" = "自动重试失败的传输";
+"settings.fileTransfer.options.resumeEnabled" = "启用断点续传（失败自动重试）";
 "settings.fileTransfer.options.keepHistory" = "保持传输历史记录";
 "settings.fileTransfer.options.keepAwake" = "传输时保持系统唤醒";
 "settings.fileTransfer.security.title" = "安全设置";
 "settings.fileTransfer.security.enableEncrypt" = "启用传输加密";
+"settings.fileTransfer.security.encryption.alwaysOn" = "文件传输加密始终开启";
+"settings.fileTransfer.security.encryption.alwaysOn.detail" = "经典传输协议固定要求 AES-256-GCM，不允许降级为明文。";
+"settings.security.certificateValidation.alwaysOn" = "证书校验始终开启";
+"settings.security.certificateValidation.alwaysOn.detail" = "当前版本固定启用严格证书校验，无法关闭。";
 "settings.fileTransfer.security.verifyIntegrity" = "验证文件完整性";
 "settings.fileTransfer.security.scanVirus" = "扫描传输文件病毒";
 "settings.fileTransfer.security.algorithm" = "加密算法:";
@@ -539,6 +599,7 @@
 "settings.videoTransfer.enableAdaptiveBitrate.help" = "根据网络状况自动调整比特率";
 "settings.videoTransfer.compressionQuality" = "压缩质量:";
 
+"settings.remote.qualityPerformance.title" = "画质与性能";
 "settings.remote.display.title" = "显示设置";
 "settings.remote.display.videoQuality" = "视频质量:";
 "settings.remote.display.compressionLevel" = "压缩级别:";
@@ -547,6 +608,10 @@
 "settings.remote.interaction.title" = "交互设置";
 "settings.remote.interaction.clipboardSync" = "启用剪贴板同步";
 "settings.remote.interaction.audioRedirection" = "启用音频重定向";
+"settings.remote.interaction.audioUnavailable.title" = "音频重定向暂未开放";
+"settings.remote.interaction.audioUnavailable.body" = "该能力仍在完善中，本版本已默认停用，当前不可手动开启。";
+"settings.remote.interaction.audioPrinterUnavailable.title" = "音频重定向与打印机重定向暂未开放";
+"settings.remote.interaction.audioPrinterUnavailable.body" = "这两项能力仍在完善中，本版本已默认停用，当前不可手动开启。";
 "settings.remote.interaction.fileTransfer" = "启用文件传输";
 "settings.remote.interaction.trackpadGestures" = "启用触控板手势";
 "settings.remote.interaction.mouseSensitivity" = "鼠标灵敏度:";
@@ -554,6 +619,7 @@
 "settings.remote.network.title" = "网络优化";
 "settings.remote.network.enableBandwidthAdaptive" = "启用带宽自适应";
 "settings.remote.network.enableUDP" = "启用UDP传输";
+"settings.remote.network.enableEncryption" = "启用网络加密";
 "settings.remote.network.enableCompression" = "启用数据压缩";
 "settings.remote.network.bandwidthLimit" = "带宽限制 (Mbps):";
 "settings.remote.network.bufferSize" = "缓冲区大小:";
@@ -561,9 +627,10 @@
 "settings.systemMonitor.config.title" = "监控配置";
 "settings.systemMonitor.config.refreshInterval" = "刷新间隔:";
 "settings.systemMonitor.config.enableRealtime" = "启用实时监控";
-"settings.systemMonitor.config.enableHistory" = "启用历史记录";
+"settings.systemMonitor.config.enableHistory" = "显示趋势指示器";
 "settings.systemMonitor.config.enablePerformanceAlerts" = "启用性能警报";
 "settings.systemMonitor.config.retentionDays" = "数据保留天数:";
+"settings.systemMonitor.config.maxHistoryPoints" = "最大历史数据点:";
 "settings.systemMonitor.display.title" = "显示选项";
 "settings.systemMonitor.display.cpu" = "显示CPU使用率";
 "settings.systemMonitor.display.memory" = "显示内存使用率";
@@ -572,10 +639,17 @@
 "settings.systemMonitor.display.temperature" = "显示温度信息";
 "settings.systemMonitor.display.fanSpeed" = "显示风扇转速";
 "settings.systemMonitor.display.chartType" = "图表类型:";
+"settings.systemMonitor.display.noneEnabled" = "已关闭所有监控指标显示";
+"settings.systemMonitor.display.noneEnabled.detail" = "请至少启用一项 CPU、内存、温度或风扇显示。";
 "settings.systemMonitor.alerts.title" = "警报设置";
 "settings.systemMonitor.alerts.cpuThreshold" = "CPU警报阈值:";
 "settings.systemMonitor.alerts.memoryThreshold" = "内存警报阈值:";
 "settings.systemMonitor.alerts.diskThreshold" = "磁盘警报阈值:";
+"settings.systemMonitor.alerts.enableTemperatureMonitoring" = "启用温度监控";
+"settings.systemMonitor.alerts.temperatureThreshold" = "温度警报阈值:";
+"settings.systemMonitor.alerts.enableFanSpeedMonitoring" = "启用风扇转速监控";
+"settings.systemMonitor.alerts.fanSpeedThreshold" = "风扇转速警报阈值:";
+"settings.systemMonitor.alerts.thermalThrottling" = "启用热节流警报";
 "settings.systemMonitor.alerts.enableSound" = "启用声音警报";
 "settings.systemMonitor.alerts.enableNotificationCenter" = "启用通知中心";
 "settings.systemMonitor.advanced.title" = "高级选项";
@@ -583,6 +657,8 @@
 "settings.systemMonitor.advanced.exportData" = "导出监控数据";
 "settings.systemMonitor.advanced.enableRemoteMonitoring" = "启用远程监控";
 "settings.systemMonitor.advanced.samplingPrecision" = "采样精度:";
+"settings.systemMonitor.unsupported" = "暂未生效";
+"settings.systemMonitor.unsupported.detail" = "当前版本尚未接入该配置项的监控链路。";
 
 "fileTransfer.connectionStatus" = "连接状态";
 "status.transferring" = "传输中";
@@ -606,18 +682,17 @@
 "fileTransfer.history.clear" = "清空历史";
 "fileTransfer.history.emptyTitle" = "没有传输历史";
 "fileTransfer.history.emptySubtitle" = "完成的传输将显示在这里";
-"fileTransfer.debug.title" = "调试面板";
-"fileTransfer.debug.hmacTagHex" = "HMAC 标记（十六进制）";
-"fileTransfer.debug.signatureResult" = "整文件签名校验结果";
 "common.none" = "无";
 "action.preview" = "预览";
 "transferStatus.preparing" = "准备中";
 "transferStatus.transferring" = "传输中";
 "transferStatus.paused" = "已暂停";
 "transferStatus.completed" = "已完成";
+"fileTransfer.receiptDeliveryUnknown" = "文件已保存，但发送端确认状态未知；请勿自动重传。";
 "transferStatus.failed" = "失败";
 "transferStatus.cancelled" = "已取消";
 "action.close" = "关闭";
+"action.disconnect" = "断开";
 "action.share" = "分享";
 "status.idle" = "空闲";
 "status.adaptiveTuning" = "自适应调谐";
@@ -647,7 +722,7 @@
 "remote.newConnection" = "新建连接";
 "remote.overlay.connectingTo" = "正在连接到 %@...";
 "remote.empty.title" = "选择一个会话开始远程桌面";
-"remote.empty.subtitle" = "从左侧列表选择活跃会话，或创建新的远程连接";
+"remote.empty.subtitle" = "推荐先到「设备发现」一键连接你的设备。手动 RDP/VNC/SSH 属于高级功能，可作为备选方案。";
 "remote.toolbar.newConnection.help" = "新建远程连接";
 "remote.toolbar.refresh.help" = "刷新会话列表";
 "remote.performance.monitor" = "Metal 4 性能监控";
@@ -657,8 +732,8 @@
 "remote.connectionMode.near" = "近距";
 "remote.connectionMode.far" = "远距";
 "remote.connectionMode.auto.description" = "自动选择最佳连接模式（同网优先近距镜像）";
-"remote.connectionMode.near.description" = "近距硬件镜像 - 同网低延迟（ScreenCaptureKit + HEVC + QUIC）";
-"remote.connectionMode.far.description" = "远距 RDP - 跨网稳定（FreeRDP 3.x + GFX-AVC444）";
+"remote.connectionMode.near.description" = "查看并控制同一网络内的设备";
+"remote.connectionMode.far.description" = "手动 RDP（受限预览）- FreeRDP 3.30 软件 GDI、严格证书校验、无通道重定向";
 "common.unknown" = "未知";
 "profile.title" = "用户资料";
 "action.close" = "关闭";
@@ -675,6 +750,16 @@
 "about.title" = "关于 SkyBridge Compass Pro";
 "about.checkingUpdates" = "正在检查更新...";
 "about.checkUpdates" = "检查更新";
+"update.available.title" = "发现新版本";
+"update.available.message" = "SkyBridge Compass Pro %@ (Build %@) 可用，最低需要 macOS %@。更新包为 Developer ID 签名并公证的 DMG，下载后将由 macOS Gatekeeper 验证。";
+"update.latest.title" = "已是最新版本";
+"update.latest.message" = "SkyBridge Compass Pro %@ 已是当前稳定版。";
+"update.unsupported.title" = "发现新版本，但系统不满足要求";
+"update.unsupported.message" = "版本 %@ 最低需要 macOS %@，当前系统为 macOS %@。";
+"update.failed.title" = "检查更新失败";
+"update.failed.message" = "无法完成更新检查：%@";
+"update.download" = "下载更新";
+"update.later" = "稍后";
 "about.systemInfo" = "系统信息";
 "about.diagnostics" = "诊断工具";
 "about.feedback" = "反馈问题";
@@ -687,7 +772,23 @@
 "brand.title" = "SkyBridge Compass";
 "brand.tagline" = "连接无界，探索无限";
 "auth.selectMethod" = "选择登录方式";
+"auth.method.apple.title" = "Apple ID";
+"auth.method.nebula.title" = "星云账号";
+"auth.method.phone.title" = "手机号码";
+"auth.method.email.title" = "电子邮箱";
+"auth.method.apple.subtitle" = "使用 Face ID 或 Touch ID 快速登录";
+"auth.method.nebula.subtitle" = "企业级星云身份认证";
+"auth.method.phone.subtitle" = "通过短信验证码安全登录";
+"auth.method.email.subtitle" = "使用邮箱和密码登录";
 "auth.apple.tip" = "使用Apple ID快速登录";
+"auth.apple.web.button" = "继续使用 Apple 登录";
+"auth.apple.web.tip" = "SkyBridge Compass Pro 将打开 Apple 安全网页完成授权，成功后会自动返回应用。";
+"auth.apple.unavailable" = "Apple 登录暂未开放，请先使用星云、手机号或邮箱登录";
+"auth.apple.native.enabled" = "当前构建已启用原生 Apple 登录，请直接使用 Apple 登录按钮";
+"auth.apple.web.only" = "当前版本会通过浏览器完成 Apple 登录，请重新点击 Apple 登录按钮";
+"auth.apple.credential.missing" = "无法获取 Apple ID 凭证";
+"auth.apple.identityToken.missing" = "无法获取身份令牌";
+"auth.apple.context.expired" = "Apple 登录上下文已失效，请重试";
 "auth.nebula.toggle.hasAccount" = "已有账号？点击登录";
 "auth.nebula.toggle.noAccount" = "没有账号？点击注册";
 "auth.nebula.account" = "星云账号";
@@ -702,7 +803,16 @@
 "auth.emailAddress.placeholder" = "请输入邮箱地址";
 "auth.nebula.register" = "注册星云账号";
 "auth.nebula.login" = "登录星云";
+"auth.nebula.browser.action.register" = "在安全浏览器中注册";
+"auth.nebula.browser.action.login" = "在安全浏览器中登录";
+"auth.nebula.browser.recommended.register" = "推荐使用安全浏览器注册";
+"auth.nebula.browser.recommended.login" = "推荐使用安全浏览器登录";
+"auth.nebula.browser.description.register" = "Nebula 注册会在系统浏览器中完成，邮箱验证与二次验证都会留在浏览器授权会话里。";
+"auth.nebula.browser.description.login" = "Nebula 登录会在系统浏览器中完成，授权与二次验证都会留在浏览器授权会话里。";
+"auth.nebula.browser.capability.register" = "支持 PKCE、浏览器内注册与 MFA";
+"auth.nebula.browser.capability.login" = "支持 PKCE 与浏览器内 MFA";
 "auth.mfa.code" = "多因素认证码";
+"auth.mfa.code.placeholder" = "请输入多因素认证码";
 "auth.mfa.verify" = "验证MFA";
 "auth.phone.toggle.hasAccount" = "已有账号？点击登录";
 "auth.phone.toggle.noAccount" = "没有账号？点击注册";
@@ -724,6 +834,77 @@
 "auth.email.register" = "注册账号";
 "auth.email.login" = "邮箱登录";
 "auth.password.forgot" = "忘记密码？";
+"auth.security.verification.cancelled" = "已取消安全验证";
+"auth.turnstile.cancelled" = "已取消 Cloudflare Turnstile 验证";
+"auth.turnstile.failed" = "Cloudflare Turnstile 验证失败：%@";
+"auth.turnstile.missingConfig" = "客户端缺少 Cloudflare Turnstile 配置，请检查 TURNSTILE_SITE_KEY";
+"auth.preview.unsupportedOS" = "需要 macOS 14.0 或更高版本";
+"auth.displayName.default.user" = "用户";
+"auth.displayName.default.newUser" = "新用户";
+"auth.displayName.default.apple" = "Apple 用户";
+"auth.displayName.default.nebula" = "Nebula 用户";
+"auth.displayName.default.guest" = "游客用户";
+"auth.list.separator" = "、";
+"auth.security.retryAfter.hours" = "%@（约 %d 小时后可重试）";
+"auth.security.retryAfter.minutes" = "%@（约 %d 分钟后可重试）";
+"auth.security.deviceVerificationFailed" = "设备验证失败，请重试";
+"auth.security.rateLimited.local" = "请求过于频繁，请稍后再试";
+"auth.security.rateLimited.remote" = "当前请求已触发额外风控，请稍后再试";
+"auth.security.captchaRequired" = "请先完成安全验证";
+"auth.security.checkUnavailable" = "认证安全校验暂时不可用，请稍后重试";
+"auth.captcha.verificationFailed" = "验证失败，请重试";
+"auth.nebula.credentials.required" = "请输入完整的账号和密码";
+"auth.browser.flow.apple.name" = "Apple 登录";
+"auth.browser.flow.nebula.name" = "Nebula 登录";
+"auth.browser.flow.cancelled" = "%@已取消";
+"auth.browser.flow.startFailed" = "无法启动%@";
+"auth.apple.browser.callbackSessionMissing" = "Apple 登录回调缺少会话信息";
+"auth.nebula.browser.invalidCallback" = "Nebula 回调地址无效";
+"auth.nebula.browser.stateMismatch" = "Nebula 登录状态校验失败";
+"auth.nebula.browser.authorizationCodeMissing" = "Nebula 未返回授权码";
+"auth.code.required" = "请输入验证码";
+"auth.mfa.verificationFailedWithReason" = "MFA 验证失败：%@";
+"auth.phone.invalid" = "请输入有效的手机号码";
+"auth.phone.code.sent" = "验证码已发送";
+"auth.phone.code.resent" = "验证码已重新发送";
+"auth.phone.code.resendFailedWithReason" = "重新发送失败：%@";
+"auth.phone.code.sendFailedWithReason" = "发送验证码失败：%@";
+"auth.password.strength.weak" = "弱";
+"auth.password.strength.medium" = "中等";
+"auth.password.strength.strong" = "强";
+"auth.password.strength.veryStrong" = "非常强";
+"auth.password.tooShort" = "密码至少需要 8 个字符";
+"auth.password.tooLong" = "密码最多 128 个字符";
+"auth.password.requirement.uppercase" = "大写字母";
+"auth.password.requirement.lowercase" = "小写字母";
+"auth.password.requirement.number" = "数字";
+"auth.password.requirement.specialCharacter" = "特殊字符";
+"auth.password.strengthInsufficient" = "密码强度不足";
+"auth.password.strengthInsufficientWithSuggestions" = "密码强度不足，建议添加：%@";
+"auth.password.weakGeneric" = "密码强度不足";
+"auth.password.confirmationMismatch" = "两次输入的密码不一致";
+"auth.username.tooShort" = "用户名至少需要 4 个字符";
+"auth.username.tooLong" = "用户名最多 20 个字符";
+"auth.username.invalidCharacters" = "用户名只能包含字母、数字和下划线";
+"auth.username.reserved" = "该用户名已被保留";
+"auth.username.cannotStartWithNumber" = "用户名不能以数字开头";
+"auth.username.invalid" = "用户名格式不正确";
+"auth.email.invalid" = "请输入有效的邮箱地址";
+"auth.email.disposableNotSupported" = "不支持使用临时邮箱注册";
+"auth.registration.identifierGenerationFailed" = "ID 生成失败，请重试";
+"auth.registration.verifyEmailSent" = "注册成功！请检查邮箱并点击验证链接";
+"auth.registration.failedWithReason" = "注册失败：%@";
+"auth.registration.pendingAdminApproval" = "注册成功！您的账户正在等待管理员审核。";
+"auth.registration.failed" = "注册失败";
+"auth.phone.required" = "请输入手机号码";
+"auth.profile.displayName.required" = "请输入显示名称";
+"auth.profile.displayName.tooLong" = "显示名称最多 50 个字符";
+"auth.email.required" = "请输入邮箱地址";
+"auth.password.required" = "请输入密码";
+"auth.passwordReset.emailSent" = "密码重置邮件已发送，请检查邮箱";
+"auth.passwordReset.emailSendFailedWithReason" = "发送重置邮件失败：%@";
+"auth.passwordReset.sessionMissing" = "当前没有可用于重置密码的会话，请重新打开邮件链接";
+"auth.session.notLoggedIn" = "用户未登录";
 "guest.mode" = "游客模式体验";
 "monitor.noData" = "暂无数据";
 "monitor.axis.time" = "时间";
@@ -746,6 +927,15 @@
 "auth.username" = "用户名";
 "remote.form.connect" = "连接";
 "remote.form.connectFailed" = "连接失败";
+
+// 新增：推荐入口 + 高级折叠
+"remote.connect.recommended" = "从设备发现连接（推荐）";
+"remote.connect.advanced" = "高级：手动连接（RDP/VNC/SSH）";
+"remote.form.recommended.section" = "推荐";
+"remote.form.recommended.body" = "大多数情况下无需手动填写 IP/端口。建议先到「设备发现」选择设备进行连接。";
+"remote.form.openDeviceDiscovery" = "打开设备发现";
+"remote.form.advanced.section" = "高级：手动配置（RDP/VNC/SSH）";
+"remote.form.rdp.certificateNotice" = "RDP 仅接受证书链受 macOS 系统信任且主机名匹配的端点。需要手动信任的未知、自签名或已变更证书会被拒绝；本版本没有证书登记或 TOFU 流程。";
 "monitor.title" = "系统监控";
 "monitor.status.monitoring" = "监控中";
 "monitor.status.initializing" = "初始化中...";
@@ -756,6 +946,33 @@
 "monitor.helper.enable" = "启用高级监控…";
 "monitor.helper.uninstall.tip" = "可卸载提权 Helper 以恢复系统默认状态。";
 "monitor.helper.uninstall" = "卸载 Helper…";
+"monitor.metric.unavailableWithReason" = "不可用（%@）";
+"monitor.metric.stale" = "过期";
+"monitor.metric.staleSuffix" = "(过期)";
+"monitor.metric.reason.unsupported" = "硬件或系统不支持";
+"monitor.metric.reason.permissionDenied" = "需要高级监控权限";
+"monitor.metric.reason.notProvidedByOS" = "硬件或系统未提供该指标";
+"monitor.metric.reason.helperUnavailable" = "高级监控 Helper 不可用";
+"monitor.metric.reason.helperOutdated" = "高级监控 Helper 版本过旧";
+"monitor.metric.reason.parsingFailed" = "采样解析失败";
+"monitor.metric.reason.sampling" = "采样中";
+"monitor.metric.reason.requiresExpertMode" = "需要切换到专家模式";
+"monitor.metric.reason.temporarilyInitializing" = "初始化中";
+"monitor.metric.source.kernelAPI" = "Kernel API";
+"monitor.metric.source.ioAccelerator" = "IOAccelerator";
+"monitor.metric.source.smc" = "SMC";
+"monitor.metric.source.iohid" = "IOHID";
+"monitor.metric.source.ioreport" = "IOReport";
+"monitor.metric.source.powermetrics" = "powermetrics";
+"monitor.metric.source.processInfoThermalState" = "thermalState";
+"monitor.metric.availability.available" = "可用";
+"monitor.metric.availability.unavailable" = "不可用";
+"monitor.metric.availability.stale" = "过期";
+"monitor.metric.age.seconds" = "%d秒前";
+"monitor.mode.title" = "监控模式";
+"monitor.mode.standard" = "标准";
+"monitor.mode.expert" = "专家";
+"monitor.diagnostics.title" = "监控诊断";
 "monitor.overview" = "系统概览";
 "monitor.cpu.details" = "CPU详情";
 "monitor.memory.details" = "内存详情";
@@ -782,6 +999,96 @@
 "monitor.network.totalUpload" = "总上传";
 "monitor.network.totalDownload" = "总下载";
 "monitor.network.activeConnections" = "活跃连接";
+
+/* Notifications */
+"notifications.center.title" = "通知中心";
+"notifications.center.empty" = "暂无通知";
+"notifications.discovery.trust.verified" = "已验签";
+"notifications.discovery.trust.unverified" = "未验证";
+"notifications.discovery.detail" = "%@ · %@:%@ · %@";
+"notifications.discovery.reason" = "原因：%@";
+"notifications.discovery.title" = "发现可连接设备";
+"notifications.discovery.title.unverified" = "发现可连接设备（未验证）";
+"notifications.fileTransfer.completed" = "文件传输完成";
+"notifications.fileTransfer.failed" = "文件传输失败";
+"notifications.fileTransfer.savedTo" = "已保存到 %@";
+"notifications.fileTransfer.completed.body" = "%@ 已成功传输";
+"notifications.fileTransfer.failed.body" = "%@ 传输失败";
+"notifications.fileReceived.completed" = "文件接收完成";
+"notifications.fileReceived.savedTo" = "%@ 已保存到 %@";
+"notifications.fileReceived.completedBody" = "%@ 已接收完成";
+"notifications.remoteDesktop.ended.title" = "远程桌面已结束";
+"notifications.remoteDesktop.ended.body" = "远程桌面会话已正常结束。";
+"notifications.remoteDesktop.ended.bodyWithDevice" = "与 %@ 的远程桌面会话已正常结束。";
+"notifications.remoteDesktop.interrupted.title" = "远程桌面异常中断";
+"notifications.remoteDesktop.interrupted.body" = "远程桌面会话已异常中断。";
+"notifications.remoteDesktop.interrupted.bodyWithDevice" = "与 %@ 的远程桌面会话已异常中断。";
+"notifications.chunkVerification.passed" = "分块校验通过";
+"notifications.chunkVerification.failed" = "分块校验失败";
+"notifications.merkleVerification.passed" = "Merkle 校验通过";
+"notifications.merkleVerification.failed" = "Merkle 校验失败";
+"notifications.certificate.passed" = "证书校验通过";
+"notifications.certificate.failed" = "证书校验失败";
+"notifications.certificate.elapsed" = "耗时 %@ms";
+"notifications.merkleTiming.verify" = "Merkle 校验耗时";
+"notifications.merkleTiming.compute" = "Merkle 计算耗时";
+"notifications.welcome.greeting" = "%@，%@！";
+"notifications.welcome.title" = "%@，%@！欢迎使用 SkyBridge Compass";
+"notifications.welcome.detail" = "开始您的跨设备连接之旅";
+"notifications.greeting.lateNight" = "夜深了";
+"notifications.greeting.earlyMorning" = "清晨好";
+"notifications.greeting.morning" = "早上好";
+"notifications.greeting.noon" = "中午好";
+"notifications.greeting.afternoon" = "下午好";
+"notifications.greeting.evening" = "晚上好";
+"notifications.greeting.default" = "你好";
+"notifications.wellness.lateNight.title" = "夜深了，注意休息";
+"notifications.wellness.lateNight.detail" = "建议放松眼睛，保证睡眠质量";
+"notifications.rest.1h.title" = "您已连续使用 1 小时";
+"notifications.rest.1h.detail" = "休息片刻，喝杯水，保护您的眼睛";
+"notifications.rest.duration.title" = "使用时长提醒";
+"notifications.rest.duration.detail" = "起来走动一下吧，久坐不利于健康";
+"notifications.rest.tip.title" = "健康小贴士";
+"notifications.rest.tip.detail" = "眺望远方，让眼睛得到放松";
+"notifications.rest.breathe.title" = "建议休息";
+"notifications.rest.breathe.detail" = "做几个深呼吸，缓解疲劳";
+"notifications.rest.break.title" = "休息一下";
+"notifications.rest.break.detail" = "起身活动，保持最佳状态";
+"notifications.rest.3h.title" = "连续使用 3 小时";
+"notifications.rest.3h.detail" = "建议充分休息、补充水分并活动一下";
+"notifications.weather.aqi.veryUnhealthy.title" = "空气质量极差 (AQI: %@)";
+"notifications.weather.aqi.veryUnhealthy.detail" = "建议减少外出，佩戴口罩并关闭门窗";
+"notifications.weather.aqi.unhealthy.title" = "空气质量较差 (AQI: %@)";
+"notifications.weather.aqi.unhealthy.detail" = "建议佩戴口罩，尽量减少户外活动";
+"notifications.weather.aqi.sensitive.title" = "空气质量偏高 (AQI: %@)";
+"notifications.weather.aqi.sensitive.detail" = "敏感人群建议佩戴口罩，适当减少外出";
+"notifications.weather.aqi.caution.title" = "空气质量一般 (AQI: %@)";
+"notifications.weather.aqi.caution.detail" = "建议适度缩短户外时长，关注实时空气质量";
+"notifications.weather.uv.strong.title" = "强紫外线提醒";
+"notifications.weather.uv.strong.detail" = "建议涂抹防晒霜、佩戴太阳镜并减少日照";
+"notifications.weather.uv.moderate.title" = "防晒提醒";
+"notifications.weather.uv.moderate.detail" = "紫外线较强，外出注意防晒与遮阳";
+"notifications.weather.clear.title" = "天气晴好";
+"notifications.weather.clear.detail" = "适合外出，注意合理安排日照时间";
+"notifications.weather.rain.title" = "防雨提醒";
+"notifications.weather.rain.detail" = "出门请带伞，注意道路湿滑";
+"notifications.weather.snow.title" = "防雪提醒";
+"notifications.weather.snow.detail" = "注意保暖与防滑，谨防低温冻伤";
+"notifications.weather.haze.title" = "雾霾/大雾提醒";
+"notifications.weather.haze.detail" = "建议佩戴口罩，减少外出并注意行车安全";
+"notifications.weather.thunderstorm.title" = "雷暴提醒";
+"notifications.weather.thunderstorm.detail" = "减少外出，携带雨具并注意防雷安全";
+"notifications.weather.generic.title" = "天气提示";
+"notifications.weather.generic.detail" = "当前时段（%@），请根据实际天气合理安排出行";
+"notifications.deviceDiscovered.title" = "发现新设备";
+"notifications.deviceDiscovered.body" = "已发现设备：%@";
+"notifications.action.showInFinder" = "在 Finder 中显示";
+"notifications.action.retry" = "重试";
+"notifications.common.unknownFile" = "未知文件";
+"notifications.common.unknownError" = "未知错误";
+"notifications.common.id" = "ID：%@";
+"notifications.common.chunk" = "分块：%@";
+"notifications.common.expectedActual" = "期望/实际：%@ / %@";
 "monitor.network.quality" = "网络质量";
 "qrcode.generateFailed" = "生成二维码失败";
 "qrcode.regenerate" = "重新生成";
@@ -878,3 +1185,186 @@
 "common.yes" = "是";
 "common.no" = "否";
 "common.done" = "完成";
+
+/* 远控安全提示 */
+"remoteControl.securityNotice.windowTitle" = "远程控制安全提示";
+"remoteControl.securityNotice.appName" = "云桥司南";
+"remoteControl.securityNotice.pendingTitle" = "%@ 正在请求远程控制批准";
+"remoteControl.securityNotice.activeTitle" = "%@ 正在被远程控制";
+"remoteControl.securityNotice.subtitle" = "入站 %@ 远控使用已认证加密通道；仅在协商套件证明后显示 PQC。";
+"remoteControl.securityNotice.transport.p2p" = "P2P";
+"remoteControl.securityNotice.transport.webrtc" = "WebRTC";
+"remoteControl.securityNotice.remoteIP" = "IP";
+"remoteControl.securityNotice.transport" = "传输";
+"remoteControl.securityNotice.account" = "设备自报账号";
+"remoteControl.securityNotice.nebulaID" = "设备自报 Nebula ID";
+"remoteControl.securityNotice.device" = "设备身份";
+"remoteControl.securityNotice.pqc" = "PQC 套件";
+"remoteControl.securityNotice.approve" = "批准";
+"remoteControl.securityNotice.reject" = "拒绝";
+"remoteControl.securityNotice.disconnect" = "断开";
+"remoteControl.securityNotice.close" = "关闭";
+"remoteControl.securityNotice.collapse" = "收起";
+"remoteControl.securityNotice.expand" = "展开";
+"remoteControl.securityNotice.valueUnavailable" = "未提供";
+
+/* 顶部栏网络信息 */
+"topbar.network.ipLocation.pending" = "IP · …";
+"topbar.network.ipLocation.ready" = "%@ · %@";
+"topbar.network.ipLocation.failed" = "IP · 不可用";
+"topbar.network.unknownCity" = "未知城市";
+"topbar.network.unknownIp" = "未知 IP";
+"topbar.network.proxy.enabled" = "代理";
+"topbar.network.proxy.disabled" = "直连";
+"topbar.network.proxy.help.enabled" = "系统代理已开启";
+"topbar.network.proxy.help.disabled" = "系统代理未开启";
+"topbar.network.ipLocation.help.idle" = "公网 IP 城市等待采样";
+"topbar.network.ipLocation.help.loading" = "正在获取公网 IP 城市与代理状态";
+"topbar.network.ipLocation.help.ready" = "%@ · %@ · %@";
+"topbar.network.ipLocation.help.failed" = "公网 IP 城市获取失败：%@";
+"topbar.network.speed.pending" = "↓ … · ↑ …";
+"topbar.network.speed.ready" = "↓ %@ · ↑ %@";
+"topbar.network.speed.failed" = "网速不可用";
+"topbar.network.speed.help.idle" = "网络吞吐等待采样";
+"topbar.network.speed.help.loading" = "正在采样网络吞吐";
+"topbar.network.speed.help.ready" = "下载 %@，上传 %@";
+"topbar.network.speed.help.failed" = "网络吞吐采样失败：%@";
+"topbar.network.latency.pending" = "延迟 …";
+"topbar.network.latency.ready" = "%@ ms";
+"topbar.network.latency.failed" = "延迟不可用";
+"topbar.network.latency.help.idle" = "公网延迟等待探测";
+"topbar.network.latency.help.loading" = "正在探测公网延迟";
+"topbar.network.latency.help.ready" = "到 SkyBridge 官网入口的 HTTPS 响应延迟：%@ ms";
+"topbar.network.latency.help.failedUnavailable" = "公网延迟不可用";
+"topbar.network.latency.help.failed" = "公网延迟探测失败：%@";
+
+/* 本地摄像头视频流 */
+"remote.camera.connect" = "连接本地摄像头";
+"remote.camera.defaultName" = "智能监控";
+"remote.camera.name" = "摄像头名称（可选）";
+"remote.camera.endpoint" = "精确的 RTSP/RTSPS 地址";
+"remote.camera.contract" = "请输入私网 IP 字面量和精确流路径。当前版本仅支持 H.264 与 RTSP 内嵌 TCP 视频；不会猜测路径或连接厂商云中继。";
+"remote.camera.plaintextAcknowledgement" = "我了解 RTSP 的控制数据和视频没有传输加密。";
+"remote.camera.tlsNotice" = "RTSPS 使用系统证书信任和主机身份校验；无效或自签名证书会被拒绝。";
+"remote.camera.protocol" = "本地摄像头（RTSP）";
+"remote.camera.rendererUnavailable" = "无法初始化视频渲染器。";
+"remote.camera.feedUnavailable.title" = "画面不可用";
+"remote.camera.feedUnavailable.failed" = "摄像头流已失败，凭据和传输资源也已释放。请检查精确地址、凭据、H.264 编码和本地网络后重连。";
+"remote.camera.feedUnavailable.released" = "会话渲染资源已释放，请重新连接。";
+
+/* Account Devices (账号设备) */
+"discovery.mode.accountDevices" = "账号设备";
+"discovery.mode.subtitle.accountDevices" = "同一账号";
+"discovery.accountDevices.title" = "账号设备";
+"discovery.accountDevices.description" = "登录同一账号的设备会自动记录名称、IP、系统与在线状态，跨网络也能看到";
+"discovery.accountDevices.nebulaId" = "Nebula ID";
+"discovery.accountDevices.empty.title" = "还没有其他设备";
+"discovery.accountDevices.empty.message" = "在其他设备上用同一账号登录 SkyBridge，它就会出现在这里";
+"discovery.accountDevices.signedOut" = "登录后才能看到本账号的设备";
+"discovery.accountDevices.loading" = "正在同步账号设备…";
+"discovery.accountDevices.retryHint" = "将自动重试；也可以点击刷新";
+"discovery.accountDevices.stale" = "列表可能已过期（上次更新：%@）";
+"discovery.accountDevices.truncated" = "设备数量超过 200 台，仅显示前 200 台";
+"discovery.accountDevices.lastUpdated" = "更新于 %@";
+"discovery.accountDevices.status.lanReachable" = "局域网可达";
+"discovery.accountDevices.status.online" = "在线";
+"discovery.accountDevices.status.offline" = "离线";
+"discovery.accountDevices.capability.controllable" = "可被控";
+"discovery.accountDevices.capability.controlOnly" = "仅控制端";
+"discovery.accountDevices.lan" = "局域网";
+"discovery.accountDevices.public" = "公网";
+"discovery.accountDevices.deviceId" = "设备 ID";
+"discovery.accountDevices.lastSeen" = "最近活跃";
+"discovery.accountDevices.neverSeen" = "尚未上线";
+"discovery.accountDevices.registration.pending" = "待批准";
+"discovery.accountDevices.registration.frozen" = "已冻结";
+"discovery.accountDevices.action.useConnectionCode" = "用连接码连接";
+"discovery.accountDevices.hint.online" = "该设备在线，但尚未发现可用的直连路径。可在对方设备生成连接码后输入";
+"discovery.accountDevices.copyAddress" = "复制地址";
+"discovery.accountDevices.copyDeviceId" = "复制设备 ID";
+"discovery.accountDevices.failure.notAuthenticated" = "未登录";
+"discovery.accountDevices.failure.deviceNotActive" = "本机尚未在账号中激活（%@）";
+"discovery.accountDevices.failure.rateLimited" = "请求过于频繁，稍后自动重试";
+"discovery.accountDevices.failure.registryUnavailable" = "设备注册表暂不可用（%@）";
+"discovery.accountDevices.failure.serverRejected" = "服务器拒绝了请求（HTTP %d）";
+"discovery.accountDevices.failure.transport" = "无法连接信令服务器";
+"discovery.accountDevices.failure.malformedResponse" = "服务器响应无法解析";
+"discovery.accountDevices.failure.localIdentityUnavailable" = "本机身份尚未就绪";
+"discovery.accountDevices.failure.localAuthenticationUnavailable" = "本机登录状态异常（%@）";
+"discovery.accountDevices.serviceInactive.title" = "账号设备服务未运行";
+"discovery.accountDevices.serviceInactive.message" = "本机已登录，但账号设备同步尚未启动。请重新打开主控台；若持续如此请重启应用。";
+"discovery.accountDevices.heartbeatFailed" = "本机在线状态上报失败，其他设备可能看不到这台设备";
+"dashboard.accountDevices" = "账号设备";
+"dashboard.accountDevices.summary" = "%d 台设备 · %d 台在线";
+"dashboard.accountDevices.viewAll" = "查看全部";
+"dashboard.accountDevices.empty" = "登录同一账号的其他设备会显示在这里";
+
+"remoteControl.securityNotice.inputController" = "拥有输入权";
+
+"remoteControl.securityNotice.observer" = "仅观看";
+
+"remoteControl.securityNotice.transferInput" = "交接输入权";
+
+"remoteControl.securityNotice.approveView" = "允许观看";
+
+"info.appleSilicon" = "Apple 芯片";
+"info.optimizationEnabled" = "优化已启用";
+"info.pCore" = "性能核心";
+"info.eCore" = "能效核心";
+"info.multiCoreOpt" = "多核优化";
+"info.reqAppleSilicon" = "需要 Apple 芯片";
+"info.deviceUnsupported" = "不支持此设备";
+"info.standardMode" = "标准模式";
+
+"remoteControl.securityNotice.localInputController" = "本机已收回键盘和鼠标控制权，远端仍可观看。";
+
+// Saved pairing identity status
+"discovery.trustedDevices.section" = "已信任设备";
+"discovery.pendingPairings.section" = "待验证的配对记录";
+"discovery.pendingPairings.explanation" = "这些记录暂不能用于验证连接，不表示设备已从账号移除。请选择账号设备或扫描当前设备的二维码连接。";
+
+// Account device removal
+"accountDevices.remove.action" = "从账号移除";
+"accountDevices.remove.title" = "移除账号设备";
+"accountDevices.remove.message" = "将“%@”从账号移除？该设备将无法继续使用账号设备服务。本地文件和已保存的配对不会被删除。";
+"accountDevices.remove.confirm" = "移除";
+"accountDevices.remove.cancel" = "取消";
+"accountDevices.remove.selfRemoved" = "本机已从账号移除，账号设备同步已停止。";
+"accountDevices.remove.failed" = "移除未获确认。请刷新并检查设备状态后重试。";
+
+"accountDevices.myDevices" = "我的设备";
+
+"remote.session.hostStopped" = "对端已停止屏幕共享。";
+
+"remote.session.permissionRevoked" = "对端已撤销屏幕共享授权。";
+
+"remote.session.captureFailed" = "对端屏幕采集失败，共享已结束。";
+
+"audio.output.source_format" = "音源 PCM 格式";
+
+"audio.authorization.renewal.waiting" = "播放期间会自动尝试更新账户授权。";
+"audio.authorization.renewal.checking" = "正在核验账户设备，更新本次播放授权。";
+"audio.authorization.renewal.retry_pending" = "暂时无法更新授权，仍在原有效期内播放，稍后自动重试。";
+"audio.authorization.renewal.unavailable" = "未能更新授权，本次播放只可继续至当前有效期。";
+"audio.authorization.renewal.failed" = "本次播放授权已失效，正在停止播放。";
+
+"audio.output.endpoint_unavailable" = "所选输出当前不可用。请确认设备已连接，并在系统声音设置中选择可用的输出设备。";
+
+"audio.output.format_mismatch" = "此输出当前无法使用音源的采样率、声道数、PCM 表示或位深。请选择支持所示格式的输出设备。";
+
+"audio.output.mixing_required" = "当前输出路径允许系统混音，无法满足本次严格播放。请选择支持独占原格式输出的设备。";
+
+"audio.output.unsupported_layout" = "当前输出的声道布局与音源不匹配，或暂不受严格播放支持。请选择声道布局匹配的输出设备。";
+
+"audio.output.unsupported_topology" = "当前输出的音频通道组织暂不受严格播放支持。请使用其他输出设备。";
+
+"audio.output.processing_active" = "当前声音设置启用了音量增益、静音或单声道处理，无法满足严格播放。请检查系统及设备的声音设置。";
+
+"audio.output.device_busy" = "未能取得这台输出设备的独占使用权。请停止其他音频播放后重试。";
+
+"audio.output.variable_buffer_size" = "当前输出使用可变缓冲，暂不受严格播放支持。请选择其他输出设备。";
+
+"audio.output.property_unavailable" = "无法完成这台声音设备的严格输出检查。请重新连接设备后重试。";
+
+/* Reconnect the current USB accessory through a fresh authenticated session. */
+"connection.usb.retryTimeout" = "USB 连接超时。请在手机上打开 SkyBridge，然后重试连接。";

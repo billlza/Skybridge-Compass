@@ -1,3 +1,8 @@
+// macOS-exclusive: built on macOS-only APIs (AppKit / IOKit / ScreenCaptureKit / CoreWLAN /
+// MetalFX / ServiceManagement / ApplicationServices / CoreGraphics display services).
+// Excluded from other platforms so SkyBridgeCore can be the single shared core for iOS as
+// well. No behaviour changes on macOS.
+#if os(macOS)
 @preconcurrency import SwiftUI
 import CoreImage
 import CoreImage.CIFilterBuiltins
@@ -165,12 +170,6 @@ public final class QRCodeGenerator: ObservableObject {
     }
 }
 
-// MARK: - 通知扩展
-
-extension Notification.Name {
-    static let transferLinkExpired = Notification.Name("transferLinkExpired")
-}
-
 // MARK: - SwiftUI集成
 
 /// 二维码显示视图
@@ -279,4 +278,5 @@ struct QRCodeDisplayView_Previews: PreviewProvider {
         .frame(width: 400, height: 500)
     }
 }
+#endif
 #endif

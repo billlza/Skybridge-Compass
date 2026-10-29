@@ -1,0 +1,20 @@
+\begin{table*}[!tbp]
+\centering
+\scriptsize
+\caption{Ablation-by-property summary (artifact-backed).}
+\label{tab:ablation-by-property}
+\begin{tabular}{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.23}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.26}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.34}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.17}}@{}}
+\toprule
+Contract mechanism & Ablated variant & Observed breakage & Evidence anchor \\
+\midrule
+Local-only fallback gate + timeout blacklist (D2) & Timeout/network-derived fallback allowed & Under timeout attack, FDR/SDR/ECR/PCR shifts from 0.00/0.00/1.00/1.00 to 1.00/1.00/0.00/0.00 (attacker-forced classic with silent downgrade) & Table~\ref{tab:migration-threat-harness} \\
+Structured downgrade evidence + replay fields (D3) & Classic fallback without downgrade event schema & Fallback becomes non-auditable and non-replayable (SDR=1.00, PCR=0.00 on the baseline row) & Table~\ref{tab:migration-threat-harness} \\
+Per-peer fallback cooldown gate & Cooldown disabled in heterogeneous fleet & Downgrade exposure increases from 195.6 to 799.8/1k (20\% PQC-capable), 185.7 to 500.8/1k (50\%), and 124.8 to 204.8/1k (80\%) & Supplementary Table~\ref{tab:migration-fleet-behavior} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+

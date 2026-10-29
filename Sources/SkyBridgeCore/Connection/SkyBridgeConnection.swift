@@ -1,3 +1,9 @@
+// DEDUPLICATION TARGET — not inherently macOS-only.
+//
+// 属于 macOS 侧连接编排簇（其类型定义在 ConnectionManager.swift）。阶段 0 只让
+// SkyBridgeCore 能为 iOS 编译；采用/合并 iOS 版本是阶段 3 的迁移工作。
+// 记录在 Docs/background-wake-capability-ledger.md。
+#if os(macOS)
 import Foundation
 import Network
 import OSLog
@@ -34,13 +40,24 @@ public final class SkyBridgeConnection: @unchecked Sendable {
         connection.stateUpdateHandler = { [weak self] newState in
             guard let self else { return }
             self.handleStateUpdate(newState)
-            self.externalStateHandler?(newState)
+            // Read the handler under the same lock that guards lifecycleState;
+            // onStateUpdate(_:) may replace it concurrently from another thread.
+            self.currentExternalStateHandler()?(newState)
         }
     }
 
  /// 设置外部状态回调（可在初始化后调用）
     public func onStateUpdate(_ handler: @Sendable @escaping (NWConnection.State) -> Void) {
-        self.externalStateHandler = handler
+        stateLock.lock()
+        externalStateHandler = handler
+        stateLock.unlock()
+    }
+
+ /// 在锁保护下读取外部状态回调，避免与 onStateUpdate(_:) 的并发写入产生数据竞争
+    private func currentExternalStateHandler() -> (@Sendable (NWConnection.State) -> Void)? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return externalStateHandler
     }
 
  /// 当前安全状态（线程安全）
@@ -121,3 +138,4 @@ public final class SkyBridgeConnection: @unchecked Sendable {
         }
     }
 }
+#endif

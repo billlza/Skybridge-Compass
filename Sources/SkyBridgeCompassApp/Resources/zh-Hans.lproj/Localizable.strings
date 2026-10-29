@@ -11,3 +11,46 @@
 "auth.hero.benefit.reach" = "跨网直达";
 "auth.hero.benefit.trust" = "端到端可信";
 "auth.hero.benefit.setup" = "零配置协作";
+"startup.productName" = "云桥司南 Pro";
+"startup.subtitle.launching" = "正在启动应用程序...";
+"startup.loading.format" = "正在加载：%@";
+"startup.progress.steps" = "已完成 %@/%@ 个启动步骤";
+"startup.error.format" = "启动错误：%@";
+"startup.stage.initializing" = "正在初始化...";
+"startup.stage.coreSystem" = "正在加载核心系统";
+"startup.stage.basicServices" = "正在加载基础服务";
+"startup.stage.userInterface" = "正在准备界面";
+"startup.stage.advancedFeatures" = "正在加载高级功能";
+"startup.stage.completed" = "启动完成";
+"startup.step.loggingSystem" = "日志系统";
+"startup.step.configurationManager" = "配置管理";
+"startup.step.securityServices" = "安全服务";
+"startup.step.performanceFoundation" = "性能监控基础";
+"startup.step.networkServices" = "网络管理";
+"startup.step.fileSystemServices" = "文件系统";
+"startup.step.serviceLaunchPlan" = "服务启动计划";
+"startup.step.themeConfiguration" = "主题配置";
+"startup.step.mainInterface" = "主界面";
+"startup.step.systemMonitorInterface" = "系统监控";
+"startup.step.weatherServices" = "天气服务";
+"startup.step.appleSiliconOptimization" = "Apple Silicon 优化";
+"startup.step.remoteDesktopServices" = "远程桌面服务";
+
+/* Account device registration and hardware metadata */
+"discovery.accountDevices.caller.identityMismatch" = "本机身份与历史登记不一致，需要重新验证设备。";
+"discovery.accountDevices.caller.notRegistered" = "本机尚未登记，需由已登记设备批准。";
+"discovery.accountDevices.caller.pending" = "本机登记正在等待批准。";
+"discovery.accountDevices.caller.frozen" = "本机登记已冻结。";
+"discovery.accountDevices.caller.unrecognizedStatus" = "暂时无法确认本机的登记状态。";
+"discovery.accountDevices.modelNotReported" = "型号尚未上报";
+
+/* Established connection transport and USB peer identification. */
+"device.discovery.methods" = "发现方式：";
+"connection.current.usb" = "USB 已连接";
+"connection.current.network" = "网络已连接";
+"usb.connection.details" = "连接详情";
+"usb.peer.identifying" = "正在识别线缆上的设备…";
+"usb.peer.pairFirst" = "请先打开手机或平板上的 SkyBridge，通过扫码完成配对。";
+"usb.peer.identificationFailed" = "暂时无法识别线缆上的 SkyBridge 设备：";
+
+"可用的音频选项会显示在手机的设备页面。播放前会检查账户授权和输出格式，并请求本机确认。" = "可用的音频选项会显示在手机的设备页面。播放前会检查账户授权和输出格式，并请求本机确认。";

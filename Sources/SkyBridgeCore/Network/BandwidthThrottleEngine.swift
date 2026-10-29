@@ -159,6 +159,12 @@ public final class BandwidthThrottleEngine: ObservableObject {
     // MARK: - Singleton
 
     public static let shared = BandwidthThrottleEngine()
+    private static let configStore = CodablePersistenceStore<BandwidthLimit>(
+        location: .protectedApplicationSupport(
+            path: "Network/bandwidth-limit.json",
+            legacyUserDefaultsKey: "com.skybridge.bandwidth.config"
+        )
+    )
 
     // MARK: - Published Properties
 
@@ -266,18 +272,12 @@ public final class BandwidthThrottleEngine: ObservableObject {
     }
 
     private func saveConfig() {
-        if let data = try? JSONEncoder().encode(config) {
-            UserDefaults.standard.set(data, forKey: configKey)
-        }
+        try? Self.configStore.save(config)
         UserDefaults.standard.set(isEnabled, forKey: "com.skybridge.bandwidth.enabled")
     }
 
     private static func loadConfig() -> BandwidthLimit? {
-        guard let data = UserDefaults.standard.data(forKey: "com.skybridge.bandwidth.config"),
-              let config = try? JSONDecoder().decode(BandwidthLimit.self, from: data) else {
-            return nil
-        }
-        return config
+        Self.configStore.load()
     }
 }
 

@@ -32,10 +32,13 @@ public actor TokenBucketLimiter {
     
  /// Current available tokens (floating point for fractional refill)
     private var tokens: Double
-    
- /// Last refill timestamp using monotonic clock
+
+    /// Last refill timestamp using monotonic clock
     private var lastRefill: ContinuousClock.Instant
-    
+
+    /// Monotonic time source. Kept injectable so refill behavior can be tested without wall-clock sleeps.
+    private let now: @Sendable () -> ContinuousClock.Instant
+
  // MARK: - Initialization
     
  /// Initialize a token bucket rate limiter.
@@ -47,20 +50,35 @@ public actor TokenBucketLimiter {
         precondition(rate > 0, "Rate must be positive")
         precondition(burst > 0, "Burst must be positive")
         
+        let initialNow = ContinuousClock.now
         self.rate = rate
         self.burst = burst
         self.tokens = Double(burst) // Start with full bucket
-        self.lastRefill = ContinuousClock.now
+        self.lastRefill = initialNow
+        self.now = { ContinuousClock.now }
+    }
+
+    init(rate: Double, burst: Int, now: @escaping @Sendable () -> ContinuousClock.Instant) {
+        precondition(rate > 0, "Rate must be positive")
+        precondition(burst > 0, "Burst must be positive")
+
+        self.rate = rate
+        self.burst = burst
+        self.tokens = Double(burst)
+        self.lastRefill = now()
+        self.now = now
     }
     
  /// Initialize from SecurityLimits configuration.
  ///
  /// - Parameter limits: Security limits configuration
     public init(limits: SecurityLimits) {
+        let initialNow = ContinuousClock.now
         self.rate = limits.tokenBucketRate
         self.burst = limits.tokenBucketBurst
         self.tokens = Double(limits.tokenBucketBurst)
-        self.lastRefill = ContinuousClock.now
+        self.lastRefill = initialNow
+        self.now = { ContinuousClock.now }
     }
     
  // MARK: - Public Interface
@@ -119,7 +137,7 @@ public actor TokenBucketLimiter {
  /// Refill tokens based on elapsed time since last refill.
  /// Clamps to burst capacity to prevent unbounded accumulation.
     private func refill() {
-        let now = ContinuousClock.now
+        let now = now()
         let elapsed = now - lastRefill
         
  // Convert Duration to seconds

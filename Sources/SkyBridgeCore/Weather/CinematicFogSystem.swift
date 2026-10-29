@@ -1,3 +1,8 @@
+// macOS-exclusive: built on macOS-only APIs (AppKit / IOKit / ScreenCaptureKit / CoreWLAN /
+// MetalFX / ServiceManagement / ApplicationServices / CoreGraphics display services).
+// Excluded from other platforms so SkyBridgeCore can be the single shared core for iOS as
+// well. No behaviour changes on macOS.
+#if os(macOS)
 //
 // CinematicFogSystem.swift
 // SkyBridgeCore
@@ -493,3 +498,4 @@ public struct CinematicFogView: View {
 // MARK: - 🌫️ 清空区域定义
 // ClearZone已在WeatherEffectView.swift中定义
 
+#endif

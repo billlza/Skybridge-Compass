@@ -1,9 +1,18 @@
 import SwiftUI
+import SkyBridgeCore
 
 /// macOS 应用菜单命令结构 - 遵循 Apple 设计规范
 struct SkyBridgeCommands: Commands {
     
     var body: some Commands {
+        CommandGroup(after: .appInfo) {
+            Button(LocalizationManager.shared.localizedString("about.checkUpdates")) {
+                Task { @MainActor in
+                    await SkyBridgeAppUpdateController.checkAndPresent()
+                }
+            }
+        }
+
  // 应用菜单 - 添加偏好设置命令
         CommandGroup(replacing: .appSettings) {
             Button("偏好设置...") {

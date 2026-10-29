@@ -50,6 +50,8 @@ public struct MenuBarTransferItem: Identifiable, Sendable, Equatable {
     public let fileName: String
     public let progress: Double
     public let speed: Double
+    public let transferredBytes: Int64
+    public let totalBytes: Int64
     public let state: TransferState
     
  /// 传输状态
@@ -65,12 +67,16 @@ public struct MenuBarTransferItem: Identifiable, Sendable, Equatable {
         fileName: String,
         progress: Double,
         speed: Double,
+        transferredBytes: Int64 = 0,
+        totalBytes: Int64 = 0,
         state: TransferState
     ) {
         self.id = id
         self.fileName = fileName
         self.progress = progress
         self.speed = speed
+        self.transferredBytes = max(0, transferredBytes)
+        self.totalBytes = max(0, totalBytes)
         self.state = state
     }
     

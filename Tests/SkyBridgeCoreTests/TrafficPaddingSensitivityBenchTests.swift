@@ -24,11 +24,7 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
     }
 
     private var artifactDate: String {
-        if let v = ProcessInfo.processInfo.environment["ARTIFACT_DATE"], !v.isEmpty { return v }
-        if let v = ProcessInfo.processInfo.environment["SKYBRIDGE_ARTIFACT_DATE"], !v.isEmpty { return v }
-        let df = DateFormatter()
-        df.dateFormat = "yyyy-MM-dd"
-        return df.string(from: Date())
+        ArtifactDate.current()
     }
 
     func testTrafficPaddingSensitivityStudy() async throws {
@@ -51,18 +47,19 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
         group?.set(true, forKey: "sb_traffic_padding_enabled")
         group?.set(true, forKey: "sb_traffic_padding_stats_enabled")
         group?.set(false, forKey: "sb_traffic_padding_stats_autoflush")
+        TrafficPaddingStats.refreshSubmissionAdmission()
 
         let caps: [Int] = [65536, 131072, 262144]
 
         // Prepare one handshake + keys per cap run (to keep work independent and avoid state bleed).
         // Use deterministic workload seed per cap for fair comparison.
-        let outputURL = URL(fileURLWithPath: "Artifacts")
+        let outputURL = ArtifactDate.writableArtifactsDirectory()
             .appendingPathComponent("traffic_padding_sensitivity_\(artifactDate).csv")
         try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
 
         // Overwrite each time for determinism.
         var lines: [String] = []
-        lines.append("artifact_date,cap_bytes,label,wraps,unwraps,raw_bytes,padded_bytes,overhead_ratio,over_cap_events,over_cap_rate,unique_buckets,entropy_bits,top_bucket")
+        lines.append("artifact_date,cap_bytes,label,wraps,unwraps,raw_bytes,padded_bytes,overhead_ratio,overhead_all_frames_pct,overhead_padded_only_pct,over_cap_events,over_cap_rate,padded_frames,passthrough_frames,passthrough_rate,unique_buckets,entropy_bits,top_bucket")
 
         for cap in caps {
             ud.set(cap, forKey: "sb_traffic_padding_bucket_cap_bytes")
@@ -100,7 +97,7 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
 
             // Track "cap coverage": how often a label's framed payload exceeds the cap.
             // We define "over cap" as (payloadBytes + SBP2 headerBytes) > capBytes.
-            var capCounters: [String: (wraps: Int, overCap: Int)] = [:]
+            var capCounters: [String: CapCounters] = [:]
 
             for _ in 0..<iterations {
                 try await sendWorkloadBurst(
@@ -131,6 +128,8 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
                 )
             }
 
+            await TrafficPaddingStats.waitForPendingSubmissions()
+
             let snapshot = await TrafficPaddingStats.shared.snapshot()
             for key in wantedLabels() {
                 guard let st = snapshot[key] else { continue }
@@ -138,10 +137,17 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
                 let topBucket = topBucketSummary(st.bucketCounts)
                 let uniqueBuckets = st.bucketCounts.count
                 let entropy = entropyBits(st.bucketCounts)
-                let c = capCounters[key] ?? (wraps: Int(st.wraps), overCap: 0)
+                let c = capCounters[key] ?? CapCounters(wraps: Int(st.wraps))
                 let wrapCount = max(0, c.wraps)
                 let overCap = max(0, c.overCap)
                 let overCapRate = (wrapCount > 0) ? (Double(overCap) / Double(wrapCount)) : 0.0
+                let passthroughRate = (wrapCount > 0) ? (Double(c.passthroughFrames) / Double(wrapCount)) : 0.0
+                let allFramesOverhead = (c.rawBytes > 0)
+                    ? ((Double(c.paddedBytes) / Double(c.rawBytes) - 1.0) * 100.0)
+                    : 0.0
+                let paddedOnlyOverhead = (c.paddedOnlyRawBytes > 0)
+                    ? ((Double(c.paddedOnlyPaddedBytes) / Double(c.paddedOnlyRawBytes) - 1.0) * 100.0)
+                    : 0.0
                 lines.append([
                     artifactDate,
                     "\(cap)",
@@ -151,8 +157,13 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
                     "\(st.rawBytes)",
                     "\(st.paddedBytes)",
                     String(format: "%.4f", ratio),
+                    String(format: "%.4f", allFramesOverhead),
+                    String(format: "%.4f", paddedOnlyOverhead),
                     "\(overCap)",
                     String(format: "%.4f", overCapRate),
+                    "\(c.paddedFrames)",
+                    "\(c.passthroughFrames)",
+                    String(format: "%.4f", passthroughRate),
                     "\(uniqueBuckets)",
                     String(format: "%.3f", entropy),
                     csvEscape(topBucket)
@@ -287,27 +298,39 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
         controlPayloads: [(label: String, data: Data)],
         binarySizes: [(label: String, size: Int)],
         capBytes: Int,
-        capCounters: inout [String: (wraps: Int, overCap: Int)],
+        capCounters: inout [String: CapCounters],
         from transport: LoopbackDiscoveryTransport,
         peer: PeerIdentifier,
         rng: inout XorShift64Star
     ) async throws {
         let aad = Data(("dp|\(sessionId)|\(directionLabel)").utf8)
 
-        for _ in 0..<6 {
-            let (label, plaintext) = controlPayloads[Int(rng.next() % UInt64(controlPayloads.count))]
-            let frame = try encryptFrame(plaintext: plaintext, key: sendKey, aad: aad)
-            try await sendViaTransport(frame, label: label, capBytes: capBytes, capCounters: &capCounters, from: transport, peer: peer)
-            _ = try decryptFrame(data: TrafficPadding.unwrapIfNeeded(TrafficPadding.wrapIfEnabled(frame, label: label), label: "rx"), key: recvKey, aad: aad)
+        // Deterministic coverage: send each control payload twice so table rows are never missing
+        // due to randomness (see Supplementary Table S8).
+        for (label, plaintext) in controlPayloads {
+            for _ in 0..<2 {
+                let frame = try encryptFrame(plaintext: plaintext, key: sendKey, aad: aad)
+                let wrapped = try await sendViaTransport(frame, label: label, capBytes: capBytes, capCounters: &capCounters, from: transport, peer: peer)
+                _ = try decryptFrame(data: TrafficPadding.unwrapIfNeeded(wrapped, label: "rx"), key: recvKey, aad: aad)
+            }
         }
 
         let medium = binarySizes.filter { $0.size <= 4096 }
-        for _ in 0..<6 {
+        // Deterministic coverage for the small/medium DP sizes.
+        for (label, sz) in medium {
+            let plaintext = rng.bytes(count: sz)
+            let frame = try encryptFrame(plaintext: plaintext, key: sendKey, aad: aad)
+            let wrapped = try await sendViaTransport(frame, label: label, capBytes: capBytes, capCounters: &capCounters, from: transport, peer: peer)
+            let decoded = try decryptFrame(data: TrafficPadding.unwrapIfNeeded(wrapped, label: "rx"), key: recvKey, aad: aad)
+            XCTAssertEqual(decoded.count, plaintext.count)
+        }
+        // Add one extra sample for distributional variety (does not affect coverage).
+        if !medium.isEmpty {
             let (label, sz) = medium[Int(rng.next() % UInt64(medium.count))]
             let plaintext = rng.bytes(count: sz)
             let frame = try encryptFrame(plaintext: plaintext, key: sendKey, aad: aad)
-            try await sendViaTransport(frame, label: label, capBytes: capBytes, capCounters: &capCounters, from: transport, peer: peer)
-            let decoded = try decryptFrame(data: TrafficPadding.unwrapIfNeeded(TrafficPadding.wrapIfEnabled(frame, label: label), label: "rx"), key: recvKey, aad: aad)
+            let wrapped = try await sendViaTransport(frame, label: label, capBytes: capBytes, capCounters: &capCounters, from: transport, peer: peer)
+            let decoded = try decryptFrame(data: TrafficPadding.unwrapIfNeeded(wrapped, label: "rx"), key: recvKey, aad: aad)
             XCTAssertEqual(decoded.count, plaintext.count)
         }
 
@@ -316,9 +339,9 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
             let label = "DP/16KiB"
             let plaintext = rng.bytes(count: 16 * 1024)
             let frame = try encryptFrame(plaintext: plaintext, key: sendKey, aad: aad)
-            try await sendViaTransport(frame, label: label, capBytes: capBytes, capCounters: &capCounters, from: transport, peer: peer)
+            let wrapped = try await sendViaTransport(frame, label: label, capBytes: capBytes, capCounters: &capCounters, from: transport, peer: peer)
             let decoded = try decryptFrame(
-                data: TrafficPadding.unwrapIfNeeded(TrafficPadding.wrapIfEnabled(frame, label: label), label: "rx"),
+                data: TrafficPadding.unwrapIfNeeded(wrapped, label: "rx"),
                 key: recvKey,
                 aad: aad
             )
@@ -336,9 +359,9 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
             let label = "DP/rdpMix"
             let plaintext = rng.bytes(count: sz)
             let frame = try encryptFrame(plaintext: plaintext, key: sendKey, aad: aad)
-            try await sendViaTransport(frame, label: label, capBytes: capBytes, capCounters: &capCounters, from: transport, peer: peer)
+            let wrapped = try await sendViaTransport(frame, label: label, capBytes: capBytes, capCounters: &capCounters, from: transport, peer: peer)
             let decoded = try decryptFrame(
-                data: TrafficPadding.unwrapIfNeeded(TrafficPadding.wrapIfEnabled(frame, label: label), label: "rx"),
+                data: TrafficPadding.unwrapIfNeeded(wrapped, label: "rx"),
                 key: recvKey,
                 aad: aad
             )
@@ -351,9 +374,9 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
             let label = "DP/fileMix"
             let plaintext = rng.bytes(count: sz)
             let frame = try encryptFrame(plaintext: plaintext, key: sendKey, aad: aad)
-            try await sendViaTransport(frame, label: label, capBytes: capBytes, capCounters: &capCounters, from: transport, peer: peer)
+            let wrapped = try await sendViaTransport(frame, label: label, capBytes: capBytes, capCounters: &capCounters, from: transport, peer: peer)
             let decoded = try decryptFrame(
-                data: TrafficPadding.unwrapIfNeeded(TrafficPadding.wrapIfEnabled(frame, label: label), label: "rx"),
+                data: TrafficPadding.unwrapIfNeeded(wrapped, label: "rx"),
                 key: recvKey,
                 aad: aad
             )
@@ -365,21 +388,32 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
         _ payload: Data,
         label: String,
         capBytes: Int,
-        capCounters: inout [String: (wraps: Int, overCap: Int)],
+        capCounters: inout [String: CapCounters],
         from transport: LoopbackDiscoveryTransport,
         peer: PeerIdentifier
-    ) async throws {
+    ) async throws -> Data {
         // SBP2 header is magic(4) + u32(actualLen)(4)
         let sbp2HeaderLen = 8
-        var entry = capCounters[label] ?? (wraps: 0, overCap: 0)
+        var entry = capCounters[label] ?? CapCounters()
         entry.wraps += 1
-        if payload.count + sbp2HeaderLen > capBytes {
+        let isOverCap = payload.count + sbp2HeaderLen > capBytes
+        if isOverCap {
             entry.overCap += 1
+            entry.passthroughFrames += 1
+        } else {
+            entry.paddedFrames += 1
+        }
+        entry.rawBytes += payload.count
+
+        let wrapped = try TrafficPadding.wrapIfEnabled(payload, label: label)
+        entry.paddedBytes += wrapped.count
+        if !isOverCap {
+            entry.paddedOnlyRawBytes += payload.count
+            entry.paddedOnlyPaddedBytes += wrapped.count
         }
         capCounters[label] = entry
-
-        let wrapped = TrafficPadding.wrapIfEnabled(payload, label: label)
         try await transport.send(to: peer, data: wrapped)
+        return wrapped
     }
 
     // DP1 frame:
@@ -419,6 +453,28 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
     }
 }
 
+private struct CapCounters {
+    var wraps: Int
+    var overCap: Int
+    var paddedFrames: Int
+    var passthroughFrames: Int
+    var rawBytes: Int
+    var paddedBytes: Int
+    var paddedOnlyRawBytes: Int
+    var paddedOnlyPaddedBytes: Int
+
+    init(wraps: Int = 0) {
+        self.wraps = wraps
+        self.overCap = 0
+        self.paddedFrames = 0
+        self.passthroughFrames = 0
+        self.rawBytes = 0
+        self.paddedBytes = 0
+        self.paddedOnlyRawBytes = 0
+        self.paddedOnlyPaddedBytes = 0
+    }
+}
+
 // MARK: - Deterministic RNG
 
 private struct XorShift64Star {
@@ -452,5 +508,3 @@ private struct XorShift64Star {
         return out
     }
 }
-
-

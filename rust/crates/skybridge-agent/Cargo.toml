@@ -1,0 +1,34 @@
+[package]
+name = "skybridge-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+directories.workspace = true
+ed25519-dalek.workspace = true
+# `sys_rng` provides `getrandom::SysRng`, the rand_core-0.10 replacement for the
+# removed `rand_core::OsRng` used for Ed25519 signing-key generation.
+getrandom = { workspace = true, features = ["sys_rng"] }
+hostname.workspace = true
+mdns-sd.workspace = true
+rand_core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+skybridge-core = { path = "../skybridge-core" }
+time.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[features]
+# Experimental, default-off: advertise + negotiate the Q-Periapt ContextBound hybrid suite
+# (forwards to skybridge-core/q-periapt). Off by default, so the shipping build is unchanged.
+q-periapt = ["skybridge-core/q-periapt"]

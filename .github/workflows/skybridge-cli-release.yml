@@ -1,0 +1,1149 @@
+name: skybridge-cli-release
+
+on:
+  push:
+    tags:
+      - "skybridge-cli-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: skybridge-cli-release
+  cancel-in-progress: false
+
+jobs:
+  supabase-security:
+    uses: ./.github/workflows/supabase-security.yml
+
+  metadata:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      source_sha: ${{ steps.meta.outputs.source_sha }}
+      source_date_epoch: ${{ steps.meta.outputs.source_date_epoch }}
+      rust_toolchain: ${{ steps.meta.outputs.rust_toolchain }}
+      publish_requested: ${{ steps.meta.outputs.publish_requested }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13.5"
+
+      - id: meta
+        name: Bind release metadata to the protected source
+        shell: bash
+        env:
+          REF_PROTECTED: ${{ github.ref_protected }}
+          RELEASE_BRANCH: ${{ vars.SKYBRIDGE_CLI_RELEASE_BRANCH }}
+        run: |
+          set -euo pipefail
+          VERSION="$(python rust/scripts/workspace_version.py)"
+          SOURCE_SHA="$(git rev-parse HEAD)"
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          RUST_TOOLCHAIN="$(python - <<'PY'
+          import pathlib
+          import tomllib
+          with pathlib.Path("rust-toolchain.toml").open("rb") as handle:
+              print(tomllib.load(handle)["toolchain"]["channel"])
+          PY
+          )"
+          RELEASE_TAG="skybridge-cli-v${VERSION}"
+          PUBLISH_REQUESTED=false
+
+          [[ "${SOURCE_SHA}" == "${GITHUB_SHA}" ]]
+          python rust/scripts/finalize_cli_release_assets.py validate-metadata \
+            --version "${VERSION}" \
+            --source-repository "${GITHUB_REPOSITORY}" \
+            --source-sha "${SOURCE_SHA}" \
+            --rust-toolchain "${RUST_TOOLCHAIN}" \
+            --source-date-epoch "${SOURCE_DATE_EPOCH}"
+
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            [[ "${GITHUB_REF_TYPE}" == "tag" ]]
+            [[ "${GITHUB_REF_NAME}" == "${RELEASE_TAG}" ]]
+            [[ "${GITHUB_REPOSITORY}" == "billlza/Skybridge-Compass" ]]
+            [[ "${REF_PROTECTED}" == "true" ]]
+            [[ -n "${RELEASE_BRANCH}" ]]
+            git check-ref-format --branch "${RELEASE_BRANCH}" >/dev/null
+            python rust/scripts/workspace_version.py --expect-tag "${GITHUB_REF_NAME}"
+            [[ "$(git rev-parse "refs/tags/${GITHUB_REF_NAME}^{commit}")" == "${SOURCE_SHA}" ]]
+            git fetch --no-tags origin \
+              "refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
+            git merge-base --is-ancestor \
+              "${SOURCE_SHA}" "refs/remotes/origin/${RELEASE_BRANCH}"
+            # Every source binding above held, so this tag may publish —
+            # but only after the public-release-signing-gate job verifies
+            # the macOS Developer ID signature and notarization proof
+            # produced by the darwin build. Publication stays fail-closed:
+            # every publish job requires that gate's success.
+            PUBLISH_REQUESTED=true
+          fi
+
+          {
+            echo "version=${VERSION}"
+            echo "release_tag=${RELEASE_TAG}"
+            echo "source_sha=${SOURCE_SHA}"
+            echo "source_date_epoch=${SOURCE_DATE_EPOCH}"
+            echo "rust_toolchain=${RUST_TOOLCHAIN}"
+            echo "publish_requested=${PUBLISH_REQUESTED}"
+          } >>"${GITHUB_OUTPUT}"
+
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      RUSTFLAGS: -Dwarnings
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Checkout pinned Q-Periapt source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: billlza/q-periapt
+          ref: 7ed1f96a7ec33732f02a989dd5a4669cdcce39ad
+          path: External/pqt_hybrid_suite
+          persist-credentials: false
+
+      - name: Verify the pinned Cargo path dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          dependency_path="$PWD/External/pqt_hybrid_suite"
+          [[ -f "$dependency_path/Cargo.toml" ]]
+          [[ -f "$dependency_path/crates/q-periapt-backends/Cargo.toml" ]]
+          [[ "$(git -C "$dependency_path" rev-parse HEAD)" == "7ed1f96a7ec33732f02a989dd5a4669cdcce39ad" ]]
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13.5"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.18.0"
+          package-manager-cache: false
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal --component clippy --component rustfmt
+          rustup override set 1.94.0
+          [[ "$(rustc --version)" == "rustc 1.94.0 "* ]]
+
+      - name: Install the pinned dependency auditor
+        run: cargo install cargo-audit --locked --version 0.22.2
+
+      - name: Audit locked dependencies
+        run: cargo audit --deny warnings --file rust/Cargo.lock
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path rust/Cargo.toml --all --check
+
+      - name: Check workspace tests
+        env:
+          # The hosted 4-vCPU/16GB runner has died with a runner-service
+          # shutdown mid-suite. Build every test binary first (bounded jobs,
+          # no debuginfo) so nothing links while tests execute, and stream
+          # memory telemetry to the live log so a repeat is attributable.
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+          CARGO_TARGET_DIR: /tmp/skybridge-release-tests
+        run: |
+          set -euo pipefail
+          ( while true; do free -m | awk 'NR==2 {print "[mem-telemetry] used="$3"MiB free="$4"MiB available="$7"MiB"}'; sleep 5; done ) &
+          MEM_TELEMETRY_PID=$!
+          trap 'kill "${MEM_TELEMETRY_PID}" 2>/dev/null || true' EXIT
+          cargo test --locked --manifest-path rust/Cargo.toml --workspace --all-targets --jobs 2 --no-run
+          cargo test --locked --manifest-path rust/Cargo.toml --workspace --all-targets --jobs 2
+
+      - name: Check workspace lint
+        run: CARGO_TARGET_DIR=/tmp/skybridge-release-clippy cargo clippy --locked --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings
+
+      - name: Validate npm wrapper scripts
+        run: |
+          node --check rust/packaging/npm/skybridge-cli/bin/skybridge.js
+          node --check rust/packaging/npm/skybridge-cli/lib/platform.js
+          node --check rust/packaging/npm/skybridge-cli/lib/install.js
+          node --test rust/packaging/npm/skybridge-cli/test/install.test.js
+
+      - name: Check release shell scripts
+        run: |
+          bash -n rust/scripts/build_release_artifact.sh
+          bash -n rust/scripts/assemble_release_assets.sh
+          bash -n rust/scripts/render_homebrew_formula.sh
+          bash -n rust/scripts/publish_cli_github_release.sh
+          bash -n rust/scripts/publish_homebrew_formula.sh
+          bash -n rust/scripts/write_darwin_signing_proof.sh
+          bash -n rust/scripts/verify_darwin_signing_proof.sh
+          shellcheck \
+            rust/scripts/build_release_artifact.sh \
+            rust/scripts/assemble_release_assets.sh \
+            rust/scripts/render_homebrew_formula.sh \
+            rust/scripts/publish_cli_github_release.sh \
+            rust/scripts/publish_homebrew_formula.sh \
+            rust/scripts/write_darwin_signing_proof.sh \
+            rust/scripts/verify_darwin_signing_proof.sh
+
+      - name: Run release contract and fault-injection tests
+        run: |
+          python -m unittest \
+            Scripts/test_skybridge_cli_release_workflow_contract.py \
+            rust/scripts/test_finalize_cli_release_assets.py \
+            rust/scripts/test_cli_release_handoff.py \
+            rust/scripts/test_publish_cli_github_release.py \
+            rust/scripts/test_publish_cli_npm.py \
+            rust/scripts/test_publish_homebrew_formula.py \
+            rust/scripts/test_validate_cli_native_archive.py \
+            rust/scripts/test_verify_cli_release_proof.py
+
+  build:
+    needs:
+      - supabase-security
+      - metadata
+      - verify
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            asset: skybridge-aarch64-apple-darwin.tar.gz
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: skybridge-aarch64-unknown-linux-gnu.tar.gz
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            asset: skybridge-x86_64-unknown-linux-gnu.tar.gz
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            asset: skybridge-x86_64-pc-windows-msvc.zip
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.metadata.outputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout pinned Q-Periapt source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: billlza/q-periapt
+          ref: 7ed1f96a7ec33732f02a989dd5a4669cdcce39ad
+          path: External/pqt_hybrid_suite
+          persist-credentials: false
+
+      - name: Verify the pinned Cargo path dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          dependency_path="$PWD/External/pqt_hybrid_suite"
+          [[ -f "$dependency_path/Cargo.toml" ]]
+          [[ -f "$dependency_path/crates/q-periapt-backends/Cargo.toml" ]]
+          [[ "$(git -C "$dependency_path" rev-parse HEAD)" == "7ed1f96a7ec33732f02a989dd5a4669cdcce39ad" ]]
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13.5"
+
+      - name: Install the pinned Rust target
+        shell: bash
+        env:
+          RUST_TOOLCHAIN: ${{ needs.metadata.outputs.rust_toolchain }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --target "${TARGET}"
+          rustup override set "${RUST_TOOLCHAIN}"
+          [[ "$(rustc --version)" == "rustc ${RUST_TOOLCHAIN} "* ]]
+
+      - name: Test the platform runtime
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/platform-tests
+          RUSTFLAGS: -Dwarnings
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cargo test --locked --manifest-path rust/Cargo.toml \
+            -p skybridge-core \
+            -p skybridge-agent \
+            -p skybridge-crossnet-client \
+            -p skybridge-ffi \
+            -p skybridge \
+            --all-targets \
+            --target "${TARGET}"
+
+      - name: Import the Developer ID signing certificate
+        if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        env:
+          DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_CERT_P12_BASE64 }}
+          DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_CERT_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}-skybridge-cli
+        run: |
+          set -euo pipefail
+          umask 077
+          KEYCHAIN_PATH="$RUNNER_TEMP/skybridge-cli-release.keychain-db"
+          CERT_PATH="$RUNNER_TEMP/developer-id.p12"
+          {
+            echo "KEYCHAIN_PATH=$KEYCHAIN_PATH"
+            echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+          echo "$DEVELOPER_ID_CERT_P12_BASE64" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+
+          # The hosted runner's keychains lack Apple's Developer ID G2
+          # intermediate, so the imported leaf never validates and
+          # find-identity reports no usable identity. Import the vendored
+          # public intermediate after pinning its SHA-256 fingerprint.
+          G2_CA_PATH="VendorProvenance/Apple/apple-developer-id-g2-ca.pem"
+          G2_FP="$(openssl x509 -noout -fingerprint -sha256 -in "$G2_CA_PATH" | cut -d= -f2 | tr -d ':')"
+          if [[ "$G2_FP" != "F16CD3C54C7F83CEA4BF1A3E6A0819C8AAA8E4A1528FD144715F350643D2DF3A" ]]; then
+            echo "::error::Vendored Apple Developer ID G2 CA fingerprint mismatch: $G2_FP"
+            exit 1
+          fi
+          security import "$G2_CA_PATH" -k "$KEYCHAIN_PATH"
+
+          security import "$CERT_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$DEVELOPER_ID_CERT_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+
+          SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk -F '"' '/Developer ID Application/ {print $2; exit}')"
+          if [[ -z "$SIGNING_IDENTITY" ]]; then
+            # Diagnose exactly why no valid Developer ID identity resolved:
+            # names and validity of everything the keychain holds are public.
+            echo "--- identities (valid, codesigning) ---"
+            security find-identity -v -p codesigning "$KEYCHAIN_PATH" || true
+            echo "--- identities (all) ---"
+            security find-identity "$KEYCHAIN_PATH" || true
+            echo "--- certificates in the keychain ---"
+            security find-certificate -a "$KEYCHAIN_PATH" -p \
+              | awk 'BEGIN{n=0} /BEGIN CERT/{n+=1} {print > ("/tmp/kc-cert-" n ".pem")}' || true
+            for cert in /tmp/kc-cert-*.pem; do
+              [[ -s "$cert" ]] || continue
+              openssl x509 -noout -subject -issuer -enddate -in "$cert" || true
+            done
+            echo "::error::Unable to resolve a Developer ID Application identity for CLI signing."
+            exit 1
+          fi
+          echo "SKYBRIDGE_DARWIN_SIGNING_IDENTITY=$SIGNING_IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Build the exact release asset
+        shell: bash
+        env:
+          CARGO_INCREMENTAL: "0"
+          CARGO_TERM_COLOR: always
+          PYTHON_BIN: python
+          RUSTFLAGS: -Dwarnings
+          SOURCE_DATE_EPOCH: ${{ needs.metadata.outputs.source_date_epoch }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/release-asset"
+          bash rust/scripts/build_release_artifact.sh \
+            --target "${{ matrix.target }}" \
+            --out-dir "${RUNNER_TEMP}/release-asset"
+          test -f "${RUNNER_TEMP}/release-asset/${{ matrix.asset }}"
+
+      - name: Notarize the signed darwin binary and record the proof
+        if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        env:
+          NOTARYTOOL_KEY_P8_BASE64: ${{ secrets.NOTARYTOOL_KEY_P8_BASE64 }}
+          NOTARYTOOL_KEY_ID: ${{ secrets.NOTARYTOOL_KEY_ID }}
+          NOTARYTOOL_ISSUER: ${{ secrets.NOTARYTOOL_ISSUER }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+          ASSET_NAME: ${{ matrix.asset }}
+        run: |
+          set -euo pipefail
+          umask 077
+          NOTARY_KEY_PATH="$RUNNER_TEMP/notarytool-authkey.p8"
+          echo "$NOTARYTOOL_KEY_P8_BASE64" | base64 --decode > "$NOTARY_KEY_PATH"
+
+          WORK_DIR="$(mktemp -d)"
+          tar -xzf "${RUNNER_TEMP}/release-asset/${ASSET_NAME}" -C "$WORK_DIR"
+          [[ -f "$WORK_DIR/skybridge" ]]
+          /usr/bin/ditto -c -k "$WORK_DIR" "$WORK_DIR/skybridge-notarization.zip"
+
+          xcrun notarytool submit "$WORK_DIR/skybridge-notarization.zip" \
+            --key "$NOTARY_KEY_PATH" \
+            --key-id "$NOTARYTOOL_KEY_ID" \
+            --issuer "$NOTARYTOOL_ISSUER" \
+            --wait \
+            --output-format json > "$WORK_DIR/notarytool-submit.json"
+          SUBMISSION_ID="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$WORK_DIR/notarytool-submit.json")"
+          SUBMISSION_STATUS="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$WORK_DIR/notarytool-submit.json")"
+          if [[ "$SUBMISSION_STATUS" != "Accepted" ]]; then
+            echo "::error::Notarization was not accepted (status: $SUBMISSION_STATUS, submission: $SUBMISSION_ID)."
+            xcrun notarytool log "$SUBMISSION_ID" \
+              --key "$NOTARY_KEY_PATH" \
+              --key-id "$NOTARYTOOL_KEY_ID" \
+              --issuer "$NOTARYTOOL_ISSUER" || true
+            exit 1
+          fi
+
+          mkdir -p "${RUNNER_TEMP}/signing-proof"
+          bash rust/scripts/write_darwin_signing_proof.sh \
+            --binary "$WORK_DIR/skybridge" \
+            --version "$VERSION" \
+            --source-sha "$SOURCE_SHA" \
+            --submission-id "$SUBMISSION_ID" \
+            --submission-status "$SUBMISSION_STATUS" \
+            --output "${RUNNER_TEMP}/signing-proof/darwin-signing-proof.json"
+          rm -f "$NOTARY_KEY_PATH"
+          rm -rf "$WORK_DIR"
+
+      - name: Upload the darwin signing proof
+        if: matrix.target == 'aarch64-apple-darwin'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: skybridge-cli-darwin-signing-proof
+          path: ${{ runner.temp }}/signing-proof/darwin-signing-proof.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+          include-hidden-files: false
+
+      - name: Remove the temporary signing keychain
+        if: always() && matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        run: |
+          set -u
+          if [[ -n "${KEYCHAIN_PATH:-}" && -e "$KEYCHAIN_PATH" ]]; then
+            security delete-keychain "$KEYCHAIN_PATH" || exit 1
+          fi
+          /bin/rm -f "$RUNNER_TEMP/developer-id.p12" "$RUNNER_TEMP/notarytool-authkey.p8"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: skybridge-cli-${{ matrix.target }}
+          path: ${{ runner.temp }}/release-asset/${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+  assemble:
+    needs:
+      - metadata
+      - build
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+      producer_run_id: ${{ steps.producer.outputs.run_id }}
+      producer_run_attempt: ${{ steps.producer.outputs.run_attempt }}
+      producer_workflow_ref: ${{ steps.producer.outputs.workflow_ref }}
+      producer_workflow_sha: ${{ steps.producer.outputs.workflow_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.metadata.outputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13.5"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.18.0"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: skybridge-cli-aarch64-apple-darwin
+          path: ${{ runner.temp }}/release-assets
+          digest-mismatch: error
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: skybridge-cli-aarch64-unknown-linux-gnu
+          path: ${{ runner.temp }}/release-assets
+          digest-mismatch: error
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: skybridge-cli-x86_64-unknown-linux-gnu
+          path: ${{ runner.temp }}/release-assets
+          digest-mismatch: error
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: skybridge-cli-x86_64-pc-windows-msvc
+          path: ${{ runner.temp }}/release-assets
+          digest-mismatch: error
+
+      - name: Revalidate all native archive boundaries
+        shell: bash
+        run: |
+          python rust/scripts/validate_cli_native_archive.py \
+            --archive "${RUNNER_TEMP}/release-assets/skybridge-aarch64-apple-darwin.tar.gz" \
+            --target aarch64-apple-darwin
+          python rust/scripts/validate_cli_native_archive.py \
+            --archive "${RUNNER_TEMP}/release-assets/skybridge-aarch64-unknown-linux-gnu.tar.gz" \
+            --target aarch64-unknown-linux-gnu
+          python rust/scripts/validate_cli_native_archive.py \
+            --archive "${RUNNER_TEMP}/release-assets/skybridge-x86_64-unknown-linux-gnu.tar.gz" \
+            --target x86_64-unknown-linux-gnu
+          python rust/scripts/validate_cli_native_archive.py \
+            --archive "${RUNNER_TEMP}/release-assets/skybridge-x86_64-pc-windows-msvc.zip" \
+            --target x86_64-pc-windows-msvc
+
+      - name: Stage the reviewed npm package without lifecycle execution
+        shell: bash
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          python rust/scripts/prepare_npm_package.py \
+            --source-dir rust/packaging/npm/skybridge-cli \
+            --output-dir "${RUNNER_TEMP}/npm-package" \
+            --version "${VERSION}" \
+            --source-sha "${{ needs.metadata.outputs.source_sha }}" \
+            --assets-dir "${RUNNER_TEMP}/release-assets"
+          npm pack "${RUNNER_TEMP}/npm-package" \
+            --pack-destination "${RUNNER_TEMP}/release-assets" \
+            --ignore-scripts
+          python - \
+            "${RUNNER_TEMP}/release-assets/skybridge-cli-${VERSION}.tgz" \
+            "${VERSION}" \
+            "${RUNNER_TEMP}/release-assets" <<'PY'
+          import pathlib
+          import sys
+          sys.path.insert(0, "rust/scripts")
+          from publish_cli_npm import validate_package
+          validate_package(
+              pathlib.Path(sys.argv[1]),
+              version=sys.argv[2],
+              source_repository="billlza/Skybridge-Compass",
+              source_sha="${{ needs.metadata.outputs.source_sha }}",
+              # The heredoc is quoted, so shell variables never expand inside
+              # it; every runtime path must arrive through argv.
+              native_assets_dir=pathlib.Path(sys.argv[3]),
+          )
+          PY
+
+      - id: producer
+        name: Record the producer run identity
+        shell: bash
+        run: |
+          {
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "workflow_ref=${GITHUB_WORKFLOW_REF}"
+            echo "workflow_sha=${GITHUB_WORKFLOW_SHA}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Assemble the deterministic public assets and private handoff
+        shell: bash
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+          SOURCE_DATE_EPOCH: ${{ needs.metadata.outputs.source_date_epoch }}
+          RUST_TOOLCHAIN: ${{ needs.metadata.outputs.rust_toolchain }}
+        run: |
+          set -euo pipefail
+          bash rust/scripts/assemble_release_assets.sh \
+            --assets-dir "${RUNNER_TEMP}/release-assets" \
+            --version "${VERSION}" \
+            --source-repository "${GITHUB_REPOSITORY}" \
+            --source-sha "${SOURCE_SHA}" \
+            --rust-toolchain "${RUST_TOOLCHAIN}" \
+            --source-date-epoch "${SOURCE_DATE_EPOCH}" \
+            --workflow-run-id "${GITHUB_RUN_ID}" \
+            --workflow-run-attempt "${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "${RUNNER_TEMP}/handoff"
+          python rust/scripts/cli_release_handoff.py create \
+            --assets-dir "${RUNNER_TEMP}/release-assets" \
+            --archive "${RUNNER_TEMP}/handoff/skybridge-cli-release-handoff.tar.gz" \
+            --checksum "${RUNNER_TEMP}/handoff/skybridge-cli-release-handoff.tar.gz.sha256" \
+            --version "${VERSION}" \
+            --source-repository "${GITHUB_REPOSITORY}" \
+            --source-sha "${SOURCE_SHA}" \
+            --rust-toolchain "${RUST_TOOLCHAIN}" \
+            --source-date-epoch "${SOURCE_DATE_EPOCH}" \
+            --workflow-run-id "${GITHUB_RUN_ID}" \
+            --workflow-run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --workflow-ref "${GITHUB_WORKFLOW_REF}" \
+            --workflow-sha "${GITHUB_WORKFLOW_SHA}"
+
+      - id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: skybridge-cli-release-handoff-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/handoff/skybridge-cli-release-handoff.tar.gz
+            ${{ runner.temp }}/handoff/skybridge-cli-release-handoff.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+      - name: Validate the immutable handoff identity
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+        run: |
+          [[ "${ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${ARTIFACT_DIGEST}" =~ ^[0-9a-f]{64}$ ]]
+
+  public-release-signing-gate:
+    if: needs.metadata.outputs.publish_requested == 'true'
+    needs:
+      - metadata
+      - build
+      - assemble
+    runs-on: macos-14
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.metadata.outputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: skybridge-cli-aarch64-apple-darwin
+          path: ${{ runner.temp }}/darwin-asset
+          digest-mismatch: error
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: skybridge-cli-darwin-signing-proof
+          path: ${{ runner.temp }}/signing-proof
+          digest-mismatch: error
+
+      - name: Verify macOS signing and notarization before any publication
+        shell: bash
+        env:
+          NOTARYTOOL_KEY_P8_BASE64: ${{ secrets.NOTARYTOOL_KEY_P8_BASE64 }}
+          NOTARYTOOL_KEY_ID: ${{ secrets.NOTARYTOOL_KEY_ID }}
+          NOTARYTOOL_ISSUER: ${{ secrets.NOTARYTOOL_ISSUER }}
+          EXPECTED_VERSION: ${{ needs.metadata.outputs.version }}
+          EXPECTED_SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          NOTARY_KEY_PATH="$RUNNER_TEMP/notarytool-authkey.p8"
+          echo "$NOTARYTOOL_KEY_P8_BASE64" | base64 --decode > "$NOTARY_KEY_PATH"
+          SUBMISSION_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["notarization_submission_id"])' "$RUNNER_TEMP/signing-proof/darwin-signing-proof.json")"
+          xcrun notarytool info "$SUBMISSION_ID" \
+            --key "$NOTARY_KEY_PATH" \
+            --key-id "$NOTARYTOOL_KEY_ID" \
+            --issuer "$NOTARYTOOL_ISSUER" \
+            --output-format json > "$RUNNER_TEMP/notary-info.json"
+          rm -f "$NOTARY_KEY_PATH"
+
+          # The macOS binary must carry a verified Developer ID signature and
+          # an Apple-accepted notarization before anything publishes.
+          # Windows publisher-signature proofs remain unavailable (no
+          # publisher certificate exists); Windows and Linux archives are
+          # published checksummed with the immutable CI handoff provenance,
+          # exactly as every published 0.2.x release was.
+          bash rust/scripts/verify_darwin_signing_proof.sh \
+            --archive "$RUNNER_TEMP/darwin-asset/skybridge-aarch64-apple-darwin.tar.gz" \
+            --proof "$RUNNER_TEMP/signing-proof/darwin-signing-proof.json" \
+            --expected-version "$EXPECTED_VERSION" \
+            --expected-source-sha "$EXPECTED_SOURCE_SHA" \
+            --expected-team-id "YKUPL7Z869" \
+            --notary-info-json "$RUNNER_TEMP/notary-info.json"
+
+  publish-github:
+    if: needs.metadata.outputs.publish_requested == 'true'
+    needs:
+      - metadata
+      - assemble
+      - public-release-signing-gate
+    permissions:
+      actions: read
+      contents: write
+    environment:
+      name: skybridge-cli-github-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      proof_artifact_id: ${{ steps.proof-upload.outputs.artifact-id }}
+      proof_artifact_digest: ${{ steps.proof-upload.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.metadata.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13.5"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.assemble.outputs.artifact_id }}
+          path: ${{ runner.temp }}/handoff
+          digest-mismatch: error
+
+      - name: Verify and extract the exact handoff
+        shell: bash
+        run: |
+          python rust/scripts/cli_release_handoff.py extract \
+            --archive "${RUNNER_TEMP}/handoff/skybridge-cli-release-handoff.tar.gz" \
+            --checksum "${RUNNER_TEMP}/handoff/skybridge-cli-release-handoff.tar.gz.sha256" \
+            --destination "${RUNNER_TEMP}/release-assets" \
+            --version "${{ needs.metadata.outputs.version }}" \
+            --source-repository "${GITHUB_REPOSITORY}" \
+            --source-sha "${{ needs.metadata.outputs.source_sha }}" \
+            --rust-toolchain "${{ needs.metadata.outputs.rust_toolchain }}" \
+            --source-date-epoch "${{ needs.metadata.outputs.source_date_epoch }}" \
+            --workflow-run-id "${{ needs.assemble.outputs.producer_run_id }}" \
+            --workflow-run-attempt "${{ needs.assemble.outputs.producer_run_attempt }}" \
+            --workflow-ref "${{ needs.assemble.outputs.producer_workflow_ref }}" \
+            --workflow-sha "${{ needs.assemble.outputs.producer_workflow_sha }}"
+
+      - name: Publish the complete immutable GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash rust/scripts/publish_cli_github_release.sh \
+            --repository "${GITHUB_REPOSITORY}" \
+            --tag "${{ needs.metadata.outputs.release_tag }}" \
+            --expected-source-sha "${{ needs.metadata.outputs.source_sha }}" \
+            --assets-dir "${RUNNER_TEMP}/release-assets" \
+            --version "${{ needs.metadata.outputs.version }}" \
+            --rust-toolchain "${{ needs.metadata.outputs.rust_toolchain }}" \
+            --source-date-epoch "${{ needs.metadata.outputs.source_date_epoch }}" \
+            --workflow-run-id "${{ needs.assemble.outputs.producer_run_id }}" \
+            --workflow-run-attempt "${{ needs.assemble.outputs.producer_run_attempt }}" \
+            --handoff-artifact-id "${{ needs.assemble.outputs.artifact_id }}" \
+            --handoff-artifact-digest "${{ needs.assemble.outputs.artifact_digest }}" \
+            --proof-path "${RUNNER_TEMP}/proof/github-release-proof.json"
+
+      - id: proof-upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: skybridge-cli-github-release-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/proof/github-release-proof.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+          include-hidden-files: false
+
+  publish-npm:
+    # npm publication uses OIDC trusted publishing, which must first be
+    # configured for the skybridge-cli package on npmjs.com; the explicit
+    # repository variable records that this one-time setup happened. Without
+    # it the channel is skipped honestly instead of failing the release.
+    if: >-
+      needs.metadata.outputs.publish_requested == 'true' &&
+      vars.SKYBRIDGE_CLI_NPM_TRUSTED_PUBLISHING == 'true'
+    needs:
+      - metadata
+      - assemble
+      - publish-github
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    environment:
+      name: skybridge-cli-npm-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      proof_artifact_id: ${{ steps.proof-upload.outputs.artifact-id }}
+      proof_artifact_digest: ${{ steps.proof-upload.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.metadata.outputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13.5"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.18.0"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.assemble.outputs.artifact_id }}
+          path: ${{ runner.temp }}/handoff
+          digest-mismatch: error
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.publish-github.outputs.proof_artifact_id }}
+          path: ${{ runner.temp }}/github-proof
+          digest-mismatch: error
+
+      - name: Verify and extract the exact handoff
+        shell: bash
+        run: |
+          python rust/scripts/cli_release_handoff.py extract \
+            --archive "${RUNNER_TEMP}/handoff/skybridge-cli-release-handoff.tar.gz" \
+            --checksum "${RUNNER_TEMP}/handoff/skybridge-cli-release-handoff.tar.gz.sha256" \
+            --destination "${RUNNER_TEMP}/release-assets" \
+            --version "${{ needs.metadata.outputs.version }}" \
+            --source-repository "${GITHUB_REPOSITORY}" \
+            --source-sha "${{ needs.metadata.outputs.source_sha }}" \
+            --rust-toolchain "${{ needs.metadata.outputs.rust_toolchain }}" \
+            --source-date-epoch "${{ needs.metadata.outputs.source_date_epoch }}" \
+            --workflow-run-id "${{ needs.assemble.outputs.producer_run_id }}" \
+            --workflow-run-attempt "${{ needs.assemble.outputs.producer_run_attempt }}" \
+            --workflow-ref "${{ needs.assemble.outputs.producer_workflow_ref }}" \
+            --workflow-sha "${{ needs.assemble.outputs.producer_workflow_sha }}"
+
+      - name: Verify the immutable GitHub proof before npm publication
+        shell: bash
+        run: |
+          python rust/scripts/verify_cli_release_proof.py github \
+            --proof "${RUNNER_TEMP}/github-proof/github-release-proof.json" \
+            --assets-dir "${RUNNER_TEMP}/release-assets" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --tag "${{ needs.metadata.outputs.release_tag }}" \
+            --source-sha "${{ needs.metadata.outputs.source_sha }}" \
+            --version "${{ needs.metadata.outputs.version }}" \
+            --workflow-run-id "${{ needs.assemble.outputs.producer_run_id }}" \
+            --workflow-run-attempt "${{ needs.assemble.outputs.producer_run_attempt }}" \
+            --handoff-artifact-id "${{ needs.assemble.outputs.artifact_id }}" \
+            --handoff-artifact-digest "${{ needs.assemble.outputs.artifact_digest }}"
+
+      - name: Publish the exact npm package through OIDC
+        shell: bash
+        run: |
+          python rust/scripts/publish_cli_npm.py \
+            --package-file "${RUNNER_TEMP}/release-assets/skybridge-cli-${{ needs.metadata.outputs.version }}.tgz" \
+            --version "${{ needs.metadata.outputs.version }}" \
+            --source-repository "${GITHUB_REPOSITORY}" \
+            --source-sha "${{ needs.metadata.outputs.source_sha }}" \
+            --workflow-run-id "${{ needs.assemble.outputs.producer_run_id }}" \
+            --workflow-run-attempt "${{ needs.assemble.outputs.producer_run_attempt }}" \
+            --handoff-artifact-id "${{ needs.assemble.outputs.artifact_id }}" \
+            --handoff-artifact-digest "${{ needs.assemble.outputs.artifact_digest }}" \
+            --proof-path "${RUNNER_TEMP}/proof/npm-release-proof.json"
+
+      - id: proof-upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: skybridge-cli-npm-release-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/proof/npm-release-proof.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+          include-hidden-files: false
+
+  validate-homebrew:
+    # The npm channel may be legitimately skipped (trusted publishing not yet
+    # configured); the Homebrew channel then still validates and publishes
+    # against the immutable GitHub release.
+    if: >-
+      always() &&
+      needs.metadata.outputs.publish_requested == 'true' &&
+      needs.publish-github.result == 'success' &&
+      (needs.publish-npm.result == 'success' || needs.publish-npm.result == 'skipped')
+    needs:
+      - metadata
+      - assemble
+      - publish-github
+      - publish-npm
+    permissions:
+      actions: read
+      contents: read
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.metadata.outputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13.5"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.assemble.outputs.artifact_id }}
+          path: ${{ runner.temp }}/handoff
+          digest-mismatch: error
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.publish-github.outputs.proof_artifact_id }}
+          path: ${{ runner.temp }}/github-proof
+          digest-mismatch: error
+
+      - if: needs.publish-npm.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.publish-npm.outputs.proof_artifact_id }}
+          path: ${{ runner.temp }}/npm-proof
+          digest-mismatch: error
+
+      - name: Verify the handoff and prior channel proofs
+        shell: bash
+        run: |
+          python rust/scripts/cli_release_handoff.py extract \
+            --archive "${RUNNER_TEMP}/handoff/skybridge-cli-release-handoff.tar.gz" \
+            --checksum "${RUNNER_TEMP}/handoff/skybridge-cli-release-handoff.tar.gz.sha256" \
+            --destination "${RUNNER_TEMP}/release-assets" \
+            --version "${{ needs.metadata.outputs.version }}" \
+            --source-repository "${GITHUB_REPOSITORY}" \
+            --source-sha "${{ needs.metadata.outputs.source_sha }}" \
+            --rust-toolchain "${{ needs.metadata.outputs.rust_toolchain }}" \
+            --source-date-epoch "${{ needs.metadata.outputs.source_date_epoch }}" \
+            --workflow-run-id "${{ needs.assemble.outputs.producer_run_id }}" \
+            --workflow-run-attempt "${{ needs.assemble.outputs.producer_run_attempt }}" \
+            --workflow-ref "${{ needs.assemble.outputs.producer_workflow_ref }}" \
+            --workflow-sha "${{ needs.assemble.outputs.producer_workflow_sha }}"
+          python rust/scripts/verify_cli_release_proof.py github \
+            --proof "${RUNNER_TEMP}/github-proof/github-release-proof.json" \
+            --assets-dir "${RUNNER_TEMP}/release-assets" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --tag "${{ needs.metadata.outputs.release_tag }}" \
+            --source-sha "${{ needs.metadata.outputs.source_sha }}" \
+            --version "${{ needs.metadata.outputs.version }}" \
+            --workflow-run-id "${{ needs.assemble.outputs.producer_run_id }}" \
+            --workflow-run-attempt "${{ needs.assemble.outputs.producer_run_attempt }}" \
+            --handoff-artifact-id "${{ needs.assemble.outputs.artifact_id }}" \
+            --handoff-artifact-digest "${{ needs.assemble.outputs.artifact_digest }}"
+
+      - name: Verify the npm channel proof
+        if: needs.publish-npm.result == 'success'
+        shell: bash
+        run: |
+          python rust/scripts/verify_cli_release_proof.py npm \
+            --proof "${RUNNER_TEMP}/npm-proof/npm-release-proof.json" \
+            --package-file "${RUNNER_TEMP}/release-assets/skybridge-cli-${{ needs.metadata.outputs.version }}.tgz" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --source-sha "${{ needs.metadata.outputs.source_sha }}" \
+            --version "${{ needs.metadata.outputs.version }}" \
+            --workflow-run-id "${{ needs.assemble.outputs.producer_run_id }}" \
+            --workflow-run-attempt "${{ needs.assemble.outputs.producer_run_attempt }}" \
+            --handoff-artifact-id "${{ needs.assemble.outputs.artifact_id }}" \
+            --handoff-artifact-digest "${{ needs.assemble.outputs.artifact_digest }}"
+
+      - name: Audit, install, execute, and test the formula without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          if brew list --formula skybridge >/dev/null 2>&1; then
+            echo "skybridge is unexpectedly preinstalled on the release validator" >&2
+            exit 1
+          fi
+          # Modern Homebrew refuses audits by path; stage the released
+          # formula into a throwaway local tap and audit/install it by name.
+          TAP_STAGING="$(brew --repository)/Library/Taps/skybridge-staging/homebrew-staging"
+          mkdir -p "${TAP_STAGING}/Formula"
+          cp "${RUNNER_TEMP}/release-assets/skybridge.rb" "${TAP_STAGING}/Formula/skybridge.rb"
+          brew audit --strict --online skybridge-staging/staging/skybridge
+          brew install --formula skybridge-staging/staging/skybridge
+          VERSION_OUTPUT="$(skybridge version)"
+          [[ "${VERSION_OUTPUT}" == *"${{ needs.metadata.outputs.version }}"* ]]
+          [[ "${VERSION_OUTPUT}" == *"phase_5_signaling_plane"* ]]
+          brew test skybridge
+
+      - name: Remove the validated formula installation
+        if: always()
+        shell: bash
+        run: |
+          if brew list --formula skybridge >/dev/null 2>&1; then
+            brew uninstall --force skybridge
+          fi
+          /bin/rm -rf "$(brew --repository)/Library/Taps/skybridge-staging"
+
+  publish-homebrew:
+    if: >-
+      always() &&
+      needs.metadata.outputs.publish_requested == 'true' &&
+      needs.publish-github.result == 'success' &&
+      (needs.publish-npm.result == 'success' || needs.publish-npm.result == 'skipped') &&
+      needs.validate-homebrew.result == 'success'
+    needs:
+      - metadata
+      - assemble
+      - publish-github
+      - publish-npm
+      - validate-homebrew
+    permissions:
+      actions: read
+      contents: read
+    environment:
+      name: skybridge-cli-homebrew-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.metadata.outputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13.5"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.assemble.outputs.artifact_id }}
+          path: ${{ runner.temp }}/handoff
+          digest-mismatch: error
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.publish-github.outputs.proof_artifact_id }}
+          path: ${{ runner.temp }}/github-proof
+          digest-mismatch: error
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.publish-npm.outputs.proof_artifact_id }}
+          path: ${{ runner.temp }}/npm-proof
+          digest-mismatch: error
+
+      - name: Verify and extract the exact handoff
+        shell: bash
+        run: |
+          python rust/scripts/cli_release_handoff.py extract \
+            --archive "${RUNNER_TEMP}/handoff/skybridge-cli-release-handoff.tar.gz" \
+            --checksum "${RUNNER_TEMP}/handoff/skybridge-cli-release-handoff.tar.gz.sha256" \
+            --destination "${RUNNER_TEMP}/release-assets" \
+            --version "${{ needs.metadata.outputs.version }}" \
+            --source-repository "${GITHUB_REPOSITORY}" \
+            --source-sha "${{ needs.metadata.outputs.source_sha }}" \
+            --rust-toolchain "${{ needs.metadata.outputs.rust_toolchain }}" \
+            --source-date-epoch "${{ needs.metadata.outputs.source_date_epoch }}" \
+            --workflow-run-id "${{ needs.assemble.outputs.producer_run_id }}" \
+            --workflow-run-attempt "${{ needs.assemble.outputs.producer_run_attempt }}" \
+            --workflow-ref "${{ needs.assemble.outputs.producer_workflow_ref }}" \
+            --workflow-sha "${{ needs.assemble.outputs.producer_workflow_sha }}"
+
+      - name: Reverify prior channel proofs before obtaining tap credentials
+        shell: bash
+        run: |
+          python rust/scripts/verify_cli_release_proof.py github \
+            --proof "${RUNNER_TEMP}/github-proof/github-release-proof.json" \
+            --assets-dir "${RUNNER_TEMP}/release-assets" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --tag "${{ needs.metadata.outputs.release_tag }}" \
+            --source-sha "${{ needs.metadata.outputs.source_sha }}" \
+            --version "${{ needs.metadata.outputs.version }}" \
+            --workflow-run-id "${{ needs.assemble.outputs.producer_run_id }}" \
+            --workflow-run-attempt "${{ needs.assemble.outputs.producer_run_attempt }}" \
+            --handoff-artifact-id "${{ needs.assemble.outputs.artifact_id }}" \
+            --handoff-artifact-digest "${{ needs.assemble.outputs.artifact_digest }}"
+          python rust/scripts/verify_cli_release_proof.py npm \
+            --proof "${RUNNER_TEMP}/npm-proof/npm-release-proof.json" \
+            --package-file "${RUNNER_TEMP}/release-assets/skybridge-cli-${{ needs.metadata.outputs.version }}.tgz" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --source-sha "${{ needs.metadata.outputs.source_sha }}" \
+            --version "${{ needs.metadata.outputs.version }}" \
+            --workflow-run-id "${{ needs.assemble.outputs.producer_run_id }}" \
+            --workflow-run-attempt "${{ needs.assemble.outputs.producer_run_attempt }}" \
+            --handoff-artifact-id "${{ needs.assemble.outputs.artifact_id }}" \
+            --handoff-artifact-digest "${{ needs.assemble.outputs.artifact_digest }}"
+
+      - name: Validate Homebrew App configuration
+        shell: bash
+        env:
+          APP_CLIENT_ID: ${{ vars.HOMEBREW_TAP_APP_CLIENT_ID }}
+          TAP_OWNER: ${{ vars.HOMEBREW_TAP_OWNER }}
+          TAP_REPOSITORY: ${{ vars.HOMEBREW_TAP_REPOSITORY }}
+          TAP_BRANCH: ${{ vars.HOMEBREW_TAP_BRANCH }}
+          TAP_FORMULA_PATH: ${{ vars.HOMEBREW_TAP_FORMULA_PATH }}
+        run: |
+          set -euo pipefail
+          [[ "${APP_CLIENT_ID}" =~ ^[A-Za-z0-9_-]+$ ]]
+          [[ "${TAP_OWNER}" =~ ^[A-Za-z0-9_.-]+$ ]]
+          [[ "${TAP_REPOSITORY}" =~ ^[A-Za-z0-9_.-]+$ ]]
+          [[ "${TAP_BRANCH}" == "main" ]]
+          [[ "${TAP_FORMULA_PATH}" =~ ^Formula/[A-Za-z0-9_.+-]+\.rb$ ]]
+
+      - id: tap-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.HOMEBREW_TAP_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HOMEBREW_TAP_APP_PRIVATE_KEY }}
+          owner: ${{ vars.HOMEBREW_TAP_OWNER }}
+          repositories: ${{ vars.HOMEBREW_TAP_REPOSITORY }}
+          permission-contents: write
+
+      - name: Publish the exact Homebrew formula
+        shell: bash
+        env:
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ steps.tap-token.outputs.token }}
+          TAP_OWNER: ${{ vars.HOMEBREW_TAP_OWNER }}
+          TAP_REPOSITORY: ${{ vars.HOMEBREW_TAP_REPOSITORY }}
+          TAP_BRANCH: ${{ vars.HOMEBREW_TAP_BRANCH }}
+          TAP_FORMULA_PATH: ${{ vars.HOMEBREW_TAP_FORMULA_PATH }}
+        run: |
+          set -euo pipefail
+          [[ "${TAP_OWNER}" =~ ^[A-Za-z0-9_.-]+$ ]]
+          [[ "${TAP_REPOSITORY}" =~ ^[A-Za-z0-9_.-]+$ ]]
+          [[ "${TAP_BRANCH}" == "main" ]]
+          [[ "${TAP_FORMULA_PATH}" =~ ^Formula/[A-Za-z0-9_.+-]+\.rb$ ]]
+          bash rust/scripts/publish_homebrew_formula.sh \
+            --tap-repo "${TAP_OWNER}/${TAP_REPOSITORY}" \
+            --formula-file "${RUNNER_TEMP}/release-assets/skybridge.rb" \
+            --darwin-archive "${RUNNER_TEMP}/release-assets/skybridge-aarch64-apple-darwin.tar.gz" \
+            --formula-path "${TAP_FORMULA_PATH}" \
+            --branch "${TAP_BRANCH}" \
+            --version "${{ needs.metadata.outputs.version }}" \
+            --source-repository "${GITHUB_REPOSITORY}" \
+            --source-sha "${{ needs.metadata.outputs.source_sha }}" \
+            --workflow-run-id "${{ needs.assemble.outputs.producer_run_id }}" \
+            --workflow-run-attempt "${{ needs.assemble.outputs.producer_run_attempt }}" \
+            --handoff-artifact-id "${{ needs.assemble.outputs.artifact_id }}" \
+            --handoff-artifact-digest "${{ needs.assemble.outputs.artifact_digest }}" \
+            --proof-path "${RUNNER_TEMP}/proof/homebrew-release-proof.json"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: skybridge-cli-homebrew-release-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/proof/homebrew-release-proof.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+          include-hidden-files: false

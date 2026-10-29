@@ -188,6 +188,28 @@ public struct AnomalyDetectionConfiguration: Codable, Sendable {
     }
 }
 
+public enum AnomalyDetectionPersistenceOperation: String, Codable, Sendable {
+    case configuration
+    case baseline
+    case history
+}
+
+public struct AnomalyDetectionPersistenceFailure: Equatable, Sendable {
+    public let operation: AnomalyDetectionPersistenceOperation
+    public let occurredAt: Date
+    public let errorType: String
+
+    public init(
+        operation: AnomalyDetectionPersistenceOperation,
+        occurredAt: Date = Date(),
+        errorType: String
+    ) {
+        self.operation = operation
+        self.occurredAt = occurredAt
+        self.errorType = errorType
+    }
+}
+
 // MARK: - 行为基线
 
 /// 行为基线统计
@@ -219,6 +241,25 @@ public final class AnomalyDetectionService: ObservableObject {
 
     public static let shared = AnomalyDetectionService()
 
+    private static let configurationStore = CodablePersistenceStore<AnomalyDetectionConfiguration>(
+        location: .protectedApplicationSupport(
+            path: "AnomalyDetection/configuration.json",
+            legacyUserDefaultsKey: "com.skybridge.anomaly.config"
+        )
+    )
+    private static let baselineStore = CodablePersistenceStore<BehaviorBaseline>(
+        location: .protectedApplicationSupport(
+            path: "AnomalyDetection/baseline.json",
+            legacyUserDefaultsKey: "com.skybridge.anomaly.baseline"
+        )
+    )
+    private static let historyStore = CodablePersistenceStore<[DetectedAnomaly]>(
+        location: .protectedApplicationSupport(
+            path: "AnomalyDetection/history.json",
+            legacyUserDefaultsKey: "com.skybridge.anomaly.history"
+        )
+    )
+
     // MARK: - Published Properties
 
     /// 检测配置
@@ -237,6 +278,9 @@ public final class AnomalyDetectionService: ObservableObject {
 
     /// 是否处于学习模式
     @Published public private(set) var isLearning: Bool = true
+
+    /// 最近一次持久化失败；用于 UI/诊断暴露真实错误，而不是静默丢失安全状态。
+    @Published public private(set) var lastPersistenceFailure: AnomalyDetectionPersistenceFailure?
 
     // MARK: - Private Properties
 
@@ -431,7 +475,8 @@ public final class AnomalyDetectionService: ObservableObject {
             if let handler = onCriticalAnomaly {
                 let shouldBlock = await handler(anomaly)
                 if shouldBlock {
-                    logger.warning("🔍 自动阻止严重异常来源: \(anomaly.sourceDeviceID ?? "unknown")")
+                    let sourceIdentifierState = anomaly.sourceDeviceID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? "present_redacted" : "absent"
+                    logger.warning("🔍 自动阻止严重异常来源: \(sourceIdentifierState, privacy: .public)")
                 }
             }
         }
@@ -505,44 +550,54 @@ public final class AnomalyDetectionService: ObservableObject {
     // MARK: - Persistence
 
     private func saveConfiguration() {
-        if let data = try? JSONEncoder().encode(configuration) {
-            UserDefaults.standard.set(data, forKey: "com.skybridge.anomaly.config")
+        persist(.configuration) {
+            try Self.configurationStore.save(configuration)
         }
     }
 
     private static func loadConfiguration() -> AnomalyDetectionConfiguration? {
-        guard let data = UserDefaults.standard.data(forKey: "com.skybridge.anomaly.config"),
-              let config = try? JSONDecoder().decode(AnomalyDetectionConfiguration.self, from: data) else {
-            return nil
-        }
-        return config
+        Self.configurationStore.load()
     }
 
     private func saveBaseline() {
-        if let data = try? JSONEncoder().encode(baseline) {
-            UserDefaults.standard.set(data, forKey: "com.skybridge.anomaly.baseline")
+        persist(.baseline) {
+            try Self.baselineStore.save(baseline)
         }
     }
 
     private static func loadBaseline() -> BehaviorBaseline? {
-        guard let data = UserDefaults.standard.data(forKey: "com.skybridge.anomaly.baseline"),
-              let baseline = try? JSONDecoder().decode(BehaviorBaseline.self, from: data) else {
-            return nil
-        }
-        return baseline
+        Self.baselineStore.load()
     }
 
     private func saveHistory() {
-        if let data = try? JSONEncoder().encode(anomalyHistory) {
-            UserDefaults.standard.set(data, forKey: "com.skybridge.anomaly.history")
+        persist(.history) {
+            try Self.historyStore.save(anomalyHistory)
         }
     }
 
-    private static func loadHistory() -> [DetectedAnomaly] {
-        guard let data = UserDefaults.standard.data(forKey: "com.skybridge.anomaly.history"),
-              let history = try? JSONDecoder().decode([DetectedAnomaly].self, from: data) else {
-            return []
+    private func persist(_ operation: AnomalyDetectionPersistenceOperation, _ action: () throws -> Void) {
+        do {
+            try action()
+            if lastPersistenceFailure?.operation == operation {
+                lastPersistenceFailure = nil
+            }
+        } catch {
+            recordPersistenceFailure(operation, error: error)
         }
-        return history
+    }
+
+    private func recordPersistenceFailure(_ operation: AnomalyDetectionPersistenceOperation, error: Error) {
+        let failure = AnomalyDetectionPersistenceFailure(
+            operation: operation,
+            errorType: String(reflecting: type(of: error))
+        )
+        lastPersistenceFailure = failure
+        logger.error(
+            "Anomaly detection persistence failed operation=\(operation.rawValue, privacy: .public) errorType=\(failure.errorType, privacy: .public)"
+        )
+    }
+
+    private static func loadHistory() -> [DetectedAnomaly] {
+        Self.historyStore.load() ?? []
     }
 }

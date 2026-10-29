@@ -4,6 +4,7 @@ import Network
 import Security
 import NoiseKit
 import Atomics
+import SkyBridgeBenchmarkSupport
 
 final class BaselineLoopbackBenchTests: XCTestCase {
     private struct BenchConfig {
@@ -15,8 +16,97 @@ final class BaselineLoopbackBenchTests: XCTestCase {
         let quicAlpn: String
     }
 
+    private struct LoadedIdentity {
+        let secIdentity: SecIdentity
+        let certificateDER: Data
+    }
+
     private var shouldRunBenchmarks: Bool {
         ProcessInfo.processInfo.environment["BASELINE_RUN_BENCH"] == "1"
+    }
+
+    func testLoopbackLifecycleRejectsUnsafeConfiguration() async throws {
+        let invalidConfigurations: [(iterations: Int, warmup: Int, timeoutSeconds: Double, kickoffBytes: Int)] = [
+            (0, 0, 5, 0),
+            (100_000, 1, 5, 0),
+            (1, 0, 300.000_1, 0),
+            (1, 0, 5, 1_048_577)
+        ]
+
+        for configuration in invalidConfigurations {
+            do {
+                _ = try await NetworkLoopbackLifecycle.measureHandshakes(
+                    protocolName: "configuration-validation",
+                    serverParameters: .tcp,
+                    clientParameters: .tcp,
+                    iterations: configuration.iterations,
+                    warmup: configuration.warmup,
+                    timeoutSeconds: configuration.timeoutSeconds,
+                    kickoffBytes: configuration.kickoffBytes
+                )
+                XCTFail("Unsafe loopback configuration must fail before allocating a listener")
+            } catch let error as NetworkLoopbackLifecycleError {
+                if case .invalidConfiguration = error {
+                    continue
+                }
+                XCTFail("Expected invalidConfiguration, received \(error)")
+            }
+        }
+    }
+
+    func testLoopbackLifecycleImmediateCancellationFailsAfterSuccessfulCleanup() async throws {
+        let operation = Task {
+            try await NetworkLoopbackLifecycle.measureHandshakes(
+                protocolName: "cancellation",
+                serverParameters: .tcp,
+                clientParameters: .tcp,
+                iterations: 10_000,
+                warmup: 0,
+                timeoutSeconds: 5,
+                kickoffBytes: 1
+            )
+        }
+        operation.cancel()
+
+        do {
+            _ = try await operation.value
+            XCTFail("A cancelled benchmark must not return successful samples")
+        } catch let error as NetworkLoopbackLifecycleError {
+            switch error {
+            case .listener(
+                protocolName: "cancellation",
+                stage: let stage,
+                detail: "task cancelled"
+            ) where stage == "ready" || stage == "operation":
+                break
+            case .listener(
+                protocolName: "cancellation",
+                stage: "state",
+                detail: "cancelled before ready"
+            ), .accept(
+                protocolName: "cancellation",
+                iteration: _,
+                detail: "task cancelled"
+            ), .connection(
+                protocolName: "cancellation",
+                iteration: _,
+                role: _,
+                stage: "ready",
+                detail: "task cancelled"
+            ), .connection(
+                protocolName: "cancellation",
+                iteration: _,
+                role: _,
+                stage: "state",
+                detail: "cancelled before ready"
+            ):
+                break
+            case .operationAndCleanup(_, let cleanup):
+                XCTFail("Cancellation cleanup failed: \(cleanup)")
+            default:
+                XCTFail("Unexpected cancellation error: \(error)")
+            }
+        }
     }
 
     func testLoopbackBaselines() async throws {
@@ -32,8 +122,8 @@ final class BaselineLoopbackBenchTests: XCTestCase {
         )
 
         let identity = try loadIdentity(
-            path: "Tests/Fixtures/loopback_identity.p12",
-            password: "skybridge"
+            certificatePath: "Tests/Fixtures/loopback_test_server_certificate.der",
+            privateKeyPath: "Tests/Fixtures/loopback_test_server_private_key.x963"
         )
 
         let tls = try await runTLSBench(config: config, identity: identity)
@@ -47,6 +137,39 @@ final class BaselineLoopbackBenchTests: XCTestCase {
         reportStats(label: "Noise-XX", samples: noise)
     }
 
+    func testLoopbackConnectionTeardownStress() async throws {
+        try XCTSkipUnless(shouldRunBenchmarks, "Set BASELINE_RUN_BENCH=1 to run loopback baselines")
+
+        let standardConfig = BenchConfig(
+            iterations: 50,
+            warmup: 5,
+            timeoutSeconds: 5.0,
+            kickoffBytes: 1,
+            tlsVersion: .TLSv13,
+            quicAlpn: "sbq"
+        )
+        let dtlsStressConfig = BenchConfig(
+            iterations: 256,
+            warmup: 5,
+            timeoutSeconds: 5.0,
+            kickoffBytes: 1,
+            tlsVersion: .TLSv13,
+            quicAlpn: "sbq"
+        )
+        let identity = try loadIdentity(
+            certificatePath: "Tests/Fixtures/loopback_test_server_certificate.der",
+            privateKeyPath: "Tests/Fixtures/loopback_test_server_private_key.x963"
+        )
+
+        let tls = try await runTLSBench(config: standardConfig, identity: identity)
+        let quic = try await runQUICBench(config: standardConfig, identity: identity)
+        let dtls = try await runDTLSBench(config: dtlsStressConfig, identity: identity)
+
+        XCTAssertEqual(tls.count, standardConfig.iterations)
+        XCTAssertEqual(quic.count, standardConfig.iterations)
+        XCTAssertEqual(dtls.count, dtlsStressConfig.iterations)
+    }
+
     private func reportStats(label: String, samples: [Double]) {
         XCTAssertFalse(samples.isEmpty, "\(label) produced no samples")
         let p50 = percentile(samples, p: 0.50)
@@ -54,14 +177,12 @@ final class BaselineLoopbackBenchTests: XCTestCase {
         print("[BASELINE] \(label) p50=\(String(format: "%.2f", p50)) ms p95=\(String(format: "%.2f", p95)) ms")
     }
 
-    private func runTLSBench(config: BenchConfig, identity: SecIdentity) async throws -> [Double] {
+    private func runTLSBench(config: BenchConfig, identity: LoadedIdentity) async throws -> [Double] {
         let tlsOptions = makeTLSOptions(identity: identity, isServer: true, version: config.tlsVersion)
         let serverParams = NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
-        serverParams.allowLocalEndpointReuse = true
 
         let clientTlsOptions = makeTLSOptions(identity: identity, isServer: false, version: config.tlsVersion)
         let clientParams = NWParameters(tls: clientTlsOptions, tcp: NWProtocolTCP.Options())
-        clientParams.allowLocalEndpointReuse = true
 
         return try await runNWHandshakeBench(
             protocolName: "TLS13",
@@ -71,7 +192,7 @@ final class BaselineLoopbackBenchTests: XCTestCase {
         )
     }
 
-    private func runQUICBench(config: BenchConfig, identity: SecIdentity) async throws -> [Double] {
+    private func runQUICBench(config: BenchConfig, identity: LoadedIdentity) async throws -> [Double] {
         let serverQuicOptions = NWProtocolQUIC.Options(alpn: [config.quicAlpn])
         serverQuicOptions.direction = .bidirectional
         serverQuicOptions.initialMaxStreamsBidirectional = 1
@@ -90,7 +211,6 @@ final class BaselineLoopbackBenchTests: XCTestCase {
             useVerifyBlock: false
         )
         let serverParams = NWParameters(quic: serverQuicOptions)
-        serverParams.allowLocalEndpointReuse = true
 
         let clientQuicOptions = NWProtocolQUIC.Options(alpn: [config.quicAlpn])
         clientQuicOptions.direction = .bidirectional
@@ -106,11 +226,10 @@ final class BaselineLoopbackBenchTests: XCTestCase {
             version: .TLSv13,
             alpn: nil,
             serverName: "localhost",
-            peerAuthenticationRequired: false,
+            peerAuthenticationRequired: true,
             useVerifyBlock: true
         )
         let clientParams = NWParameters(quic: clientQuicOptions)
-        clientParams.allowLocalEndpointReuse = true
 
         return try await runNWHandshakeBench(
             protocolName: "QUIC",
@@ -120,14 +239,12 @@ final class BaselineLoopbackBenchTests: XCTestCase {
         )
     }
 
-    private func runDTLSBench(config: BenchConfig, identity: SecIdentity) async throws -> [Double] {
+    private func runDTLSBench(config: BenchConfig, identity: LoadedIdentity) async throws -> [Double] {
         let serverTlsOptions = makeTLSOptions(identity: identity, isServer: true, version: .DTLSv12, alpn: "webrtc")
         let serverParams = NWParameters(dtls: serverTlsOptions, udp: NWProtocolUDP.Options())
-        serverParams.allowLocalEndpointReuse = true
 
         let clientTlsOptions = makeTLSOptions(identity: identity, isServer: false, version: .DTLSv12, alpn: "webrtc")
         let clientParams = NWParameters(dtls: clientTlsOptions, udp: NWProtocolUDP.Options())
-        clientParams.allowLocalEndpointReuse = true
 
         return try await runNWHandshakeBench(
             protocolName: "WebRTC-DTLS",
@@ -140,8 +257,21 @@ final class BaselineLoopbackBenchTests: XCTestCase {
     private func runNoiseBench(config: BenchConfig) async throws -> [Double] {
         let queue = DispatchQueue(label: "baseline.noise.tests")
         let listener = try NWListener(using: .udp)
-        listener.start(queue: queue)
-        try await Self.waitForListenerReady(listener: listener, queue: queue, timeoutSeconds: config.timeoutSeconds)
+        defer {
+            listener.newConnectionHandler = nil
+            listener.cancel()
+        }
+        let serverConnectionStream = Self.makeSingleConnectionStream(
+            listener: listener,
+            queue: queue,
+            timeoutSeconds: config.timeoutSeconds
+        )
+        var serverConnectionIterator = serverConnectionStream.makeAsyncIterator()
+        try await Self.startListenerAndWaitUntilReady(
+            listener: listener,
+            queue: queue,
+            timeoutSeconds: config.timeoutSeconds
+        )
         guard let port = listener.port else {
             listener.cancel()
             throw NSError(domain: "BaselineBenchTests", code: 5, userInfo: [
@@ -153,43 +283,17 @@ final class BaselineLoopbackBenchTests: XCTestCase {
             to: .hostPort(host: "127.0.0.1", port: port),
             using: .udp
         )
+        defer { clientConnection.cancel() }
         clientConnection.start(queue: queue)
 
         let clientChannel = UDPChannel(connection: clientConnection)
-
-        let serverConnectionStream = AsyncThrowingStream<NWConnection, Error> { continuation in
-            let timer = DispatchSource.makeTimerSource(queue: queue)
-            timer.schedule(deadline: .now() + config.timeoutSeconds)
-            timer.setEventHandler {
-                listener.cancel()
-                continuation.finish(throwing: NSError(domain: "BaselineBenchTests", code: 2, userInfo: [
-                    NSLocalizedDescriptionKey: "Timed out after \(config.timeoutSeconds)s"
-                ]))
-            }
-            timer.activate()
-
-            listener.newConnectionHandler = { connection in
-                timer.cancel()
-                listener.newConnectionHandler = nil
-                connection.start(queue: queue)
-                continuation.yield(connection)
-                continuation.finish()
-            }
-
-            continuation.onTermination = { _ in
-                timer.cancel()
-                listener.newConnectionHandler = nil
-            }
-        }
-
-        var serverConnectionIterator = serverConnectionStream.makeAsyncIterator()
         try await clientChannel.send(Data([0x00]))
         guard let serverConnection = try await serverConnectionIterator.next() else {
-            listener.cancel()
             throw NSError(domain: "BaselineBenchTests", code: 5, userInfo: [
                 NSLocalizedDescriptionKey: "Listener did not accept a connection"
             ])
         }
+        defer { serverConnection.cancel() }
         let serverChannel = UDPChannel(connection: serverConnection)
         _ = try await serverChannel.receive()
 
@@ -198,7 +302,7 @@ final class BaselineLoopbackBenchTests: XCTestCase {
 
         var samples: [Double] = []
         for iteration in 0..<(config.warmup + config.iterations) {
-            let start = Date().timeIntervalSince1970
+            let start = ContinuousClock.now
             async let responderTask: Void = try NoiseXX.runResponder(
                 staticKey: responderStatic,
                 send: serverChannel.send,
@@ -210,15 +314,12 @@ final class BaselineLoopbackBenchTests: XCTestCase {
                 receive: clientChannel.receive
             )
             try await responderTask
-            let end = Date().timeIntervalSince1970
+            let elapsed = ContinuousClock.now - start
             if iteration >= config.warmup {
-                samples.append((end - start) * 1000.0)
+                samples.append(Self.durationToMilliseconds(elapsed))
             }
         }
 
-        clientConnection.cancel()
-        serverConnection.cancel()
-        listener.cancel()
         return samples
     }
 
@@ -228,201 +329,58 @@ final class BaselineLoopbackBenchTests: XCTestCase {
         clientParameters: NWParameters,
         config: BenchConfig
     ) async throws -> [Double] {
-        let queue = DispatchQueue(label: "baseline.\(protocolName.lowercased()).tests")
-        let listener = try NWListener(using: serverParameters)
-        listener.newConnectionHandler = { connection in
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) {
-                        connection.cancel()
-                    }
-                case .failed, .cancelled:
-                    connection.cancel()
-                default:
-                    break
-                }
-            }
-            connection.start(queue: queue)
-        }
-        listener.start(queue: queue)
-        try await Self.waitForListenerReady(listener: listener, queue: queue, timeoutSeconds: config.timeoutSeconds)
-        guard let port = listener.port else {
-            listener.cancel()
+        let lifecycleSamples = try await NetworkLoopbackLifecycle.measureHandshakes(
+            protocolName: protocolName,
+            serverParameters: serverParameters,
+            clientParameters: clientParameters,
+            iterations: config.iterations,
+            warmup: config.warmup,
+            timeoutSeconds: config.timeoutSeconds,
+            kickoffBytes: config.kickoffBytes
+        )
+        return lifecycleSamples.map { Self.durationToMilliseconds($0.readyDuration) }
+    }
+
+    private func loadIdentity(
+        certificatePath: String,
+        privateKeyPath: String
+    ) throws -> LoadedIdentity {
+        let certificateData = try Data(contentsOf: URL(fileURLWithPath: certificatePath))
+        guard let certificate = SecCertificateCreateWithData(nil, certificateData as CFData) else {
             throw NSError(domain: "BaselineBenchTests", code: 6, userInfo: [
-                NSLocalizedDescriptionKey: "Listener port unavailable"
-            ])
-        }
-        try await Task.sleep(for: .milliseconds(10))
-
-        let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: port)
-        var samples: [Double] = []
-        for iteration in 0..<(config.warmup + config.iterations) {
-            let connection = NWConnection(to: endpoint, using: clientParameters)
-            let start = Date().timeIntervalSince1970
-            try await Self.waitForReady(
-                connection: connection,
-                queue: queue,
-                timeoutSeconds: config.timeoutSeconds,
-                kickoffBytes: config.kickoffBytes
-            )
-            let end = Date().timeIntervalSince1970
-            connection.cancel()
-            if iteration >= config.warmup {
-                samples.append((end - start) * 1000.0)
-            }
-        }
-
-        listener.cancel()
-        return samples
-    }
-
-    private func loadIdentity(path: String, password: String) throws -> SecIdentity {
-        let data = try Data(contentsOf: URL(fileURLWithPath: path))
-        var options: [String: Any] = [kSecImportExportPassphrase as String: password]
-        var items: CFArray?
-        var status = SecPKCS12Import(data as CFData, options as CFDictionary, &items)
-        if status != errSecSuccess {
-            if let keychain = try? makeTemporaryKeychain(password: password) {
-                options[kSecImportExportKeychain as String] = keychain
-                status = SecPKCS12Import(data as CFData, options as CFDictionary, &items)
-            }
-        }
-        if status == errSecSuccess,
-           let array = items as? [[String: Any]],
-           let first = array.first,
-           let anyIdentity = first[kSecImportItemIdentity as String],
-           CFGetTypeID(anyIdentity as CFTypeRef) == SecIdentityGetTypeID() {
-            return unsafeDowncast(anyIdentity as AnyObject, to: SecIdentity.self)
-        }
-
-        if let pemIdentity = try? loadIdentityFromPEM(p12Path: path) {
-            return pemIdentity
-        }
-
-        throw NSError(domain: "BaselineBenchTests", code: Int(status), userInfo: [
-            NSLocalizedDescriptionKey: "PKCS#12 import failed (\(status))"
-        ])
-    }
-
-    private func makeTemporaryKeychain(password: String) throws -> SecKeychain {
-        let path = "/tmp/skybridge_baseline_tests_\(UUID().uuidString).keychain-db"
-        let passwordBytes = Array(password.utf8)
-        var keychain: SecKeychain?
-        let status = passwordBytes.withUnsafeBufferPointer { buffer -> OSStatus in
-            let base = buffer.baseAddress?.withMemoryRebound(to: Int8.self, capacity: buffer.count) { $0 }
-            return SecKeychainCreate(path, UInt32(passwordBytes.count), base, false, nil, &keychain)
-        }
-        guard status == errSecSuccess, let created = keychain else {
-            throw NSError(domain: "BaselineBenchTests", code: Int(status), userInfo: [
-                NSLocalizedDescriptionKey: "Temporary keychain creation failed (\(status))"
-            ])
-        }
-        return created
-    }
-
-    private func loadIdentityFromPEM(p12Path: String) throws -> SecIdentity {
-        let p12URL = URL(fileURLWithPath: p12Path)
-        let baseDir = p12URL.deletingLastPathComponent()
-        let certURL = baseDir.appendingPathComponent("loopback_cert.pem")
-        let keyURL = baseDir.appendingPathComponent("loopback_key.pem")
-
-        let certPEM = try Data(contentsOf: certURL)
-        let keyPEM = try Data(contentsOf: keyURL)
-        let certDER = try decodePEM(certPEM, header: "CERTIFICATE")
-        let keyDER = try ((try? decodePEM(keyPEM, header: "PRIVATE KEY")) ?? decodePEM(keyPEM, header: "EC PRIVATE KEY"))
-
-        guard let cert = SecCertificateCreateWithData(nil, certDER as CFData) else {
-            throw NSError(domain: "BaselineBenchTests", code: -1, userInfo: [
-                NSLocalizedDescriptionKey: "Failed to create certificate from PEM"
+                NSLocalizedDescriptionKey: "Invalid loopback certificate DER: \(certificatePath)"
             ])
         }
 
-        let keyAttributes: [String: Any] = [
+        let privateKeyData = try Data(contentsOf: URL(fileURLWithPath: privateKeyPath))
+        let attributes: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
             kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
-            kSecAttrKeySizeInBits as String: 256,
-            kSecAttrIsPermanent as String: false
+            kSecAttrKeySizeInBits as String: 256
         ]
         var keyError: Unmanaged<CFError>?
-        guard let key = SecKeyCreateWithData(keyDER as CFData, keyAttributes as CFDictionary, &keyError) else {
-            let message = keyError?.takeRetainedValue().localizedDescription ?? "Unknown"
-            throw NSError(domain: "BaselineBenchTests", code: -2, userInfo: [
-                NSLocalizedDescriptionKey: "Failed to create private key: \(message)"
+        guard let privateKey = SecKeyCreateWithData(
+            privateKeyData as CFData,
+            attributes as CFDictionary,
+            &keyError
+        ) else {
+            let underlyingError = keyError?.takeRetainedValue()
+            throw NSError(domain: "BaselineBenchTests", code: 7, userInfo: [
+                NSLocalizedDescriptionKey: "Invalid loopback private-key representation: \(privateKeyPath)",
+                NSUnderlyingErrorKey: underlyingError as Any
             ])
         }
 
-        let keychain = try makeTemporaryKeychain(password: UUID().uuidString)
-        let label = "BaselineBenchTests.\(UUID().uuidString)"
-        let addKeyQuery: [String: Any] = [
-            kSecClass as String: kSecClassKey,
-            kSecAttrLabel as String: label,
-            kSecValueRef as String: key,
-            kSecUseKeychain as String: keychain,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
-        ]
-        SecItemDelete(addKeyQuery as CFDictionary)
-        let keyStatus = SecItemAdd(addKeyQuery as CFDictionary, nil)
-        guard keyStatus == errSecSuccess else {
-            throw NSError(domain: "BaselineBenchTests", code: Int(keyStatus), userInfo: [
-                NSLocalizedDescriptionKey: "Failed to add key to keychain (\(keyStatus))"
+        guard let identity = SecIdentityCreate(nil, certificate, privateKey) else {
+            throw NSError(domain: "BaselineBenchTests", code: 8, userInfo: [
+                NSLocalizedDescriptionKey: "Loopback certificate and private key do not match"
             ])
         }
-
-        let addCertQuery: [String: Any] = [
-            kSecClass as String: kSecClassCertificate,
-            kSecAttrLabel as String: label,
-            kSecValueRef as String: cert,
-            kSecUseKeychain as String: keychain,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
-        ]
-        SecItemDelete(addCertQuery as CFDictionary)
-        let certStatus = SecItemAdd(addCertQuery as CFDictionary, nil)
-        guard certStatus == errSecSuccess else {
-            throw NSError(domain: "BaselineBenchTests", code: Int(certStatus), userInfo: [
-                NSLocalizedDescriptionKey: "Failed to add certificate to keychain (\(certStatus))"
-            ])
-        }
-
-        var identity: SecIdentity?
-        let idStatus = SecIdentityCreateWithCertificate(keychain, cert, &identity)
-        guard idStatus == errSecSuccess, let created = identity else {
-            throw NSError(domain: "BaselineBenchTests", code: Int(idStatus), userInfo: [
-                NSLocalizedDescriptionKey: "Failed to create identity from PEM (\(idStatus))"
-            ])
-        }
-        return created
-    }
-
-    private func decodePEM(_ data: Data, header: String) throws -> Data {
-        guard let text = String(data: data, encoding: .utf8) else {
-            throw NSError(domain: "BaselineBenchTests", code: -3, userInfo: [
-                NSLocalizedDescriptionKey: "PEM is not valid UTF-8"
-            ])
-        }
-        let begin = "-----BEGIN \(header)-----"
-        let end = "-----END \(header)-----"
-        guard let rangeStart = text.range(of: begin),
-              let rangeEnd = text.range(of: end) else {
-            throw NSError(domain: "BaselineBenchTests", code: -4, userInfo: [
-                NSLocalizedDescriptionKey: "PEM block \(header) not found"
-            ])
-        }
-        let body = text[rangeStart.upperBound..<rangeEnd.lowerBound]
-        let base64 = body
-            .replacingOccurrences(of: "\r", with: "")
-            .replacingOccurrences(of: "\n", with: "")
-            .replacingOccurrences(of: " ", with: "")
-        guard let decoded = Data(base64Encoded: base64) else {
-            throw NSError(domain: "BaselineBenchTests", code: -5, userInfo: [
-                NSLocalizedDescriptionKey: "Failed to decode PEM base64"
-            ])
-        }
-        return decoded
+        return LoadedIdentity(secIdentity: identity, certificateDER: certificateData)
     }
 
     private func makeTLSOptions(
-        identity: SecIdentity,
+        identity: LoadedIdentity,
         isServer: Bool,
         version: tls_protocol_version_t,
         alpn: String? = nil
@@ -435,7 +393,7 @@ final class BaselineLoopbackBenchTests: XCTestCase {
             version: version,
             alpn: alpn,
             serverName: "localhost",
-            peerAuthenticationRequired: false,
+            peerAuthenticationRequired: !isServer,
             useVerifyBlock: true
         )
         return tlsOptions
@@ -443,7 +401,7 @@ final class BaselineLoopbackBenchTests: XCTestCase {
 
     private func configureTLSOptions(
         _ secOptions: sec_protocol_options_t,
-        identity: SecIdentity,
+        identity: LoadedIdentity,
         isServer: Bool,
         version: tls_protocol_version_t,
         alpn: String?,
@@ -461,8 +419,10 @@ final class BaselineLoopbackBenchTests: XCTestCase {
             }
         }
 
+        sec_protocol_options_set_peer_authentication_required(secOptions, peerAuthenticationRequired)
+
         if isServer {
-            if let secIdentity = sec_identity_create(identity) {
+            if let secIdentity = sec_identity_create(identity.secIdentity) {
                 sec_protocol_options_set_local_identity(secOptions, secIdentity)
             }
         } else {
@@ -472,67 +432,29 @@ final class BaselineLoopbackBenchTests: XCTestCase {
                     sec_protocol_options_set_tls_server_name(secOptions, base)
                 }
             }
-            sec_protocol_options_set_peer_authentication_required(secOptions, peerAuthenticationRequired)
             if useVerifyBlock {
-                sec_protocol_options_set_verify_block(secOptions, { _, _, complete in
-                    complete(true)
+                let expectedCertificateDER = identity.certificateDER
+                sec_protocol_options_set_verify_block(secOptions, { _, trust, complete in
+                    let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
+                    guard let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate],
+                          let leafCertificate = chain.first else {
+                        complete(false)
+                        return
+                    }
+                    let actualCertificateDER = SecCertificateCopyData(leafCertificate) as Data
+                    complete(actualCertificateDER == expectedCertificateDER)
                 }, .global())
             }
         }
     }
 
-    private static func waitForReady(
-        connection: NWConnection,
-        queue: DispatchQueue,
-        timeoutSeconds: Double,
-        kickoffBytes: Int
-    ) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let timer = DispatchSource.makeTimerSource(queue: queue)
-            let didResume = ManagedAtomic(false)
-            let resumeOnce: @Sendable (Result<Void, Error>) -> Void = { result in
-                guard didResume.compareExchange(expected: false, desired: true, ordering: .relaxed).exchanged else { return }
-                timer.cancel()
-                connection.stateUpdateHandler = nil
-                switch result {
-                case .success:
-                    continuation.resume()
-                case .failure(let error):
-                    continuation.resume(throwing: error)
-                }
-            }
-            timer.schedule(deadline: .now() + timeoutSeconds)
-            timer.setEventHandler {
-                connection.cancel()
-                resumeOnce(.failure(NSError(domain: "BaselineBenchTests", code: 2, userInfo: [
-                    NSLocalizedDescriptionKey: "Timed out after \(timeoutSeconds)s"
-                ])))
-            }
-            timer.activate()
-
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    resumeOnce(.success(()))
-                case .failed(let error):
-                    resumeOnce(.failure(error))
-                case .cancelled:
-                    resumeOnce(.failure(NSError(domain: "BaselineBenchTests", code: 1, userInfo: [
-                        NSLocalizedDescriptionKey: "Connection cancelled"
-                    ])))
-                default:
-                    break
-                }
-            }
-            connection.start(queue: queue)
-            if kickoffBytes > 0 {
-                let payload = Data(repeating: 0x00, count: kickoffBytes)
-                connection.send(content: payload, completion: .contentProcessed { _ in })
-            }
-        }
+    private static func durationToMilliseconds(_ duration: Duration) -> Double {
+        let components = duration.components
+        return Double(components.seconds) * 1_000.0
+            + Double(components.attoseconds) / 1_000_000_000_000_000.0
     }
 
-    private static func waitForListenerReady(
+    private static func startListenerAndWaitUntilReady(
         listener: NWListener,
         queue: DispatchQueue,
         timeoutSeconds: Double
@@ -574,40 +496,47 @@ final class BaselineLoopbackBenchTests: XCTestCase {
                     break
                 }
             }
+            listener.start(queue: queue)
         }
     }
 
-    private static func waitForNewConnection(
+    private static func makeSingleConnectionStream(
         listener: NWListener,
         queue: DispatchQueue,
         timeoutSeconds: Double
-    ) async throws -> NWConnection {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<NWConnection, Error>) in
+    ) -> AsyncThrowingStream<NWConnection, Error> {
+        AsyncThrowingStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
             let timer = DispatchSource.makeTimerSource(queue: queue)
-            let didResume = ManagedAtomic(false)
-            let resumeOnce: @Sendable (Result<NWConnection, Error>) -> Void = { result in
-                guard didResume.compareExchange(expected: false, desired: true, ordering: .relaxed).exchanged else { return }
+            let didFinish = ManagedAtomic(false)
+            let finishOnce: @Sendable (Result<NWConnection, Error>) -> Void = { result in
+                guard didFinish.compareExchange(expected: false, desired: true, ordering: .relaxed).exchanged else { return }
                 timer.cancel()
                 listener.newConnectionHandler = nil
                 switch result {
                 case .success(let connection):
-                    continuation.resume(returning: connection)
+                    connection.start(queue: queue)
+                    continuation.yield(connection)
+                    continuation.finish()
                 case .failure(let error):
-                    continuation.resume(throwing: error)
+                    listener.cancel()
+                    continuation.finish(throwing: error)
                 }
             }
             timer.schedule(deadline: .now() + timeoutSeconds)
             timer.setEventHandler {
-                listener.cancel()
-                resumeOnce(.failure(NSError(domain: "BaselineBenchTests", code: 2, userInfo: [
+                finishOnce(.failure(NSError(domain: "BaselineBenchTests", code: 2, userInfo: [
                     NSLocalizedDescriptionKey: "Timed out after \(timeoutSeconds)s"
                 ])))
             }
             timer.activate()
 
             listener.newConnectionHandler = { connection in
-                connection.start(queue: queue)
-                resumeOnce(.success(connection))
+                finishOnce(.success(connection))
+            }
+            continuation.onTermination = { _ in
+                guard didFinish.compareExchange(expected: false, desired: true, ordering: .relaxed).exchanged else { return }
+                timer.cancel()
+                listener.newConnectionHandler = nil
             }
         }
     }

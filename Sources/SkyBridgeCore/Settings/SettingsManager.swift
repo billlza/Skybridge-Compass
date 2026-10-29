@@ -2,8 +2,12 @@ import Foundation
 import SwiftUI
 import Combine
 import UserNotifications
+#if os(macOS)
+// Theme/appearance persistence still uses NSColor + NSAppearance on macOS.
 import AppKit
+#endif
 import os.log
+import SkyBridgeProtocolCore
 
 /// 设置导出数据结构
 public struct SettingsExportData: Codable {
@@ -11,12 +15,12 @@ public struct SettingsExportData: Codable {
     public let useDarkMode: Bool
     public let themeColor: String
     public let enableSystemNotifications: Bool
-    
+
  // 网络设置
     public let scanInterval: TimeInterval
     public let connectionTimeout: TimeInterval
     public let maxRetryAttempts: Int
-    
+
  // 设备管理设置
     public let autoDiscoverAppleTV: Bool
     public let showHomePodDevices: Bool
@@ -24,7 +28,7 @@ public struct SettingsExportData: Codable {
     public let enableBluetoothScanning: Bool
     public let autoScanWiFi: Bool
     public let wifiScanInterval: TimeInterval
-    
+
  // 高级设置
     public let enableDebugMode: Bool
     public let enableVerboseLogging: Bool
@@ -33,17 +37,120 @@ public struct SettingsExportData: Codable {
     public let performanceMode: String?
  /// 隐私诊断开关：是否启用TLS握手诊断（可选，兼容旧版本导入）
     public let enableHandshakeDiagnostics: Bool?
-    
+ /// 顶部栏：是否显示公网 IP、城市与代理状态（可选，兼容旧版本导入）
+    public let showTopBarIPLocation: Bool?
+ /// 顶部栏：是否显示实时网络吞吐（可选，兼容旧版本导入）
+    public let showTopBarNetworkSpeed: Bool?
+ /// 顶部栏：是否显示公网延迟（可选，兼容旧版本导入）
+    public let showTopBarNetworkLatency: Bool?
+
  // 系统监控设置
     public let enableCPUMonitoring: Bool
     public let enableMemoryMonitoring: Bool
     public let enableNetworkMonitoring: Bool
     public let enableDiskMonitoring: Bool
     public let monitoringInterval: TimeInterval
-    
+    public let showTrendIndicators: Bool?
+    public let maxHistoryPoints: Double?
+    public let systemMonitorRetentionDays: Int?
+    public let enablePerformanceAlerts: Bool?
+    public let temperatureThreshold: Double?
+    public let enableTemperatureMonitoring: Bool?
+    public let enableFanSpeedMonitoring: Bool?
+    public let fanSpeedThreshold: Double?
+    public let enableThermalThrottlingAlert: Bool?
+    public let showMonitorCPU: Bool?
+    public let showMonitorMemory: Bool?
+    public let showMonitorTemperature: Bool?
+    public let showMonitorFanSpeed: Bool?
+    public let showMonitorDisk: Bool?
+    public let showMonitorNetwork: Bool?
+    public let systemMonitorChartType: String?
+    public let systemMonitorSamplingPrecision: String?
+    public let enableRemoteMonitoring: Bool?
+
  // 元数据
     public let exportDate: Date
     public let appVersion: String
+}
+
+public enum SettingsStorageKeys {
+    public static let preferXWingHybrid = "Settings.PreferXWingHybrid"
+    public static let protocolIdentityConfigurationV2 = "Settings.ProtocolIdentityConfiguration.v2"
+    // Read-only migration inputs. New writes use the single v2 value above.
+    public static let protocolSigningAlgorithmV1 = "Settings.ProtocolIdentityConfiguration.v1.algorithm"
+    public static let protocolSigningKeyProtectionV1 = "Settings.ProtocolIdentityConfiguration.v1.protection"
+    /// Experimental (beta): prefer Q-Periapt ABI2 PolicyBound only after an
+    /// authenticated policy session has been admitted locally.
+    public static let preferQPeriaptBeta = "Settings.PreferQPeriaptBeta"
+}
+
+public struct ProtocolIdentityConfigurationRecord: Codable, Sendable, Equatable {
+    public static let currentVersion = 2
+
+    public let version: Int
+    public let algorithm: ProtocolSigningAlgorithm
+    public let protection: ProtocolSigningKeyProtection
+
+    public init(
+        version: Int = Self.currentVersion,
+        algorithm: ProtocolSigningAlgorithm,
+        protection: ProtocolSigningKeyProtection
+    ) {
+        self.version = version
+        self.algorithm = algorithm
+        self.protection = protection
+    }
+
+    public var isValidAuthoritySelection: Bool {
+        version == Self.currentVersion && algorithm != .ed25519
+    }
+}
+
+enum ProtocolIdentityAuthorityRestorationAction: Equatable, Sendable {
+    case provision
+    case requireExisting
+}
+
+enum ProtocolIdentityAuthorityRestorationPolicy {
+    nonisolated static func action(
+        shouldProvisionDefault: Bool,
+        usesEphemeralIdentityStore: Bool
+    ) -> ProtocolIdentityAuthorityRestorationAction {
+        if shouldProvisionDefault || usesEphemeralIdentityStore {
+            return .provision
+        }
+        return .requireExisting
+    }
+}
+
+struct PreparedProtocolIdentityConfiguration: Sendable {
+    let configuration: ProtocolIdentityConfigurationRecord
+    let publicKey: Data
+    let keyHandle: SigningKeyHandle
+    fileprivate let requestGeneration: UInt64
+}
+
+struct ProtocolIdentityConfigurationRequestGate: Sendable {
+    private(set) var currentGeneration: UInt64 = 0
+
+    mutating func begin() -> UInt64 {
+        currentGeneration &+= 1
+        return currentGeneration
+    }
+
+    func accepts(_ generation: UInt64) -> Bool {
+        generation == currentGeneration
+    }
+}
+
+public enum ProtocolIdentityConfigurationState: String, Sendable, Equatable {
+    case active
+    case provisioning
+    case waitingForPeerRepin
+    case requiresExplicitConfirmation
+    case unavailable
+    case failed
 }
 
 /// 设置错误类型
@@ -53,7 +160,7 @@ public enum SettingsError: Error, LocalizedError {
     case validationFailed(String)
     case exportFailed(String)
     case importFailed(String)
-    
+
     public var errorDescription: String? {
         switch self {
         case .fileAccessDenied:
@@ -82,23 +189,24 @@ extension DateFormatter {
 /// 应用设置管理器 - 统一管理所有设置数据和持久化
 @MainActor
 public class SettingsManager: ObservableObject, Sendable {
-    
+
  // MARK: - 单例
     public static let shared = SettingsManager()
-    
+
  // MARK: - 日志记录器
     private let logger = Logger(subsystem: "com.skybridge.compass", category: "SettingsManager")
-    
+
  // MARK: - 通用设置
     @Published public var autoScanOnStartup: Bool = true
     @Published public var showSystemNotifications: Bool = true
+    @Published public var showFileTransferNotifications: Bool = true
     @Published public var useDarkMode: Bool = false
     @Published public var scanInterval: Int = 30
     @Published public var showDeviceDetails: Bool = true
     @Published public var showConnectionStats: Bool = true
     @Published public var compactMode: Bool = false
     @Published public var themeColor: Color = .blue
-    
+
  // MARK: - 网络设置
     @Published public var autoConnectKnownNetworks: Bool = true
     @Published public var showHiddenNetworks: Bool = false
@@ -119,7 +227,7 @@ public class SettingsManager: ObservableObject, Sendable {
     @Published public var enableConnectionEncryption: Bool = true
     @Published public var verifyCertificates: Bool = true
     @Published public var customServiceTypes: [String] = []
-    
+
  // MARK: - 设备设置
     @Published public var autoConnectPairedDevices: Bool = true
     @Published public var showDeviceRSSI: Bool = true
@@ -139,7 +247,7 @@ public class SettingsManager: ObservableObject, Sendable {
     @Published public var sortWeightConnected: Int = 1000
  /// 设备列表排序权重：信号强度系数（0~100）
     @Published public var sortWeightSignalMultiplier: Int = 100
-    
+
  // MARK: - 高级设置
     @Published public var enableVerboseLogging: Bool = false
     @Published public var showDebugInfo: Bool = false
@@ -153,13 +261,13 @@ public class SettingsManager: ObservableObject, Sendable {
     @Published public var useNewDiscoveryAlgorithm: Bool = false
     @Published public var enableP2PDirectConnection: Bool = false
     @Published public var enableRealTimeWeather: Bool = false
-    
+
  // 性能模式设置
     public enum PerformanceMode: String, CaseIterable, Codable {
         case extreme = "极致"
         case balanced = "平衡"
         case energySaving = "节能"
-        
+
         public var targetFPS: Double {
             switch self {
             case .extreme: return 60.0
@@ -169,9 +277,15 @@ public class SettingsManager: ObservableObject, Sendable {
         }
     }
     @Published public var performanceMode: PerformanceMode = .balanced
-    
- /// 是否在仪表盘顶部显示实时FPS（默认关闭）
+
+/// 是否在仪表盘顶部显示实时FPS（默认关闭）
     @Published public var showRealtimeFPS: Bool = false
+ /// 是否在仪表盘顶部显示公网 IP、城市与代理状态
+    @Published public var showTopBarIPLocation: Bool = true
+ /// 是否在仪表盘顶部显示实时网络吞吐
+    @Published public var showTopBarNetworkSpeed: Bool = true
+ /// 是否在仪表盘顶部显示公网延迟
+    @Published public var showTopBarNetworkLatency: Bool = true
  /// 兼容/更多设备发现开关（默认关闭，正常用户场景仅SkyBridge）
     @Published public var enableCompatibilityMode: Bool = false
  /// 是否启用 companion‑link 服务类型（默认关闭）
@@ -195,18 +309,38 @@ public class SettingsManager: ObservableObject, Sendable {
     @Published public var onlyNotifyVerifiedDevices: Bool = false
  /// 隐私诊断开关：是否采集TLS握手诊断数据（ALPN/SNI等），默认关闭以保护隐私
     @Published public var enableHandshakeDiagnostics: Bool = false
- /// Secure Enclave 支持（仅在 macOS 26+ 且 CryptoKit PQC 可用时生效）
-    @Published public var useSecureEnclaveMLDSA: Bool = true
- /// Secure Enclave 支持（仅在 macOS 26+ 且 CryptoKit PQC 可用时生效）
-    @Published public var useSecureEnclaveMLKEM: Bool = true
- /// 量子安全：启用后量子密码（应用层）
- /// 🔧 优化：默认启用PQC，提供量子安全保护
+ /// 量子安全：启用后量子密码（应用层）尝试；真实 PQC 状态仍以协商套件和 runtime proof 为准
+ /// 🔧 优化：默认开启 PQC-capable 路径，但不得把开关本身当成量子安全证明
     @Published public var enablePQC: Bool = true
- /// 量子安全：优先签名算法（ML-DSA/SLH-DSA/Falcon）
-    @Published public var pqcSignatureAlgorithm: String = "ML-DSA"
+ /// 量子安全：请求的生产协议身份签名算法。运行时只使用已完成本机
+ /// provisioning 且满足对端 pin 的 `activeProtocolSigningAlgorithm`。
+    @Published public var pqcSignatureAlgorithm: String = "ML-DSA-65" {
+        didSet {
+            let normalized = Self.normalizedPQCSignatureAlgorithm(pqcSignatureAlgorithm)
+            guard normalized != pqcSignatureAlgorithm else { return }
+            logger.notice(
+                "Rejected unsupported production PQC signature setting"
+            )
+            pqcSignatureAlgorithm = normalized
+        }
+    }
+    @Published public private(set) var activeProtocolSigningAlgorithm: ProtocolSigningAlgorithm = .mlDSA65
+    @Published public private(set) var activeProtocolSigningKeyProtection: ProtocolSigningKeyProtection = .softwareKeychain
+    @Published public private(set) var protocolIdentityConfigurationState: ProtocolIdentityConfigurationState = .provisioning
+    @Published public private(set) var protocolIdentityConfigurationError: String?
  /// 量子安全：是否启用TLS混合协商（视系统支持而定）
     @Published public var enablePQCHybridTLS: Bool = false
-    
+ /// 量子安全：是否优先协商 X-Wing 混合套件（仅调整套件优先级）
+    @Published public private(set) var applyingHandshakeProfile = false
+    @Published public var preferXWingHybrid: Bool = false
+ /// 量子安全（beta）：是否优先协商 Q-Periapt ABI2 PolicyBound；没有已认证策略 session 时保持禁用。
+    @Published public var preferQPeriaptBeta: Bool = false
+    @Published public private(set) var strictlyMatchSelectedPQCMode = true
+    @Published public private(set) var pqcModePolicyError: String?
+    @Published public private(set) var qPeriaptRuntimeSupported: Bool = false
+    @Published public private(set) var isPreparingQPeriaptRuntime: Bool = false
+    @Published public private(set) var qPeriaptRuntimePreparationError: String?
+
  // MARK: - 系统监控设置
     @Published public var systemMonitorRefreshInterval: Double = 1.0
     @Published public var enableSystemNotifications: Bool = true
@@ -217,51 +351,176 @@ public class SettingsManager: ObservableObject, Sendable {
     @Published public var showTrendIndicators: Bool = true
     @Published public var enableSoundAlerts: Bool = false
     @Published public var maxHistoryPoints: Double = 300.0
-    
+    @Published public var systemMonitorRetentionDays: Int = 7
+
+    public enum SystemMonitorChartType: String, CaseIterable, Codable {
+        case line
+        case bar
+        case area
+    }
+
+    public enum SystemMonitorSamplingPrecision: String, CaseIterable, Codable {
+        case low
+        case normal
+        case high
+    }
+
+    @Published public var systemMonitorChartType: SystemMonitorChartType = .line
+    @Published public var systemMonitorSamplingPrecision: SystemMonitorSamplingPrecision = .normal
+    @Published public var enableRemoteMonitoring: Bool = false
+
+    // 系统监控：性能警报与显示控制
+    @Published public var enablePerformanceAlerts: Bool = true
+    @Published public var temperatureThreshold: Double = 80.0
+    @Published public var enableTemperatureMonitoring: Bool = true
+    @Published public var enableFanSpeedMonitoring: Bool = true
+    @Published public var fanSpeedThreshold: Double = 4000.0
+    @Published public var enableThermalThrottlingAlert: Bool = true
+    @Published public var showMonitorCPU: Bool = true
+    @Published public var showMonitorMemory: Bool = true
+    @Published public var showMonitorTemperature: Bool = true
+    @Published public var showMonitorFanSpeed: Bool = true
+    @Published public var showMonitorDisk: Bool = true
+    @Published public var showMonitorNetwork: Bool = true
+
  // MARK: - 文件传输设置
+    public static let defaultMaxConcurrentFileTransfers = 3
+    public static let maximumConcurrentFileTransfers = ClassicTransferInboundPolicy.maximumConcurrentConnections
+    public static let defaultTransferBufferSize = 128 * 1_024
+    public static let maximumTransferSpeedLimitMBps = 500.0
+
     @Published public var defaultTransferPath: String = "~/Downloads"
-    @Published public var transferBufferSize: Int = 131072  // 128KB
+    @Published public var maxConcurrentFileTransfers: Int = SettingsManager.defaultMaxConcurrentFileTransfers
+    @Published public var transferBufferSize: Int = SettingsManager.defaultTransferBufferSize
     @Published public var autoRetryFailedTransfers: Bool = true
     @Published public var keepTransferHistory: Bool = true
     @Published public var keepSystemAwakeDuringTransfer: Bool = false
     @Published public var scanTransferFilesForVirus: Bool = false
-    @Published public var encryptionAlgorithm: String = "AES-256"
+ /// 文件传输速率限制（MB/s），0 表示不限速
+    @Published public var transferSpeedLimitMBps: Double = 0
+    @Published public var encryptionAlgorithm: FileTransferEncryptionAlgorithm = .aes256GCM
  /// 文件扫描级别：Quick/Standard/Deep
-    @Published public var scanLevel: FileScanService.ScanLevel = .standard
+    @Published public var scanLevel: FileScanLevel = .standard
  /// MetalFX 降级缩放：是否优先选择最近邻（更快但质量低），默认关闭（使用双线性）
     @Published public var preferNearestNeighborScaling: Bool = false
     @Published public var enableZeroCopyBGRA: Bool = false
-    
+
  // MARK: - 私有属性
-    private let userDefaults = UserDefaults.standard
+    private let userDefaults: UserDefaults
+    private let pqcModePolicyStore: PQCModePolicyStore
+    private var applyingPQCModeSnapshot = false
+    private let existingOnlyIdentityRuntimeOverride: Bool?
+    private let qPeriaptRuntimeSupportPreparer:
+        @MainActor @Sendable () async throws -> QPeriaptProductionPreparationResult
+    private let qPeriaptEnvironmentPreferenceApplier:
+        (@MainActor @Sendable (Bool) -> Void)?
+    private let runtimeSideEffectsEnabled: Bool
     private var settingsCancellables = Set<AnyCancellable>()
-    
- // MARK: - 初始化
-    private init() {
-        loadSettings()
-        setupObservers()
+    private var fileTransferSettingsApplyTask: Task<Void, Never>?
+    private var protocolIdentityConfigurationRequestGate = ProtocolIdentityConfigurationRequestGate()
+    private var qPeriaptRuntimePreparationTask: Task<Void, Never>?
+    private var protocolIdentityRestorationTask: Task<Void, Never>?
+    private var hasCommittedProtocolIdentityConfiguration = false
+
+    private var requiresExistingOnlyIdentityRuntime: Bool {
+        existingOnlyIdentityRuntimeOverride
+            ?? DeviceIdentityKeyManager.requiresExistingOnlyIdentityRuntime
     }
-    
+
+ // MARK: - 初始化
+    private convenience init() {
+        self.init(
+            userDefaults: .standard,
+            existingOnlyIdentityRuntimeOverride: nil,
+            qPeriaptRuntimeSupportPreparer: {
+                try await QPeriaptPlatformPolicy.prepareLocalRuntimeSupport()
+            },
+            qPeriaptEnvironmentPreferenceApplier: nil,
+            runtimeSideEffectsEnabled: true,
+            startsProtocolIdentityRestoration: true
+        )
+    }
+
+    private init(
+        userDefaults: UserDefaults,
+        existingOnlyIdentityRuntimeOverride: Bool?,
+        qPeriaptRuntimeSupportPreparer:
+            @escaping @MainActor @Sendable () async throws -> QPeriaptProductionPreparationResult,
+        qPeriaptEnvironmentPreferenceApplier:
+            (@MainActor @Sendable (Bool) -> Void)?,
+        runtimeSideEffectsEnabled: Bool,
+        startsProtocolIdentityRestoration: Bool
+    ) {
+        self.userDefaults = userDefaults
+        self.pqcModePolicyStore = userDefaults === UserDefaults.standard ? .standard : PQCModePolicyStore(defaults: userDefaults, environment: [:])
+        self.existingOnlyIdentityRuntimeOverride = existingOnlyIdentityRuntimeOverride
+        self.qPeriaptRuntimeSupportPreparer = qPeriaptRuntimeSupportPreparer
+        self.qPeriaptEnvironmentPreferenceApplier =
+            qPeriaptEnvironmentPreferenceApplier
+        self.runtimeSideEffectsEnabled = runtimeSideEffectsEnabled
+        loadSettings()
+        if runtimeSideEffectsEnabled {
+            setupObservers()
+            applyRuntimeSettingsSnapshot()
+        } else {
+            setupPQCSignatureAlgorithmObserver()
+        }
+        scheduleQPeriaptRuntimePreparation()
+        if startsProtocolIdentityRestoration {
+            protocolIdentityRestorationTask = Task { @MainActor [weak self] in
+                await self?.restoreProtocolIdentityConfiguration()
+            }
+        }
+    }
+
+    #if DEBUG || SKYBRIDGE_TESTING
+    convenience init(
+        testingUserDefaults: UserDefaults,
+        existingOnlyIdentityRuntime: Bool,
+        startsProtocolIdentityRestoration: Bool = true,
+        qPeriaptRuntimeSupportPreparer:
+            @escaping @MainActor @Sendable () async throws -> QPeriaptProductionPreparationResult,
+        qPeriaptEnvironmentPreferenceApplier:
+            @escaping @MainActor @Sendable (Bool) -> Void
+    ) {
+        self.init(
+            userDefaults: testingUserDefaults,
+            existingOnlyIdentityRuntimeOverride: existingOnlyIdentityRuntime,
+            qPeriaptRuntimeSupportPreparer: qPeriaptRuntimeSupportPreparer,
+            qPeriaptEnvironmentPreferenceApplier:
+                qPeriaptEnvironmentPreferenceApplier,
+            runtimeSideEffectsEnabled: false,
+            startsProtocolIdentityRestoration: startsProtocolIdentityRestoration
+        )
+    }
+
+    func waitForStartupTasksForTesting() async {
+        await qPeriaptRuntimePreparationTask?.value
+        await protocolIdentityRestorationTask?.value
+    }
+    #endif
+
  // MARK: - 生命周期管理方法
-    
+
  /// 启动设置管理器
     public func start() async throws {
+        _ = try await committedProtocolIdentityConfiguration()
         logger.info("⚙️ 设置管理器已启动")
     }
-    
+
  /// 停止设置管理器
     public func stop() async {
         logger.info("⚙️ 设置管理器已停止")
     }
-    
+
  /// 清理资源
     public func cleanup() {
         settingsCancellables.removeAll()
         logger.info("⚙️ 设置管理器资源已清理")
     }
-    
+
  // MARK: - 公共方法
-    
+
  /// 重置所有设置到默认值
     @MainActor
     public func resetToDefaults() async {
@@ -274,7 +533,7 @@ public class SettingsManager: ObservableObject, Sendable {
         showConnectionStats = true
         compactMode = false
         themeColor = .blue
-        
+
  // 网络设置
         autoConnectKnownNetworks = true
         showHiddenNetworks = false
@@ -288,8 +547,11 @@ public class SettingsManager: ObservableObject, Sendable {
         retryCount = 3
         enableConnectionEncryption = true
         verifyCertificates = true
+        discoveryPassiveMode = true
+        requireAuthorizationForConnection = true
+        enableWiFiAwareDiscovery = true
         customServiceTypes = []
-        
+
  // 设备设置
         autoConnectPairedDevices = true
         showDeviceRSSI = true
@@ -302,7 +564,10 @@ public class SettingsManager: ObservableObject, Sendable {
         showDeviceIcons = true
         minimumSignalStrength = -80.0
         signalStrengthAlpha = 0.6
-        
+        sortWeightVerified = 2000
+        sortWeightConnected = 1000
+        sortWeightSignalMultiplier = 100
+
  // 高级设置
         enableVerboseLogging = false
         showDebugInfo = false
@@ -315,15 +580,53 @@ public class SettingsManager: ObservableObject, Sendable {
         enableIPv6Support = false
         useNewDiscoveryAlgorithm = false
         enableP2PDirectConnection = false
+        enableRealTimeWeather = false
         performanceMode = .balanced
+        showRealtimeFPS = false
+        showTopBarIPLocation = true
+        showTopBarNetworkSpeed = true
+        showTopBarNetworkLatency = true
+        enableCompatibilityMode = false
+        enableCompanionLink = false
         enableHandshakeDiagnostics = false
-        useSecureEnclaveMLDSA = true
-        useSecureEnclaveMLKEM = true
-        enablePQC = false
-        pqcSignatureAlgorithm = "ML-DSA"
+        // 默认启用应用层 PQC（与属性默认值/注释保持一致）
+        enablePQC = true
+        pqcSignatureAlgorithm = activeProtocolSigningAlgorithm.rawValue
         enablePQCHybridTLS = false
-        
+        preferXWingHybrid = false
+        strictModeForSensitiveGroups = false
+        aqiThresholdCautionUrban = 100
+        aqiThresholdSensitiveUrban = 150
+        aqiThresholdUnhealthyUrban = 200
+        aqiThresholdVeryUnhealthyUrban = 300
+        aqiThresholdCautionSuburban = 120
+        aqiThresholdSensitiveSuburban = 170
+        aqiThresholdUnhealthySuburban = 220
+        aqiThresholdVeryUnhealthySuburban = 300
+        uvThresholdModerate = 6.0
+        uvThresholdStrong = 8.0
+        onlyNotifyVerifiedDevices = false
+
  // 系统监控设置
+        resetSystemMonitorSettingsToDefaults()
+
+ // 文件传输设置
+        defaultTransferPath = "~/Downloads"
+        maxConcurrentFileTransfers = Self.defaultMaxConcurrentFileTransfers
+        transferBufferSize = Self.defaultTransferBufferSize
+        autoRetryFailedTransfers = true
+        keepTransferHistory = true
+        keepSystemAwakeDuringTransfer = false
+        scanTransferFilesForVirus = false
+        transferSpeedLimitMBps = 0
+        encryptionAlgorithm = .aes256GCM
+        scanLevel = .standard
+
+        applyRuntimeSettingsSnapshot()
+        SkyBridgeLogger.ui.debugOnly("🔄 所有设置已重置为默认值")
+    }
+
+    public func resetSystemMonitorSettingsToDefaults() {
         systemMonitorRefreshInterval = 1.0
         enableSystemNotifications = true
         cpuThreshold = 80.0
@@ -333,20 +636,558 @@ public class SettingsManager: ObservableObject, Sendable {
         showTrendIndicators = true
         enableSoundAlerts = false
         maxHistoryPoints = 300.0
-        
- // 文件传输设置
-        defaultTransferPath = "~/Downloads"
-        transferBufferSize = 131072
-        autoRetryFailedTransfers = true
-        keepTransferHistory = true
-        keepSystemAwakeDuringTransfer = false
-        scanTransferFilesForVirus = false
-        encryptionAlgorithm = "AES-256"
-        scanLevel = .standard
-        
-        SkyBridgeLogger.ui.debugOnly("🔄 所有设置已重置为默认值")
+        systemMonitorRetentionDays = 7
+        systemMonitorChartType = .line
+        systemMonitorSamplingPrecision = .normal
+        enableRemoteMonitoring = false
+        enablePerformanceAlerts = true
+        temperatureThreshold = 80.0
+        enableTemperatureMonitoring = true
+        enableFanSpeedMonitoring = true
+        fanSpeedThreshold = 4000.0
+        enableThermalThrottlingAlert = true
+        showMonitorCPU = true
+        showMonitorMemory = true
+        showMonitorTemperature = true
+        showMonitorFanSpeed = true
+        showMonitorDisk = true
+        showMonitorNetwork = true
     }
-    
+
+    public func applyRuntimeSettingsSnapshot() {
+        enforceStrictCertificateValidationIfNeeded(context: "runtime snapshot")
+
+        NotificationCenter.default.post(
+            name: NSNotification.Name("LayoutModeChanged"),
+            object: nil,
+            userInfo: ["isCompact": compactMode]
+        )
+        NotificationCenter.default.post(name: NSNotification.Name("DeviceDisplayModeChanged"), object: nil)
+        NotificationCenter.default.post(name: NSNotification.Name("ConnectionStatsDisplayChanged"), object: nil)
+        NotificationCenter.default.post(
+            name: NSNotification.Name("ThemeDidChange"),
+            object: nil,
+            userInfo: ["isDarkMode": useDarkMode, "themeColor": themeColor]
+        )
+        NotificationCenter.default.post(
+            name: NSNotification.Name("ThemeColorChanged"),
+            object: nil,
+            userInfo: ["color": themeColor]
+        )
+
+        NetworkActivityLogStore.shared.setEnabled(saveNetworkLogs)
+        applyLoggingRuntimeSettings()
+
+        Task { @MainActor in
+            FileTransferSettingsBridge.shared.apply()
+#if os(macOS)
+            // 发现服务与网络偏好目前仍是 macOS 侧实现（各平台一套编排，属于
+            // 「协议共享 / 编排分平台」切分线的编排侧）。
+            NetworkPreferenceService.shared.applyRuntimeSettings(
+                prefer5GHz: self.prefer5GHz,
+                autoConnectKnownNetworks: self.autoConnectKnownNetworks,
+                scanIntervalSeconds: self.wifiScanTimeout,
+                startMonitoringIfNeeded: false
+            )
+#endif
+            let sharedScanInterval = Double(self.scanInterval)
+            // 仅首启从「通用扫描间隔」播种各协议间隔；此后保留用户在「设备管理」里的逐协议自定义值。
+            // 此前每次启动都无条件覆盖，导致用户的逐协议设置被静默丢失。
+            if self.userDefaults.object(forKey: "Settings.DidSeedDeviceManagementScanIntervals") == nil {
+                DeviceManagementSettingsManager.shared.wifiScanInterval = sharedScanInterval
+                DeviceManagementSettingsManager.shared.bluetoothScanInterval = sharedScanInterval
+                DeviceManagementSettingsManager.shared.airplayScanInterval = sharedScanInterval
+                self.userDefaults.set(true, forKey: "Settings.DidSeedDeviceManagementScanIntervals")
+            }
+            self.postWiFiSettingsChanged(["scanInterval": sharedScanInterval])
+            self.postBluetoothSettingsChanged(["scanInterval": sharedScanInterval])
+            self.postAirPlaySettingsChanged([
+                "scanInterval": sharedScanInterval,
+                "autoDiscoverAppleTV": self.autoDiscoverAppleTV,
+                "showHomePodDevices": self.showHomePodDevices,
+                "showThirdPartyAirPlayDevices": self.showThirdPartyAirPlayDevices
+            ])
+#if os(macOS)
+            // 发现服务与网络偏好目前仍是 macOS 侧实现（各平台一套编排，属于
+            // 「协议共享 / 编排分平台」切分线的编排侧）。
+            DeviceDiscoveryService.shared.applyRuntimeDiscoverySettings(restartIfNeeded: false)
+            if #available(macOS 14.0, *) {
+                UnifiedOnlineDeviceManager.shared.applyRuntimeDiscoverySettings(restartIfNeeded: false)
+            }
+#endif
+            self.applyRemotePerformanceSettings(self.enableHardwareAcceleration)
+        }
+    }
+
+    private func scheduleFileTransferSettingsApply() {
+        fileTransferSettingsApplyTask?.cancel()
+        fileTransferSettingsApplyTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            FileTransferSettingsBridge.shared.apply()
+            self?.fileTransferSettingsApplyTask = nil
+        }
+    }
+
+    private func scheduleDiscoveryRuntimeApply(restartIfNeeded: Bool) {
+        Task { @MainActor in
+#if os(macOS)
+            // 发现服务与网络偏好目前仍是 macOS 侧实现（各平台一套编排，属于
+            // 「协议共享 / 编排分平台」切分线的编排侧）。
+            DeviceDiscoveryService.shared.applyRuntimeDiscoverySettings(restartIfNeeded: restartIfNeeded)
+            if #available(macOS 14.0, *) {
+                UnifiedOnlineDeviceManager.shared.applyRuntimeDiscoverySettings(restartIfNeeded: restartIfNeeded)
+            }
+#endif
+        }
+    }
+
+    private func scheduleOnlineDevicePresentationRefresh() {
+        Task { @MainActor in
+#if os(macOS)
+            if #available(macOS 14.0, *) {
+                UnifiedOnlineDeviceManager.shared.refreshDevices()
+            }
+#endif
+        }
+    }
+
+    private func postWiFiSettingsChanged(_ userInfo: [String: Any]) {
+        NotificationCenter.default.post(
+            name: NSNotification.Name("WiFiSettingsChanged"),
+            object: self,
+            userInfo: userInfo
+        )
+    }
+
+    private func postBluetoothSettingsChanged(_ userInfo: [String: Any]) {
+        NotificationCenter.default.post(
+            name: NSNotification.Name("BluetoothSettingsChanged"),
+            object: self,
+            userInfo: userInfo
+        )
+    }
+
+    private func postAirPlaySettingsChanged(_ userInfo: [String: Any]) {
+        NotificationCenter.default.post(
+            name: NSNotification.Name("AirPlaySettingsChanged"),
+            object: self,
+            userInfo: userInfo
+        )
+    }
+
+    private func clearCryptoProviderCacheForSettingsChange() {
+        Task {
+            await CryptoProviderSelector.shared.clearCache()
+        }
+    }
+
+    private func clearCryptoProviderCacheForSettingsChangeIfEnabled() {
+        guard runtimeSideEffectsEnabled else { return }
+        clearCryptoProviderCacheForSettingsChange()
+    }
+
+    private func applyLoggingRuntimeSettings() {
+        SkyBridgeLogger.minimumLogLevel = enableVerboseLogging
+            ? .debug
+            : Self.logLevel(from: logLevel)
+    }
+
+    private static func logLevel(from rawValue: String) -> LogLevel {
+        switch rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "trace":
+            return .trace
+        case "debug":
+            return .debug
+        case "warning", "warn":
+            return .warning
+        case "error":
+            return .error
+        case "critical", "fault":
+            return .critical
+        default:
+            return .info
+        }
+    }
+
+    public static func normalizedPQCSignatureAlgorithm(_ rawValue: String) -> String {
+        switch rawValue.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() {
+        case "ML-DSA", "ML-DSA-65", "MLDSA", "MLDSA-65":
+            return "ML-DSA-65"
+        case "ML-DSA-87", "MLDSA-87":
+            return "ML-DSA-87"
+        default:
+            return "ML-DSA-65"
+        }
+    }
+
+    /// Provisions and self-tests a candidate without changing the committed
+    /// local authority. A remote rotation coordinator must call this first,
+    /// then commit only after the server transaction succeeds.
+    func prepareProtocolIdentityConfiguration(
+        algorithm: ProtocolSigningAlgorithm,
+        protection: ProtocolSigningKeyProtection
+    ) async throws -> PreparedProtocolIdentityConfiguration {
+        await protocolIdentityRestorationTask?.value
+        guard !requiresExistingOnlyIdentityRuntime else {
+            throw SettingsError.validationFailed(
+                "Protocol identity provisioning is disabled in the existing-only runtime"
+            )
+        }
+        let requestGeneration = protocolIdentityConfigurationRequestGate.begin()
+        guard algorithm != .ed25519 else {
+            throw SettingsError.validationFailed(
+                "Ed25519 is not a PQC identity selection"
+            )
+        }
+
+        protocolIdentityConfigurationState = .provisioning
+        protocolIdentityConfigurationError = nil
+        do {
+            let identity = try await DeviceIdentityKeyManager.shared
+                .getProtocolSigningIdentity(for: algorithm, protection: protection)
+            try await validateProtocolSigningIdentity(
+                identity,
+                algorithm: algorithm,
+                protection: protection
+            )
+            guard protocolIdentityConfigurationRequestGate.accepts(requestGeneration) else {
+                throw SettingsError.validationFailed(
+                    "Protocol identity configuration was superseded by a newer request"
+                )
+            }
+            return PreparedProtocolIdentityConfiguration(
+                configuration: ProtocolIdentityConfigurationRecord(
+                    algorithm: algorithm,
+                    protection: protection
+                ),
+                publicKey: identity.publicKey,
+                keyHandle: identity.keyHandle,
+                requestGeneration: requestGeneration
+            )
+        } catch {
+            if protocolIdentityConfigurationRequestGate.accepts(requestGeneration) {
+                protocolIdentityConfigurationState = .failed
+                protocolIdentityConfigurationError = error.localizedDescription
+            }
+            throw error
+        }
+    }
+
+    /// Publishes one already self-tested candidate. This function contains no
+    /// suspension point so persistence and runtime activation remain one local
+    /// transaction after the remote CAS has committed.
+    func commitPreparedProtocolIdentityConfiguration(
+        _ prepared: PreparedProtocolIdentityConfiguration
+    ) throws {
+        guard !requiresExistingOnlyIdentityRuntime else {
+            throw SettingsError.validationFailed(
+                "Protocol identity configuration persistence is disabled in the existing-only runtime"
+            )
+        }
+        guard protocolIdentityConfigurationRequestGate.accepts(
+            prepared.requestGeneration
+        ) else {
+            throw SettingsError.validationFailed(
+                "Protocol identity configuration was superseded by a newer request"
+            )
+        }
+        try persistProtocolIdentityConfiguration(prepared.configuration)
+        activateProtocolIdentityConfiguration(
+            algorithm: prepared.configuration.algorithm,
+            protection: prepared.configuration.protection
+        )
+        clearCryptoProviderCacheForSettingsChange()
+    }
+
+    func markProtocolIdentityConfigurationFailed(
+        _ error: Error,
+        for prepared: PreparedProtocolIdentityConfiguration
+    ) {
+        guard protocolIdentityConfigurationRequestGate.accepts(
+            prepared.requestGeneration
+        ) else { return }
+        protocolIdentityConfigurationState = .failed
+        protocolIdentityConfigurationError = error.localizedDescription
+    }
+
+    func abandonPreparedProtocolIdentityConfiguration(
+        _ prepared: PreparedProtocolIdentityConfiguration
+    ) {
+        guard protocolIdentityConfigurationRequestGate.accepts(
+            prepared.requestGeneration
+        ) else { return }
+        _ = protocolIdentityConfigurationRequestGate.begin()
+        protocolIdentityConfigurationState = (
+            activeProtocolSigningAlgorithm == .mlDSA65
+                && activeProtocolSigningKeyProtection == .softwareKeychain
+        ) ? .active : .waitingForPeerRepin
+        protocolIdentityConfigurationError = nil
+    }
+
+    /// Returns the last fully provisioned and durably persisted protocol
+    /// authority. Security-sensitive consumers must use this barrier instead of
+    /// reading the published fields during asynchronous startup restoration.
+    public func committedProtocolIdentityConfiguration() async throws
+        -> ProtocolIdentityConfigurationRecord {
+        await protocolIdentityRestorationTask?.value
+        guard hasCommittedProtocolIdentityConfiguration else {
+            throw SettingsError.validationFailed(
+                protocolIdentityConfigurationError
+                    ?? "Protocol identity configuration has not been restored"
+            )
+        }
+        return ProtocolIdentityConfigurationRecord(
+            algorithm: activeProtocolSigningAlgorithm,
+            protection: activeProtocolSigningKeyProtection
+        )
+    }
+
+    private func restoreProtocolIdentityConfiguration() async {
+        let requestGeneration = protocolIdentityConfigurationRequestGate.begin()
+        let existingOnly = requiresExistingOnlyIdentityRuntime
+        let storedRecord: ProtocolIdentityConfigurationRecord
+        let shouldProvisionDefault: Bool
+
+        if let encoded = userDefaults.data(forKey: SettingsStorageKeys.protocolIdentityConfigurationV2) {
+            do {
+                let decoded = try JSONDecoder().decode(
+                    ProtocolIdentityConfigurationRecord.self,
+                    from: encoded
+                )
+                guard decoded.isValidAuthoritySelection else {
+                    throw SettingsError.validationFailed("Stored protocol identity configuration is invalid")
+                }
+                storedRecord = decoded
+                shouldProvisionDefault = false
+            } catch {
+                guard protocolIdentityConfigurationRequestGate.accepts(requestGeneration) else { return }
+                protocolIdentityConfigurationState = .requiresExplicitConfirmation
+                protocolIdentityConfigurationError = "Stored protocol identity configuration is malformed or unsupported"
+                return
+            }
+        } else {
+            guard !existingOnly else {
+                guard protocolIdentityConfigurationRequestGate.accepts(
+                    requestGeneration
+                ) else { return }
+                protocolIdentityConfigurationState = .requiresExplicitConfirmation
+                protocolIdentityConfigurationError =
+                    "Existing-only runtime requires a committed v2 protocol identity configuration"
+                return
+            }
+            let legacyAlgorithmRaw = userDefaults.string(
+                forKey: SettingsStorageKeys.protocolSigningAlgorithmV1
+            )
+            let legacyProtectionRaw = userDefaults.string(
+                forKey: SettingsStorageKeys.protocolSigningKeyProtectionV1
+            )
+            switch (legacyAlgorithmRaw, legacyProtectionRaw) {
+            case (nil, nil):
+                storedRecord = ProtocolIdentityConfigurationRecord(
+                    algorithm: .mlDSA65,
+                    protection: .softwareKeychain
+                )
+                shouldProvisionDefault = true
+            case (.some(let algorithmRaw), .some(let protectionRaw)):
+                guard let algorithm = ProtocolSigningAlgorithm(rawValue: algorithmRaw),
+                      algorithm != .ed25519,
+                      let protection = ProtocolSigningKeyProtection(rawValue: protectionRaw) else {
+                    guard protocolIdentityConfigurationRequestGate.accepts(requestGeneration) else { return }
+                    protocolIdentityConfigurationState = .requiresExplicitConfirmation
+                    protocolIdentityConfigurationError = "Legacy protocol identity configuration is invalid"
+                    return
+                }
+                storedRecord = ProtocolIdentityConfigurationRecord(
+                    algorithm: algorithm,
+                    protection: protection
+                )
+                shouldProvisionDefault = false
+            default:
+                guard protocolIdentityConfigurationRequestGate.accepts(requestGeneration) else { return }
+                protocolIdentityConfigurationState = .requiresExplicitConfirmation
+                protocolIdentityConfigurationError = "Legacy protocol identity configuration is incomplete"
+                return
+            }
+        }
+
+        do {
+            let restoredIdentity: (publicKey: Data, keyHandle: SigningKeyHandle)
+            let restorationAction: ProtocolIdentityAuthorityRestorationAction
+            if existingOnly {
+                restorationAction = .requireExisting
+            } else {
+                restorationAction = ProtocolIdentityAuthorityRestorationPolicy.action(
+                    shouldProvisionDefault: shouldProvisionDefault,
+                    usesEphemeralIdentityStore: DeviceIdentityKeyManager
+                        .usesEphemeralIdentityStoreForCurrentProcess
+                )
+            }
+            if restorationAction == .provision {
+                restoredIdentity = try await DeviceIdentityKeyManager.shared.getProtocolSigningIdentity(
+                    for: storedRecord.algorithm,
+                    protection: storedRecord.protection
+                )
+            } else {
+                guard let existingIdentity = try await DeviceIdentityKeyManager.shared
+                    .existingProtocolSigningIdentity(
+                        for: storedRecord.algorithm,
+                        protection: storedRecord.protection
+                    ) else {
+                    guard protocolIdentityConfigurationRequestGate.accepts(requestGeneration) else { return }
+                    protocolIdentityConfigurationState = .requiresExplicitConfirmation
+                    protocolIdentityConfigurationError = "Stored intent has no matching protocol identity authority"
+                    return
+                }
+                restoredIdentity = existingIdentity
+            }
+            try await validateProtocolSigningIdentity(
+                restoredIdentity,
+                algorithm: storedRecord.algorithm,
+                protection: storedRecord.protection
+            )
+            guard protocolIdentityConfigurationRequestGate.accepts(requestGeneration) else { return }
+            if !existingOnly {
+                try persistProtocolIdentityConfiguration(storedRecord)
+            }
+            activateProtocolIdentityConfiguration(
+                algorithm: storedRecord.algorithm,
+                protection: storedRecord.protection
+            )
+        } catch {
+            guard protocolIdentityConfigurationRequestGate.accepts(requestGeneration) else { return }
+            protocolIdentityConfigurationState = .failed
+            protocolIdentityConfigurationError = error.localizedDescription
+        }
+    }
+
+    private func validateProtocolSigningIdentity(
+        _ identity: (publicKey: Data, keyHandle: SigningKeyHandle),
+        algorithm: ProtocolSigningAlgorithm,
+        protection: ProtocolSigningKeyProtection
+    ) async throws {
+        let probe = Data(
+            [
+                "SkyBridge-Protocol-Identity-Self-Test-v1",
+                algorithm.rawValue,
+                protection.rawValue,
+            ].joined(separator: "\n").utf8
+        )
+        let signatureProvider = ProtocolSignatureProviderSelector.select(for: algorithm)
+        let signature = try await signatureProvider.sign(probe, key: identity.keyHandle)
+        guard try await signatureProvider.verify(
+            probe,
+            signature: signature,
+            publicKey: identity.publicKey
+        ) else {
+            throw SettingsError.validationFailed(
+                "Protocol identity failed its signing self-test"
+            )
+        }
+    }
+
+    private func persistProtocolIdentityConfiguration(
+        _ record: ProtocolIdentityConfigurationRecord
+    ) throws {
+        guard !requiresExistingOnlyIdentityRuntime else {
+            throw SettingsError.validationFailed(
+                "Protocol identity configuration persistence is disabled in the existing-only runtime"
+            )
+        }
+        guard record.isValidAuthoritySelection else {
+            throw SettingsError.validationFailed("Protocol identity configuration is invalid")
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let encoded = try encoder.encode(record)
+        userDefaults.set(encoded, forKey: SettingsStorageKeys.protocolIdentityConfigurationV2)
+        guard userDefaults.data(forKey: SettingsStorageKeys.protocolIdentityConfigurationV2) == encoded else {
+            throw SettingsError.validationFailed("Protocol identity configuration persistence verification failed")
+        }
+        userDefaults.removeObject(forKey: SettingsStorageKeys.protocolSigningAlgorithmV1)
+        userDefaults.removeObject(forKey: SettingsStorageKeys.protocolSigningKeyProtectionV1)
+    }
+
+    private func activateProtocolIdentityConfiguration(
+        algorithm: ProtocolSigningAlgorithm,
+        protection: ProtocolSigningKeyProtection
+    ) {
+        pqcSignatureAlgorithm = algorithm.rawValue
+        activeProtocolSigningAlgorithm = algorithm
+        activeProtocolSigningKeyProtection = protection
+        hasCommittedProtocolIdentityConfiguration = true
+        protocolIdentityConfigurationState = (
+            algorithm == .mlDSA65 && protection == .softwareKeychain
+        ) ? .active : .waitingForPeerRepin
+        protocolIdentityConfigurationError = nil
+    }
+
+    public func retryQPeriaptRuntimePreparation() {
+        scheduleQPeriaptRuntimePreparation()
+    }
+
+    private func scheduleQPeriaptRuntimePreparation() {
+        guard !isPreparingQPeriaptRuntime else { return }
+        isPreparingQPeriaptRuntime = true
+        qPeriaptRuntimePreparationTask = Task { @MainActor [weak self] in
+            await self?.prepareQPeriaptRuntimeSupport()
+        }
+    }
+
+    private func prepareQPeriaptRuntimeSupport() async {
+        defer { isPreparingQPeriaptRuntime = false }
+        qPeriaptRuntimePreparationError = nil
+        guard !requiresExistingOnlyIdentityRuntime else {
+            // The smoke host may inspect existing local identity authorities,
+            // but it is not an enrollment authority. Keep Q-Periapt dark
+            // without entering its durable Keychain CAS provisioning chain.
+            qPeriaptRuntimeSupported = false
+            qPeriaptEnvironmentPreferenceApplier?(false)
+            clearCryptoProviderCacheForSettingsChangeIfEnabled()
+            return
+        }
+
+        // Preserve both a saved Q selection and an externally supplied Q request
+        // while preparation is pending or fails. Only an explicit UI change to
+        // off clears this preference; runtime failure is not a settings change.
+        if preferQPeriaptBeta {
+            qPeriaptEnvironmentPreferenceApplier?(true)
+        }
+        do {
+            let result = try await qPeriaptRuntimeSupportPreparer()
+            switch result {
+            case .activated, .alreadyActive:
+                qPeriaptRuntimeSupported = true
+            case .unprovisioned:
+                qPeriaptRuntimeSupported = false
+                qPeriaptRuntimePreparationError = "未配置 Q-Periapt 生产信任根，Q 连接暂不可用。"
+            }
+        } catch {
+            qPeriaptRuntimeSupported = false
+            qPeriaptRuntimePreparationError = error.localizedDescription
+            logger.error("Q-Periapt 准备失败，保留已选套件: \(error.localizedDescription, privacy: .public)")
+        }
+        clearCryptoProviderCacheForSettingsChangeIfEnabled()
+    }
+
+    private func applyWeatherRuntimeSetting(_ enabled: Bool) {
+        Task { @MainActor in
+            if enabled {
+                await WeatherIntegrationManager.shared.start()
+            } else {
+                WeatherIntegrationManager.shared.stop()
+            }
+        }
+    }
+
+    private func applyRemotePerformanceSettings(_ hardwareAccelerationEnabled: Bool) {
+        Task { @MainActor in
+            let remoteSettings = RemoteDesktopSettingsManager.shared
+            remoteSettings.settings.displaySettings.enableHardwareAcceleration = hardwareAccelerationEnabled
+            remoteSettings.saveSettings()
+        }
+    }
+
  /// 导出设置到文件
     @MainActor
     public func exportSettings() async throws -> URL {
@@ -354,12 +1195,13 @@ public class SettingsManager: ObservableObject, Sendable {
  // 通用设置
             "autoScanOnStartup": autoScanOnStartup,
             "showSystemNotifications": showSystemNotifications,
+            "showFileTransferNotifications": showFileTransferNotifications,
             "useDarkMode": useDarkMode,
             "scanInterval": scanInterval,
             "showDeviceDetails": showDeviceDetails,
             "showConnectionStats": showConnectionStats,
             "compactMode": compactMode,
-            
+
  // 网络设置
             "autoConnectKnownNetworks": autoConnectKnownNetworks,
             "showHiddenNetworks": showHiddenNetworks,
@@ -371,10 +1213,13 @@ public class SettingsManager: ObservableObject, Sendable {
             "discoveryTimeout": discoveryTimeout,
             "connectionTimeout": connectionTimeout,
             "retryCount": retryCount,
+            "discoveryPassiveMode": discoveryPassiveMode,
+            "requireAuthorizationForConnection": requireAuthorizationForConnection,
+            "enableWiFiAwareDiscovery": enableWiFiAwareDiscovery,
             "enableConnectionEncryption": enableConnectionEncryption,
             "verifyCertificates": verifyCertificates,
             "customServiceTypes": customServiceTypes,
-            
+
  // 设备设置
             "autoConnectPairedDevices": autoConnectPairedDevices,
             "showDeviceRSSI": showDeviceRSSI,
@@ -386,7 +1231,11 @@ public class SettingsManager: ObservableObject, Sendable {
             "sortBySignalStrength": sortBySignalStrength,
             "showDeviceIcons": showDeviceIcons,
             "minimumSignalStrength": minimumSignalStrength,
-            
+            "signalStrengthAlpha": signalStrengthAlpha,
+            "sortWeightVerified": sortWeightVerified,
+            "sortWeightConnected": sortWeightConnected,
+            "sortWeightSignalMultiplier": sortWeightSignalMultiplier,
+
  // 高级设置
             "enableVerboseLogging": enableVerboseLogging,
             "showDebugInfo": showDebugInfo,
@@ -399,12 +1248,31 @@ public class SettingsManager: ObservableObject, Sendable {
             "enableIPv6Support": enableIPv6Support,
             "useNewDiscoveryAlgorithm": useNewDiscoveryAlgorithm,
             "enableP2PDirectConnection": enableP2PDirectConnection,
+            "enableRealTimeWeather": enableRealTimeWeather,
             "performanceMode": performanceMode.rawValue,
             "enableHandshakeDiagnostics": enableHandshakeDiagnostics,
             "showRealtimeFPS": showRealtimeFPS,
+            "showTopBarIPLocation": showTopBarIPLocation,
+            "showTopBarNetworkSpeed": showTopBarNetworkSpeed,
+            "showTopBarNetworkLatency": showTopBarNetworkLatency,
             "enableCompatibilityMode": enableCompatibilityMode,
             "enableCompanionLink": enableCompanionLink,
-            
+            "strictModeForSensitiveGroups": strictModeForSensitiveGroups,
+            "aqiThresholdCautionUrban": aqiThresholdCautionUrban,
+            "aqiThresholdSensitiveUrban": aqiThresholdSensitiveUrban,
+            "aqiThresholdUnhealthyUrban": aqiThresholdUnhealthyUrban,
+            "aqiThresholdVeryUnhealthyUrban": aqiThresholdVeryUnhealthyUrban,
+            "aqiThresholdCautionSuburban": aqiThresholdCautionSuburban,
+            "aqiThresholdSensitiveSuburban": aqiThresholdSensitiveSuburban,
+            "aqiThresholdUnhealthySuburban": aqiThresholdUnhealthySuburban,
+            "aqiThresholdVeryUnhealthySuburban": aqiThresholdVeryUnhealthySuburban,
+            "uvThresholdModerate": uvThresholdModerate,
+            "uvThresholdStrong": uvThresholdStrong,
+            "onlyNotifyVerifiedDevices": onlyNotifyVerifiedDevices,
+            "enablePQC": enablePQC,
+            "pqcSignatureAlgorithm": pqcSignatureAlgorithm,
+            "enablePQCHybridTLS": enablePQCHybridTLS,
+            "preferXWingHybrid": preferXWingHybrid,
  // 系统监控设置
             "systemMonitorRefreshInterval": systemMonitorRefreshInterval,
             "enableSystemNotifications": enableSystemNotifications,
@@ -415,37 +1283,55 @@ public class SettingsManager: ObservableObject, Sendable {
             "showTrendIndicators": showTrendIndicators,
             "enableSoundAlerts": enableSoundAlerts,
             "maxHistoryPoints": maxHistoryPoints,
-            
+            "systemMonitorRetentionDays": systemMonitorRetentionDays,
+            "systemMonitorChartType": systemMonitorChartType.rawValue,
+            "systemMonitorSamplingPrecision": systemMonitorSamplingPrecision.rawValue,
+            "enableRemoteMonitoring": enableRemoteMonitoring,
+            "enablePerformanceAlerts": enablePerformanceAlerts,
+            "temperatureThreshold": temperatureThreshold,
+            "enableTemperatureMonitoring": enableTemperatureMonitoring,
+            "enableFanSpeedMonitoring": enableFanSpeedMonitoring,
+            "fanSpeedThreshold": fanSpeedThreshold,
+            "enableThermalThrottlingAlert": enableThermalThrottlingAlert,
+            "showMonitorCPU": showMonitorCPU,
+            "showMonitorMemory": showMonitorMemory,
+            "showMonitorTemperature": showMonitorTemperature,
+            "showMonitorFanSpeed": showMonitorFanSpeed,
+            "showMonitorDisk": showMonitorDisk,
+            "showMonitorNetwork": showMonitorNetwork,
+
  // 文件传输设置
             "defaultTransferPath": defaultTransferPath,
+            "maxConcurrentFileTransfers": maxConcurrentFileTransfers,
             "transferBufferSize": transferBufferSize,
             "autoRetryFailedTransfers": autoRetryFailedTransfers,
             "keepTransferHistory": keepTransferHistory,
             "keepSystemAwakeDuringTransfer": keepSystemAwakeDuringTransfer,
             "scanTransferFilesForVirus": scanTransferFilesForVirus,
-            "encryptionAlgorithm": encryptionAlgorithm,
+            "transferSpeedLimitMBps": transferSpeedLimitMBps,
+            "encryptionAlgorithm": encryptionAlgorithm.rawValue,
             "scanLevel": scanLevel.rawValue,
-            
+
  // 元数据
             "exportDate": ISO8601DateFormatter().string(from: Date()),
             "appVersion": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "未知"
         ] as [String: Any]
-        
+
         guard let jsonData = try? JSONSerialization.data(withJSONObject: settings, options: .prettyPrinted) else {
             throw NSError(domain: "SettingsExportError", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法序列化设置数据"])
         }
-        
+
  // 创建临时文件
         let tempDirectory = FileManager.default.temporaryDirectory
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
         let fileName = "SkyBridge_Settings_\(dateFormatter.string(from: Date())).json"
         let fileURL = tempDirectory.appendingPathComponent(fileName)
-        
+
         try jsonData.write(to: fileURL)
-        
+
         SkyBridgeLogger.ui.debugOnly("📤 设置已导出到: \(fileURL.path)")
-        
+
  // 发送通知
         if showSystemNotifications {
             sendSystemNotification(
@@ -453,10 +1339,10 @@ public class SettingsManager: ObservableObject, Sendable {
                 body: "设置已成功导出到 \(fileName)"
             )
         }
-        
+
         return fileURL
     }
-    
+
  /// 从文件导入设置
     @MainActor
     public func importSettings(from url: URL) async throws {
@@ -464,7 +1350,7 @@ public class SettingsManager: ObservableObject, Sendable {
             throw SettingsError.fileAccessDenied
         }
         defer { url.stopAccessingSecurityScopedResource() }
-        
+
  // ✅ 异步文件读取，避免主线程阻塞
         let jsonData = try await withCheckedThrowingContinuation { continuation in
             Task.detached(priority: .userInitiated) {
@@ -476,17 +1362,17 @@ public class SettingsManager: ObservableObject, Sendable {
                 }
             }
         }
-        
+
  // 尝试解析为新的结构化数据格式
         if let settingsData = try? JSONDecoder().decode(SettingsExportData.self, from: jsonData) {
  // 验证设置数据的有效性
             try validateImportedSettings(settingsData)
-            
+
  // 应用导入的设置
             await applyImportedSettings(settingsData)
-            
+
             SkyBridgeLogger.ui.debugOnly("📥 设置已从文件导入: \(url.lastPathComponent)")
-            
+
  // 发送通知
             if showSystemNotifications {
                 sendSystemNotification(
@@ -496,20 +1382,20 @@ public class SettingsManager: ObservableObject, Sendable {
             }
             return
         }
-        
+
  // 回退到旧的字典格式
         guard let settings = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
             throw SettingsError.invalidData
         }
-        
+
  // 验证设置数据的有效性
         try validateLegacyImportedSettings(settings)
-        
+
  // 应用旧格式设置
-        await applyLegacyImportedSettings(settings)
-        
+        try await applyLegacyImportedSettings(settings)
+
         SkyBridgeLogger.ui.debugOnly("📥 设置已从文件导入: \(url.lastPathComponent)")
-        
+
  // 发送通知
         if showSystemNotifications {
             sendSystemNotification(
@@ -518,7 +1404,7 @@ public class SettingsManager: ObservableObject, Sendable {
             )
         }
     }
-    
+
  /// 验证旧格式导入的设置数据
     private func validateLegacyImportedSettings(_ settings: [String: Any]) throws {
  // 验证扫描间隔范围
@@ -527,34 +1413,60 @@ public class SettingsManager: ObservableObject, Sendable {
                 throw SettingsError.validationFailed("扫描间隔必须在1-300秒之间")
             }
         }
-        
+
  // 验证连接超时范围
         if let connectionTimeout = settings["connectionTimeout"] as? Int {
             if connectionTimeout < 1 || connectionTimeout > 60 {
                 throw SettingsError.validationFailed("连接超时必须在1-60秒之间")
             }
         }
-        
+
  // 验证重试次数范围
         if let retryCount = settings["retryCount"] as? Int {
             if retryCount < 1 || retryCount > 10 {
                 throw SettingsError.validationFailed("重试次数必须在1-10次之间")
             }
         }
+
+        if let value = settings["encryptionAlgorithm"] as? String {
+            do {
+                _ = try FileTransferEncryptionAlgorithm(persistedValue: value)
+            } catch {
+                throw SettingsError.validationFailed("文件传输仅支持 AES-256-GCM 加密")
+            }
+        }
+
+        if let value = settings["maxConcurrentFileTransfers"] as? Int,
+           !(1...ClassicTransferInboundPolicy.maximumConcurrentConnections).contains(value) {
+            throw SettingsError.validationFailed("文件传输并发数超出支持范围")
+        }
+        if let value = settings["transferBufferSize"] as? Int,
+           !(ClassicTransferInboundPolicy.minimumDeclaredChunkSizeBytes...ClassicTransferInboundPolicy.maximumDeclaredChunkSizeBytes).contains(value) {
+            throw SettingsError.validationFailed("文件传输分片大小超出支持范围")
+        }
+        let importedSpeedLimit = (settings["transferSpeedLimitMBps"] as? Double)
+            ?? (settings["transferSpeedLimitMBps"] as? Int).map(Double.init)
+        if let importedSpeedLimit,
+           (!importedSpeedLimit.isFinite
+            || importedSpeedLimit < 0
+            || importedSpeedLimit > Self.maximumTransferSpeedLimitMBps) {
+            throw SettingsError.validationFailed("文件传输限速必须位于 0...500 MB/s")
+        }
     }
-    
+
  /// 应用旧格式导入的设置
     @MainActor
-    private func applyLegacyImportedSettings(_ settings: [String: Any]) async {
+    private func applyLegacyImportedSettings(_ settings: [String: Any]) async throws {
  // 通用设置
         if let value = settings["autoScanOnStartup"] as? Bool { autoScanOnStartup = value }
         if let value = settings["showSystemNotifications"] as? Bool { showSystemNotifications = value }
+        if let value = settings["showFileTransferNotifications"] as? Bool { showFileTransferNotifications = value }
         if let value = settings["useDarkMode"] as? Bool { useDarkMode = value }
         if let value = settings["scanInterval"] as? Int { scanInterval = value }
         if let value = settings["showDeviceDetails"] as? Bool { showDeviceDetails = value }
         if let value = settings["showConnectionStats"] as? Bool { showConnectionStats = value }
         if let value = settings["compactMode"] as? Bool { compactMode = value }
-        
+
  // 网络设置
         if let value = settings["autoConnectKnownNetworks"] as? Bool { autoConnectKnownNetworks = value }
         if let value = settings["showHiddenNetworks"] as? Bool { showHiddenNetworks = value }
@@ -566,10 +1478,16 @@ public class SettingsManager: ObservableObject, Sendable {
         if let value = settings["discoveryTimeout"] as? Int { discoveryTimeout = value }
         if let value = settings["connectionTimeout"] as? Int { connectionTimeout = value }
         if let value = settings["retryCount"] as? Int { retryCount = value }
+        if let value = settings["discoveryPassiveMode"] as? Bool { discoveryPassiveMode = value }
+        if let value = settings["requireAuthorizationForConnection"] as? Bool { requireAuthorizationForConnection = value }
+        if let value = settings["enableWiFiAwareDiscovery"] as? Bool { enableWiFiAwareDiscovery = value }
         if let value = settings["enableConnectionEncryption"] as? Bool { enableConnectionEncryption = value }
-        if let value = settings["verifyCertificates"] as? Bool { verifyCertificates = value }
+        if let value = settings["verifyCertificates"] as? Bool {
+            verifyCertificates = value
+            enforceStrictCertificateValidationIfNeeded(context: "legacy import")
+        }
         if let value = settings["customServiceTypes"] as? [String] { customServiceTypes = value }
-        
+
  // 设备设置
         if let value = settings["autoConnectPairedDevices"] as? Bool { autoConnectPairedDevices = value }
         if let value = settings["showDeviceRSSI"] as? Bool { showDeviceRSSI = value }
@@ -581,7 +1499,11 @@ public class SettingsManager: ObservableObject, Sendable {
         if let value = settings["sortBySignalStrength"] as? Bool { sortBySignalStrength = value }
         if let value = settings["showDeviceIcons"] as? Bool { showDeviceIcons = value }
         if let value = settings["minimumSignalStrength"] as? Double { minimumSignalStrength = value }
-        
+        if let value = settings["signalStrengthAlpha"] as? Double { signalStrengthAlpha = value }
+        if let value = settings["sortWeightVerified"] as? Int { sortWeightVerified = value }
+        if let value = settings["sortWeightConnected"] as? Int { sortWeightConnected = value }
+        if let value = settings["sortWeightSignalMultiplier"] as? Int { sortWeightSignalMultiplier = value }
+
  // 高级设置
         if let value = settings["enableVerboseLogging"] as? Bool { enableVerboseLogging = value }
         if let value = settings["showDebugInfo"] as? Bool { showDebugInfo = value }
@@ -594,12 +1516,31 @@ public class SettingsManager: ObservableObject, Sendable {
         if let value = settings["enableIPv6Support"] as? Bool { enableIPv6Support = value }
         if let value = settings["useNewDiscoveryAlgorithm"] as? Bool { useNewDiscoveryAlgorithm = value }
         if let value = settings["enableP2PDirectConnection"] as? Bool { enableP2PDirectConnection = value }
+        if let value = settings["enableRealTimeWeather"] as? Bool { enableRealTimeWeather = value }
         if let value = settings["enableHandshakeDiagnostics"] as? Bool { enableHandshakeDiagnostics = value }
         if let value = settings["performanceMode"] as? String, let pm = PerformanceMode(rawValue: value) { performanceMode = pm }
         if let value = settings["showRealtimeFPS"] as? Bool { showRealtimeFPS = value }
+        if let value = settings["showTopBarIPLocation"] as? Bool { showTopBarIPLocation = value }
+        if let value = settings["showTopBarNetworkSpeed"] as? Bool { showTopBarNetworkSpeed = value }
+        if let value = settings["showTopBarNetworkLatency"] as? Bool { showTopBarNetworkLatency = value }
         if let value = settings["enableCompatibilityMode"] as? Bool { enableCompatibilityMode = value }
         if let value = settings["enableCompanionLink"] as? Bool { enableCompanionLink = value }
-        
+        if let value = settings["strictModeForSensitiveGroups"] as? Bool { strictModeForSensitiveGroups = value }
+        if let value = settings["aqiThresholdCautionUrban"] as? Int { aqiThresholdCautionUrban = value }
+        if let value = settings["aqiThresholdSensitiveUrban"] as? Int { aqiThresholdSensitiveUrban = value }
+        if let value = settings["aqiThresholdUnhealthyUrban"] as? Int { aqiThresholdUnhealthyUrban = value }
+        if let value = settings["aqiThresholdVeryUnhealthyUrban"] as? Int { aqiThresholdVeryUnhealthyUrban = value }
+        if let value = settings["aqiThresholdCautionSuburban"] as? Int { aqiThresholdCautionSuburban = value }
+        if let value = settings["aqiThresholdSensitiveSuburban"] as? Int { aqiThresholdSensitiveSuburban = value }
+        if let value = settings["aqiThresholdUnhealthySuburban"] as? Int { aqiThresholdUnhealthySuburban = value }
+        if let value = settings["aqiThresholdVeryUnhealthySuburban"] as? Int { aqiThresholdVeryUnhealthySuburban = value }
+        if let value = settings["uvThresholdModerate"] as? Double { uvThresholdModerate = value }
+        if let value = settings["uvThresholdStrong"] as? Double { uvThresholdStrong = value }
+        if let value = settings["onlyNotifyVerifiedDevices"] as? Bool { onlyNotifyVerifiedDevices = value }
+        if settings["enablePQC"] is Bool { enablePQC = true }
+        if let value = settings["pqcSignatureAlgorithm"] as? String { pqcSignatureAlgorithm = value }
+        if let value = settings["enablePQCHybridTLS"] as? Bool { enablePQCHybridTLS = value }
+        if let value = settings["preferXWingHybrid"] as? Bool { preferXWingHybrid = value }
  // 系统监控设置
         if let value = settings["systemMonitorRefreshInterval"] as? Double { systemMonitorRefreshInterval = value }
         if let value = settings["enableSystemNotifications"] as? Bool { enableSystemNotifications = value }
@@ -610,52 +1551,82 @@ public class SettingsManager: ObservableObject, Sendable {
         if let value = settings["showTrendIndicators"] as? Bool { showTrendIndicators = value }
         if let value = settings["enableSoundAlerts"] as? Bool { enableSoundAlerts = value }
         if let value = settings["maxHistoryPoints"] as? Double { maxHistoryPoints = value }
-        
+        if let value = settings["systemMonitorRetentionDays"] as? Int { systemMonitorRetentionDays = max(1, value) }
+        if let value = settings["systemMonitorChartType"] as? String,
+           let chartType = SystemMonitorChartType(rawValue: value) {
+            systemMonitorChartType = chartType
+        }
+        if let value = settings["systemMonitorSamplingPrecision"] as? String,
+           let samplingPrecision = SystemMonitorSamplingPrecision(rawValue: value) {
+            systemMonitorSamplingPrecision = samplingPrecision
+        }
+        if let value = settings["enableRemoteMonitoring"] as? Bool { enableRemoteMonitoring = value }
+        if let value = settings["enablePerformanceAlerts"] as? Bool { enablePerformanceAlerts = value }
+        if let value = settings["temperatureThreshold"] as? Double { temperatureThreshold = value }
+        if let value = settings["enableTemperatureMonitoring"] as? Bool { enableTemperatureMonitoring = value }
+        if let value = settings["enableFanSpeedMonitoring"] as? Bool { enableFanSpeedMonitoring = value }
+        if let value = settings["fanSpeedThreshold"] as? Double { fanSpeedThreshold = value }
+        if let value = settings["enableThermalThrottlingAlert"] as? Bool { enableThermalThrottlingAlert = value }
+        if let value = settings["showMonitorCPU"] as? Bool { showMonitorCPU = value }
+        if let value = settings["showMonitorMemory"] as? Bool { showMonitorMemory = value }
+        if let value = settings["showMonitorTemperature"] as? Bool { showMonitorTemperature = value }
+        if let value = settings["showMonitorFanSpeed"] as? Bool { showMonitorFanSpeed = value }
+        if let value = settings["showMonitorDisk"] as? Bool { showMonitorDisk = value }
+        if let value = settings["showMonitorNetwork"] as? Bool { showMonitorNetwork = value }
+
  // 文件传输设置
         if let value = settings["defaultTransferPath"] as? String { defaultTransferPath = value }
+        if let value = settings["maxConcurrentFileTransfers"] as? Int { maxConcurrentFileTransfers = value }
         if let value = settings["transferBufferSize"] as? Int { transferBufferSize = value }
         if let value = settings["autoRetryFailedTransfers"] as? Bool { autoRetryFailedTransfers = value }
         if let value = settings["keepTransferHistory"] as? Bool { keepTransferHistory = value }
         if let value = settings["keepSystemAwakeDuringTransfer"] as? Bool { keepSystemAwakeDuringTransfer = value }
         if let value = settings["scanTransferFilesForVirus"] as? Bool { scanTransferFilesForVirus = value }
-        if let value = settings["encryptionAlgorithm"] as? String { encryptionAlgorithm = value }
-        if let value = settings["scanLevel"] as? String, let level = FileScanService.ScanLevel(rawValue: value) { scanLevel = level }
+        if let value = settings["transferSpeedLimitMBps"] as? Double { transferSpeedLimitMBps = value }
+        if let value = settings["transferSpeedLimitMBps"] as? Int { transferSpeedLimitMBps = Double(value) }
+        if let value = settings["encryptionAlgorithm"] as? String {
+            encryptionAlgorithm = try FileTransferEncryptionAlgorithm(persistedValue: value)
+        }
+        if let value = settings["scanLevel"] as? String, let level = FileScanLevel(rawValue: value) { scanLevel = level }
+
+        enforceStrictCertificateValidationIfNeeded(context: "legacy import payload")
+        applyRuntimeSettingsSnapshot()
     }
-    
+
  /// 验证导入的设置数据
     private func validateImportedSettings(_ settingsData: SettingsExportData) throws {
  // 验证扫描间隔范围
         if settingsData.scanInterval < 1.0 || settingsData.scanInterval > 300.0 {
             throw SettingsError.validationFailed("扫描间隔必须在1-300秒之间")
         }
-        
+
  // 验证连接超时范围
         if settingsData.connectionTimeout < 1.0 || settingsData.connectionTimeout > 60.0 {
             throw SettingsError.validationFailed("连接超时必须在1-60秒之间")
         }
-        
+
  // 验证重试次数范围
         if settingsData.maxRetryAttempts < 1 || settingsData.maxRetryAttempts > 10 {
             throw SettingsError.validationFailed("重试次数必须在1-10次之间")
         }
-        
+
  // 验证WiFi扫描间隔范围
         if settingsData.wifiScanInterval < 5.0 || settingsData.wifiScanInterval > 300.0 {
             throw SettingsError.validationFailed("WiFi扫描间隔必须在5-300秒之间")
         }
-        
+
  // 验证监控间隔范围
         if settingsData.monitoringInterval < 1.0 || settingsData.monitoringInterval > 60.0 {
             throw SettingsError.validationFailed("监控间隔必须在1-60秒之间")
         }
-        
+
  // 验证主题色彩
         let validThemeColors = ["blue", "green", "red", "orange", "purple", "pink"]
         if !validThemeColors.contains(settingsData.themeColor) {
             throw SettingsError.validationFailed("无效的主题色彩")
         }
     }
-    
+
  /// 应用导入的设置
     @MainActor
     private func applyImportedSettings(_ settingsData: SettingsExportData) async {
@@ -672,18 +1643,18 @@ public class SettingsManager: ObservableObject, Sendable {
         default: themeColor = .blue
         }
         showSystemNotifications = settingsData.enableSystemNotifications
-        
+
  // 网络设置
         scanInterval = Int(settingsData.scanInterval)
         connectionTimeout = Int(settingsData.connectionTimeout)
         retryCount = settingsData.maxRetryAttempts
-        
+
  // 设备管理设置
         autoDiscoverAppleTV = settingsData.autoDiscoverAppleTV
         showHomePodDevices = settingsData.showHomePodDevices
         showThirdPartyAirPlayDevices = settingsData.showThirdPartyAirPlayDevices
  // 注意：这些属性在当前SettingsManager中不存在，需要添加或映射到现有属性
-        
+
  // 高级设置
         enableVerboseLogging = settingsData.enableVerboseLogging
  // 性能模式（结构化导入可选）
@@ -694,15 +1665,41 @@ public class SettingsManager: ObservableObject, Sendable {
         if let diagEnabled = settingsData.enableHandshakeDiagnostics {
             enableHandshakeDiagnostics = diagEnabled
         }
+        if let value = settingsData.showTopBarIPLocation { showTopBarIPLocation = value }
+        if let value = settingsData.showTopBarNetworkSpeed { showTopBarNetworkSpeed = value }
+        if let value = settingsData.showTopBarNetworkLatency { showTopBarNetworkLatency = value }
  // 注意：enableDebugMode和enablePerformanceMonitoring需要添加到SettingsManager
-        
+
  // 系统监控设置
         systemMonitorRefreshInterval = settingsData.monitoringInterval
- // 注意：其他监控设置需要添加到SettingsManager
-        
+        if let value = settingsData.showTrendIndicators { showTrendIndicators = value }
+        if let value = settingsData.maxHistoryPoints { maxHistoryPoints = value }
+        if let value = settingsData.systemMonitorRetentionDays { systemMonitorRetentionDays = max(1, value) }
+        if let value = settingsData.systemMonitorChartType, let chartType = SystemMonitorChartType(rawValue: value) {
+            systemMonitorChartType = chartType
+        }
+        if let value = settingsData.systemMonitorSamplingPrecision, let samplingPrecision = SystemMonitorSamplingPrecision(rawValue: value) {
+            systemMonitorSamplingPrecision = samplingPrecision
+        }
+        if let value = settingsData.enableRemoteMonitoring { enableRemoteMonitoring = value }
+        if let value = settingsData.enablePerformanceAlerts { enablePerformanceAlerts = value }
+        if let value = settingsData.temperatureThreshold { temperatureThreshold = value }
+        if let value = settingsData.enableTemperatureMonitoring { enableTemperatureMonitoring = value }
+        if let value = settingsData.enableFanSpeedMonitoring { enableFanSpeedMonitoring = value }
+        if let value = settingsData.fanSpeedThreshold { fanSpeedThreshold = value }
+        if let value = settingsData.enableThermalThrottlingAlert { enableThermalThrottlingAlert = value }
+        if let value = settingsData.showMonitorCPU { showMonitorCPU = value }
+        if let value = settingsData.showMonitorMemory { showMonitorMemory = value }
+        if let value = settingsData.showMonitorTemperature { showMonitorTemperature = value }
+        if let value = settingsData.showMonitorFanSpeed { showMonitorFanSpeed = value }
+        if let value = settingsData.showMonitorDisk { showMonitorDisk = value }
+        if let value = settingsData.showMonitorNetwork { showMonitorNetwork = value }
+
+        enforceStrictCertificateValidationIfNeeded(context: "structured import payload")
+        applyRuntimeSettingsSnapshot()
         logger.info("设置导入完成，来源版本: \(settingsData.appVersion)，导出时间: \(settingsData.exportDate)")
     }
-    
+
  /// 重置网络设置到默认值
     public func resetNetworkSettings() {
  // 重置WiFi设置
@@ -710,43 +1707,49 @@ public class SettingsManager: ObservableObject, Sendable {
         showHiddenNetworks = false
         prefer5GHz = true
         wifiScanTimeout = 10
-        
+
  // 重置网络发现设置
         enableBonjourDiscovery = true
         enableMDNSResolution = true
         scanCustomPorts = false
         discoveryTimeout = 30
-        
+        discoveryPassiveMode = true
+        requireAuthorizationForConnection = true
+        enableWiFiAwareDiscovery = true
+
  // 重置连接设置
         connectionTimeout = 10
         retryCount = 3
         enableConnectionEncryption = true
         verifyCertificates = true
-        
+
  // 清空自定义服务类型
         customServiceTypes = []
+        applyRuntimeSettingsSnapshot()
     }
-    
+
  /// 获取缓存大小
     public func getCacheSize() -> String {
         let cacheSize = calculateCacheSize()
         return formatBytes(cacheSize)
     }
-    
+
  /// 清理缓存
     public func clearCache() {
         Task {
             await performCacheClear()
         }
     }
-    
+
  /// 应用主题模式
     public func applyThemeMode() {
         Task { @MainActor in
+#if os(macOS)
             if let window = NSApplication.shared.windows.first {
                 window.appearance = self.useDarkMode ? NSAppearance(named: .darkAqua) : NSAppearance(named: .aqua)
             }
-            
+#endif
+
  // 发送主题变更通知
             NotificationCenter.default.post(
                 name: NSNotification.Name("ThemeDidChange"),
@@ -755,77 +1758,106 @@ public class SettingsManager: ObservableObject, Sendable {
             )
         }
     }
-    
+
  /// 请求通知权限
     public func requestNotificationPermission() async -> Bool {
         let center = UNUserNotificationCenter.current()
-        
+
         do {
             let granted = try await center.requestAuthorization(options: [.alert, .sound, .badge])
-            
+
             Task { @MainActor in
             self.showSystemNotifications = granted
         }
-            
+
             return granted
         } catch {
             SkyBridgeLogger.ui.error("通知权限请求失败: \(error.localizedDescription, privacy: .private)")
             return false
         }
     }
-    
+
  /// 发送系统通知
-    public func sendSystemNotification(title: String, body: String, identifier: String = UUID().uuidString) {
+    public func sendSystemNotification(
+        title: String,
+        body: String,
+        identifier: String = UUID().uuidString,
+        categoryIdentifier: String? = nil,
+        userInfo: [AnyHashable: Any] = [:]
+    ) {
         guard showSystemNotifications else { return }
-        
+
+        // Some run environments (unit tests, `swift run`, certain Xcode/DerivedData launch setups)
+        // don't have a valid App Bundle. In that case UNUserNotificationCenter.current() may assert:
+        // "bundleProxyForCurrentProcess is nil".
+        let bundleURL = Bundle.main.bundleURL
+        guard bundleURL.path.lowercased().hasSuffix(".app"),
+              Bundle.main.bundleIdentifier != nil else {
+            SkyBridgeLogger.ui.debugOnly("跳过系统通知：当前进程无有效 App Bundle title=\(title)")
+            return
+        }
+
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         content.sound = enableSoundAlerts ? .default : nil
-        
+        if let categoryIdentifier {
+            content.categoryIdentifier = categoryIdentifier
+        }
+        if !userInfo.isEmpty {
+            content.userInfo = userInfo
+        }
+
         let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
-        
+
         UNUserNotificationCenter.current().add(request) { error in
             if let error = error {
                 SkyBridgeLogger.ui.error("发送通知失败: \(error.localizedDescription, privacy: .private)")
             }
         }
     }
-    
+
  // MARK: - 私有辅助方法
-    
+
+    private func enforceStrictCertificateValidationIfNeeded(context: String) {
+        guard !verifyCertificates else { return }
+        logger.warning("检测到已关闭证书校验（\(context, privacy: .public)），已迁移为严格校验")
+        verifyCertificates = true
+        userDefaults.set(true, forKey: "Settings.VerifyCertificates")
+    }
+
  /// 计算缓存大小
     private func calculateCacheSize() -> Int64 {
         var totalSize: Int64 = 0
-        
+
  // 计算应用缓存目录大小
         if let cacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first {
             let appCacheURL = cacheURL.appendingPathComponent(Bundle.main.bundleIdentifier ?? "SkyBridgeCompass")
             totalSize += directorySize(at: appCacheURL)
         }
-        
+
  // 计算临时文件大小
         let tempURL = FileManager.default.temporaryDirectory
         totalSize += directorySize(at: tempURL.appendingPathComponent("SkyBridgeCompass"))
-        
+
  // 计算头像缓存大小
         totalSize += calculateAvatarCacheSize()
-        
+
  // 计算Metal渲染缓存大小（估算）
         totalSize += calculateMetalCacheSize()
-        
+
  // 计算系统监控数据缓存大小
         totalSize += calculateSystemMonitorCacheSize()
-        
+
  // 计算网络日志缓存大小
         totalSize += calculateNetworkLogsCacheSize()
-        
+
  // 计算UserDefaults占用空间（估算）
         totalSize += Int64(userDefaults.dictionaryRepresentation().description.count)
-        
+
         return totalSize
     }
-    
+
  /// 计算头像缓存大小
     private func calculateAvatarCacheSize() -> Int64 {
  // 备用方案：计算头像缓存目录大小
@@ -833,27 +1865,27 @@ public class SettingsManager: ObservableObject, Sendable {
             let avatarCacheURL = cacheURL.appendingPathComponent("Avatars")
             return directorySize(at: avatarCacheURL)
         }
-        
+
         return 0
     }
-    
+
  /// 计算Metal缓存大小（估算）
     private func calculateMetalCacheSize() -> Int64 {
         var metalCacheSize: Int64 = 0
-        
+
  // 计算Metal着色器缓存
         if let cacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first {
             let metalCacheURL = cacheURL.appendingPathComponent("com.apple.metal")
             metalCacheSize += directorySize(at: metalCacheURL)
         }
-        
+
  // 估算运行时Metal缓存（基于可用内存的小部分）
         let processInfo = ProcessInfo.processInfo
         metalCacheSize += Int64(processInfo.physicalMemory / 10000) // 更保守的估算值
-        
+
         return metalCacheSize
     }
-    
+
  /// 计算系统监控数据缓存大小
     private func calculateSystemMonitorCacheSize() -> Int64 {
         if let cacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first {
@@ -862,7 +1894,7 @@ public class SettingsManager: ObservableObject, Sendable {
         }
         return 0
     }
-    
+
  /// 计算网络日志缓存大小
     private func calculateNetworkLogsCacheSize() -> Int64 {
         if let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
@@ -871,7 +1903,7 @@ public class SettingsManager: ObservableObject, Sendable {
         }
         return 0
     }
-    
+
  /// 计算目录大小
     private func directorySize(at url: URL) -> Int64 {
         guard let enumerator = FileManager.default.enumerator(
@@ -881,9 +1913,9 @@ public class SettingsManager: ObservableObject, Sendable {
         ) else {
             return 0
         }
-        
+
         var totalSize: Int64 = 0
-        
+
         for case let fileURL as URL in enumerator {
             do {
                 let resourceValues = try fileURL.resourceValues(forKeys: [.fileSizeKey])
@@ -892,10 +1924,10 @@ public class SettingsManager: ObservableObject, Sendable {
                 continue
             }
         }
-        
+
         return totalSize
     }
-    
+
  /// 格式化字节数
     private func formatBytes(_ bytes: Int64) -> String {
         let formatter = ByteCountFormatter()
@@ -903,27 +1935,27 @@ public class SettingsManager: ObservableObject, Sendable {
         formatter.countStyle = .file
         return formatter.string(fromByteCount: bytes)
     }
-    
+
  /// 执行缓存清理
     @MainActor
     private func performCacheClear() async {
         var clearedSize: Int64 = 0
-        
+
  // 清理应用缓存目录
         if let cacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first {
             let appCacheURL = cacheURL.appendingPathComponent(Bundle.main.bundleIdentifier ?? "SkyBridgeCompass")
             clearedSize += await clearDirectory(at: appCacheURL)
         }
-        
+
  // 清理临时文件
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("SkyBridgeCompass")
         clearedSize += await clearDirectory(at: tempURL)
-        
+
  // 清理过期的网络日志
         if !saveNetworkLogs {
             await clearNetworkLogs()
         }
-        
+
  // 发送缓存清理完成通知
         if enableSystemNotifications {
             sendSystemNotification(
@@ -931,7 +1963,7 @@ public class SettingsManager: ObservableObject, Sendable {
                 body: "已清理 \(formatBytes(clearedSize)) 缓存数据"
             )
         }
-        
+
  // 发送应用内通知
         NotificationCenter.default.post(
             name: NSNotification.Name("CacheClearCompleted"),
@@ -939,16 +1971,16 @@ public class SettingsManager: ObservableObject, Sendable {
             userInfo: ["clearedSize": clearedSize]
         )
     }
-    
+
  /// 清理指定目录
     private func clearDirectory(at url: URL) async -> Int64 {
         var clearedSize: Int64 = 0
-        
+
         do {
             if FileManager.default.fileExists(atPath: url.path) {
  // 计算清理前的大小
                 clearedSize = directorySize(at: url)
-                
+
  // 删除目录内容
                 let contents = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)
                 for item in contents {
@@ -958,41 +1990,57 @@ public class SettingsManager: ObservableObject, Sendable {
         } catch {
             SkyBridgeLogger.ui.error("清理目录失败: \(error.localizedDescription, privacy: .private)")
         }
-        
+
         return clearedSize
     }
-    
+
  /// 清理网络日志
     private func clearNetworkLogs() async {
  // 实现网络日志清理逻辑
  // 这里可以清理应用生成的网络日志文件
     }
-    
+
  /// 添加自定义服务类型
     public func addCustomServiceType(_ serviceType: String) {
         if !customServiceTypes.contains(serviceType) {
             customServiceTypes.append(serviceType)
         }
     }
-    
+
  /// 移除自定义服务类型
     public func removeCustomServiceType(_ serviceType: String) {
         customServiceTypes.removeAll { $0 == serviceType }
     }
-    
+
  // MARK: - 私有方法
-    
+
  /// 加载设置
     private func loadSettings() {
  // 通用设置
         autoScanOnStartup = userDefaults.bool(forKey: "Settings.AutoScanOnStartup", defaultValue: true)
         showSystemNotifications = userDefaults.bool(forKey: "Settings.ShowSystemNotifications", defaultValue: true)
+        showFileTransferNotifications = userDefaults.bool(forKey: "Settings.ShowFileTransferNotifications", defaultValue: true)
         useDarkMode = userDefaults.bool(forKey: "Settings.UseDarkMode", defaultValue: false)
         scanInterval = userDefaults.integer(forKey: "Settings.ScanInterval", defaultValue: 30)
         showDeviceDetails = userDefaults.bool(forKey: "Settings.ShowDeviceDetails", defaultValue: true)
         showConnectionStats = userDefaults.bool(forKey: "Settings.ShowConnectionStats", defaultValue: true)
         compactMode = userDefaults.bool(forKey: "Settings.CompactMode", defaultValue: false)
-        
+        // themeColor: support both new namespaced key and legacy key ("ThemeColor") used by older UI code.
+#if os(macOS)
+        if let data = userDefaults.data(forKey: "Settings.ThemeColor") ?? userDefaults.data(forKey: "ThemeColor"),
+           let nsColor = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSColor.self, from: data) {
+            themeColor = Color(nsColor)
+        } else if let hex = userDefaults.string(forKey: "Settings.ThemeColorHex") {
+            themeColor = Self.color(fromHexRGBA: hex) ?? .blue
+        }
+#else
+        // Non-macOS reads only the portable hex representation. The NSColor archive is a macOS
+        // legacy format and is never written on other platforms.
+        if let hex = userDefaults.string(forKey: "Settings.ThemeColorHex") {
+            themeColor = Self.color(fromHexRGBA: hex) ?? .blue
+        }
+#endif
+
  // 网络设置
         autoConnectKnownNetworks = userDefaults.bool(forKey: "Settings.AutoConnectKnownNetworks", defaultValue: true)
         showHiddenNetworks = userDefaults.bool(forKey: "Settings.ShowHiddenNetworks", defaultValue: false)
@@ -1006,11 +2054,12 @@ public class SettingsManager: ObservableObject, Sendable {
         retryCount = userDefaults.integer(forKey: "Settings.RetryCount", defaultValue: 3)
         enableConnectionEncryption = userDefaults.bool(forKey: "Settings.EnableConnectionEncryption", defaultValue: true)
         verifyCertificates = userDefaults.bool(forKey: "Settings.VerifyCertificates", defaultValue: true)
+        enforceStrictCertificateValidationIfNeeded(context: "load settings")
         discoveryPassiveMode = userDefaults.bool(forKey: "Settings.DiscoveryPassiveMode", defaultValue: true)
         requireAuthorizationForConnection = userDefaults.bool(forKey: "Settings.RequireAuthorizationForConnection", defaultValue: true)
         enableWiFiAwareDiscovery = userDefaults.bool(forKey: "Settings.EnableWiFiAwareDiscovery", defaultValue: true)
         customServiceTypes = userDefaults.stringArray(forKey: "Settings.CustomServiceTypes") ?? []
-        
+
  // 设备设置
         autoConnectPairedDevices = userDefaults.bool(forKey: "Settings.AutoConnectPairedDevices", defaultValue: true)
         showDeviceRSSI = userDefaults.bool(forKey: "Settings.ShowDeviceRSSI", defaultValue: true)
@@ -1022,10 +2071,11 @@ public class SettingsManager: ObservableObject, Sendable {
         sortBySignalStrength = userDefaults.bool(forKey: "Settings.SortBySignalStrength", defaultValue: true)
         showDeviceIcons = userDefaults.bool(forKey: "Settings.ShowDeviceIcons", defaultValue: true)
         minimumSignalStrength = userDefaults.double(forKey: "Settings.MinimumSignalStrength", defaultValue: -80.0)
+        signalStrengthAlpha = userDefaults.double(forKey: "Settings.SignalStrengthAlpha", defaultValue: 0.6)
         sortWeightVerified = userDefaults.integer(forKey: "Settings.SortWeightVerified", defaultValue: 2000)
         sortWeightConnected = userDefaults.integer(forKey: "Settings.SortWeightConnected", defaultValue: 1000)
         sortWeightSignalMultiplier = userDefaults.integer(forKey: "Settings.SortWeightSignalMultiplier", defaultValue: 100)
-        
+
  // 高级设置
         enableVerboseLogging = userDefaults.bool(forKey: "Settings.EnableVerboseLogging", defaultValue: false)
         showDebugInfo = userDefaults.bool(forKey: "Settings.ShowDebugInfo", defaultValue: false)
@@ -1042,8 +2092,27 @@ public class SettingsManager: ObservableObject, Sendable {
         enableRealTimeWeather = userDefaults.bool(forKey: "Settings.EnableRealTimeWeather", defaultValue: false)
         performanceMode = PerformanceMode(rawValue: userDefaults.string(forKey: "Settings.PerformanceMode") ?? "") ?? .balanced
         showRealtimeFPS = userDefaults.bool(forKey: "Settings.ShowRealtimeFPS", defaultValue: false)
+        showTopBarIPLocation = userDefaults.bool(forKey: "Settings.ShowTopBarIPLocation", defaultValue: true)
+        showTopBarNetworkSpeed = userDefaults.bool(forKey: "Settings.ShowTopBarNetworkSpeed", defaultValue: true)
+        showTopBarNetworkLatency = userDefaults.bool(forKey: "Settings.ShowTopBarNetworkLatency", defaultValue: true)
         enableCompatibilityMode = userDefaults.bool(forKey: "Settings.EnableCompatibilityMode", defaultValue: false)
         enableCompanionLink = userDefaults.bool(forKey: "Settings.EnableCompanionLink", defaultValue: false)
+        // PQC settings (previously not persisted)
+        enablePQC = true
+        userDefaults.set(true, forKey: "Settings.EnablePQC")
+        // The versioned protocol-identity record is restored asynchronously as
+        // one authority transaction. Never project either half of the legacy
+        // two-key record into runtime state here.
+        pqcSignatureAlgorithm = "ML-DSA-65"
+        enablePQCHybridTLS = userDefaults.bool(forKey: "Settings.EnablePQCHybridTLS", defaultValue: false)
+        preferXWingHybrid = userDefaults.bool(forKey: SettingsStorageKeys.preferXWingHybrid, defaultValue: false)
+        preferQPeriaptBeta = userDefaults.bool(forKey: SettingsStorageKeys.preferQPeriaptBeta, defaultValue: false)
+        do {
+            strictlyMatchSelectedPQCMode = try pqcModePolicyStore.snapshot().selection.strictlyMatchSelectedMode
+            pqcModePolicyError = nil
+        } catch { pqcModePolicyError = error.localizedDescription }
+        // Runtime admission keeps Q routing unavailable until its native probe
+        // completes. Loading preferences must preserve an external Q request.
         strictModeForSensitiveGroups = userDefaults.bool(forKey: "Settings.StrictModeForSensitiveGroups", defaultValue: false)
         aqiThresholdCautionUrban = userDefaults.integer(forKey: "Settings.AQIThresholdCautionUrban", defaultValue: 100)
         aqiThresholdSensitiveUrban = userDefaults.integer(forKey: "Settings.AQIThresholdSensitiveUrban", defaultValue: 150)
@@ -1056,7 +2125,7 @@ public class SettingsManager: ObservableObject, Sendable {
         uvThresholdModerate = userDefaults.double(forKey: "Settings.UVThresholdModerate", defaultValue: 6.0)
         uvThresholdStrong = userDefaults.double(forKey: "Settings.UVThresholdStrong", defaultValue: 8.0)
         onlyNotifyVerifiedDevices = userDefaults.bool(forKey: "Settings.OnlyNotifyVerifiedDevices", defaultValue: false)
-        
+
  // 系统监控设置
         systemMonitorRefreshInterval = userDefaults.double(forKey: "Settings.SystemMonitorRefreshInterval", defaultValue: 1.0)
         enableSystemNotifications = userDefaults.bool(forKey: "Settings.EnableSystemNotifications", defaultValue: true)
@@ -1067,49 +2136,167 @@ public class SettingsManager: ObservableObject, Sendable {
         showTrendIndicators = userDefaults.bool(forKey: "Settings.ShowTrendIndicators", defaultValue: true)
         enableSoundAlerts = userDefaults.bool(forKey: "Settings.EnableSoundAlerts", defaultValue: false)
         maxHistoryPoints = userDefaults.double(forKey: "Settings.MaxHistoryPoints", defaultValue: 300.0)
-        
+        systemMonitorRetentionDays = userDefaults.integer(forKey: "Settings.SystemMonitorRetentionDays", defaultValue: 7)
+        systemMonitorChartType = SystemMonitorChartType(rawValue: userDefaults.string(forKey: "Settings.SystemMonitorChartType") ?? "") ?? .line
+        systemMonitorSamplingPrecision = SystemMonitorSamplingPrecision(rawValue: userDefaults.string(forKey: "Settings.SystemMonitorSamplingPrecision") ?? "") ?? .normal
+        enableRemoteMonitoring = userDefaults.bool(forKey: "Settings.EnableRemoteMonitoring", defaultValue: false)
+        enablePerformanceAlerts = userDefaults.bool(forKey: "Settings.EnablePerformanceAlerts", defaultValue: true)
+        temperatureThreshold = userDefaults.double(forKey: "Settings.TemperatureThreshold", defaultValue: 80.0)
+        enableTemperatureMonitoring = userDefaults.bool(forKey: "Settings.EnableTemperatureMonitoring", defaultValue: true)
+        enableFanSpeedMonitoring = userDefaults.bool(forKey: "Settings.EnableFanSpeedMonitoring", defaultValue: true)
+        fanSpeedThreshold = userDefaults.double(forKey: "Settings.FanSpeedThreshold", defaultValue: 4000.0)
+        enableThermalThrottlingAlert = userDefaults.bool(forKey: "Settings.EnableThermalThrottlingAlert", defaultValue: true)
+        showMonitorCPU = userDefaults.bool(forKey: "Settings.ShowMonitorCPU", defaultValue: true)
+        showMonitorMemory = userDefaults.bool(forKey: "Settings.ShowMonitorMemory", defaultValue: true)
+        showMonitorTemperature = userDefaults.bool(forKey: "Settings.ShowMonitorTemperature", defaultValue: true)
+        showMonitorFanSpeed = userDefaults.bool(forKey: "Settings.ShowMonitorFanSpeed", defaultValue: true)
+        showMonitorDisk = userDefaults.bool(forKey: "Settings.ShowMonitorDisk", defaultValue: true)
+        showMonitorNetwork = userDefaults.bool(forKey: "Settings.ShowMonitorNetwork", defaultValue: true)
+
  // 文件传输设置
         defaultTransferPath = userDefaults.string(forKey: "Settings.DefaultTransferPath") ?? "~/Downloads"
-        transferBufferSize = userDefaults.integer(forKey: "Settings.TransferBufferSize", defaultValue: 131072)
+        let persistedConcurrentFileTransfers = userDefaults.integer(
+            forKey: "Settings.MaxConcurrentFileTransfers",
+            defaultValue: Self.defaultMaxConcurrentFileTransfers
+        )
+        if (1...ClassicTransferInboundPolicy.maximumConcurrentConnections)
+            .contains(persistedConcurrentFileTransfers) {
+            maxConcurrentFileTransfers = persistedConcurrentFileTransfers
+        } else {
+            maxConcurrentFileTransfers = Self.defaultMaxConcurrentFileTransfers
+            userDefaults.set(
+                maxConcurrentFileTransfers,
+                forKey: "Settings.MaxConcurrentFileTransfers"
+            )
+            SkyBridgeLogger.fileTransfer.error("无效的已持久化文件传输并发数已重置")
+        }
+
+        let persistedTransferBufferSize = userDefaults.integer(
+            forKey: "Settings.TransferBufferSize",
+            defaultValue: Self.defaultTransferBufferSize
+        )
+        if (ClassicTransferInboundPolicy.minimumDeclaredChunkSizeBytes...ClassicTransferInboundPolicy.maximumDeclaredChunkSizeBytes)
+            .contains(persistedTransferBufferSize) {
+            transferBufferSize = persistedTransferBufferSize
+        } else {
+            transferBufferSize = Self.defaultTransferBufferSize
+            userDefaults.set(transferBufferSize, forKey: "Settings.TransferBufferSize")
+            SkyBridgeLogger.fileTransfer.error("无效的已持久化文件传输分片大小已重置")
+        }
         autoRetryFailedTransfers = userDefaults.bool(forKey: "Settings.AutoRetryFailedTransfers", defaultValue: true)
         keepTransferHistory = userDefaults.bool(forKey: "Settings.KeepTransferHistory", defaultValue: true)
         keepSystemAwakeDuringTransfer = userDefaults.bool(forKey: "Settings.KeepSystemAwakeDuringTransfer", defaultValue: false)
         scanTransferFilesForVirus = userDefaults.bool(forKey: "Settings.ScanTransferFilesForVirus", defaultValue: false)
-        encryptionAlgorithm = userDefaults.string(forKey: "Settings.EncryptionAlgorithm") ?? "AES-256"
-        scanLevel = FileScanService.ScanLevel(rawValue: userDefaults.string(forKey: "Settings.ScanLevel") ?? "") ?? .standard
+        let persistedTransferSpeedLimit = userDefaults.double(
+            forKey: "Settings.TransferSpeedLimitMBps",
+            defaultValue: 0
+        )
+        if persistedTransferSpeedLimit.isFinite,
+           persistedTransferSpeedLimit >= 0,
+           persistedTransferSpeedLimit <= Self.maximumTransferSpeedLimitMBps {
+            transferSpeedLimitMBps = persistedTransferSpeedLimit
+        } else {
+            transferSpeedLimitMBps = 0
+            userDefaults.set(0, forKey: "Settings.TransferSpeedLimitMBps")
+            SkyBridgeLogger.fileTransfer.error("无效的已持久化文件传输限速已重置")
+        }
+        let persistedFileTransferAlgorithm = userDefaults.string(forKey: "Settings.EncryptionAlgorithm") ?? FileTransferEncryptionAlgorithm.aes256GCM.rawValue
+        encryptionAlgorithm = (try? FileTransferEncryptionAlgorithm(persistedValue: persistedFileTransferAlgorithm)) ?? .aes256GCM
+        userDefaults.set(encryptionAlgorithm.rawValue, forKey: "Settings.EncryptionAlgorithm")
+        scanLevel = FileScanLevel(rawValue: userDefaults.string(forKey: "Settings.ScanLevel") ?? "") ?? .standard
         enableZeroCopyBGRA = userDefaults.bool(forKey: "Settings.EnableZeroCopyBGRA", defaultValue: false)
+        preferNearestNeighborScaling = userDefaults.bool(forKey: "Settings.PreferNearestNeighborScaling", defaultValue: false)
     }
-    
+
+    private func setupPQCSignatureAlgorithmObserver() {
+        $pqcSignatureAlgorithm.sink { [weak self] value in
+            guard let self else { return }
+            let normalized = Self.normalizedPQCSignatureAlgorithm(value)
+            guard normalized == value else {
+                self.pqcSignatureAlgorithm = normalized
+                return
+            }
+            guard !self.requiresExistingOnlyIdentityRuntime else { return }
+            self.userDefaults.set(
+                normalized,
+                forKey: "Settings.PQCSignatureAlgorithm"
+            )
+            self.clearCryptoProviderCacheForSettingsChangeIfEnabled()
+        }.store(in: &settingsCancellables)
+    }
+
  /// 设置观察者
     private func setupObservers() {
  // 通用设置观察者
         $autoScanOnStartup.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.AutoScanOnStartup")
         }.store(in: &settingsCancellables)
-        
+
         $showSystemNotifications.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ShowSystemNotifications")
         }.store(in: &settingsCancellables)
-        
+
+        $showFileTransferNotifications.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.ShowFileTransferNotifications")
+        }.store(in: &settingsCancellables)
+
         $useDarkMode.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.UseDarkMode")
             self?.applyThemeMode() // 立即应用主题变化
         }.store(in: &settingsCancellables)
-        
-        $scanInterval.sink { [weak self] value in
+
+        // dropFirst：跳过订阅时的初始值（启动），避免启动即用通用值覆盖各协议间隔；
+        // 仅当用户此后显式更改「通用扫描间隔」时才作为“统一设置”级联到各协议。
+        $scanInterval.dropFirst().sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ScanInterval")
+            let interval = Double(value)
+            DeviceManagementSettingsManager.shared.wifiScanInterval = interval
+            DeviceManagementSettingsManager.shared.bluetoothScanInterval = interval
+            DeviceManagementSettingsManager.shared.airplayScanInterval = interval
+            self?.postWiFiSettingsChanged(["scanInterval": interval])
+            self?.postBluetoothSettingsChanged(["scanInterval": interval])
+            self?.postAirPlaySettingsChanged(["scanInterval": interval])
         }.store(in: &settingsCancellables)
-        
+
         $showDeviceDetails.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ShowDeviceDetails")
+            NotificationCenter.default.post(name: NSNotification.Name("DeviceDisplayModeChanged"), object: nil)
         }.store(in: &settingsCancellables)
-        
+
         $showConnectionStats.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ShowConnectionStats")
+            NotificationCenter.default.post(name: NSNotification.Name("ConnectionStatsDisplayChanged"), object: nil)
         }.store(in: &settingsCancellables)
-        
+
         $compactMode.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.CompactMode")
+            NotificationCenter.default.post(
+                name: NSNotification.Name("LayoutModeChanged"),
+                object: nil,
+                userInfo: ["isCompact": value]
+            )
+        }.store(in: &settingsCancellables)
+
+        // Theme color persistence (namespaced + legacy compatibility)
+        $themeColor.sink { [weak self] value in
+            guard let self else { return }
+#if os(macOS)
+            if let data = Self.archive(color: value) {
+                self.userDefaults.set(data, forKey: "Settings.ThemeColor")
+                // legacy key used by older UI code
+                self.userDefaults.set(data, forKey: "ThemeColor")
+            }
+#endif
+#if os(macOS)
+            if let hex = Self.hexRGBA(from: value) {
+                self.userDefaults.set(hex, forKey: "Settings.ThemeColorHex")
+            }
+#endif
+            NotificationCenter.default.post(
+                name: NSNotification.Name("ThemeColorChanged"),
+                object: nil,
+                userInfo: ["color": value]
+            )
         }.store(in: &settingsCancellables)
 
  // 设备列表排序权重观察者
@@ -1122,187 +2309,249 @@ public class SettingsManager: ObservableObject, Sendable {
         $sortWeightSignalMultiplier.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.SortWeightSignalMultiplier")
         }.store(in: &settingsCancellables)
-        
+
  // 网络设置观察者
         $autoConnectKnownNetworks.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.AutoConnectKnownNetworks")
         }.store(in: &settingsCancellables)
-        
+
  // 文件传输设置观察者
         $defaultTransferPath.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.DefaultTransferPath")
         }.store(in: &settingsCancellables)
-        
+
+        $maxConcurrentFileTransfers.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.MaxConcurrentFileTransfers")
+            self?.scheduleFileTransferSettingsApply()
+        }.store(in: &settingsCancellables)
+
         $transferBufferSize.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.TransferBufferSize")
+            self?.scheduleFileTransferSettingsApply()
         }.store(in: &settingsCancellables)
-        
+
         $autoRetryFailedTransfers.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.AutoRetryFailedTransfers")
+            self?.scheduleFileTransferSettingsApply()
         }.store(in: &settingsCancellables)
-        
+
         $keepTransferHistory.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.KeepTransferHistory")
+            self?.scheduleFileTransferSettingsApply()
         }.store(in: &settingsCancellables)
-        
+
         $keepSystemAwakeDuringTransfer.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.KeepSystemAwakeDuringTransfer")
+            self?.scheduleFileTransferSettingsApply()
         }.store(in: &settingsCancellables)
-        
+
         $scanTransferFilesForVirus.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ScanTransferFilesForVirus")
+            self?.scheduleFileTransferSettingsApply()
         }.store(in: &settingsCancellables)
-        
+
+        $transferSpeedLimitMBps.sink { [weak self] value in
+            guard value.isFinite,
+                  value >= 0,
+                  value <= Self.maximumTransferSpeedLimitMBps else {
+                SkyBridgeLogger.fileTransfer.error("拒绝持久化无效的文件传输限速")
+                NotificationCenter.default.post(
+                    name: Notification.Name("FileTransferSettingsValidationFailure"),
+                    object: nil,
+                    userInfo: ["code": "invalid_transfer_speed_limit"]
+                )
+                return
+            }
+            self?.userDefaults.set(value, forKey: "Settings.TransferSpeedLimitMBps")
+            self?.scheduleFileTransferSettingsApply()
+        }.store(in: &settingsCancellables)
+
         $scanLevel.sink { [weak self] value in
             self?.userDefaults.set(value.rawValue, forKey: "Settings.ScanLevel")
+            self?.scheduleFileTransferSettingsApply()
         }.store(in: &settingsCancellables)
-        
+
         $encryptionAlgorithm.sink { [weak self] value in
-            self?.userDefaults.set(value, forKey: "Settings.EncryptionAlgorithm")
+            self?.userDefaults.set(value.rawValue, forKey: "Settings.EncryptionAlgorithm")
+            self?.scheduleFileTransferSettingsApply()
         }.store(in: &settingsCancellables)
-        
+
         $showHiddenNetworks.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ShowHiddenNetworks")
+            self?.postWiFiSettingsChanged(["showHiddenNetworks": value])
         }.store(in: &settingsCancellables)
-        
+
         $prefer5GHz.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.Prefer5GHz")
         }.store(in: &settingsCancellables)
-        
+
         $wifiScanTimeout.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.WiFiScanTimeout")
+            self?.postWiFiSettingsChanged(["scanTimeout": Double(value)])
         }.store(in: &settingsCancellables)
-        
+
         $enableBonjourDiscovery.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnableBonjourDiscovery")
+            self?.scheduleDiscoveryRuntimeApply(restartIfNeeded: true)
         }.store(in: &settingsCancellables)
-        
+
         $enableMDNSResolution.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnableMDNSResolution")
+            self?.scheduleDiscoveryRuntimeApply(restartIfNeeded: false)
         }.store(in: &settingsCancellables)
-        
+
         $discoveryPassiveMode.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.DiscoveryPassiveMode")
+            self?.scheduleDiscoveryRuntimeApply(restartIfNeeded: true)
         }.store(in: &settingsCancellables)
-        
+
         $requireAuthorizationForConnection.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.RequireAuthorizationForConnection")
         }.store(in: &settingsCancellables)
-        
+
         $enableWiFiAwareDiscovery.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnableWiFiAwareDiscovery")
+            self?.scheduleDiscoveryRuntimeApply(restartIfNeeded: true)
         }.store(in: &settingsCancellables)
-        
+
         $scanCustomPorts.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ScanCustomPorts")
+            self?.scheduleDiscoveryRuntimeApply(restartIfNeeded: true)
         }.store(in: &settingsCancellables)
-        
+
         $discoveryTimeout.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.DiscoveryTimeout")
+            self?.scheduleDiscoveryRuntimeApply(restartIfNeeded: false)
         }.store(in: &settingsCancellables)
-        
+
         $connectionTimeout.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ConnectionTimeout")
         }.store(in: &settingsCancellables)
-        
+
         $retryCount.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.RetryCount")
         }.store(in: &settingsCancellables)
-        
+
         $enableConnectionEncryption.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnableConnectionEncryption")
         }.store(in: &settingsCancellables)
-        
+
         $verifyCertificates.sink { [weak self] value in
-            self?.userDefaults.set(value, forKey: "Settings.VerifyCertificates")
+            guard let self else { return }
+            if !value {
+                self.logger.warning("检测到证书校验被关闭请求，已强制保持严格校验")
+                self.userDefaults.set(true, forKey: "Settings.VerifyCertificates")
+                if self.verifyCertificates != true {
+                    self.verifyCertificates = true
+                }
+                return
+            }
+            self.userDefaults.set(true, forKey: "Settings.VerifyCertificates")
         }.store(in: &settingsCancellables)
-        
+
         $customServiceTypes.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.CustomServiceTypes")
+            self?.scheduleDiscoveryRuntimeApply(restartIfNeeded: true)
         }.store(in: &settingsCancellables)
-        
+
  // 设备设置观察者
         $autoConnectPairedDevices.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.AutoConnectPairedDevices")
         }.store(in: &settingsCancellables)
-        
+
         $showDeviceRSSI.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ShowDeviceRSSI")
         }.store(in: &settingsCancellables)
-        
+
         $showConnectableDevicesOnly.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ShowOnlyConnectableDevices")
+            self?.scheduleOnlineDevicePresentationRefresh()
         }.store(in: &settingsCancellables)
-        
+
         $autoDiscoverAppleTV.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.AutoDiscoverAppleTV")
+            self?.postAirPlaySettingsChanged(["autoDiscoverAppleTV": value])
         }.store(in: &settingsCancellables)
-        
+
         $showHomePodDevices.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ShowHomePodDevices")
+            self?.postAirPlaySettingsChanged(["showHomePodDevices": value])
         }.store(in: &settingsCancellables)
-        
+
         $showThirdPartyAirPlayDevices.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ShowThirdPartyAirPlay")
+            self?.postAirPlaySettingsChanged(["showThirdPartyAirPlayDevices": value])
         }.store(in: &settingsCancellables)
-        
+
         $hideOfflineDevices.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.HideOfflineDevices")
+            self?.scheduleOnlineDevicePresentationRefresh()
         }.store(in: &settingsCancellables)
-        
+
         $sortBySignalStrength.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.SortBySignalStrength")
         }.store(in: &settingsCancellables)
-        
+
         $showDeviceIcons.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ShowDeviceIcons")
         }.store(in: &settingsCancellables)
-        
+
         $minimumSignalStrength.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.MinimumSignalStrength")
+            self?.scheduleOnlineDevicePresentationRefresh()
         }.store(in: &settingsCancellables)
-        
+
+        $signalStrengthAlpha.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.SignalStrengthAlpha")
+        }.store(in: &settingsCancellables)
+
  // 高级设置观察者
         $enableVerboseLogging.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnableVerboseLogging")
+            self?.applyLoggingRuntimeSettings()
         }.store(in: &settingsCancellables)
-        
+
         $showDebugInfo.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ShowDebugInfo")
         }.store(in: &settingsCancellables)
-        
+
         $saveNetworkLogs.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.SaveNetworkLogs")
+            NetworkActivityLogStore.shared.setEnabled(value)
         }.store(in: &settingsCancellables)
-        
+
         $logLevel.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.LogLevel")
+            self?.applyLoggingRuntimeSettings()
         }.store(in: &settingsCancellables)
-        
+
         $enableHardwareAcceleration.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnableHardwareAcceleration")
+            self?.applyRemotePerformanceSettings(value)
         }.store(in: &settingsCancellables)
-        
+
         $optimizeMemoryUsage.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.OptimizeMemoryUsage")
         }.store(in: &settingsCancellables)
-        
+
         $enableBackgroundScanning.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.BackgroundScanning")
         }.store(in: &settingsCancellables)
-        
+
         $maxConcurrentConnections.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.MaxConcurrentConnections")
         }.store(in: &settingsCancellables)
-        
+
         $enableIPv6Support.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnableIPv6Support")
+            self?.scheduleDiscoveryRuntimeApply(restartIfNeeded: false)
         }.store(in: &settingsCancellables)
-        
+
         $useNewDiscoveryAlgorithm.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.UseNewDiscoveryAlgorithm")
+            self?.scheduleDiscoveryRuntimeApply(restartIfNeeded: true)
         }.store(in: &settingsCancellables)
-        
+
         $enableP2PDirectConnection.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnableP2PDirectConnect")
         }.store(in: &settingsCancellables)
@@ -1310,11 +2559,15 @@ public class SettingsManager: ObservableObject, Sendable {
         $enableHandshakeDiagnostics.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnableHandshakeDiagnostics")
         }.store(in: &settingsCancellables)
-        
-        $enableRealTimeWeather.sink { [weak self] value in
-            self?.userDefaults.set(value, forKey: "Settings.EnableRealTimeWeather")
-        }.store(in: &settingsCancellables)
-        
+
+        $enableRealTimeWeather
+            .dropFirst()
+            .sink { [weak self] value in
+                self?.userDefaults.set(value, forKey: "Settings.EnableRealTimeWeather")
+                self?.applyWeatherRuntimeSetting(value)
+            }
+            .store(in: &settingsCancellables)
+
         $performanceMode.sink { [weak self] value in
             self?.userDefaults.set(value.rawValue, forKey: "Settings.PerformanceMode")
             Task { await SystemOrchestrator.shared.reloadProfile(modeName: value.rawValue) }
@@ -1327,49 +2580,163 @@ public class SettingsManager: ObservableObject, Sendable {
         $showRealtimeFPS.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ShowRealtimeFPS")
         }.store(in: &settingsCancellables)
- // 兼容/更多设备模式与 companion‑link 开关持久化
-        $enableCompatibilityMode.sink { [weak self] value in
-            self?.userDefaults.set(value, forKey: "Settings.EnableCompatibilityMode")
+
+        $showTopBarIPLocation.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.ShowTopBarIPLocation")
         }.store(in: &settingsCancellables)
-        $enableCompanionLink.sink { [weak self] value in
-            self?.userDefaults.set(value, forKey: "Settings.EnableCompanionLink")
+
+        $showTopBarNetworkSpeed.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.ShowTopBarNetworkSpeed")
         }.store(in: &settingsCancellables)
-        
+
+        $showTopBarNetworkLatency.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.ShowTopBarNetworkLatency")
+        }.store(in: &settingsCancellables)
+	 // 兼容/更多设备模式与 companion‑link 开关持久化，并实时驱动 P2P Bonjour 浏览器集合。
+        $enableCompatibilityMode
+            .combineLatest($enableCompanionLink)
+            .removeDuplicates { lhs, rhs in
+                lhs.0 == rhs.0 && lhs.1 == rhs.1
+            }
+            .sink { [weak self] runtime in
+                let compatibilityMode = runtime.0
+                let companionLink = runtime.1
+                self?.userDefaults.set(compatibilityMode, forKey: "Settings.EnableCompatibilityMode")
+                self?.userDefaults.set(companionLink, forKey: "Settings.EnableCompanionLink")
+                Task { @MainActor in
+                    P2PDiscoveryService.shared.applyDiscoverySettings(
+                        compatibilityMode: compatibilityMode,
+                        companionLink: companionLink
+                    )
+                }
+            }
+            .store(in: &settingsCancellables)
+
+        $preferNearestNeighborScaling.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.PreferNearestNeighborScaling")
+        }.store(in: &settingsCancellables)
+
+        // PQC settings persistence
+        $enablePQC.sink { [weak self] value in
+            guard let self else { return }
+            guard value else {
+                self.userDefaults.set(true, forKey: "Settings.EnablePQC")
+                self.enablePQC = true
+                self.clearCryptoProviderCacheForSettingsChange()
+                return
+            }
+            self.userDefaults.set(true, forKey: "Settings.EnablePQC")
+            self.clearCryptoProviderCacheForSettingsChange()
+        }.store(in: &settingsCancellables)
+        setupPQCSignatureAlgorithmObserver()
+        $enablePQCHybridTLS.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.EnablePQCHybridTLS")
+            self?.clearCryptoProviderCacheForSettingsChange()
+        }.store(in: &settingsCancellables)
+        $preferXWingHybrid.dropFirst().sink { [weak self] value in
+            guard let self, !self.applyingPQCModeSnapshot else { return }
+            do {
+                let snapshot = try self.pqcModePolicyStore.setLegacyPreferenceFlag(preferXWing: value)
+                self.strictlyMatchSelectedPQCMode = snapshot.selection.strictlyMatchSelectedMode
+                self.pqcModePolicyError = nil
+                self.clearCryptoProviderCacheForSettingsChange()
+            } catch { self.pqcModePolicyError = error.localizedDescription }
+        }.store(in: &settingsCancellables)
+        $preferQPeriaptBeta.dropFirst().sink { [weak self] value in
+            guard let self, !self.applyingPQCModeSnapshot else { return }
+            do {
+                let snapshot = try self.pqcModePolicyStore.setLegacyPreferenceFlag(preferQ: value)
+                self.strictlyMatchSelectedPQCMode = snapshot.selection.strictlyMatchSelectedMode
+                self.pqcModePolicyError = nil
+                self.qPeriaptEnvironmentPreferenceApplier?(value)
+                self.clearCryptoProviderCacheForSettingsChange()
+                if value { self.scheduleQPeriaptRuntimePreparation() }
+            } catch { self.pqcModePolicyError = error.localizedDescription }
+        }.store(in: &settingsCancellables)
  // 系统监控设置观察者
         $systemMonitorRefreshInterval.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.SystemMonitorRefreshInterval")
         }.store(in: &settingsCancellables)
-        
+
         $enableSystemNotifications.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnableSystemNotifications")
         }.store(in: &settingsCancellables)
-        
+
         $cpuThreshold.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.CPUThreshold")
         }.store(in: &settingsCancellables)
-        
+
         $memoryThreshold.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.MemoryThreshold")
         }.store(in: &settingsCancellables)
-        
+
         $diskThreshold.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.DiskThreshold")
         }.store(in: &settingsCancellables)
-        
+
         $enableAutoRefresh.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnableAutoRefresh")
         }.store(in: &settingsCancellables)
-        
+
         $showTrendIndicators.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ShowTrendIndicators")
         }.store(in: &settingsCancellables)
-        
+
         $enableSoundAlerts.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnableSoundAlerts")
         }.store(in: &settingsCancellables)
-        
+
         $maxHistoryPoints.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.MaxHistoryPoints")
+        }.store(in: &settingsCancellables)
+        $systemMonitorRetentionDays.sink { [weak self] value in
+            self?.userDefaults.set(max(1, value), forKey: "Settings.SystemMonitorRetentionDays")
+        }.store(in: &settingsCancellables)
+        $systemMonitorChartType.sink { [weak self] value in
+            self?.userDefaults.set(value.rawValue, forKey: "Settings.SystemMonitorChartType")
+        }.store(in: &settingsCancellables)
+        $systemMonitorSamplingPrecision.sink { [weak self] value in
+            self?.userDefaults.set(value.rawValue, forKey: "Settings.SystemMonitorSamplingPrecision")
+        }.store(in: &settingsCancellables)
+        $enableRemoteMonitoring.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.EnableRemoteMonitoring")
+        }.store(in: &settingsCancellables)
+
+        $enablePerformanceAlerts.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.EnablePerformanceAlerts")
+        }.store(in: &settingsCancellables)
+        $temperatureThreshold.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.TemperatureThreshold")
+        }.store(in: &settingsCancellables)
+        $enableTemperatureMonitoring.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.EnableTemperatureMonitoring")
+        }.store(in: &settingsCancellables)
+        $enableFanSpeedMonitoring.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.EnableFanSpeedMonitoring")
+        }.store(in: &settingsCancellables)
+        $fanSpeedThreshold.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.FanSpeedThreshold")
+        }.store(in: &settingsCancellables)
+        $enableThermalThrottlingAlert.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.EnableThermalThrottlingAlert")
+        }.store(in: &settingsCancellables)
+        $showMonitorCPU.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.ShowMonitorCPU")
+        }.store(in: &settingsCancellables)
+        $showMonitorMemory.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.ShowMonitorMemory")
+        }.store(in: &settingsCancellables)
+        $showMonitorTemperature.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.ShowMonitorTemperature")
+        }.store(in: &settingsCancellables)
+        $showMonitorFanSpeed.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.ShowMonitorFanSpeed")
+        }.store(in: &settingsCancellables)
+        $showMonitorDisk.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.ShowMonitorDisk")
+        }.store(in: &settingsCancellables)
+        $showMonitorNetwork.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.ShowMonitorNetwork")
         }.store(in: &settingsCancellables)
 
  // 健康提醒阈值观察者
@@ -1420,18 +2787,137 @@ extension UserDefaults {
         }
         return bool(forKey: key)
     }
-    
+
     func integer(forKey key: String, defaultValue: Int) -> Int {
         if object(forKey: key) == nil {
             return defaultValue
         }
         return integer(forKey: key)
     }
-    
+
     func double(forKey key: String, defaultValue: Double) -> Double {
         if object(forKey: key) == nil {
             return defaultValue
         }
         return double(forKey: key)
+    }
+}
+
+// MARK: - Theme color helpers (UserDefaults)
+//
+// The NSColor-based archive is the historical macOS storage format. Other platforms persist the
+// portable `Settings.ThemeColorHex` representation only, so these helpers stay macOS-scoped.
+@available(macOS 14.0, *)
+private extension SettingsManager {
+#if os(macOS)
+    static func archive(color: Color) -> Data? {
+        let ns = NSColor(color)
+        return try? NSKeyedArchiver.archivedData(withRootObject: ns, requiringSecureCoding: false)
+    }
+
+    static func hexRGBA(from color: Color) -> String? {
+        let ns = NSColor(color).usingColorSpace(.sRGB) ?? NSColor(color)
+        guard let rgb = ns.usingColorSpace(.sRGB) else { return nil }
+        let r = Int(round(rgb.redComponent * 255))
+        let g = Int(round(rgb.greenComponent * 255))
+        let b = Int(round(rgb.blueComponent * 255))
+        let a = Int(round(rgb.alphaComponent * 255))
+        return String(format: "#%02X%02X%02X%02X", r, g, b, a)
+    }
+#endif
+
+    /// Portable representation, used by every platform.
+    static func color(fromHexRGBA s: String) -> Color? {
+        var str = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if str.hasPrefix("#") { str.removeFirst() }
+        guard str.count == 8, let v = UInt32(str, radix: 16) else { return nil }
+        let r = Double((v >> 24) & 0xFF) / 255.0
+        let g = Double((v >> 16) & 0xFF) / 255.0
+        let b = Double((v >> 8) & 0xFF) / 255.0
+        let a = Double(v & 0xFF) / 255.0
+        return Color(.sRGB, red: r, green: g, blue: b, opacity: a)
+    }
+}
+
+
+extension SettingsManager {
+    private func applyPQCModeSnapshot(_ snapshot: PQCModePolicySnapshot) {
+        applyingPQCModeSnapshot = true
+        defer { applyingPQCModeSnapshot = false }
+        preferXWingHybrid = snapshot.selection.preference == .xwing
+        preferQPeriaptBeta = snapshot.selection.preference == .qperiapt
+        strictlyMatchSelectedPQCMode = snapshot.selection.strictlyMatchSelectedMode
+        pqcModePolicyError = nil
+    }
+
+    public func setStrictlyMatchSelectedPQCMode(_ enabled: Bool, isBusy: Bool) throws {
+        guard !applyingHandshakeProfile, !isBusy else { throw HandshakeConfigurationError.busy }
+        applyPQCModeSnapshot(try pqcModePolicyStore.setStrictMatch(enabled))
+        clearCryptoProviderCacheForSettingsChange()
+    }
+
+    public func reportPQCModePolicyError(_ error: Error) { pqcModePolicyError = error.localizedDescription }
+
+    public func handshakeConfigurationSnapshot(busy: Bool = false) throws -> HandshakeConfigurationSnapshot {
+        let profile: HandshakeProfile = preferQPeriaptBeta ? .qperiapt : (preferXWingHybrid ? .xwing : .mlkem)
+        let signature = activeProtocolSigningAlgorithm
+        let mode = try pqcModePolicyStore.snapshot()
+        let state = "\(profile.rawValue):\(signature.rawValue):\(mode.selection.strictlyMatchSelectedMode):\(mode.revision.uuidString)"
+        let revision = HandshakeConfigurationWire.revision(for: state, defaults: userDefaults)
+        let capability = CryptoProviderFactory.detectCapability()
+        let qAvailable: Bool
+        if #available(macOS 26.0, *) { qAvailable = signature == .mlDSA65 } else { qAvailable = false }
+        let provider = P2PConnection.makeHandshakeCryptoProvider(policy: .requirePQC)
+        return HandshakeConfigurationSnapshot(revision: revision, configuredProfile: profile,
+            providerSuite: provider.supportsSuite(provider.activeSuite) && provider.activeSuite.isNegotiable ? provider.activeSuite.rawValue : nil, options: [
+                .init(.qperiapt, selectable: qAvailable, reason: qAvailable ? nil : "需要 macOS 26 和 ML-DSA-65 主身份"),
+                .init(.xwing, selectable: CryptoProviderFactory.isAppleXWingAvailable(), reason: CryptoProviderFactory.isAppleXWingAvailable() ? nil : "X-Wing runtime 不可用"),
+                .init(.mlkem, selectable: capability.hasApplePQC || capability.hasLiboqs, reason: nil),
+                .init(.classic, selectable: false, reason: "严格 PQC 策略已禁用 Classic")
+            ], busy: busy || applyingHandshakeProfile)
+    }
+
+    public func applyHandshakeProfile(_ profile: HandshakeProfile, expectedRevision: String,
+                                      isBusy: @MainActor () -> Bool,
+                                      revalidate: HandshakeConfigurationService.Revalidate = {}) async throws -> HandshakeConfigurationSnapshot {
+        guard !applyingHandshakeProfile else { throw HandshakeConfigurationError.busy }
+        let initial = try handshakeConfigurationSnapshot()
+        guard initial.revision == expectedRevision else { throw HandshakeConfigurationError.revisionChanged }
+        guard profile != .classic else { throw HandshakeConfigurationError.classicDisabled }
+        guard initial.options.first(where: { $0.profile == profile })?.selectable == true else {
+            throw HandshakeConfigurationError.profileUnavailable
+        }
+        guard !isBusy() else { throw HandshakeConfigurationError.transferActive }
+        applyingHandshakeProfile = true
+        defer { applyingHandshakeProfile = false }
+        if profile == .qperiapt {
+            let prepared = try await qPeriaptRuntimeSupportPreparer()
+            switch prepared {
+            case .activated, .alreadyActive: qPeriaptRuntimeSupported = true
+            case .unprovisioned: throw HandshakeConfigurationError.profileUnavailable
+            }
+        }
+        try Task.checkCancellation()
+        try await revalidate()
+        guard try handshakeConfigurationSnapshot().revision == expectedRevision else {
+            throw HandshakeConfigurationError.revisionChanged
+        }
+        guard !isBusy() else { throw HandshakeConfigurationError.transferActive }
+        let previous = try pqcModePolicyStore.snapshot()
+        let preference: PQCModeSelection.Preference = profile == .qperiapt ? .qperiapt : (profile == .xwing ? .xwing : .mlkem)
+        applyPQCModeSnapshot(try pqcModePolicyStore.setPreference(preference))
+        clearCryptoProviderCacheForSettingsChange()
+        let result = try handshakeConfigurationSnapshot()
+        guard profile.matches(suite: result.providerSuite) else {
+            applyPQCModeSnapshot(try pqcModePolicyStore.setPreference(previous.selection.preference))
+            clearCryptoProviderCacheForSettingsChange()
+            let restored = try handshakeConfigurationSnapshot()
+            guard initial.configuredProfile == restored.configuredProfile,
+                  initial.providerSuite == restored.providerSuite else { throw HandshakeConfigurationError.rollbackFailed }
+            throw HandshakeConfigurationError.applyFailed
+        }
+        var completed = result
+        completed.busy = isBusy()
+        return completed
     }
 }

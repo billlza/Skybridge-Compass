@@ -185,12 +185,10 @@ final class MessageSizeSnapshotTests: XCTestCase {
     }
 
     private func writeBreakdownCSV(_ rows: [SizeBreakdown]) throws {
-        let artifactsDir = URL(fileURLWithPath: "Artifacts")
+        let artifactsDir = ArtifactDate.writableArtifactsDirectory()
         try FileManager.default.createDirectory(at: artifactsDir, withIntermediateDirectories: true)
 
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy-MM-dd"
-        let dateString = dateFormatter.string(from: Date())
+        let dateString = ArtifactDate.current()
         let csvPath = artifactsDir.appendingPathComponent("message_sizes_\(dateString).csv")
 
         var content = "message,total_bytes,signature_bytes,keyshare_bytes,identity_bytes,overhead_bytes\n"

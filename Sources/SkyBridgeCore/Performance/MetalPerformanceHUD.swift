@@ -9,6 +9,13 @@ import SwiftUI
 @available(macOS 14.0, *)
 @MainActor
 public final class MetalPerformanceHUD: ObservableObject {
+    public static let shared: MetalPerformanceHUD = {
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let hud = try? MetalPerformanceHUD(device: device) else {
+            return MetalPerformanceHUD.fallback()
+        }
+        return hud
+    }()
     
  // MARK: - 发布属性
     
@@ -58,12 +65,20 @@ public final class MetalPerformanceHUD: ObservableObject {
     public static func fallback() -> MetalPerformanceHUD {
         return MetalPerformanceHUD(fallback: ())
     }
+
+    public var isAvailable: Bool {
+        metalDevice != nil && hudRenderer != nil
+    }
     
  // MARK: - 公共方法
     
  /// 启用Performance HUD
     public func enable() {
         guard !isEnabled else { return }
+        guard isAvailable else {
+            logger.warning("Metal Performance HUD 不可用：当前设备或渲染器不支持")
+            return
+        }
         
         isEnabled = true
         self.isVisible = hudConfiguration.autoShow

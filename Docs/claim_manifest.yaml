@@ -1,0 +1,61 @@
+{
+  "claims": [
+    {
+      "id": "CLAIM-D2-DEFAULT-POLICY-GATE",
+      "target": "main",
+      "scope": "Default",
+      "text": "Under default-policy scope, timeout and unknown-suite paths remain non-fallback-eligible; classic fallback remains policy-gated.",
+      "assumptions": [
+        "Threat model excludes compromised endpoints and malicious local root tampering.",
+        "Handshake policy and pinning checks execute before downgrade eligibility decisions."
+      ],
+      "snapshot_id": "primary-2026-01-23",
+      "code_refs": [
+        "Sources/SkyBridgeCore/P2P/TwoAttemptHandshakeManager.swift",
+        "Sources/SkyBridgeCore/P2P/HandshakeDriver.swift"
+      ],
+      "artifact_refs": [
+        "Artifacts/policy_downgrade_2026-01-23.csv",
+        "Artifacts/claim_guardrails_2026-01-23.json"
+      ]
+    },
+    {
+      "id": "CLAIM-SOA-BINDING-CONSISTENCY",
+      "target": "supplementary",
+      "scope": "Default",
+      "text": "SOA arbitration binds to authenticated initiator identifiers and reports supersede as supersededByConcurrentAttempt under alias-mixed discovery identifiers.",
+      "assumptions": [
+        "SOA metadata is covered by authenticated MessageA signatures.",
+        "Pairwise arbitration uses canonical peer identifiers."
+      ],
+      "snapshot_id": "secondary-2026-02-24-boundary",
+      "code_refs": [
+        "Sources/SkyBridgeCore/P2P/PeerSessionArbiter.swift",
+        "Tests/SkyBridgeCoreTests/SOABindingAliasRegressionTests.swift"
+      ],
+      "artifact_refs": [
+        "Artifacts/soa_interop_2026-02-22.csv",
+        "Artifacts/boundary_stress_2026-02-24.csv"
+      ]
+    },
+    {
+      "id": "CLAIM-WIRE-CANONICALIZATION-PASSTHROUGH",
+      "target": "supplementary",
+      "scope": "Compliance",
+      "text": "MessageA decode-reencode preserves canonical bytes and unknown TLV passthrough for transcript binding checks.",
+      "assumptions": [
+        "Canonical field ordering and length prefixes are fixed by wire contract.",
+        "Unknown TLV bytes are treated as opaque payload and not normalized."
+      ],
+      "snapshot_id": "secondary-2026-02-24-boundary",
+      "code_refs": [
+        "Sources/SkyBridgeCore/P2P/HandshakeMessages.swift",
+        "Tests/SkyBridgeCoreTests/WireCanonicalizationTests.swift"
+      ],
+      "artifact_refs": [
+        "Artifacts/boundary_stress_2026-02-24.csv",
+        "Scripts/check_wire_canonicalization.sh"
+      ]
+    }
+  ]
+}

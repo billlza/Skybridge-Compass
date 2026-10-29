@@ -1,0 +1,695 @@
+//
+// DeviceRowView.swift
+// SkyBridgeCompassiOS
+//
+// 设备行视图组件 - 显示单个发现的设备
+//
+
+import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
+
+/// 设备行视图
+@available(iOS 17.0, *)
+public struct DeviceRowView: View {
+    let device: DiscoveredDevice
+    let connectionStatus: ConnectionStatus?
+    let connectionStatusText: String?
+    let onTap: () -> Void
+    
+    public init(
+        device: DiscoveredDevice,
+        connectionStatus: ConnectionStatus? = nil,
+        connectionStatusText: String? = nil,
+        onTap: @escaping () -> Void
+    ) {
+        self.device = device
+        self.connectionStatus = connectionStatus
+        self.connectionStatusText = connectionStatusText
+        self.onTap = onTap
+    }
+    
+    public var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 14) {
+                // 设备图标
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [platformColor.opacity(0.3), platformColor.opacity(0.1)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 44, height: 44)
+                    
+                    Image(systemName: platformIcon)
+                        .font(.system(size: 18))
+                        .foregroundColor(platformColor)
+                }
+                
+                // 设备信息
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(device.name)
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                            .foregroundStyle(.primary)
+
+                        if let status = connectionStatus {
+                            Text(connectionStatusText ?? status.displayName)
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundColor(connectionStatusColor(status))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(connectionStatusColor(status).opacity(0.18))
+                                .clipShape(Capsule())
+                        }
+                        
+                        // PQC 徽章
+                        if device.capabilities.contains("pqc") {
+                            PQCCapabilityBadge()
+                        }
+                    }
+                    
+                    HStack(spacing: 8) {
+                        // 平台
+                        Text(device.platform.displayName)
+                            .font(.caption)
+                            .foregroundColor(LiquidGlass.supportingText)
+                        
+                        // IP 地址
+                        if let ip = device.ipAddress {
+                            Text("•")
+                                .foregroundColor(LiquidGlass.supportingText)
+                            Text(ip)
+                                .font(.caption)
+                                .foregroundColor(LiquidGlass.supportingText)
+                        }
+                    }
+
+                    // 能力徽章（端口来自 TXT/合并结果；如果未知就不显示端口）
+                    HStack(spacing: 6) {
+                        if device.supportsFileTransfer {
+                            CapabilityBadge(
+                                icon: "folder",
+                                title: "文件",
+                                port: device.fileTransferPort
+                            )
+                        }
+                        if device.supportsRemoteControl {
+                            CapabilityBadge(
+                                icon: "display",
+                                title: "远控",
+                                port: device.remoteControlPort
+                            )
+                        }
+                    }
+                }
+                
+                Spacer()
+                
+                // 信号强度
+                SignalStrengthView(strength: device.signalStrength)
+                
+                // 箭头
+                Image(systemName: "chevron.right")
+                    .font(.caption)
+                    .foregroundColor(LiquidGlass.supportingText)
+            }
+            .padding(.vertical, 10)
+            .padding(.horizontal, 12)
+            .liquidGlassCard(cornerRadius: 16, padding: 0)
+        }
+        .buttonStyle(PlainButtonStyle())
+    }
+    
+    // MARK: - Computed Properties
+    
+    private var platformIcon: String {
+        switch device.platform {
+        case .macOS: return "desktopcomputer"
+        case .iOS: return "iphone"
+        case .iPadOS: return "ipad"
+        case .android: return "smartphone"
+        case .windows: return "pc"
+        case .linux: return "server.rack"
+        case .unknown: return "questionmark.circle"
+        }
+    }
+    
+    private var platformColor: Color {
+        switch device.platform {
+        case .macOS: return .blue
+        case .iOS: return .cyan
+        case .iPadOS: return .purple
+        case .android: return .green
+        case .windows: return .blue
+        case .linux: return .orange
+        case .unknown: return .gray
+        }
+    }
+
+    private func connectionStatusColor(_ status: ConnectionStatus) -> Color {
+        switch status {
+        case .connected:
+            return .green
+        case .connecting, .disconnecting:
+            return .orange
+        case .failed, .error:
+            return .red
+        case .disconnected:
+            return .gray
+        }
+    }
+}
+
+// MARK: - Signal Strength View
+
+/// 信号强度视图
+@available(iOS 17.0, *)
+struct SignalStrengthView: View {
+    let strength: Int
+    
+    var body: some View {
+        Group {
+            if normalized <= 0.02 {
+                Image(systemName: "wifi.slash")
+            } else {
+                Image(systemName: "wifi", variableValue: normalized)
+            }
+        }
+        .symbolRenderingMode(.hierarchical)
+        .foregroundStyle(LiquidGlass.supportingText)
+        .font(.system(size: 14, weight: .medium))
+        .frame(width: 20, alignment: .trailing)
+    }
+
+    /// 将 RSSI（dBm，通常为负数）映射到 [0,1]，用于可变 SF Symbol
+    private var normalized: Double {
+        // 经验阈值：-90 较弱，-30 很强
+        let minRSSI = -90.0
+        let maxRSSI = -30.0
+        let value = Double(strength)
+        let clamped = min(max(value, minRSSI), maxRSSI)
+        return (clamped - minRSSI) / (maxRSSI - minRSSI)
+    }
+}
+
+// MARK: - PQC Badge
+
+/// PQC 候选能力徽章
+@available(iOS 17.0, *)
+struct PQCCapabilityBadge: View {
+    var body: some View {
+        HStack(spacing: 2) {
+            Image(systemName: "lock.shield.fill")
+                .font(.system(size: 8))
+            Text("PQC候选")
+                .font(.system(size: 8, weight: .bold))
+        }
+        .foregroundColor(.green)
+        .padding(.horizontal, 4)
+        .padding(.vertical, 2)
+        .background(Color.green.opacity(0.2))
+        .clipShape(Capsule())
+        .accessibilityLabel("PQC 候选能力；不是当前连接证明")
+    }
+}
+
+// MARK: - Capability Badge
+
+@available(iOS 17.0, *)
+private struct CapabilityBadge: View {
+    let icon: String
+    let title: String
+    let port: UInt16?
+
+    var body: some View {
+        let localizedTitle = RuntimeLocalization.string(title)
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 9))
+            if let port {
+                Text("\(localizedTitle):\(port)")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+            } else {
+                Text(localizedTitle)
+                    .font(.system(size: 9, weight: .semibold))
+            }
+        }
+        .foregroundColor(.cyan)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(Color.cyan.opacity(0.15))
+        .clipShape(Capsule())
+    }
+}
+
+// MARK: - Empty Devices View
+
+/// 空设备列表视图
+@available(iOS 17.0, *)
+struct EmptyDevicesView: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 40))
+                .foregroundColor(LiquidGlass.supportingText)
+            
+            Text("未发现设备")
+                .font(.subheadline)
+                .foregroundColor(LiquidGlass.supportingText)
+            
+            Text("确保设备在同一网络下")
+                .font(.caption)
+                .foregroundColor(.secondary.opacity(0.7))
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 30)
+    }
+}
+
+// MARK: - Connection Row View
+
+/// 连接行视图
+@available(iOS 17.0, *)
+struct ConnectionRowView: View {
+    let connection: Connection
+    let statusText: String?
+    let onDisconnect: () -> Void
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            // 设备图标
+            ZStack {
+                Circle()
+                    .fill(Color.green.opacity(0.2))
+                    .frame(width: 40, height: 40)
+                
+                Image(systemName: deviceIcon)
+                    .font(.system(size: 16))
+                    .foregroundColor(.green)
+            }
+            
+            // 连接信息
+            VStack(alignment: .leading, spacing: 4) {
+                Text(connection.device.name)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                    .foregroundStyle(.primary)
+                
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(statusColor)
+                        .frame(width: 6, height: 6)
+                    Text(statusText ?? connection.status.displayName)
+                        .font(.caption)
+                        .foregroundColor(LiquidGlass.supportingText)
+                }
+            }
+            
+            Spacer()
+            
+            // 断开按钮
+            Button(action: onDisconnect) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.title3)
+                    .foregroundColor(.red.opacity(0.8))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(LinearGradient(colors: [.green.opacity(0.4), .clear, .green.opacity(0.1)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
+        )
+    }
+    
+    private var deviceIcon: String {
+        switch connection.device.platform {
+        case .macOS: return "desktopcomputer"
+        case .iOS: return "iphone"
+        case .iPadOS: return "ipad"
+        default: return "laptop"
+        }
+    }
+    
+    private var statusColor: Color {
+        switch connection.status {
+        case .connected: return .green
+        case .connecting: return .orange
+        case .disconnecting: return .yellow
+        case .disconnected: return .gray
+        case .failed: return .red
+        case .error: return .red
+        }
+    }
+}
+
+// MARK: - Device Detail Sheet
+
+/// The payload and presentation lifetime are one state value, so the first
+/// presentation cannot capture an empty target from an independent boolean.
+struct DeviceAudioPlaybackPresentation: Identifiable {
+    let id = UUID()
+    let target: IOSAudioPlaybackTarget
+}
+
+enum DeviceDetailSessionIdentity {
+    static func matches(deviceID: String, sessionDeviceID: String?) -> Bool {
+        guard let selected = PeerIdentityAliasResolver.persistentDeviceId(from: deviceID),
+              let current = PeerIdentityAliasResolver.persistentDeviceId(from: sessionDeviceID) else { return false }
+        return selected == current
+    }
+}
+
+/// 设备详情弹窗
+@available(iOS 17.0, *)
+struct DeviceDetailSheet: View {
+    let device: DiscoveredDevice
+    
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var connectionManager: P2PConnectionManager
+    @StateObject private var crossNetworkManager = CrossNetworkWebRTCManager.instance
+    @StateObject private var remoteDesktopManager = RemoteDesktopManager.instance
+    @State private var isConnecting = false
+    @State private var connectError: String?
+    @State private var showPQCVerification: Bool = false
+    @State private var showMessaging: Bool = false
+    @State private var audioPresentation: DeviceAudioPlaybackPresentation?
+    
+    var body: some View {
+        NavigationStack {
+            List {
+                // 操作
+                Section {
+                    if let target = connectionManager.audioPlaybackTarget(for: device.id, name: device.name) {
+                        Button {
+                            audioPresentation = .init(target: target)
+                        } label: {
+                            Label(RuntimeLocalization.string("在电脑上播放音频"), systemImage: "hifispeaker")
+                        }
+                    } else if let active = connectionManager.audioPlayback.target, active.deviceID == device.id {
+                        Button(RuntimeLocalization.string("查看音频播放")) { audioPresentation = .init(target: active) }
+                    }
+                    if device.isTrusted {
+                        HStack(spacing: 10) {
+                            Image(systemName: trustSymbolName)
+                                .foregroundStyle(.green)
+                            Text(RuntimeLocalization.string("已受信任（PQC 引导）"))
+                                .foregroundStyle(LiquidGlass.supportingText)
+                        }
+                        Button {
+                            showMessaging = true
+                        } label: {
+                            HStack {
+                                Image(systemName: "bubble.left.and.bubble.right")
+                                Text(RuntimeLocalization.string("发送消息"))
+                            }
+                        }
+                    } else {
+                        Button {
+                            showPQCVerification = true
+                        } label: {
+                            HStack {
+                                Image(systemName: "lock.shield")
+                                Text(RuntimeLocalization.string("PQC 身份验证（输入验证码）"))
+                            }
+                        }
+                    }
+                    if effectiveConnectionStatus == .connected || isCrossNetworkConnectedDevice {
+                        Button(role: .destructive) {
+                            disconnect()
+                        } label: {
+                            HStack {
+                                Image(systemName: disconnectSymbolName)
+                                Text(RuntimeLocalization.string("断开连接"))
+                            }
+                        }
+                    } else {
+                        Button {
+                            connect()
+                        } label: {
+                            HStack {
+                                if isConnecting {
+                                    ProgressView()
+                                        .progressViewStyle(CircularProgressViewStyle())
+                                } else {
+                                    Image(systemName: "link")
+                                }
+                                Text(isConnecting ? RuntimeLocalization.string("连接中...") : RuntimeLocalization.string("连接设备"))
+                            }
+                        }
+                        .disabled(isConnecting || effectiveConnectionStatus == .connecting)
+                    }
+                }
+                // 设备信息
+                Section(RuntimeLocalization.string("设备信息")) {
+                    LabeledContent(RuntimeLocalization.string("名称"), value: device.name)
+                    LabeledContent(RuntimeLocalization.string("平台"), value: device.platform.displayName)
+                    LabeledContent(RuntimeLocalization.string("系统版本"), value: device.osVersion)
+                    LabeledContent(
+                        RuntimeLocalization.string("连接状态"),
+                        value: effectiveConnectionStatusText ?? RuntimeLocalization.string("未连接")
+                    )
+                    if let ip = device.ipAddress {
+                        LabeledContent(RuntimeLocalization.string("IP 地址"), value: ip)
+                    }
+                    if let err = connectionManager.resolvedConnectionError(for: device), !err.isEmpty {
+                        LabeledContent(RuntimeLocalization.string("断开原因"), value: err)
+                    }
+                }
+                
+                // 功能
+                Section {
+                    DisclosureGroup(RuntimeLocalization.string("设备能力（高级）")) {
+                        ForEach(device.capabilities, id: \.self) { capability in
+                            HStack {
+                                Image(systemName: capabilityIcon(capability))
+                                    .foregroundColor(.cyan)
+                                Text(capabilityName(capability))
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle(device.name)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(RuntimeLocalization.string("关闭")) {
+                        dismiss()
+                    }
+                }
+            }
+            .alert(
+                RuntimeLocalization.string("连接失败"),
+                isPresented: Binding(
+                    get: { connectError != nil },
+                    set: { presenting in
+                        if !presenting { connectError = nil }
+                    }
+                )
+            ) {
+                Button(RuntimeLocalization.string("好的")) { connectError = nil }
+            } message: {
+                Text(connectError ?? "")
+            }
+            .sheet(isPresented: $showPQCVerification) {
+                PQCVerificationView(device: device)
+            }
+            .sheet(isPresented: $showMessaging) {
+                DeviceMessagingView(device: device)
+            }
+            .sheet(item: $audioPresentation) { presentation in
+                DeviceAudioPlaybackView(target: presentation.target, service: connectionManager.audioPlayback,
+                    openChannel: { try connectionManager.openAudioChannel(for: presentation.target.deviceID,
+                        requiringRemoteProtocolFingerprint: presentation.target.identity.fingerprint) })
+            }
+        }
+    }
+    
+    private var disconnectSymbolName: String {
+        #if canImport(UIKit)
+        // Some SF Symbols are OS-version dependent; avoid runtime spam on older system symbol sets.
+        for name in ["link.badge.minus", "link.slash", "xmark.circle", "xmark"] {
+            if UIImage(systemName: name) != nil { return name }
+        }
+        #endif
+        return "xmark"
+    }
+    
+    private var trustSymbolName: String {
+        #if canImport(UIKit)
+        for name in ["checkmark.shield", "checkmark.seal", "checkmark.circle", "checkmark"] {
+            if UIImage(systemName: name) != nil { return name }
+        }
+        #endif
+        return "checkmark"
+    }
+
+    private var effectiveConnectionStatus: ConnectionStatus? {
+        if let p2pStatus = connectionManager.resolvedConnectionStatus(for: device) {
+            return p2pStatus
+        }
+        guard let snapshot = activeCrossNetworkSnapshot else { return nil }
+        switch snapshot.phase {
+        case .transportReady:
+            return .connecting
+        case .handshakeComplete:
+            return .connected
+        case .reconnecting:
+            return .connecting
+        case .connecting, .disconnecting:
+            return .disconnecting
+        }
+    }
+
+    private var activeCrossNetworkSnapshot: ActiveSessionSnapshot? {
+        guard let snapshot = crossNetworkManager.activeSessionSnapshot,
+              DeviceDetailSessionIdentity.matches(deviceID: device.id, sessionDeviceID: snapshot.deviceId) else { return nil }
+        switch snapshot.phase {
+        case .transportReady, .handshakeComplete, .reconnecting:
+            return snapshot
+        case .connecting, .disconnecting:
+            return nil
+        }
+    }
+
+    private var isCrossNetworkConnectedDevice: Bool {
+        activeCrossNetworkSnapshot != nil
+    }
+
+    private var effectiveConnectionStatusText: String? {
+        guard let status = effectiveConnectionStatus else { return nil }
+        let rekey = connectionManager.resolvedRekeyStatus(for: device)
+        let crossNetworkSuite =
+            activeCrossNetworkSnapshot?.phase == .handshakeComplete ? activeCrossNetworkSnapshot?.negotiatedSuite : nil
+        let suite = rekey == nil
+            ? (connectionManager.getNegotiatedSuite(for: device.id)?.rawValue ?? crossNetworkSuite)
+            : nil
+        let kind = rekey.map { "\($0.fromSuite) → \($0.toSuite)" }
+        return ConnectionPresentationContract.modeAwareStatusText(
+            baseText: status.displayName,
+            kind: kind,
+            suite: suite,
+            defaultPQCModeLabel: nil
+        )
+    }
+
+    private var isCrossNetworkRemoteDesktopActiveForDevice: Bool {
+        guard let current = remoteDesktopManager.currentConnection?.device else { return false }
+        return DeviceDetailSessionIdentity.matches(deviceID: device.id, sessionDeviceID: current.id)
+    }
+
+    private func connect() {
+        isConnecting = true
+        Task {
+            do {
+                try await P2PConnectionManager.instance.connect(to: device)
+                isConnecting = false
+                dismiss()
+            } catch {
+                isConnecting = false
+                connectError = connectionManager.resolvedConnectionError(for: device)
+                    ?? P2PConnectionManager.localizedConnectionErrorMessage(error)
+            }
+        }
+    }
+
+    private func disconnect() {
+        Task { @MainActor in
+            var didDisconnect = false
+            if isCrossNetworkConnectedDevice {
+                if isCrossNetworkRemoteDesktopActiveForDevice {
+                    await remoteDesktopManager.disconnect(tearDownTransport: true)
+                } else {
+                    await crossNetworkManager.disconnect()
+                }
+                didDisconnect = true
+            }
+            if connectionManager.resolvedConnectionStatus(for: device) != nil {
+                didDisconnect = await P2PConnectionManager.instance.disconnect(from: device) || didDisconnect
+            }
+
+            let stillConnected = isCrossNetworkConnectedDevice
+                || connectionManager.resolvedConnectionStatus(for: device) == .connected
+                || connectionManager.resolvedConnectionStatus(for: device) == .connecting
+                || connectionManager.resolvedConnectionStatus(for: device) == .disconnecting
+
+            if !stillConnected {
+                dismiss()
+            } else {
+                connectError = RuntimeLocalization.string("disconnect.failed")
+            }
+        }
+    }
+
+    private func capabilityIcon(_ capability: String) -> String {
+        switch capability {
+        case "remote_desktop", "remote_desktop_viewer": return "display"
+        case "file_transfer": return "folder"
+        case "clipboard_sync": return "doc.on.clipboard"
+        case "screen_sharing", "screen_sharing_viewer": return "rectangle.on.rectangle"
+        case "touch_input": return "hand.tap"
+        case "pqc": return "lock.shield"
+        default: return "questionmark.circle"
+        }
+    }
+    
+    private func capabilityName(_ capability: String) -> String {
+        switch capability {
+        case "remote_desktop", "remote_desktop_viewer": return RuntimeLocalization.string("远程桌面")
+        case "file_transfer": return RuntimeLocalization.string("文件传输")
+        case "clipboard_sync": return RuntimeLocalization.string("剪贴板同步")
+        case "screen_sharing", "screen_sharing_viewer": return RuntimeLocalization.string("屏幕共享")
+        case "touch_input": return RuntimeLocalization.string("触控输入")
+        case "pqc": return RuntimeLocalization.string("量子安全")
+        default: return capability
+        }
+    }
+}
+
+// MARK: - Preview
+#if DEBUG
+@available(iOS 17.0, *)
+struct DeviceRowView_Previews: PreviewProvider {
+    static var previews: some View {
+        VStack {
+            DeviceRowView(
+                device: DiscoveredDevice(
+                    id: "test",
+                    name: "MacBook Pro",
+                    modelName: "MacBookPro18,3",
+                    platform: .macOS,
+                    osVersion: "15.0",
+                    ipAddress: "192.168.1.100",
+                    signalStrength: -45,
+                    lastSeen: Date()
+                )
+            ) {}
+            
+            DeviceRowView(
+                device: DiscoveredDevice(
+                    id: "test2",
+                    name: "iPhone 15 Pro",
+                    modelName: "iPhone15,3",
+                    platform: .iOS,
+                    osVersion: "18.0",
+                    ipAddress: "192.168.1.101",
+                    signalStrength: -65,
+                    lastSeen: Date()
+                )
+            ) {}
+        }
+        .padding()
+        .background(Color.black)
+    }
+}
+#endif

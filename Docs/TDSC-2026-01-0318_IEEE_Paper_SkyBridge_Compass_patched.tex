@@ -43,6 +43,8 @@
     pdfkeywords={},
     pdfsubject={}
 }
+\hbadness=10000
+\vbadness=10000
 \usepackage{xr}
 % Allow main paper to reference Supplementary Table/Figure numbers via \ref{}.
 % Build TDSC supplementary once so TDSC supplementary .aux exists.
@@ -132,19 +134,20 @@
 
 \newcommand{\artifacturl}{https://github.com/billlza/Skybridge-Compass}
 \newcommand{\artifacturlshort}{https://github.com/billlza/Skybridge-Compass}
-\newcommand{\artifacttag}{tdsc-2026-01-0318-ios-sim-fix-\allowbreak\hspace{0pt}20260211}
-\newcommand{\artifactsha}{b16fe9386ff0}
-\newcommand{\artifactshafull}{b16fe9386ff047d17ba9a518b2c331f64493971e}
+\newcommand{\artifacttag}{6576e954a5bb}
+\newcommand{\artifactsha}{6576e954a5bb}
+\newcommand{\artifactshafull}{6576e954a5bb7b9c42a367ba43f086d383e5f495}
 \newcommand{\artifactzipurl}{\artifacturl/archive/\artifactshafull.zip}
-\newcommand{\artifactzipsha}{460813da\allowbreak\hspace{0pt}9ade5b79\allowbreak\hspace{0pt}b333c94a\allowbreak\hspace{0pt}1b76e14e\allowbreak\hspace{0pt}6b522f63\allowbreak\hspace{0pt}0be1a6f0\allowbreak\hspace{0pt}decb9845\allowbreak\hspace{0pt}def3f258}
+\newcommand{\artifactzipsha}{8b568316\allowbreak{}81518171\allowbreak{}af846691\allowbreak{}0bd8893a\allowbreak{}88312936\allowbreak{}26241f7a\allowbreak{}416b2522\allowbreak{}afe4ef42}
 \newcommand{\artifacttarurl}{\artifacturl/archive/\artifactshafull.tar.gz}
-\newcommand{\artifacttarsha}{443b8ac9\allowbreak\hspace{0pt}0ffe42f7\allowbreak\hspace{0pt}57d65f1d\allowbreak\hspace{0pt}79cd3d18\allowbreak\hspace{0pt}3b7d7ce5\allowbreak\hspace{0pt}02dd8bcd\allowbreak\hspace{0pt}31cdb016\allowbreak\hspace{0pt}1016f380}
+\newcommand{\artifacttarsha}{fe6088e4\allowbreak{}6a9da610\allowbreak{}3ad6d1d5\allowbreak{}8aebb654\allowbreak{}3cbb1a0c\allowbreak{}5370232b\allowbreak{}53a6e246\allowbreak{}87fa3b33}
 \newcommand{\artifactdate}{2026-01-23}
-\newcommand{\artifactdateXWing}{2026-01-16}
+\newcommand{\artifactdateXWing}{2026-01-23}
 \newcommand{\artifactdateSystemImpact}{2026-01-23}
 \newcommand{\artifactcsv}[1]{\texttt{#1\_\artifactdate.csv}}
 \newcommand{\artifactpath}[1]{\texttt{Artifacts/#1\_\artifactdate.csv}}
 \newcommand{\implref}[2]{Implementation reference: \href{\artifacturl}{\artifacturlshort} (ref=\texttt{\artifacttag}, commit=\texttt{\artifactsha}), file: \texttt{#1}, lines: #2.}
+\input{generated/claims_macros}
 
 
 \title{SkyBridge Compass: A Crypto-Agile P2P Handshake Framework for Remote Desktop and File Transfer with Auditable Downgrade Policy and Post-Quantum Readiness}
@@ -158,33 +161,36 @@
 
 \IEEEtitleabstractindextext{%
 \begin{abstract}
-Peer-to-peer remote desktop and file transfer
-systems increasingly operate across heterogeneous devices, untrusted
-networks, and long lifecycles in which cryptographic assumptions may
-expire faster than products. Yet ``post-quantum readiness'' is often
-treated as a one-off algorithm swap rather than a migration problem with
-downgrade resistance, auditability, and reproducibility requirements.
-This paper presents SkyBridge Compass, a crypto-agile P2P system that
-explicitly separates (i) negotiated cryptographic suites, (ii)
-provider backends, and (iii) a policy layer that governs when (and
-whether) classic fallback is permissible. We use an actor-isolated
-handshake state machine with deterministic outcomes and structured
-security-event emission, enabling \mbox{end-to-end} audit trails for
-downgrade, identity mismatch, and signature verification failures. We
-evaluate three configurations on macOS 26.x as a deployment instance:
-classic (X25519 + Ed25519), PQC via liboqs (ML-KEM-768 + ML-DSA-65), and
-PQC via native CryptoKit (ML-KEM-768 + ML-DSA-65). We do not claim
-perfect forward secrecy for the KEM-based PQC suites in v1; post-quantum
-confidentiality holds only while long-term KEM private keys remain
-uncompromised. \mbox{End-to-end}
-handshake completion latency (including event emission overhead) is
-1.89 ms (p95 2.18 ms) for classic, 3.47 ms (p95 4.18 ms) for liboqs PQC,
-and 5.20 ms (p95 6.16 ms) for CryptoKit PQC over N=1000 iterations.
-The handshake wire size (MessageA + MessageB + 2$\times$Finished) grows
-from 687 B (classic) to 12,002 B (PQC). Beyond
-performance, we validate downgrade policies, failure semantics, and
-audit-signal fidelity under fault injection, and we release scripts and
-artifacts that reproduce all primary figures and tables.
+Peer-to-peer remote desktop and file-transfer systems run across
+heterogeneous devices, untrusted networks, and multi-year lifecycles in
+which cryptographic assumptions can expire faster than products. Yet
+``post-quantum readiness'' is usually treated as a one-off algorithm
+swap rather than a migration problem with downgrade resistance,
+auditability, and reproducibility requirements. We present an
+\emph{auditable crypto-agile migration contract} for authenticated P2P
+key exchange. The contract separates negotiated suites, provider
+backends, and a policy layer; restricts any classic fallback to a
+local-only, pre-send, rate-limited path so that timeout and
+network-derived failures can never trigger a downgrade; and emits a
+minimal, replayable evidence tuple for every downgrade decision. We
+formalize the contract and \emph{machine-check} it: a Dolev-Yao Tamarin
+model with an active attacker and long-term and KEM key compromise
+proves session-key secrecy, injective entity authentication, negotiation
+integrity, downgrade resistance, weak forward secrecy for v1, and
+genuine forward secrecy for the v2 hybrid suite (surviving long-term-key
+compromise). All 13 lemmas verify with no falsifications. The contract
+is realized as a portable, provider-agnostic core (a Rust
+implementation with C-ABI and UniFFI bindings) deployed on macOS and
+iOS, directly answering the ``generalize beyond Apple'' concern at the
+mechanism level. On macOS, end-to-end handshake latency is
+\claimClassicMeanMs~ms (classic), \claimLiboqsMeanMs~ms (ML-KEM-768
++ ML-DSA-65), and \claimLiboqsVTwoMeanMs~ms (v2 hybrid forward secrecy),
+with payloads of \claimClassicPayloadBytes--\claimLiboqsVTwoPayloadBytes~B
+($N=1000$ each). Because the handshake runs once per long remote-desktop
+session or large transfer, this cost amortizes to a negligible fraction
+of session time. Reported latencies are deployment-instance
+measurements; we claim mechanism-level portability, not cross-platform
+performance parity.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -199,123 +205,181 @@ post-quantum cryptography, crypto agility, downgrade resistance, secure handshak
 \noindent Peer-to-peer (P2P) remote desktop and file transfer systems must
 establish secure sessions under adversarial network conditions, device
 churn, and multi-year lifecycles. These systems face a practical
-tension: users demand ``it just works'' pairing across heterogeneous
-stacks, while defenders require that cryptographic negotiation remains
+tension: users expect seamless pairing across heterogeneous stacks,
+while defenders require that cryptographic negotiation remains
 robust against downgrade and \mbox{implementation-level} failure modes.
 Post-quantum cryptography (PQC) increases this tension. Larger messages,
 higher computational cost, and uneven platform support make fallback
 tempting---yet fallback is exactly where silent downgrade and
 unverifiable behavior tend to hide.
 
+The technical contribution of this paper is a \emph{generic,
+crypto-agile P2P authenticated key exchange (AKE) and migration
+contract}; this is why we compare against generic secure-channel
+baselines (TLS~1.3, QUIC, DTLS, Noise) throughout. Remote desktop and
+file transfer are the \emph{deployment} that motivates the contract's
+constraints rather than a restriction of its scope: both run one
+handshake per long-lived session or large transfer, so an implementer
+can afford a deterministic, auditable, downgrade-resistant negotiation
+whose one-time cost amortizes over the session
+(Section~\ref{sec:system-impact}).
+
 Existing secure-channel designs and frameworks provide mature
 cryptographic building blocks, but they do not, by default, solve the
 migration problem an implementer actually faces: (i) selecting among
-classic/PQC/hybrid suites across platform strata, (ii) ensuring that
+classic/PQC/hybrid suites across provider/suite strata in heterogeneous
+runtimes, (ii) ensuring that
 policy (e.g., ``require PQC'') is enforced at the entry points where
 callers cannot accidentally violate it, (iii) targeting deterministic
 failure semantics under timeouts, reorder/duplication, and malformed
 inputs, and (iv) emitting security-relevant telemetry that can be
-audited without turning the system into a logging minefield. In
+audited without relying on ad hoc or excessive logging. In
 practice, many systems either hard-code a single suite, or allow
 ``compatibility'' to creep into negotiation in ways that are hard to
 reason about and harder to verify.
+For this paper, ``locally generated'' fallback causes are narrowly scoped:
+pre-send capability/provider instantiation failures for already paired
+peers (pinned trust record); timeout and unauthenticated network-derived
+failures are never fallback-eligible.
 
-This paper addresses these gaps with SkyBridge Compass, a crypto-agile
-P2P system designed for explicit PQC migration and auditability, with
-Apple platforms as a deployment instance. The core idea is to treat
-crypto agility as a layered
+To make the migration gap explicit in reviewer-visible form,
+Table~\ref{tab:intro-migration-gap} maps the four requirements above to
+what widely deployed handshakes provide by default versus what this work
+adds as a system-level contract.
+
+\begin{table}[!t]
+\centering
+\scriptsize
+\caption{Migration requirements and default baseline coverage in Introduction scope.}
+\label{tab:intro-migration-gap}
+\begingroup
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{@{}p{0.16\linewidth}p{0.39\linewidth}p{0.39\linewidth}@{}}
+\toprule
+Req. & Widely deployed defaults (TLS/QUIC/DTLS/Noise) & SkyBridge contract in this paper \\
+\midrule
+(i) Suite/provider migration & Protocol negotiation primitives exist (Noise patterns may be fixed), but runtime provider migration policy is mostly external to the protocol & Explicit separation of suite stratum and provider-backend stratum with capability-ordered selection \\
+(ii) Policy non-bypass at entry points & Typically enforced in caller glue; policy/suite mismatch handling is implementation-specific & Policy-bound handshake sessions plus compile-fail harness + runtime precondition checks (Supplementary, Regression Testing) \\
+(iii) Deterministic fault semantics & Alert/pattern outcomes exist, but fallback semantics are often application-defined & Actor-isolated one-shot state machine with timeout-blocked fallback and deterministic terminal templates \\
+(iv) Auditable security telemetry & Downgrade prevention exists, but event schema and evidence sufficiency are externalized & D3 minimal evidence set + typed events + transcript-anchored in-session hash chain \\
+\bottomrule
+\end{tabular}
+\endgroup
+\end{table}
+
+This paper addresses these gaps with an auditable migration contract,
+instantiated in SkyBridge Compass, for staged PQC migration and
+downgrade-auditable negotiation, with Apple platforms as a deployment
+instance.
+
+\textbf{Distinction from protocol-plus-policy wrappers:} In widely
+deployed stacks, the causes and semantics of retry/fallback are
+typically pushed into application glue, making downgrade decisions hard
+to specify, prove, or audit post hoc. Our contract makes migration
+semantics part of the security surface: (D2) timeout and other
+network-derived failures are never fallback-eligible, so an active
+adversary, under this default-policy gate and threat model, cannot
+create a classic downgrade edge by suppression; (D3)
+any policy-allowed downgrade action emits a minimal replayable evidence
+tuple sufficient to re-derive ``what happened and why'' under the pinned
+trust record and policy mode. The policy-bound, deterministic state
+machine ensures evidence corresponds to the actual decision path and is
+validated under fault injection and timeout suppression
+(Table~\ref{tab:migration-threat-harness}).
+
+The core
+idea is to treat crypto agility as a layered
 contract: negotiated suites define the protocol surface; provider
 backends implement suites using platform-native or portable
 cryptography; and a policy layer governs fallback and produces
-structured evidence when (and only when) downgrade occurs. We complement
+downgrade-specific structured evidence only when fallback action is
+taken (other exceptional states emit typed events but are not labeled
+as downgrade). Concretely, policy consumes peer-auth result, local
+capability/provider errors, offered suites, and timer/attempt state, and
+outputs allowed suites, retry plan, and mandatory event set. We
+complement
 this design with an actor-isolated handshake driver that enforces
 one-shot completion, timeouts, and sensitive-material zeroization,
 yielding deterministic outcomes under the modeled transport faults.
+The portability claim here is mechanism-level portability of the
+migration contract (provider/suite separation, policy semantics, and
+verification workflow) across heterogeneous stacks, not cross-platform
+latency parity.
 Operationally, the strict policy now has two explicit realizations:
 \emph{Compliance Mode} (no classic path at all) and
 \emph{Bootstrap-Assisted Mode} (one-time classic control channel only to
 refresh paired KEM identity keys, followed by mandatory PQC rekey before
-business traffic is released).
+business traffic is released; control messages are type-restricted to
+KEM-refresh, and business message types are rejected before key
+release).
+We separate mechanism-level claims (policy-gated downgrade behavior,
+deterministic failure semantics, and auditability) from deployment-level
+claims (absolute latency/throughput), and evaluate each layer with
+corresponding evidence.
 
-\textbf{Verifiable Security Guarantees.}
-To reduce ambiguity in reviewer-facing claims, we state the v1 guarantees
-as a small set of \emph{verifiable} properties under the threat model in
-Section~\ref{sec:security-model}; the Supplementary Materials provide
-additional guarantees and artifact-level evidence pointers.
-{\small
-\begin{itemize}\tightlist
-\item \textbf{Negotiation integrity:} the Responder selects only a suite
-  offered by the Initiator and with a matching key share; unknown suite
-  IDs are rejected if they appear in \nbcode{keyShares[]} or as
-  \texttt{selectedSuite}. \textit{Evidence:} Fig.~\ref{fig:handshake-sequence};
-  Table~\ref{tab:security-contract}.
-\item \textbf{Transcript binding:} \texttt{sigB} commits to MessageA and
-  the chosen suite (and policy), so any tampering of
-  \nbcode{supportedSuites[]}, \nbcode{keyShares[]}, or \texttt{policy}
-  fails verification. \textit{Evidence:} Table~\ref{tab:security-contract}.
-\item \textbf{Downgrade resistance and auditability (policy-defined):} strict policy is
-  explicit and auditable in two forms: \emph{Compliance Mode} forbids
-  classic establishment entirely; \emph{Bootstrap-Assisted Mode} permits
-  a one-time classic control channel only for paired KEM-key recovery
-  and requires PQC rekey before business traffic. The default policy
-  permits classic fallback only for a local-only whitelist of
-  capability/provider failures (timeouts and unauthenticated
-  network-derived failures cannot trigger default-mode fallback).
-  Every fallback emits a structured \texttt{cryptoDowngrade} event.
-  \textit{Evidence:} Fig.~\ref{fig:policy-downgrade}; Fig.~\ref{fig:downgrade-matrix};
-  Table~\ref{tab:legacy-fallback-preconditions};
-  Fig.~\ref{fig:event-traces}.
-\end{itemize}
-}
-
-We additionally provide explicit key confirmation via two Finished
-frames (Fig.~\ref{fig:handshake-sequence}) and document v1 non-claims and
-limitations in Section~\ref{sec:limitations}.
+The contract's guarantees---negotiation integrity, transcript binding,
+mutual authentication, session-key secrecy, replay resistance, and
+policy-defined downgrade resistance with auditability---are stated as
+theorems and \emph{machine-checked} against an active Dolev-Yao attacker
+in Section~\ref{sec:security-model}. Here ``deterministic outcomes''
+means that for a fixed input transcript, policy mode, and fault class
+the terminal outcome and required event template are unique. Explicit
+key confirmation uses two Finished frames so that both peers confirm
+transcript-derived keys before any business data is released
+(Fig.~\ref{fig:handshake-sequence}), matching standard AKE
+key-confirmation notions. The v1 non-claims and limitations are stated
+in Section~\ref{sec:limitations}.
 
 \subsection{Contributions}\label{a.-contributions}
 
-Contributions:
+This paper makes three contributions.
 
 \begin{enumerate}
 \item
-  We turn PQC migration from a narrative into an enforceable contract by
-  making downgrade and \mbox{legacy-compatibility} decisions explicit,
-  testable, and auditable rather than implicit ``best-effort'' fallback,
-  including strict-policy separation into Compliance vs
-  Bootstrap-Assisted realizations.
-  \textit{Evidence:} Fig.~\ref{fig:downgrade-matrix}; Table~\ref{tab:security-contract};
-  \\
-  \texttt{PolicyDowngradeBenchTests},\\
-  \texttt{LegacyFallbackPreconditionTests}.
+  \textbf{C1: An auditable crypto-agile migration contract, backed by a
+  machine-checked security proof.} The contract (a) separates negotiated
+  suites from provider backends with capability-ordered selection; (b)
+  enforces policy non-bypass at the handshake entry points, so callers
+  cannot reintroduce ad hoc fallback; (c) admits only a narrow,
+  local-only, pre-send classic fallback, making timeout- and
+  network-derived failures fallback-ineligible \emph{by construction}
+  (Definition~D2); and (d) emits a minimal, replayable downgrade-evidence
+  tuple for every accepted fallback (Definition~D3). We give formal
+  definitions and prove the resulting guarantees---session-key secrecy,
+  injective authentication, negotiation integrity, and downgrade
+  resistance---in a Dolev-Yao Tamarin model with an active attacker and
+  long-term/KEM key compromise; all 13 lemmas verify
+  (Section~\ref{sec:security-model};
+  \texttt{formal/skybridge\_v2.spthy}). As a sub-point, an opt-in v2
+  hybrid suite composes the static KEM secret with a fresh ephemeral
+  contribution; unlike v1 (which the model shows has only weak forward
+  secrecy), v2 achieves \emph{genuine} forward secrecy that survives
+  long-term-key compromise, also proven in the model
+  (\texttt{ForwardSecrecy\_v2}). \textit{Evidence:}
+  Section~\ref{sec:security-model};
+  Table~\ref{tab:security-contract};
+  Supplementary Table~\ref{tab:supp-v2-v1-compare}.
 \item
-  We design a crypto-agile P2P handshake that cleanly separates suite
-  negotiation, transcript binding, and protocol-signature keys,
-  preventing ``suite says PQC but keys stay classical'' class of
-  integration bugs. \textit{Evidence:} Fig.~\ref{fig:handshake-sequence}; Table~\ref{tab:security-contract};
-  \\
-  \texttt{ProtocolSignatureRegressionTests},\\
-  \texttt{TranscriptIntegrityPropertyTests}.
+  \textbf{C2: A portable, provider-agnostic reference implementation.}
+  The contract is implemented as an OS-independent Rust core with a
+  C-ABI binding (for C/C++/C\# P/Invoke) and a UniFFI binding (for
+  Kotlin and Swift), so non-Apple clients can drive the same negotiation
+  and downgrade-policy logic from one shared core. This is our concrete
+  answer to ``generalize beyond Apple'': the mechanism, not just the
+  paper's description, is language- and OS-agnostic. We deploy it on
+  macOS and iOS and are consolidating reference Windows, Android, and
+  Linux clients onto the same core. \textit{Evidence:}
+  Section~\ref{sec:implementation};
+  Supplementary Table~\ref{tab:supp-cross-platform-policy}.
 \item
-  We provide migration safety with measurable coverage by enumerating
-  legacy/PQC strata and validating acceptance/rejection boundaries under
-  fault injection instead of relying on informal compatibility claims.
-  \textit{Evidence:} Table~\ref{tab:legacy-fallback-preconditions}; Table~\ref{tab:failure-mode-robustness};
-  \\
-  \texttt{HandshakeFaultInjectionBenchTests}.
-\item
-  We harden correctness under concurrency by an actor-isolated state
-  machine with idempotent transitions and bounded retries, eliminating
-  double-resume and state desynchronization failure modes. \textit{Evidence:} Fig.~\ref{fig:state-machines};
-  \\
-  Table~\ref{tab:security-contract}; \texttt{HandshakeDriverTests}.
-\item
-  We make evaluation reproducible by shipping a benchmark harness that
-  reports distributional statistics (p50/p95/p99) over large-N runs and
-  links each metric back to a concrete failure taxonomy.
-  \textit{Evidence:} Fig.~\ref{fig:policy-downgrade}; Table~\ref{tab:perf-summary};
-  \\
-  \texttt{HandshakeBenchmarkTests},\\
-  \texttt{MessageSizeSnapshotTests}.
+  \textbf{C3: Reproducible benchmarks.} We release artifact pipelines
+  that report distributional metrics (p50/p95/p99, CIs, effect sizes)
+  rather than point estimates, and that reproduce every primary figure
+  and table, including handshake latency, downgrade-policy behavior under
+  fault injection, and session-level amortization. \textit{Evidence:}
+  Fig.~\ref{fig:policy-downgrade}; Table~\ref{tab:perf-summary};
+  \texttt{AuditTrailTests};
+  \texttt{Handshake\allowbreak Benchmark\allowbreak Tests}.
 \end{enumerate}
 
 \subsection{Paper Organization}\label{b.-paper-organization}
@@ -336,15 +400,21 @@ implementation details, and extended tables.
 
 \section{Related Work}\label{sec:related-work}
 
-We use the following terms throughout: \emph{crypto agility} (ability to
-migrate primitives without redesign), \emph{downgrade resistance}
-(prevent or detect forced fallback), \emph{suite negotiation} (explicit,
-authenticated selection of handshake KEM/SIG/AEAD/KDF), \emph{PQC readiness}
-(ability to deploy PQC alongside classic suites), and \emph{auditability}
-(deterministic, minimal event traces for security decisions). Our threat
-model assumes an active network attacker attempting to induce fallback
-or obscure failures; therefore we focus on mechanisms that make
-negotiation and failures explicit and auditable.
+Because our contribution is a generic crypto-agile P2P AKE and migration
+contract, the natural comparison set is the family of widely deployed
+authenticated key-exchange and secure-channel designs (TLS~1.3, QUIC,
+DTLS, Noise) together with PQC-migration guidance; remote desktop and
+file transfer are the deployment that motivates the contract's
+constraints, not its boundary. We use the following terms throughout:
+\emph{crypto agility} (ability to migrate primitives without redesign),
+\emph{downgrade resistance} (prevent or detect forced fallback),
+\emph{suite negotiation} (explicit, authenticated selection of handshake
+KEM/SIG/AEAD/KDF), \emph{PQC readiness} (ability to deploy PQC alongside
+classic suites), and \emph{auditability} (deterministic, minimal event
+traces for security decisions). Our threat model assumes an active
+network attacker attempting to induce fallback or obscure failures;
+therefore we focus on mechanisms that make negotiation and failures
+explicit and auditable.
 
 \subsection{Peer-to-Peer Device
 Pairing}\label{a.-peer-to-peer-device-pairing}
@@ -380,7 +450,12 @@ Deployment}\label{d.-post-quantum-cryptography-deployment}
 
 PQC standardization and early deployments highlight size and performance
 costs, along with pressure for hybrid deployments \cite{ref8}, \cite{ref9},
-\cite{ref10}, \cite{ref22}, \cite{ref23}, \cite{ref24}, \cite{ref25}. We
+\cite{ref10}, \cite{ref15}, \cite{ref40}, \cite{ref22}, \cite{ref41},
+\cite{ref42}, \cite{ref17}, \cite{ref23}, \cite{ref24}, \cite{ref25}.
+Recent IETF work standardizes both hybrid X25519MLKEM768 key agreement
+\cite{ref44} and standalone ML-KEM named groups \cite{ref45} for
+TLS~1.3, reflecting the same static-versus-hybrid migration trade-off our
+v1/v2 suites address. We
 focus on making downgrade policy and auditability explicit across
 providers, treating Apple's CryptoKit PQC \cite{ref1,ref34} as a deployment
 instance rather than a protocol dependency.
@@ -406,7 +481,7 @@ size, and latency where available.
 \begin{table*}[!t]
 \centering
 \scriptsize
-\caption{Baseline comparison with widely deployed handshakes. Message counts and negotiation semantics are summarized from the TLS/QUIC/DTLS RFCs and Noise specification \cite{ref6,ref18,ref19,ref39}. Loopback latencies and wire sizes are measured with BaselineBenchRunner (release), N=1000; wire sizes report loopback p50/p95 (kB) and are cert-dependent for TLS/QUIC/DTLS. Noise wire size is pattern-dependent and reflects the XX pattern used in this baseline.}
+\caption{Baseline comparison with widely deployed handshakes. Message counts and negotiation semantics are summarized from the TLS/QUIC/DTLS RFCs and Noise specification \cite{ref6,ref18,ref19,ref39}. Loopback latencies and wire sizes are measured with BaselineBenchRunner (release), N=1000; wire sizes report loopback p50/p95 (KiB) and are cert-dependent for TLS/QUIC/DTLS. SkyBridge loopback wire size includes framing/transport overhead (and may include SBP1 handshake padding); payload-only handshake bytes are reported in Supplementary Table~\ref{tab:supp-message-sizes}. Noise wire size is pattern-dependent and reflects the XX pattern used in this baseline.}
 \label{tab:baseline-comparison}
 \begin{tabular}{@{}
   >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.14}}
@@ -417,7 +492,7 @@ size, and latency where available.
   >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.14}}
   >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.21}}@{}}
 \toprule\noalign{}
-Protocol & Suite nego. explicit & Auditable downgrade policy & Failure semantics & Msgs & Wire size (p50/p95, kB) & p50/p95 latency \\
+Protocol & Suite nego. explicit & Auditable downgrade policy & Failure semantics & Msgs & Wire size (p50/p95, KiB) & p50/p95 latency \\
 \midrule\noalign{}
 TLS 1.3 \cite{ref6} & Yes (cipher suites, groups) & Downgrade prevention only; audit external & Alerts defined; audit external & 4 (1 RTT) & 8.6/8.7 & 8.53/14.01 ms \\
 QUIC \cite{ref18} & Yes (TLS 1.3) & Same as TLS 1.3 & Same as TLS 1.3 & 4 (1 RTT) & 7.6/14.1 & 0.34/11.37 ms \\
@@ -428,28 +503,62 @@ SkyBridge Compass & Yes (suite + policy bound) & Yes (explicit policy + events) 
 \end{tabular}
 \end{table*}
 
-BaselineBenchRunner measures \emph{time-to-ready} (NWConnection.ready) for
-fresh loopback connections; each sample creates a new connection and
-records the elapsed time from connect start to ready. We report N=1000
-after 10 warmup iterations (warm cache); 0-RTT/session resumption is not
-explicitly enabled and results reflect Network.framework defaults. QUIC
-measurements use ALPN \texttt{sbq} with a single bidirectional stream,
-and no application data is sent (\texttt{BASELINE\_KICKOFF\_BYTES=0}).
+Baseline protocols expose transcript integrity but do not specify
+system-level retry causes or replayable downgrade evidence. Detailed
+baseline methodology (time-to-ready endpoint, warmup policy, ALPN setup,
+kickoff payload settings, and loopback pcap accounting) and full baseline
+tables are provided in the Supplementary Materials (notably
+Table~\ref{tab:supp-loopback-wire}).
 
-Loopback SkyBridge p95 latency is 1.57/\allowbreak 2.76/\allowbreak 7.53~ms for
-classic/\allowbreak liboqs/\allowbreak CryptoKit in our loopback harness; these
-numbers are not directly comparable to TLS/QUIC/DTLS handshakes in
-production deployments, but provide a reproducible baseline under a
-consistent measurement setup. The in-memory handshake microbench isolates
-crypto/state-machine overhead (p95
-2.18/\allowbreak 4.18/\allowbreak 6.16~ms for
-classic/\allowbreak liboqs/\allowbreak CryptoKit) and is reported in
-Section~\ref{sec:evaluation} and Supplementary Tables~\ref{tab:supp-latency}--\ref{tab:supp-rtt}.
-Loopback TLS/QUIC/DTLS p95 latency is 11.37--14.01~ms; wire-size baselines
-(p50/p95) are reported in Supplementary Table~\ref{tab:supp-loopback-wire} and are reproducible via
-loopback pcap capture
-(\texttt{Scripts/\allowbreak run\_\allowbreak baseline\_\allowbreak bench.sh}).
-SkyBridge-CryptoKit loopback baselines are included in Supplementary Table~\ref{tab:supp-loopback-wire}.
+Importantly, baseline protocols' downgrade protections target negotiated
+parameter integrity within a single handshake. They do not specify when
+an implementation should \emph{retry} with weaker cryptography after
+local failures, nor do they require a minimal, replayable evidence set
+for such a decision; in practice, these behaviors are pushed into
+application glue and operational logging. Our migration contract makes
+the retry/downgrade boundary explicit (Definitions D2--D3) and
+audit-visible, and we validate it under active suppression (e.g.,
+Fig.~\ref{fig:downgrade-matrix}).
+
+\subsection{Novelty Boundary and Incremental
+Delta}\label{sec:novelty-delta}
+
+We do not claim novelty in authenticated transcript binding, suite
+negotiation primitives, or actor isolation by themselves; these are
+reused. The delta is making \emph{migration semantics} part of the
+security surface (contribution~C1): the contract binds negotiation to a
+declared provider backend rather than an implicit platform default;
+enforces policy non-bypass at the entry points so caller glue cannot
+reintroduce fallback; confines fallback eligibility to a local-only,
+pre-send cause set that excludes timeout and network-derived failures by
+definition (D2); attaches a replayable, downgrade-specific evidence
+tuple with deterministic event typing that distinguishes downgrade from
+failure (D3); and realizes strictness in two explicit forms (Compliance,
+and Bootstrap-Assisted recovery with a mandatory PQC-rekey gate before
+business traffic). Supplementary Table~\ref{tab:novelty-delta} gives the
+full prior-art-versus-delta matrix with evidence anchors, and
+Supplementary Table~\ref{tab:ablation-by-property} gives an
+artifact-backed ablation-by-property map for these mechanisms.
+
+\subsection{PQC Migration Design
+Space}\label{sec:migration-design-space}
+
+To make migration-risk boundaries explicit, we classify designs on two
+axes: (1) fallback trigger origin (\emph{network-derived} vs
+\emph{local-only} vs \emph{never fallback}), and (2) evidence strength
+for operator-side verification (\emph{none/external log} vs
+\emph{structured replayable evidence}).
+
+In this space, TLS/QUIC deployment defaults~\cite{ref6,ref18} provide
+strong handshake transcript integrity but leave system-level retry and
+fallback causes, and any downgrade evidence, implementation-defined and
+outside the protocol; Signal PQXDH~\cite{ref9} performs hybrid key
+agreement at the application layer but likewise leaves fallback
+eligibility and replayable evidence outside the protocol. SkyBridge
+occupies the corner that combines a local-only fallback whitelist with a
+timeout/network-derived blacklist and structured, replayable downgrade
+evidence with deterministic event typing. Supplementary
+Table~\ref{tab:migration-design-space} provides the full matrix.
 
 \section{System Architecture}\label{sec:system-architecture}
 
@@ -462,98 +571,65 @@ high-level component relationships and trust boundaries.
 
 \subsection{Threat Model}\label{a.1-threat-model}
 
-We model an active network attacker in the Dolev-Yao style with the
-following \textbf{capability set}:
+We model an active network attacker in the Dolev-Yao style. The attacker
+fully controls the discovery channel: it can drop, delay, reorder, and
+duplicate packets; modify or inject arbitrary bytes in MessageA,
+MessageB, or the Finished frames; replay prior handshake messages across
+sessions; spoof capability or policy claims to induce weaker
+negotiation; and force negotiation failures by corrupting suites, key
+shares, or signatures. Extending the baseline model, the attacker may
+also compromise a peer after pairing and reveal its long-term signing
+and KEM private keys; the proofs in Section~\ref{sec:security-model} are
+established against this stronger reveal-capable attacker. Each
+capability is met by a specific protocol or policy mechanism, summarized
+in Table~\ref{tab:threat-defense-mapping}: transcript binding via
+\texttt{sigB}, responder-side negotiation-integrity checks,
+nonce-derived replay control, the policy-gated downgrade rules (no
+timeout- or network-derived fallback; strict policy is either Compliance
+Mode or a control-only Bootstrap-Assisted Mode with mandatory PQC
+rekey), per-peer rate limiting, and trust-record gating of legacy P-256
+acceptance.
 
-\textbf{Network Capabilities (Attacker-Controlled):}
-\begin{itemize}\tightlist
-\item
-  \textbf{Drop / delay / reorder / duplicate} packets on the discovery
-  channel
-\item
-  \textbf{Modify/inject} arbitrary bytes in MessageA, MessageB, or
-  Finished frames
-\item
-  \textbf{Replay} prior handshake messages across sessions
-\item
-  \textbf{Spoof capability or policy claims} to induce weaker
-  negotiation
-\item
-  \textbf{Force negotiation failure} by corrupting suites, key shares,
-  or signatures
-\end{itemize}
+\begin{table}[!t]
+\centering
+\scriptsize
+\caption{Attacker capabilities and the mechanism that addresses each.}
+\label{tab:threat-defense-mapping}
+\begingroup
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}p{0.42\linewidth}p{0.50\linewidth}@{}}
+\toprule
+Attacker capability & Mechanism (protocol + policy) \\
+\midrule
+Modify/inject handshake bytes & Transcript binding: \texttt{sigB} covers MessageA and the chosen suite; edits to \nbcode{supportedSuites[]}, \nbcode{keyShares[]}, or \texttt{policy} fail verification \\
+Spoof/select unoffered suite & Negotiation integrity: Responder must pick an offered suite with a matching key share, else \texttt{missingKeyShare} \\
+Replay prior handshakes & \texttt{handshakeId} from fresh nonces; duplicates rejected within a window \\
+Force timeouts to induce fallback & Downgrade resistance: timeout/network-derived fallback disallowed (D2); strict policy is fail-closed or control-only bootstrap \\
+Rapid downgrade cycling & Per-peer fallback cooldown (default 5\,min) \\
+Stranger forcing legacy P-256 & Legacy acceptance gated on authenticated channel or trust record \\
+\bottomrule
+\end{tabular}
+\endgroup
+\end{table}
 
-\textbf{Defense Mapping (Protocol + Policy):}
-\begin{itemize}\tightlist
-\item
-  \textbf{Transcript binding:} \texttt{sigB} covers MessageA and the
-  chosen suite, so modifications to \nbcode{supportedSuites[]},
-  \nbcode{keyShares[]}, or \texttt{policy} fail verification.
-\item
-  \textbf{Negotiation integrity:} Responder MUST select a suite that
-  Initiator offered and for which a key share exists; otherwise reject
-  \texttt{missingKeyShare}.
-\item
-  \textbf{Replay control:} \texttt{handshakeId} is derived from nonces
-  and cached to reject duplicates within a window.
-\item
-  \textbf{Downgrade resistance:} timeout-triggered \emph{default-mode}
-  fallback is disallowed; only whitelisted local capability errors may
-  fallback under default policy. Strict policy offers either Compliance
-  Mode (no classic establishment) or Bootstrap-Assisted Mode (classic
-  control-only bootstrap with mandatory PQC rekey before business data).
-\item
-  \textbf{Rate limiting:} per-peer fallback cooldown prevents rapid
-  downgrade cycling.
-\item
-  \textbf{Legacy gating:} legacy P-256 acceptance requires an
-  authenticated channel or an existing trust record.
-\end{itemize}
-
-\textbf{Out-of-Scope (Baseline Claims):}
-\begin{itemize}\tightlist
-\item
-  \textbf{Traffic analysis} from size/timing metadata is not assumed in
-  the baseline threat model. SBP2 is an optional mitigation evaluated
-  separately in Section~\ref{sec:evaluation}, and its overhead/privacy
-  tradeoffs are reported without changing the core security claims.
-\end{itemize}
-
-\textbf{Trust Assumptions:}
-\begin{enumerate}\tightlist
-\item
-  The initial pairing ceremony occurs over a trusted out-of-band
-  channel (e.g., visual PIN comparison on both device screens)
-\item
-  The device Keychain provides integrity guarantees for stored identity
-  keys
-\item
-  The Secure Enclave (when available) provides hardware-backed key
-  isolation that resists software-level extraction
-\item
-  Users can visually verify device identity during pairing (no blind
-  trust)
-\end{enumerate}
-
-\textbf{Out of Scope:}
-\begin{itemize}\tightlist
-\item
-  Side-channel attacks on cryptographic implementations
-\item
-  Physical attacks on Secure Enclave hardware
-\item
-  Compromise of the operating system kernel
-\item
-  Social engineering attacks on users
-\end{itemize}
+We trust that the out-of-band pairing ceremony delivers the correct peer
+identity key (e.g., visual PIN comparison on both screens, with no blind
+trust), that the device Keychain preserves the integrity of stored
+identity keys, and that the Secure Enclave, when available, provides
+hardware-backed key isolation resisting software-level extraction.
+Out of scope are traffic analysis from size/timing metadata (SBP2 is an
+optional mitigation evaluated in Section~\ref{sec:evaluation} without
+changing the core claims), side-channel and physical attacks on
+cryptographic implementations or Secure Enclave hardware, compromise of
+the operating-system kernel, and social engineering of users.
 
 \subsection{Protocol Message
 Flow}\label{a.2-protocol-message-flow}
 
 Fig.~\ref{fig:handshake-sequence} illustrates the handshake message sequence and transcript
-coverage.
+coverage. Supplementary Table~\ref{tab:suite-negotiation-scenarios} enumerates suite-negotiation outcomes under the two-attempt strategy.
 
-\begin{figure}[!t]
+\begin{figure}[!b]
 \centering
 \pandocbounded{\includegraphics[width=\columnwidth]{figures/fig_handshake_sequence.pdf}}
 \caption{Handshake sequence with transcript coverage and policy
@@ -579,45 +655,9 @@ state. Full wire-format definitions, field validation rules, and
 encoding rationale appear in the Supplementary Materials (Wire Format
 and Validation Rules).
 
-\begin{table*}[!t]
-\centering
-\caption{Suite negotiation scenarios under the two-attempt strategy (homogeneous per attempt).}
-\label{tab:suite-negotiation-scenarios}
-\begin{tabular}{@{}
-  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.4219}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.3281}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.1406}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.1094}}@{}}
-\toprule\noalign{}
-\begin{minipage}[b]{\linewidth}\raggedright
-Initiator attempt(s)
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Responder Capability
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Outcome
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Notes
-\end{minipage} \\
-\midrule
-Attempt 1: PQC-only & PQC available & PQC established & Best available selected \\
-Attempt 1: PQC-only; Attempt 2: classic-only & Classic only (no PQC material) & Classic established & Graceful fallback (evented) \\
-PQC-only (\texttt{strictPQC}, bootstrap-assisted) & Missing/stale paired KEM key & PQC established after rekey & Classic channel is control-only before rekey \\
-PQC-only (\texttt{strictPQC}) & Classic only & Handshake failed & Policy enforced (no fallback) \\
-Classic-only & PQC available & Classic established & Initiator policy respected \\
-\bottomrule
-\end{tabular}
-\end{table*}
-
-\textbf{Failure Semantics:}
-\begin{itemize}\tightlist
-\item
-  All failures trigger \texttt{HandshakeContext.}\\
-  \texttt{zeroize()} before error propagation
-\item
-  Security events are emitted for audit logging
-\item
-  No partial state is retained after failure
-\end{itemize}
+\textbf{Failure semantics.} All failures call
+\texttt{HandshakeContext.zeroize()} before propagating the error, emit a
+typed security event for audit logging, and retain no partial state.
 
 \begin{figure*}[!t]
 \centering
@@ -676,12 +716,14 @@ boundary (dashed) and policy guard (diamond).}
 \label{fig:architecture}
 \end{figure*}
 
-\textbf{Implementation alignment (GitHub HEAD, 2026-02-08).} In the
+\textbf{Implementation alignment (artifact snapshot, 2026-01-23).} In the
 current code revision, connection orchestration for the remote
 desktop/file-transfer path is route-aware and authentication-gated:
 local discovery can prefer USB-capable host endpoints, control-channel
 connections are promoted to ``connected'' only after handshake
-authentication, and active file-transfer routing prioritizes live
+authentication, discovery advertisements expose an explicit
+\texttt{hs\_soa} capability bit for optional SOA negotiation, and active
+file-transfer routing prioritizes live
 authenticated sessions before fallback candidates. These implementation
 surfaces are enumerated in the Supplementary Artifact Map.
 
@@ -712,7 +754,7 @@ Format}\label{c.-cryptosuite-wire-format}
 A \textbf{suite} defines the handshake tuple
 \texttt{(KEM,\ SIG,\ AEAD,\ KDF)} used for the KEM-DEM envelope and
 transcript binding. Data-plane AEAD is negotiated separately and is
-fixed to AES-256-GCM in v1 (Table~\ref{tab:aead-mapping}). Suite identifiers use a compact
+fixed to AES-256-GCM in v1 (Supplementary Table~\ref{tab:aead-mapping}). Suite identifiers use a compact
 16-bit wire ID with reserved ranges for hybrid, PQC, classic, and
 experimental suites to enable forward compatibility. The full range
 table, encoding rules, and X-Wing notes appear in the Supplementary
@@ -729,23 +771,10 @@ selection based on runtime capability detection and policy
 configuration:
 
 
-The selection algorithm proceeds as follows:
-
-\begin{enumerate}\raggedright
-\tightlist
-\item
-  \textbf{Capability Detection:} Query the environment for native PQC
-  availability and liboqs presence.
-\item
-  \textbf{Policy Application:} Match detected capabilities against the
-  requested policy.
-\item
-  \textbf{Provider Instantiation:} Create the appropriate provider
-  instance for the detected environment and policy.
-\item
-  \textbf{Event Emission:} Emit a \texttt{SecurityEvent} recording the
-  selection decision.
-\end{enumerate}
+The selection algorithm first queries the environment for native PQC
+availability and liboqs presence, matches the detected capabilities
+against the requested policy, instantiates the appropriate provider, and
+emits a \texttt{SecurityEvent} recording the selection decision.
 
 {\raggedright
 For \texttt{preferPQC} policy, the precedence order is
@@ -759,10 +788,9 @@ We use two orthogonal knobs: provider selection
 (\texttt{preferPQC}/\texttt{requirePQC}) and handshake fallback policy
 (\texttt{default}/\texttt{strictPQC}). In our evaluation, \texttt{default}
 corresponds to prefer-PQC with evented classic fallback permitted, while
-\texttt{strictPQC} corresponds to requiring PQC with either (i)
-Compliance Mode (no classic establishment) or (ii)
-Bootstrap-Assisted Mode (control-only bootstrap plus mandatory PQC
-rekey).
+\texttt{strictPQC} requires PQC with either (i) Compliance Mode
+(no classic establishment) or (ii) Bootstrap-Assisted Mode
+(control-only bootstrap plus mandatory PQC rekey).
 
 \subsection{KEM-DEM Authenticated Encryption
 Format}\label{e.-kem-dem-authenticated-encryption-format}
@@ -775,6 +803,15 @@ primitives (ML-KEM/ML-DSA) within the same envelope to preserve a single
 wire format across platforms. Full header/body formats, versioning, and
 length limits are provided in the Supplementary Materials (KEM-DEM
 Envelope).
+
+\textbf{Why not direct RFC 9180 HPKE everywhere (v1)?}
+Three engineering constraints motivate this compatibility layer in v1:
+(i) a unified transcript/signature binding surface across mixed
+provider stacks, (ii) strict backward compatibility with deployed v1
+bridge behavior, and (iii) deterministic parser-level DoS checks before
+provider dispatch. When native HPKE is available (Apple 26+), our v2
+path uses RFC 9180 HPKE directly; thus the v1 KEM-DEM envelope is
+transition code, not a claim of new cryptographic primitive design.
 
 
 
@@ -827,8 +864,11 @@ counter after resumption, and emitting security events on unexpected
 transitions.
 
 This approach provides structural protection against reentrancy hazards
-rather than relying on timing assumptions. A formal analysis using model
-checking is planned for future work.
+rather than relying on timing assumptions. Formal model checking of
+actor await-window interleavings is outside the scope; we mitigate and
+regression-test this class via epoch checks and targeted fault injection
+(Table~\ref{tab:audit-signal-fidelity}; Supplementary
+Table~\ref{tab:failure-mode-robustness}).
 
 \subsection{State Transitions}\label{c.-state-transitions}
 
@@ -906,6 +946,32 @@ Fig.~\ref{fig:state-machines} illustrates the handshake state machine for both r
 \label{fig:state-machines}
 \end{figure}
 
+\subsection{Simultaneous-Open Arbitration (SOA)}\label{soa-arbitration}
+
+To remove nondeterminism when both peers initiate concurrently, we use
+an optional MessageA extension (SOA TLV) without adding handshake
+round-trips. The extension carries
+\texttt{soaVersion(1B),\allowbreak initiatorPeerId(32B),\allowbreak targetPeerId(32B),\allowbreak attemptId(16B)}.
+Arbitration compares the tuple
+\((\texttt{initiatorPeerId},\allowbreak \texttt{attemptId})\) with
+lexicographic \emph{byte} ordering (not string ordering); the smaller
+tuple wins.
+
+Compatibility is capability-gated (\texttt{hs\_soa=1} in discovery TXT).
+If absent, peers stay on the legacy MessageA path. The parser keeps
+\texttt{extensionsRaw} bytes (including unknown TLVs) and transcript/hash
+binding is computed over the original encoded bytes, so decode/re-encode
+normalization cannot desynchronize signatures. A local outgoing attempt
+is superseded only after: (i) MessageA signature verification succeeds,
+(ii) \texttt{targetPeerId==localPeerId}, (iii)
+\texttt{initiatorPeerId==expectedRemotePeerId}, and (iv) the same
+canonical \texttt{pairKey} is selected. Runtime controls combine
+\texttt{single-flight} (one pending winner per \texttt{pairKey}),
+\texttt{established guard} (new attempts return
+\texttt{already\_connected}), and bounded supersede rate
+(3 attempts / 60 s). The pending arbitration window is 10 s; established
+guard is released immediately on disconnect.
+
 \subsection{Double-Resume
 Prevention}\label{d.-double-resume-prevention}
 
@@ -925,18 +991,21 @@ and cross-session replay attacks.
 MessageA-local fields, binding suite preference, policy intent, and
 identity context before any responder data is received:
 
-Signature A preimage includes the domain separator \texttt{SkyBridge-A},
-the version, canonical supported suites and key shares, the client nonce,
-capabilities, policy, and the initiator identity public key; optional
-Secure Enclave binding uses \texttt{SkyBridge-SE-A}.
+For Signature A, the initiator signs \texttt{SkyBridge-A}, protocol
+version, canonical suite/key-share set, client nonce, capabilities,
+policy, and initiator identity key. Optional Secure Enclave binding
+uses \texttt{SkyBridge-SE-A}.
+When SOA extensions are present, the signature/transcript includes the
+raw extension container bytes (unknown TLVs preserved as-is), not a
+decoded/re-encoded structure.
 
 \textbf{Signature B (MessageB):} The Responder signs a transcript that
 commits to MessageA:
 
-Signature B preimage includes the domain separator \texttt{SkyBridge-B}
-plus \texttt{transcriptA}, selected suite wire ID, responder key share,
-server nonce, payload hash, and the responder identity public key;
-optional Secure Enclave binding uses \texttt{SkyBridge-SE-B}.
+For Signature B, the responder signs \texttt{SkyBridge-B},
+\texttt{transcriptA}, selected suite wire ID, responder key share,
+server nonce, payload hash, and responder identity key. Optional Secure
+Enclave binding uses \texttt{SkyBridge-SE-B}.
 
 \textbf{Key Derivation:} Nonces, transcripts, suite binding, and
 \emph{directional separation} are included in the KDF, and the salt is
@@ -944,12 +1013,9 @@ transcript-bound (non-empty):
 
 KDF input concatenates the \texttt{SkyBridge-KDF} label, suite wire ID,
 transcript hashes, and nonces. The salt uses the domain string
-\texttt{SkyBridge-KDF-Salt-v1|}. Direction labels separate traffic
-classes:
-\begin{itemize}
-\item \texttt{initiator\_to\_responder}
-\item \texttt{responder\_to\_initiator}
-\end{itemize}
+\texttt{SkyBridge-KDF-Salt-v1|}, and direction labels
+(\texttt{initiator\_to\_responder}, \texttt{responder\_to\_initiator})
+separate traffic classes.
 
 
 This structure is designed to ensure: (1) \texttt{sigB} commits to \texttt{MessageA},
@@ -980,145 +1046,261 @@ while long-term KEM private keys remain uncompromised; later compromise
 of the corresponding KEM private key can enable decryption of recorded
 sessions.
 
-\textbf{Assumptions:}
-\begin{itemize}\tightlist
-\item
-  The pairing ceremony delivers the correct peer identity key (PIN or
-  visual verification is not bypassed).
-\item
-  Pinned identity keys stored in Keychain/Secure Enclave retain integrity
-  across normal device operation.
-\item
-  Devices remain uncompromised (no root or malware control) during
-  handshake execution.
-\end{itemize}
+This v1 choice is intentional for migration: it binds PQC establishment
+to paired long-term KEM identity material that can be provisioned and
+audited out-of-band, enabling incremental rollout across heterogeneous
+fleets without introducing an additional interactive key-registration
+step. To reduce post-compromise exposure while remaining
+bridge-compatible, we provide v2 suites that mix the static KEM secret
+with an ephemeral contribution under transcript binding
+(Proposition~P2) and evaluate the incremental overhead (Supplementary
+Table~\ref{tab:supp-v2-v1-compare}).
 
-\textbf{If assumptions fail:}
-\begin{itemize}\tightlist
-\item
-  If pairing is subverted and the pinned identity key is replaced,
-  peer authentication is no longer meaningful; the system must require
-  re-pairing and treat the session as untrusted.
-\item
-  If device integrity is lost, confidentiality and key secrecy cannot be
-  guaranteed; the system should abort and emit high-severity events such
-  as \texttt{identity}\allowbreak\texttt{Mismatch} or
-  \texttt{handshake}\allowbreak\texttt{Failed}.
-\end{itemize}
+We assume the pairing ceremony delivers the correct peer identity key
+(PIN or visual verification is not bypassed), that pinned identity keys
+in Keychain/Secure Enclave retain integrity across normal device
+operation, and that devices remain uncompromised (no root or malware
+control) during handshake execution.
 
-\subsection{Security Goals and Proof
-Sketches}\label{b.-security-goals-and-proof-sketches}
+Under concurrent-open threat conditions, the attacker may inject or
+replay MessageA variants to try to force cancellation of a valid local
+attempt. The SOA path treats such attempts as unauthenticated control
+input until signature verification and peer-binding checks complete;
+therefore cancellation is only admissible for authenticated, correctly
+bound attempts within the same canonical \texttt{pairKey}.
+
+\textbf{If assumptions fail.} If pairing is subverted and the pinned
+identity key is replaced, peer authentication is no longer meaningful;
+the system requires re-pairing and treats the session as untrusted. If
+device integrity is lost, confidentiality and key secrecy cannot be
+guaranteed; the system aborts and emits high-severity events such as
+\texttt{identity}\allowbreak\texttt{Mismatch} or
+\texttt{handshake}\allowbreak\texttt{Failed}.
+
+To keep boundary handling operationally explicit, Supplementary
+Table~\ref{tab:supp-boundary-stress} enumerates boundary-stress cases
+(pairing social engineering, endpoint compromise classes, and audit-log
+abuse), their in/out-of-model status, expected event signals, and
+required operator actions.
+
+\subsection{Security Goals and Machine-Checked
+Proofs}\label{b.-security-goals-and-proof-sketches}
+
+\textbf{Mechanized symbolic proof.} The properties below are
+\emph{machine-checked} in a Dolev-Yao symbolic model of the handshake,
+discharged by the Tamarin prover (v1.10.0)~\cite{ref43}; the model is
+released as \texttt{formal/skybridge\_v2.spthy}. Every protocol message
+is sent and received through the network so that Tamarin's built-in
+active adversary fully mediates the channel (drop, inject, reorder,
+replay, and synthesize), and the model additionally grants the adversary
+long-term and KEM private-key compromise via explicit \texttt{Reveal}
+rules. The KEM is modeled symbolically and the v2 ephemeral contribution
+is included. All 13 lemmas \emph{verify} with no falsifications and no
+wellformedness warnings; each named property below cites the lemma that
+discharges it.
+
+The symbolic proof establishes the structural guarantees (authentication,
+agreement, negotiation integrity, secrecy, forward secrecy, and
+downgrade resistance) under the standard symbolic abstraction of the
+primitives. We retain the computational assumptions---KEM IND-CCA,
+signature EUF-CMA, and HKDF-as-PRF---as the soundness conditions under
+which the symbolic abstraction is faithful to the implementation; we do
+\emph{not} claim a computational reduction. Implementation conformance is
+supported by property-oriented tests that map each proof obligation to
+concrete code paths and artifacts (Supplementary
+Table~\ref{tab:supp-formal-code-traceability}); full code-level
+verification of the Swift implementation is out of scope.
 
 \textbf{Definitions.}
 \begin{itemize}\tightlist
 \item \textbf{D1 (Forced downgrade / forced fallback).} A downgrade occurs if a business-capable session is established with a classic suite when strict policy requires PQC, or if classic fallback is accepted under the default policy without satisfying the local-only fallback gate (Definition D2) and without emitting the corresponding audit event (Property G8).
-\item \textbf{D2 (Local-only fallback gate, default policy).} Fallback is permitted only after (i) the peer identity is verified against the pinned key (paired peers) and (ii) the triggering failure is locally generated capability/instantiation unavailability (whitelist), excluding timeout and any unauthenticated network-derived failure.
+\item \textbf{D2 (Local-only fallback gate, default policy).} Fallback is permitted only as an \emph{initiator-side attempt switch} when (i) the session targets an already paired peer (pinned trust record) and (ii) the triggering failure is a locally generated capability/instantiation unavailability detected \emph{pre-send} at the on-wire send boundary (i.e., before emitting the first handshake flight / MessageA in the current attempt); timeout and any network-derived parse/verification failure are fallback-ineligible by definition.
 \item \textbf{D3 (Audit evidence).} The minimal sufficient evidence set is the tuple \{event type, timestamp, deviceId, suiteId, failure reason code, policy mode, fallback flag, cooldown remaining\} (Property G8).
 \item \textbf{D4 (Bootstrap-Assisted strict recovery gate).} In strict policy, a temporary classic control channel is allowed only for paired KEM-key recovery triggers (\texttt{missingKEM}, \texttt{staleKEMRecovery}); non-control business messages are blocked until PQC rekey succeeds.
 \end{itemize}
 
-We state the core properties as invariants and provide proof sketches
-tied to protocol mechanics. To strengthen reviewer-facing claims, we
-additionally provide a minimal symbolic model artifact (Tamarin) that
-captures suite negotiation, transcript binding, explicit key confirmation,
-and the fallback gate; lemmas are machine-checkable from the released
-artifact (\texttt{formal/skybridge\_minimal.spthy}). Full formalization of
-the entire Swift implementation (including concurrency and platform APIs)
-remains future work.
+\textbf{Lemma L1 (Timeout-triggered fallback impossibility).}
+Any migration policy that permits classic fallback on timeout or other
+unauthenticated network-derived failures is exploitable: under the active
+attacker of Section~\ref{sec:security-model}, the adversary suppresses or
+delays PQC-path messages past the timeout boundary, so each attempt
+exposes a reachable classic edge under attacker control and classic
+establishment is forced.
 
-\textbf{Property G1 (Negotiation Integrity):} The selected suite must be
-among the Initiator's offered suites and have a corresponding key
-share.\\
-\emph{Proof sketch:}
+\textbf{Corollary (Necessary fallback gate condition).}
+To retain compatibility fallback without attacker-forced downgrade,
+fallback eligibility must exclude timeout/network-derived failures and be
+restricted to attacker-non-inducible local causes (Definition~D2), or
+classic fallback must be disabled entirely. This is exactly the contract
+the model verifies: under strict PQC policy no classic session is ever
+reachable (\texttt{NoClassicUnderStrictPQC}), under the default policy no
+classic session arises without an explicit, audited downgrade
+(\texttt{NoSilentClassicFallback\_Default}), and any classic session
+implies either a downgrade event or an explicit classic policy
+(\texttt{ClassicRequiresDowngradeOrClassicPolicy}). To rule out vacuity,
+the model also carries existence lemmas witnessing live PQCv1, PQCv2, and
+audited-downgrade traces (\texttt{Exists\_PQCv1\_Session},
+\texttt{Exists\_PQCv2\_Session},
+\texttt{Exists\_Default\_Classic\_Downgrade}). Implementation-level
+traceability anchors are summarized in Supplementary
+Table~\ref{tab:supp-formal-code-traceability}.
+
+\textbf{Threat model and security goals (as verified).} The adversary
+$\mathcal{A}$ is the active Dolev-Yao network attacker of
+Section~\ref{sec:security-model}, additionally able to reveal long-term
+signing and KEM private keys. We require four goals, each discharged by a
+named Tamarin lemma: \emph{authentication}---$\mathcal{A}$ cannot make a
+paired endpoint accept an unauthenticated peer
+(\texttt{Injective\_Agreement\_I\_with\_R},
+\texttt{SigB\_Authentic\_or\_Compromised});
+\emph{negotiation integrity}---an accepted \texttt{selectedSuite} was
+offered and matches a key share
+(\texttt{NegotiationIntegrity\_AcceptedWasOffered});
+\emph{downgrade resistance}---classic establishment respects policy as
+above; and \emph{forward secrecy}---v2 session keys survive long-term-key
+compromise (\texttt{ForwardSecrecy\_v2}) whereas v1 does not
+(\texttt{WeakFS\_v1}, \texttt{V1\_LacksForwardSecrecy\_Witness}).
+
+\textbf{Soundness assumptions.} The symbolic proof is faithful to the
+implementation under KEM IND-CCA security for the negotiated KEM
+(ML-KEM/X-Wing profile), signature EUF-CMA security for the protocol
+signatures (ML-DSA-65 / Ed25519), and HKDF-SHA256 behaving as a PRF in
+the extraction/expansion domain used.
+
+\textbf{Theorem T1 (Authentication).} Under the threat model above, no
+trace lets a paired endpoint complete with a peer that did not run the
+matching role with agreeing transcript parameters; the agreement is
+injective (no replay). \emph{Verified:}
+\texttt{Injective\_Agreement\_I\_with\_R}, supported by
+\texttt{SigB\_Authentic\_or\_Compromised} (an accepted \texttt{sigB} is
+genuine unless the responder's signing key was revealed).
+
+\textbf{Theorem T2 (Negotiation integrity and key secrecy).} In every
+trace, the accepted suite was offered by the initiator and bound to a
+matching key share (\texttt{NegotiationIntegrity\_AcceptedWasOffered}),
+and the derived session key is secret against $\mathcal{A}$ in the honest
+case (\texttt{Secrecy\_SessionKey\_HonestCase}).
+
+\textbf{Proposition P1 (Policy-gated downgrade).} $\mathcal{A}$ cannot
+force classic establishment under strict PQC policy
+(\texttt{NoClassicUnderStrictPQC}), cannot produce a silent classic
+session under the default policy
+(\texttt{NoSilentClassicFallback\_Default}), and any classic session
+implies an audited downgrade or an explicit classic policy
+(\texttt{ClassicRequiresDowngradeOrClassicPolicy}).
+
+\textbf{Proposition P2 (v2 forward secrecy).} For v2 sessions, the
+derived key remains secret even after $\mathcal{A}$ reveals every
+long-term signing and KEM private key, provided the per-session
+ephemerals are not revealed---genuine forward secrecy, now \emph{proven}
+(\texttt{ForwardSecrecy\_v2}). The model also exhibits a v1 trace where
+the same long-term compromise breaks v1 secrecy
+(\texttt{V1\_LacksForwardSecrecy\_Witness}), confirming that the v2
+guarantee is strictly stronger than v1's weak forward secrecy
+(\texttt{WeakFS\_v1}).
+
+We restate the same guarantees as eight named implementation-facing
+properties G1--G8, each anchored to the verified lemma that discharges
+it and to the protocol mechanism that realizes it.
+
+\emph{G1 (Negotiation integrity).} The selected suite is always one the
+initiator offered and for which a matching key share exists: \texttt{sigB}
+covers MessageA, so any edit to the offered suite or key-share list
+breaks verification, and the responder rejects a \texttt{selectedSuite}
+that was not offered. \emph{Verified:}
+\texttt{NegotiationIntegrity\_AcceptedWasOffered}.
+
+\emph{G2 (Mutual authentication for paired peers).} The peer identity is
+authenticated and bound to the transcript: \texttt{identityPubKey} is
+pinned at OOB pairing, and the MessageA/MessageB signatures over
+transcript data must verify under the pinned key or the handshake aborts
+with \texttt{identityMismatch}. The agreement is injective.
+\emph{Verified:} \texttt{Injective\_Agreement\_I\_with\_R},
+\texttt{SigB\_Authentic\_or\_Compromised}.
+
+\emph{G3 (Session-key secrecy).} The shared secret comes from KEM
+decapsulation (or DH) and is expanded with HKDF over a transcript-bound
+salt, so an attacker lacking the key material cannot derive the session
+keys. \emph{Verified:} \texttt{Secrecy\_SessionKey\_HonestCase}. For v1
+KEM suites this is conditional on the long-term KEM key
+(\texttt{WeakFS\_v1}); v2 adds an ephemeral contribution that removes
+this dependence (see G3$'$).
+
+\emph{G3$'$ (v2 forward secrecy).} v2 keys survive compromise of all
+long-term signing and KEM keys as long as the session ephemerals are not
+revealed; v1 does not. \emph{Verified:} \texttt{ForwardSecrecy\_v2},
+witnessed against v1 by \texttt{V1\_LacksForwardSecrecy\_Witness}.
+
+\emph{G4 (Replay resistance).} \texttt{handshakeId} is derived from fresh
+nonces and suite identifiers, and duplicates are rejected within a
+window; replay is precluded by the injectivity of the agreement above.
+\emph{Verified:} injective \texttt{Injective\_Agreement\_I\_with\_R}.
+
+\emph{G5 (Strict-policy consistency).} Strict policy never yields a
+business-capable classic session: Compliance Mode has no classic edge,
+and Bootstrap-Assisted Mode allows only a transient control channel with
+business traffic blocked until PQC rekey. \emph{Verified:}
+\texttt{NoClassicUnderStrictPQC}; validated empirically by the policy
+downgrade benchmarks (Fig.~\ref{fig:policy-downgrade}).
+
+\emph{G6 (Safe fallback under default policy).} Fallback occurs only for
+an already paired peer and only for a whitelisted, locally generated
+\emph{pre-send} capability/instantiation error evaluated before MessageA
+is emitted (Supplementary
+Table~\ref{tab:supp-default-fallback-eligibility}); \texttt{timeout} and
+every network-derived failure are excluded by Definition~D2, and per-peer
+cooldown bounds repeated downgrades. Consequently an attacker who can
+drop, delay, or reorder messages cannot induce a classic session by
+causing timeouts. \emph{Verified:}
+\texttt{NoSilentClassicFallback\_Default},
+\texttt{ClassicRequiresDowngradeOrClassicPolicy}.
+
+\emph{G7 (Legacy acceptance preconditions).} Legacy P-256 signatures are
+accepted only under authenticated pairing or an existing trust record
+(\texttt{LegacyTrustPrecondition}); stranger connections fail, as
+validated by the precondition test matrix
+(Table~\ref{tab:legacy-fallback-preconditions}).
+
+\emph{G8 (Auditability).} Every downgrade emits a \texttt{cryptoDowngrade}
+event carrying the minimal sufficient set \{event type, timestamp,
+deviceId, suiteId, failure reason code, policy mode, fallback flag,
+cooldown remaining\} and records it into a per-session, transcript-anchored
+hash-chain (\texttt{AuditTrail}) for in-session tamper-evidence; session
+keys, nonces, raw signatures, payloads, and user identifiers beyond
+deviceId are never logged. Long-term retention and remote attestation
+depend on the operating environment and are out of scope, since a
+privileged adversary can truncate host logs.
+
+\subsection{Complexity and Overhead Bounds}\label{sec:complexity-bounds}
+
+Let $S$ and $K$ denote implementation bounds for offered suites and key
+shares (\texttt{maxSupportedSuites}, \texttt{maxKeyShareCount});
+currently $S \le 8$ and $K \le 2$. Encoding/decoding work for
+MessageA/MessageB is:
+\[
+T_{\mathrm{codec}} = O(S + K + |M_A| + |M_B|),
+\]
+with constant-time checks on fixed-length fields and linear passes over
+suite/key-share vectors.
+
+Handshake cryptographic operation counts are:
 \begin{itemize}\tightlist
-\item
-  \texttt{MessageB} includes \texttt{selectedSuite}, and
-  \texttt{sigB} covers \texttt{MessageA}.
-\item
-  Any modification to the offered suite list or key-share list breaks
-  \texttt{sigB} verification.
-\item
-  The Responder validates \texttt{selectedSuite} against the offered
-  suites and checks that a matching key share is present.
+\item \textbf{v1 PQC path:} $1\times$ KEM encapsulate + $1\times$ KEM decapsulate + 2 signatures + 2 signature verifies + HKDF key schedule.
+\item \textbf{v2 FS path:} v1 counts plus one ephemeral contribution generation per side and one additional shared-secret composition step (HKDF extract-expand on static+ephemeral input).
+\item \textbf{Classic path:} one DH-style encapsulation/open path (KEM-DEM abstraction), signatures/verifications, and HKDF key schedule.
 \end{itemize}
 
-\textbf{Property G2 (Mutual Authentication for Paired Peers):} For
-previously paired devices, the peer identity is authenticated and bound
-to the handshake transcript.\\
-\emph{Proof sketch:}
-\begin{itemize}\tightlist
-\item
-  \texttt{identityPubKey} is pinned during OOB pairing.
-\item
-  \texttt{MessageA}/\texttt{MessageB} signatures over transcript data
-  must verify under the pinned key; otherwise
-  \texttt{identityMismatch} aborts the handshake.
-\end{itemize}
-
-\textbf{Property G3 (Session Key Secrecy):} The derived session keys
-remain secret under standard KEM/DH and signature security
-assumptions. For KEM-based PQC suites in v1, we do not claim
-post-compromise forward secrecy: confidentiality holds only while
-long-term KEM private keys remain uncompromised.\\
-\emph{Proof sketch:}
-\begin{itemize}\tightlist
-\item
-  The shared secret is derived from KEM decapsulation or DH, and keys
-  are extracted via HKDF with transcript-bound salt.
-\item
-  An attacker without the private key material cannot compute the shared
-  secret or derive session keys.
-\end{itemize}
-
-\textbf{Property G4 (Replay Resistance):} Replayed handshakes do not
-establish a session.\\
-\emph{Proof sketch:} \texttt{handshakeId} derives from fresh nonces and
-suite identifiers; replay detection caches recent IDs and rejects
-duplicates within the window.
-
-\textbf{Property G5 (Strict-Policy Consistency):} Strict policy never
-permits a business-capable classic session. Compliance Mode has no
-classic path. Bootstrap-Assisted Mode may use a transient classic
-control channel, but business traffic is blocked until PQC rekey
-completes.\\
-\emph{Proof sketch:} \texttt{TwoAttemptHandshakeManager} enforces a
-policy gate before any default-mode fallback attempt; strict compliance
-forbids classic establishment edges. For strict recovery, bootstrap is
-trigger-limited, emits explicit \texttt{handshake\_fallback} events, and
-enforces control-only messaging until PQC rekey succeeds. This is
-validated by policy downgrade benchmarks
-(Fig.~\ref{fig:policy-downgrade}) and bootstrap control-gating tests.
-
-\textbf{Property G6 (Safe Fallback under default policy):} Fallback can
-only occur after peer identity is verified under the pinned key and only
-for a whitelisted set of locally generated capability errors; timeout
-and network-derived failures never trigger fallback.\\
-\emph{Proof sketch:} Fallback is gated after identity verification; the
-whitelist is evaluated on locally generated capability/instantiation
-errors rather than unauthenticated network input. \texttt{timeout} is
-explicitly blocked and per-peer cooldown limits repeated downgrades.
-\emph{Proposition (No forced fallback by packet loss):} Under the attacker model in Section~\ref{sec:security-model}, an active network attacker who can drop/delay/reorder messages cannot induce a successful classic session by causing timeouts, because timeout-triggered fallback is disallowed and the default-policy fallback gate (Definition D2) requires locally generated unavailability after identity verification.
-
-\textbf{Property G7 (Legacy Acceptance Preconditions):} Legacy P-256
-signatures are accepted only under authenticated pairing or an existing
-trust record.\\
-\emph{Proof sketch:} Legacy acceptance is gated by
-\texttt{Legacy\allowbreak Trust\allowbreak Precondition}; pure network stranger connections fail.
-This is validated by the precondition test matrix (Table~\ref{tab:legacy-fallback-preconditions}).
-
-\textbf{Property G8 (Auditability):} Cryptographic downgrades and
-exceptional states are observable via a minimal sufficient information set.\\
-\emph{Proof sketch:} The handshake emits
-\texttt{cryptoDowngrade} events with reason,
-deviceId, and cooldown context, enabling post-hoc verification of policy
-adherence.
-
-\emph{Audit field requirements:}
-\begin{itemize}\tightlist
-\item \textbf{MUST log} (minimal sufficient set): event type, timestamp, deviceId, suiteId, failure reason code, policy mode, fallback triggered (bool), cooldown remaining.
-\item \textbf{MUST NOT log} (privacy preservation): session keys, nonces, raw signatures, message payloads, user identifiers beyond deviceId.
-\item \textbf{Tamper-evidence:} Events are emitted synchronously before state transitions complete; the resulting trace is checkable against expected state-machine templates (used in our audit-signal fidelity tests). Log collection relies on OS unified logging (\texttt{os\_log}) for best-effort retention and is not a cryptographic tamper-proof store; privileged adversaries can alter or truncate logs.
-\end{itemize}
+Closed-form byte overhead between v1 and v2 is dominated by the extra
+contribution fields. Let $c_I$ denote the initiator contribution carried
+in MessageA and $c_R^{(v1)}, c_R^{(v2)}$ denote responder-share fields
+in MessageB for v1 and v2:
+\[
+\Delta |M_A| = 2 + |c_I|,
+\qquad
+\Delta |M_B| = |c_R^{(v2)}| - |c_R^{(v1)}|.
+\]
+In current implementation (\texttt{X25519} contribution, 32 bytes):
+$\Delta |M_A| = 34$ bytes and $\Delta |M_B| = 32$ bytes.
 
 \begin{table*}[!t]
 \centering
@@ -1138,13 +1320,13 @@ Evidence
 \end{minipage} \\
 \midrule
 G1 Negotiation integrity & Suite/keyshare validation + transcript-bound \texttt{sigB} & Fig.~\ref{fig:handshake-sequence}, \mbox{HandshakeDriverTests} \\
-G2 Mutual authentication & Identity pinning + signature verification & Table~\ref{tab:failure-mode-robustness} (wrong signature), Table~\ref{tab:legacy-fallback-preconditions} \\
+G2 Mutual authentication & Identity pinning + signature verification & Supplementary Table~\ref{tab:failure-mode-robustness} (wrong signature), Table~\ref{tab:legacy-fallback-preconditions} \\
 G3 Session key secrecy & KEM/DH + HKDF with transcript-bound salt & Property 1, Supplementary Materials (ML-DSA Key Sizes) \\
 G4 Replay resistance & \texttt{handshakeId} cache + nonce binding & Property-Oriented Testing (Section~\ref{sec:evaluation}) \\
 G5 Strict-policy consistency & TwoAttempt policy gate + bootstrap control-only gate + mandatory rekey to PQC & Fig.~\ref{fig:policy-downgrade}, \mbox{PolicyDowngradeBenchTests}, \mbox{BootstrapAssuranceTests} \\
-G6 Default safe fallback & Whitelist/blacklist + local capability gate + cooldown & Fig.~\ref{fig:downgrade-matrix}, Table~\ref{tab:failure-mode-robustness} \\
+G6 Default safe fallback & Whitelist/blacklist + local capability gate + cooldown & Fig.~\ref{fig:downgrade-matrix}, Supplementary Table~\ref{tab:failure-mode-robustness} \\
 G7 Legacy acceptance precondition & LegacyTrustPrecondition & Table~\ref{tab:legacy-fallback-preconditions} \\
-G8 Auditability & Security event emission & Fig.~\ref{fig:failure-histogram}, Table~\ref{tab:audit-signal-fidelity} \\
+G8 Auditability & Security event emission + transcript-anchored \texttt{AuditTrail} hash-chain & Fig.~\ref{fig:failure-histogram}, Table~\ref{tab:audit-signal-fidelity} \\
 \bottomrule
 \end{tabular}
 \end{table*}
@@ -1163,8 +1345,25 @@ when available (e.g., CryptoKit ML-KEM/ML-DSA), a portable liboqs
 provider, and a classic provider. Provider selection is deterministic
 and prefers the strongest available tier; Secure Enclave proof-of-
 possession is optional and orthogonal to the negotiated suite. The full
-platform support matrix and suite availability are in the Supplementary
-Materials (Platform Support Matrix).
+Apple provider matrix and the cross-platform runtime suite-policy matrix
+are in the Supplementary Materials (Tables
+\ref{tab:supp-platform-support} and \ref{tab:supp-cross-platform-policy}).
+
+\textbf{Portable core and outward bindings (contribution~C2).} The
+negotiation, downgrade-policy, and audit logic of the contract live in
+an OS-independent Rust core (\texttt{skybridge-core}) that is not tied to
+any Apple API. The core exposes two coordinated outward binding surfaces
+(\texttt{skybridge-ffi}): a hand-written, panic-safe C ABI
+(\texttt{extern\ "C"}, header generated by cbindgen) for C/C++/C\#
+P/Invoke, and a UniFFI proc-macro surface for Kotlin and Swift, both thin
+wrappers over the same core. A non-Apple client therefore drives the
+identical suite/provider separation, policy-gate, and downgrade-evidence
+machinery rather than reimplementing the protocol. We deploy this core on
+macOS and iOS and are consolidating reference Windows (C\#/WinUI~3),
+Android (Kotlin), and Linux (GTK~4) clients onto it. This establishes
+\emph{mechanism-level} portability; we do not claim measured
+cross-platform performance parity, and the binding surface deliberately
+excludes platform-native remote-desktop capture/inject.
 
 \subsection{Native PQC Integration}\label{b.-apple-pqc-integration}
 
@@ -1172,7 +1371,11 @@ The native provider wraps CryptoKit ML-KEM/ML-DSA APIs \cite{ref1,ref34} when th
 SDK exposes them, enabling platform-backed PQC suites and HPKE-based
 encapsulation. We treat this as a deployment instance rather than a
 protocol dependency; integration details are provided in the
-Supplementary Materials (Native PQC Integration).
+Supplementary Materials (Native PQC Integration). Specifically, the
+Apple provider path does not redefine the protocol contract, does not
+alter the primary evidence base of the paper, and is evaluated only as
+an implementation capability mapping under existing negotiation and
+policy semantics.
 
 \subsection{Conditional Compilation
 Strategy}\label{c.-conditional-compilation-strategy}
@@ -1185,9 +1388,9 @@ Supplementary Materials (Conditional Compilation).
 \subsection{Security Event
 Emission}\label{d.-security-event-emission}
 
-All cryptographic decisions emit structured events for auditability.
-The emitter provides backpressure and rate limiting; implementation
-details are in the Supplementary Materials (Security Event Emission).
+All cryptographic decisions emit structured audit events with
+backpressure and rate limiting; implementation details are in the
+Supplementary Materials (Security Event Emission).
 
 \subsection{Secure Enclave
 Integration}\label{e.-secure-enclave-integration}
@@ -1217,8 +1420,9 @@ negotiated suite. We resolve this with pre-negotiation signature
 selection and a two-attempt strategy. Each attempt is homogeneous
 (PQC-only or classic-only), and the signature algorithm is chosen based
 on the offered suites. The initiator first attempts PQC, then falls back
-to classic only for a whitelist of benign, locally generated capability
-errors after peer identity verification; timeout, signature
+to classic only for already paired peers and only for a whitelist of
+benign, locally generated \emph{pre-send} capability/instantiation
+errors; timeout, signature
 verification, identity mismatch, replay, and other network-derived
 failures never trigger fallback. This policy is enforced by the
 handshake manager and logged as security events. Detailed error lists
@@ -1230,30 +1434,62 @@ For strict policy deployments, we expose two operator-selectable modes:
 channel only for paired KEM-key recovery, then require PQC rekey before
 business traffic).
 
-\textbf{Fallback Boundary Conditions (Explicit Scope):}
-\begin{itemize}\tightlist
-\item \emph{We defend against:} (1) Attacker-induced timeout forcing downgrade (blocked by timeout blacklist); (2) Rapid downgrade cycling via repeated failures (5-minute per-peer cooldown); (3) Signature/identity attacks masquerading as capability failures (verification failures are blacklisted).
-\item \emph{We do not defend against:} (1) Attacker persistently blocking PQC traffic for $>$5 minutes under default mode (availability vs.\ security trade-off; strict compliance mode provides full protection at cost of connectivity); (2) Legitimate PQC provider failures causing temporary classic fallback under default mode.
-\item \emph{Cooldown rationale:} We set a conservative default of 5 minutes to bound downgrade cycling while limiting availability impact; the cooldown is a tunable policy knob. Operators requiring zero classic establishment can select strict Compliance Mode.
-\end{itemize}
+Compliance Mode is fail-closed and is the reference point for our strict
+downgrade-resistance claims. Default Mode prioritizes availability and
+therefore allows a bounded, policy-audited classic fallback for already
+paired peers under the local-only gate (D2); persistent PQC blocking is
+treated as an availability attack rather than a silent downgrade.
 
-\textbf{Attempt State and Identifiability:}
-\begin{itemize}\tightlist
-\item \emph{Shared across attempts:} pinned identity fingerprint and pinned KEM public keys (trust record), and per-peer fallback cooldown state.
-\item \emph{Not shared across attempts:} nonces, transcript hashes, handshakeId/replay tags, ephemeral key shares, and session keys; each attempt runs a fresh state machine.
-\item \emph{Identifiability:} a passive observer can distinguish a classic fallback attempt from a PQC attempt by wire format. We do not transmit an explicit attempt counter; strict Compliance Mode removes classic attempts entirely when capability privacy outweighs compatibility.
-\end{itemize}
+\textbf{Fallback boundary conditions (explicit scope).} The contract
+defends against attacker-induced timeouts forcing a downgrade (blocked by
+the timeout blacklist), rapid downgrade cycling (per-peer cooldown,
+default 5\,min), and signature/identity attacks masquerading as
+capability failures (verification failures are blacklisted). It does not
+defend against persistent PQC blocking under Default Mode (an
+availability-versus-security trade-off for which Compliance Mode is the
+fail-closed answer) or legitimate PQC-provider failures causing a
+temporary classic fallback under Default Mode. The 5\,min cooldown is a
+conservative default that bounds cycling while limiting availability
+impact; it is a tunable operator knob (ablation in Supplementary
+Table~\ref{tab:migration-fleet-behavior}), and operators requiring zero
+classic establishment select strict Compliance Mode.
+
+\begin{table}[!t]
+\centering
+\scriptsize
+\caption{Default-policy fallback classes and remote-inducibility boundary.}
+\label{tab:fallback-locality}
+\begin{tabular}{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.47}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.53}}@{}}
+\toprule
+Reason class & Default-policy outcome \\
+\midrule
+Local capability/instantiation unavailability (paired trust record, pre-send; e.g., local \texttt{suiteNegotiationFailed} due to missing paired KEM keyshare) & ALLOW classic fallback + mandatory \texttt{cryptoDowngrade} event \\
+Network-derived / after-send failures (\texttt{timeout}, remote negotiation mismatch, signature/identity/replay failures) & DENY fallback; emit failure event only \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Attempt state and identifiability.} Across attempts only the
+pinned identity fingerprint and KEM public keys (trust record) and the
+per-peer cooldown state are shared; nonces, transcript hashes,
+handshakeId/replay tags, ephemeral key shares, and session keys are not,
+so each attempt runs a fresh state machine. A passive observer can
+distinguish a classic fallback attempt from a PQC attempt by wire format;
+we transmit no explicit attempt counter, and strict Compliance Mode
+removes classic attempts entirely when capability privacy outweighs
+compatibility.
 
 \textbf{Security Events:}
 
-Default-policy classic fallback emits \texttt{cryptoDowngrade} with full
-context (reason, deviceId, cooldown), enabling audit and anomaly
-detection. Strict Bootstrap-Assisted recovery emits
-\texttt{handshake\_fallback} events with mode
-\texttt{bootstrap\_assisted}
-and trigger/result fields, so reviewers can distinguish ``strict
-compliance fail-closed'' from ``strict recovery with mandatory PQC
-rekey'' traces.
+Under default policy, classic fallback emits event
+``cryptoDowngrade'' with reason, deviceId, and cooldown fields.
+Strict Bootstrap-Assisted recovery emits event
+``handshake\_fallback'' (bootstrap-assisted mode) with explicit
+trigger/result fields. This distinguishes strict compliance
+(fail-closed) traces from strict recovery traces with mandatory
+PQC rekey.
 
 
 
@@ -1267,7 +1503,7 @@ suppression, legacy precondition enforcement, and auditability) and
 \textbf{cost-centric evidence} (handshake latency, wire overhead,
 provider selection overhead, and data-plane throughput).
 
-\textbf{Environment:} All experiments are run on Apple Silicon (M1/M3 class) with macOS 26.x, where CryptoKit PQC is available when the SDK exposes ML-KEM/ML-DSA types \cite{ref1,ref34}. Build configuration uses Release (\texttt{-O}) with non-essential logging disabled. Timing uses a monotonic clock (\texttt{ContinuousClock}) with N=1000 iterations after 10 warmup runs; reported percentiles (p50/p95/p99) are computed directly from samples.
+\textbf{Environment:} All experiments are run on Apple Silicon (M1/M3 class) with macOS 26.x, where CryptoKit PQC is available when the SDK exposes ML-KEM/ML-DSA types \cite{ref1,ref34}. Build configuration uses Release (\texttt{-O}) with non-essential logging disabled. Timing uses a monotonic clock (\texttt{ContinuousClock}) with 10 warmup runs. The \emph{core gate} (Classic/liboqs/liboqs-v2-FS) uses N=1000 per configuration. Apple PQC/X-Wing are collected in a separate \emph{contrast} pass (N=5000) and are reported as non-gating diagnostics. Reported percentiles (p50/p95/p99) are computed directly from samples; binary outcomes are reported with Wilson 95\% confidence intervals.
 
 \textbf{Repeatability:} We support multi-batch repeatability by
 restarting the benchmark test process for each batch. Supplementary
@@ -1276,37 +1512,79 @@ report the number of observed batches ($B$) and (when $B \ge 2$) mean and
 95\% confidence intervals across batches. To reproduce multi-batch CIs,
 re-run the harness with \texttt{SKYBRIDGE\_BENCH\_BATCHES=3}--\texttt{5}.
 
-\textbf{Reproducibility:} We ship an opt-in benchmark suite under \texttt{Tests/\allowbreak SkyBridgeCoreTests/}. For a one-shot run, use \texttt{Scripts/\allowbreak run\_\allowbreak paper\_\allowbreak eval.sh}. The complete command reference and CSV artifact specifications are provided in the Supplementary Materials (Reproducibility).
+\textbf{Reproducibility:} We ship an opt-in benchmark suite under \texttt{Tests/\allowbreak SkyBridgeCoreTests/} that emits date-stamped CSV artifacts under \texttt{Artifacts/} (pinned by \texttt{ARTIFACT\_DATE=\artifactdate}) and regenerates all evaluation tables/figures from scripts. For a one-shot run, use \texttt{Scripts/\allowbreak run\_\allowbreak paper\_\allowbreak eval.sh}. The runner supports profile-scoped collection via \texttt{SKYBRIDGE\_BENCH\_PROFILE} and \texttt{SKYBRIDGE\_BENCH\_OUTPUT\_SET}; contrast outputs are written to dedicated contrast CSV/JSON artifacts. The complete command reference and CSV artifact specifications are provided in the Supplementary Materials (Reproducibility).
 
-\textbf{iOS Reproducibility:} Because CI-style automation for iOS PQC
-measurements is sensitive to device availability and simulator runtime
-support, we also ship an on-device micro-benchmark in the iOS app that
-exports JSON artifacts (timestamped) for Supplementary tables. This
-enables independent reproduction of KEM, signature, and KEM--DEM costs on
-commodity iOS 26+ hardware without modifying the protocol code paths.
+\textbf{iOS Reproducibility:} We ship an on-device micro-benchmark in
+the iOS app (\texttt{Settings} $\rightarrow$ \texttt{PQC} $\rightarrow$
+\texttt{Self-test/Bench}) that exports schema-v3 JSON artifacts.
+For the pinned run (\texttt{ARTIFACT\_DATE=\artifactdate}), each suite uses
+warmup=10, N=1000, and three batches (B=3). We aggregate exported JSON
+with \texttt{aggregate\_ios\_microbench.py} into the date-stamped iOS
+micro-benchmark CSV, then auto-generate the main table and Supplementary
+device metadata. In this frozen run
+(iOS/iPadOS 26.2.1), the iOS compatibility-matrix gate passed on both
+tested device classes (iPad + iPhone), with no schema or negotiation
+incompatibility observed in the benchmark pipeline.
 
-\begin{table*}[!t]
-\centering
-\caption{On-device micro-benchmark on iOS 26.2 (iPhone, N=50). Metrics are reported in milliseconds (ms) as mean and p99 over 50 iterations (no warmup). Artifacts are exported as JSON (schema v2) and include split suite labels (\texttt{kem\_suite}, \texttt{sig\_suite}) for academic clarity. Each ``encapsulate'' measurement includes the sender-side ephemeral generation and encapsulation work for the corresponding KEM/key-agreement.}
-\label{tab:ios-microbench}
-{\setlength{\tabcolsep}{3pt}\small
-\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.28\textwidth}*{4}{>{\raggedright\arraybackslash}p{0.16\textwidth}}@{}}
-\toprule
-Configuration &
-KEM encaps.\newline(mean/p99) &
-Sign\newline(mean/p99) &
-Verify\newline(mean/p99) &
-\shortstack[l]{KEM--DEM\\seal+open\\(mean/p99)} \\
-\midrule
-Classic (X25519 + Ed25519) & 0.414 / 0.704 & 0.122 / 0.126 & 0.085 / 0.133 & 0.389 / 0.534 \\
-CryptoKit PQC (ML-KEM-768 + ML-DSA-65) & 0.149 / 0.190 & 1.072 / 2.108 & 0.048 / 0.055 & 0.245 / 0.272 \\
-CryptoKit Hybrid (X-Wing + ML-DSA-65) & 0.282 / 0.452 & 1.403 / 2.654 & 0.048 / 0.053 & 0.324 / 0.391 \\
-\bottomrule
-\end{tabular}
-}
-\end{table*}
+\textbf{iOS microbench results:} Supplementary
+Table~\ref{tab:ios-microbench} reports \emph{primitive-level} iOS costs
+(encap/sign/verify/seal+open), not end-to-end handshake completion; it
+is therefore not interpreted as a direct substitute for macOS loopback
+handshake latency. Supplementary
+Table~\ref{tab:supp-ios-microbench-devices} records per-device metadata
+for the pinned run.
 
-\textbf{Interpretation:} The loopback microbench isolates cryptographic and state-machine overhead; it does not model OS network stacks, NAT traversal, or heterogeneous access networks. We report simulated impairments separately (Section~\ref{sec:network-conditions}) and list real-network end-to-end measurement as future work (Section~\ref{sec:limitations}).
+\subsection{Claim Scope and External Validity}\label{sec:claim-scope-validity}
+
+We separate \emph{mechanism-level} from \emph{deployment-level} claims.
+Mechanism-level claims cover negotiation integrity, policy-gated
+downgrade behavior, deterministic failure semantics, and audit-event
+completeness under the stated threat model. These claims are tied to the
+protocol contract and test/formal artifacts, not to Apple-specific APIs.
+Deployment-level claims cover absolute latency, wire overhead, and
+provider/runtime effects. They are evaluated only for the reported
+Apple-platform instance and should not be extrapolated to other OS
+stacks without remeasurement. To reduce portability ambiguity we ship a
+cross-platform contract-consistency JSON artifact (Supplementary
+Table~\ref{tab:supp-cross-platform-contract}) and a dedicated external
+Linux direct-path run (Supplementary Table~\ref{tab:supp-ec2-direct}).
+
+Accordingly, we use the real-network results as external-validity
+evidence rather than ecosystem-wide performance characterization: the
+current snapshot includes one STUN-coupled non-overlay direct path,
+overlay-mediated paths, and a dedicated external Linux direct-path run
+(\texttt{n=50} per payload), and is used to validate directional
+robustness and failure semantics under deployment constraints.
+
+\textbf{Evidence overview (main claims).} Negotiation integrity and
+transcript binding rest on the machine-checked model plus protocol and
+property tests (Section~\ref{sec:security-model};
+\texttt{formal/skybridge\_v2.spthy}); policy-gated downgrade correctness
+on decision-matrix validation, the forced-error policy bench, and the
+migration-threat harness (Figs.~\ref{fig:policy-downgrade},
+\ref{fig:downgrade-matrix}; Tables~\ref{tab:ablation-by-property},
+\ref{tab:migration-threat-harness}); deterministic failure semantics on
+fault injection and spec-to-event mapping (Supplementary
+Table~\ref{tab:failure-mode-robustness};
+Table~\ref{tab:audit-signal-fidelity}); performance on distributional
+microbenchmarks and system-level amortization
+(Table~\ref{tab:perf-summary};
+Fig.~\ref{fig:system-impact-amortization}); and external validity on
+controlled simulation, kernel cross-check, fleet dynamics, and the
+real-network micro-study (Section~\ref{sec:network-conditions}).
+Supplementary Table~\ref{tab:claim-evidence-strength} provides the full
+claim-to-evidence map.
+
+\textbf{Threats to validity.} Timing can be affected by runtime noise
+(scheduler/cache/thermal), so we use Release builds, warmup,
+distributional reporting, and multi-batch restarts (internal). Loopback
+time-to-ready is not user QoE, so we report \texttt{T\_connect},
+\texttt{T\_first\_frame}, and \texttt{T\_total} separately (construct).
+Absolute costs are Apple-platform-instance results, with cross-stack
+evidence framed as contract consistency plus targeted Linux direct-path
+checks (external). Audit-signal fidelity is deterministic spec-to-event
+conformance rather than statistical, and all artifacts are published for
+independent reruns (conclusion).
 
 \subsection{Security Validation}\label{b.-security-centric-evaluation}
 
@@ -1314,6 +1592,64 @@ We validate security properties through fault injection, property-based
 testing, and audit-signal fidelity analysis. This section presents the
 key results; detailed test matrices and methodology are provided in the
 Supplementary Materials (Regression Testing).
+
+\textbf{Migration-threat harness (baseline contrast).}
+To evaluate migration behavior under active suppression, we run a
+targeted harness with four metrics:
+\textbf{FDR} (forced downgrade rate), \textbf{SDR} (silent downgrade
+rate), \textbf{ECR} (evidence completeness rate for emitted downgrade
+events), and \textbf{PCR} (policy-decision replayability rate from
+recorded traces). We compare a naive timeout-fallback baseline against
+SkyBridge policies under a timeout-attack scenario (N=1000).
+This baseline models a common availability-first glue policy where timeouts are treated as fallback triggers; Lemma~L1 applies to any migration strategy that makes timeout/network-derived failures fallback-eligible.
+
+\begin{table*}[!t]
+\centering
+\scriptsize
+\caption{Migration-threat harness under active timeout suppression (N=1000 per row). Data source: \texttt{Artifacts/\allowbreak migration\_threat\_harness\_\artifactdate.csv} produced by \texttt{MigrationThreatHarnessBenchTests}.}
+\label{tab:migration-threat-harness}
+\begin{tabular}{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.19}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.11}}
+  >{\centering\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.07}}
+  >{\centering\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.07}}
+  >{\centering\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.07}}
+  >{\centering\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.07}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.42}}@{}}
+\toprule
+Configuration & Scenario & FDR & SDR & ECR & PCR & Interpretation \\
+\midrule
+SkyBridge default & Timeout attack & 0.00 & 0.00 & 1.00 & 1.00 & Timeout does not open classic fallback edge \\
+SkyBridge strictPQC & Timeout attack & 0.00 & 0.00 & 1.00 & 1.00 & Compliance mode remains fail-closed under suppression \\
+Naive timeout-fallback baseline & Timeout attack & 1.00 & 1.00 & 0.00 & 0.00 & Attacker can force classic with no replayable audit evidence \\
+SkyBridge default & Local unavailability & 1.00 & 0.00 & 1.00 & 1.00 & Local-only fallback path is explicit and fully evidenced \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+This contrast provides implementation-level evidence for Lemma~L1 and
+its corollary: timeout-eligible fallback is attacker-forcible, while a
+local-only gate removes that adversarial edge.
+
+\textbf{Provider/back-end consistency check (non-Apple path).}
+To validate that migration semantics are not tied to Apple-native
+providers, we rerun the same harness using explicit liboqs and classic
+provider selection. Supplementary Table~\ref{tab:migration-provider-matrix}
+reports the provider-matrix results (N=1000 per row).
+
+\textbf{Fleet-level migration dynamics (heterogeneous capability mix).}
+To quantify migration behavior beyond per-handshake microbenchmarks, we
+run a controlled fleet simulation with heterogeneous peer capability
+ratios, per-peer cooldown on/off ablation, and active timeout
+suppression (N=10{,}000 sessions per row; peer pool=2{,}000; timeout
+attack rate=5\%). Supplementary Table~\ref{tab:migration-fleet-behavior}
+reports availability, downgrade exposure, and policy-decision
+distribution from
+\texttt{Artifacts/\allowbreak migration\_fleet\_behavior\_\artifactdate.csv}.
+
+The fleet-level \texttt{mean connect} metric is an in-process
+policy/attempt completion cost (not external network RTT) and is reported
+only to compare policy modes under identical harness conditions.
 
 \textbf{Failure-Mode Robustness.}
 The actor-isolated handshake driver targets deterministic failure semantics; in our fault-injection tests we observed no unhandled errors, double-resume, or sensitive-material leaks. We inject faults including timeout, malformed framing, invalid signatures, out-of-order delivery, and concurrent cancellation (n=1000 per scenario per policy).
@@ -1324,55 +1660,10 @@ explicit \texttt{unknown(wireId)} value and reject them if they appear in
 ``unknown $\rightarrow$ classic'' coercions that would otherwise weaken
 downgrade guarantees.
 
-\begin{table*}[!t]
-\centering
-\caption{Failure-Mode Robustness and Observability. Runs = number of
-iterations per scenario and policy (n=1000). Table reports default
-policy; strictPQC (Compliance Mode) counts are recorded separately in
-\texttt{fault\_injection\_\artifactdate.csv}. All
-metrics are binary (1 = pass) except event counts. Data from
-\texttt{Artifacts/fault\_injection\_\artifactdate.csv}
-produced by \mbox{HandshakeFaultInjectionBenchTests}; semantic checks from
-\mbox{HandshakeDriverTests}.}
-\label{tab:failure-mode-robustness}
-\begin{tabular}{@{}
-  >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.1186}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.0508}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.0763}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.1356}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.1780}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.2203}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 12\tabcolsep) * \real{0.2203}}@{}}
-\toprule\noalign{}
-\begin{minipage}[b]{\linewidth}\raggedright
-Failure Mode
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Runs
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-No\\Unexp.\\Error
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-No\\Double\\Resume
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Zero\\Verified
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-$E_{\texttt{handshakeFailed}}$
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-$E_{\texttt{cryptoDowngrade}}$
-\end{minipage} \\
-\midrule
-Out-of-order & 1000 & 1 & 1 & 1 & 0 & 0 \\
-Duplicate & 1000 & 1 & 1 & 1 & 0 & 0 \\
-Drop & 1000 & 1 & 1 & 1 & 1000 & 0 \\
-Delay within timeout & 1000 & 1 & 1 & 1 & 0 & 0 \\
-Delay exceed timeout & 1000 & 1 & 1 & 1 & 1000 & 0 \\
-Corrupt header & 1000 & 1 & 1 & 1 & 1000 & 0 \\
-Corrupt payload & 1000 & 1 & 1 & 1 & 1000 & 0 \\
-Wrong signature & 1000 & 1 & 1 & 1 & 1000 & 0 \\
-Concurrent cancel & 1000 & 1 & 1 & 1 & 1000 & 0 \\
-Concurrent timeout & 1000 & 1 & 1 & 1 & 1000 & 0 \\
-\bottomrule
-\end{tabular}
-\end{table*}
+Supplementary Table~\ref{tab:failure-mode-robustness} reports the full
+per-scenario robustness and observability matrix and event counts (n=1000
+per scenario; strictPQC counts recorded separately in
+\texttt{fault\_injection\_\allowbreak \artifactdate.csv}).
 
 The delay-within-timeout and delay-exceed-timeout scenarios approximate
 RTT jitter and loss-induced stalls, while drop and duplicate cases
@@ -1383,6 +1674,33 @@ Downgrade events are quantified separately in the policy bench (Fig.~\ref{fig:po
 to avoid conflating fallback behavior with transport corruption
 scenarios.
 
+\textbf{SOA Arbitration and Compatibility Stress.}
+We add a focused SOA regression bench (\texttt{SOAInteroperability\allowbreak BenchTests},
+\texttt{N=100} per scenario) covering simultaneous-open convergence,
+forged-target rejection, established-guard release, supersede rate
+limiting, and legacy/new MessageA interoperability.
+Table~\ref{tab:soa-interop} summarizes the results; raw rows are stored
+in \path{Artifacts/soa_interop_2026-02-22.csv}.
+
+\begin{table*}[!t]
+\centering
+\caption{SOA arbitration and compatibility stress results
+(\texttt{ARTIFACT\_DATE=2026-02-22}, \texttt{N=100} per row).}
+\label{tab:soa-interop}
+\begin{tabular}{@{}p{0.24\linewidth}p{0.52\linewidth}ccc@{}}
+\toprule
+Scenario & Check focus & N & Pass & Pass rate \\
+\midrule
+Simultaneous open single-flight & Deterministic winner via byte-ordered \((\texttt{initiatorPeerId},\texttt{attemptId})\) & 100 & 100 & 1.00 \\
+Forged target binding guard & Reject unauthenticated cancellation trigger (\texttt{targetPeerId} mismatch) & 100 & 100 & 1.00 \\
+Established guard release & \texttt{already\_connected} while established; immediate reconnect after release & 100 & 100 & 1.00 \\
+Supersede rate limit & Bound supersede to 3/60s; 4th attempt rejected & 100 & 100 & 1.00 \\
+Legacy MessageA compatibility & Missing SOA extension remains valid legacy path & 100 & 100 & 1.00 \\
+Extension passthrough + transcript binding & Unknown TLVs preserved in \texttt{extensionsRaw}; SOA-only wire delta \(=91\) B, no extra RTT & 100 & 100 & 1.00 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
 \begin{figure}
 \centering
 \pandocbounded{\includegraphics[keepaspectratio,width=\columnwidth]{figures/fig_policy_downgrade.pdf}}
@@ -1391,10 +1709,10 @@ scenarios.
 \label{fig:policy-downgrade}
 \end{figure}
 
-The plot in Fig.~\ref{fig:policy-downgrade} uses the policy-downgrade
-dataset. File: \texttt{policy\_downgrade\_\artifactdate.csv}. It
-demonstrates that strictPQC Compliance Mode never emits fallback events even under
-forced PQC-unavailable errors; default policy shows non-zero downgrade
+Fig.~\ref{fig:policy-downgrade} (dataset
+\texttt{policy\_downgrade\_\artifactdate.csv}) shows that strictPQC
+Compliance Mode never emits fallback events even under forced
+PQC-unavailable errors, whereas default policy shows non-zero downgrade
 events.
 
 \begin{figure}
@@ -1406,8 +1724,8 @@ explicit allow/deny semantics, macOS 26.x. Each cell is labeled ALLOW or DENY fo
 \end{figure}
 
 Fig.~\ref{fig:downgrade-matrix} encodes the explicit downgrade whitelist/blacklist: only
-PQC-unavailability and suite-selection errors may fallback under default
-policy; strictPQC Compliance Mode denies classic fallback edges
+PQC-unavailability and local pre-send suite-selection errors may fallback
+under default policy; strictPQC Compliance Mode denies classic fallback edges
 (Bootstrap-Assisted strict recovery is a separate control-only path with
 mandatory PQC rekey).
 
@@ -1424,17 +1742,24 @@ event from the policy bench to visualize observability of failures and
 downgrades across policy modes.
 
 \textbf{\mbox{Property-Oriented} Testing.}
-Correctness properties are validated with property-based tests using reproducible seeds (0xDEADBEEF). Key properties include: (1) KEM-DEM round-trip correctness across all providers (100 trials), (2) signature verification integrity (100 payloads per provider), (3) secure zeroization on deallocation, and (4) state-machine single-resume guarantee under concurrent stress (500 iterations). A standalone Python decoder (\texttt{Scripts/\allowbreak wire\_\allowbreak format\_\allowbreak sanity.py}) provides non-Swift interoperability validation of wire formats.
+Correctness properties are validated with property-based tests using a
+reproducible seed (0xDEADBEEF): KEM-DEM round-trip correctness across all
+providers (100 trials), signature verification integrity (100 payloads
+per provider), secure zeroization on deallocation, and the
+state-machine single-resume guarantee under concurrent stress (500
+iterations).
+A standalone Python decoder
+(\texttt{Scripts/\allowbreak wire\_\allowbreak format\_\allowbreak sanity.py}) provides non-Swift
+interoperability validation of wire formats.
 
 \textbf{ML-DSA Key Lifecycle.}
-ML-DSA-65 key generation, storage, and sign-verify operations are
-validated against FIPS 204 specifications \cite{ref16}. Size compliance
-results are reported in the Supplementary Materials (ML-DSA Key Sizes);
-all property tests (round-trip, tampering detection, key independence)
-achieve 100\% pass rate. Keys are stored in Keychain with
-\texttt{kSecAttrAccessible\allowbreak AfterFirstUnlock\allowbreak ThisDeviceOnly}
-and \texttt{kSecAttrSynchronizable=\allowbreak false} to ensure
-device-local protection.
+ML-DSA-65 key generation, storage, and sign/verify operations are
+validated against FIPS 204 \cite{ref16}. Size-compliance results are
+reported in the Supplementary Materials (ML-DSA Key Sizes). All property
+tests (round-trip, tampering detection, key independence) achieve
+100\% pass rate. Keys are stored in Keychain with device-local
+accessibility and synchronization disabled
+(\texttt{kSecAttrSynchronizable=\allowbreak false}).
 
 \textbf{Legacy Fallback Security.}
 Legacy P-256 signatures are only accepted when a security precondition is satisfied: (1) authenticated out-of-band channel (QR code, PAKE/PIN), or (2) existing TrustRecord with \texttt{legacyP256PublicKey}. Pure network stranger connections are rejected to prevent downgrade attacks.
@@ -1442,7 +1767,7 @@ Legacy P-256 signatures are only accepted when a security precondition is satisf
 \begin{table*}[!t]
 \centering
 \caption{Legacy Fallback Precondition Test Results. All tests executed
-via \mbox{LegacyFallbackPreconditionTests}. Tests validate Property 7: Legacy
+via \mbox{LegacyFallbackPreconditionTests}. Tests validate Property G7: Legacy
 Fallback Security Precondition.}
 \label{tab:legacy-fallback-preconditions}
 \begin{tabular}{@{}
@@ -1472,13 +1797,19 @@ Unverified authenticated channel & None & Reject & OK Reject \\
 \end{tabular}
 \end{table*}
 
-\textbf{Property 7 (Legacy Fallback Security Precondition):} A legacy
-P-256 signature SHALL only be accepted when a security precondition is
-satisfied. Pure network stranger connections SHALL be rejected.
-Validated with 12 test cases covering all precondition combinations (100\% coverage of the precondition state space).
+Property~G7 (legacy-fallback precondition) is validated with 12 test
+cases covering all precondition combinations (100\% coverage of the
+precondition state space): a legacy P-256 signature is accepted only when
+the precondition holds, and pure network strangers are rejected.
 
 \textbf{Audit-Signal Fidelity.}
-Security events provide deterministic, audit-friendly (best-effort, non-cryptographic) telemetry of failures and policy decisions. Fig.~\ref{fig:event-traces} illustrates a representative timeout trace showing attacker action, policy gate response, and emitted event.
+Security events provide deterministic, protocol-level audit signals of
+failures and policy decisions. Under non-compromised runtime
+assumptions, the per-session \texttt{AuditTrail} hash-chain provides
+tamper-evident ordering; long-term retention depends on the operating
+environment. Fig.~\ref{fig:event-traces} illustrates a representative
+timeout trace showing attacker action, policy gate response, and emitted
+event.
 
 \emph{Evaluation approach:} We evaluate audit-signal fidelity using a spec-to-event mapping consistency metric, \emph{not} a statistical classifier. Each fault-injection scenario deterministically maps to exactly one expected trace template (event sequence), e.g., timeout $\rightarrow$ \texttt{handshakeFailed=1, cryptoDowngrade=0}. Match rate (MR)=1.00 means all N iterations matched the expected template; spurious rate (SR)=0.00 means no unexpected events were emitted. This is regression consistency against the protocol specification, not ML classification performance.
 
@@ -1512,37 +1843,78 @@ PQC unavailable (strictPQC) & cryptoDowngrade=0 & 1000 & 1.00 & 0.00 \\
 
 Due to space constraints, the complete regression test matrix, TLV encoding validation, and implementation component details are provided in the Supplementary Materials (Regression Testing and Artifact Map).
 
+\subsection{Resource Amplification and Throttling}\label{sec:resource-amplification}
+
+We separate adversarial cost vectors into (i) pre-authentication parser
+cost and (ii) post-authentication retry/cooldown pressure. Pre-auth
+cost is bounded by strict field-length checks, overflow-safe parsing, and
+bounded key-share cardinality before cryptographic operations are
+invoked. Post-auth pressure is bounded by per-peer fallback cooldown and
+rate-limited security event emission.
+
+These controls are intended to bound resource amplification from malformed
+inputs and retry storms without introducing silent downgrade paths. We do
+not claim Internet-scale saturation resistance from this revision alone;
+adversarial burst-throughput characterization remains future work.
+
 \subsection{Performance Benchmarks}\label{c.-cost-centric-evaluation}
 
-Table~\ref{tab:perf-summary} consolidates all performance metrics. We measure \mbox{end-to-end} handshake completion time using an in-memory loopback transport to isolate cryptographic and state-machine overhead. Each configuration reports distributional statistics over N=1000 iterations after 10 warmup runs.
+Table~\ref{tab:perf-summary} consolidates \emph{core gate} performance metrics. We measure \mbox{end-to-end} handshake completion time using an in-memory loopback transport to isolate cryptographic and state-machine overhead. Each core configuration reports distributional statistics after 10 warmup runs (N=1000 per configuration). Apple PQC/X-Wing are reported separately as non-gating contrast data.
 
 \input{tables/perf_summary}
 
+\textbf{v1/v2 Bridge Overhead.}
+To isolate the protocol-v2 cost, we run a controlled liboqs v1/v2 bridge
+comparison with identical hardware/runtime settings (N=1000, warmup=10).
+Supplementary Table~\ref{tab:supp-v2-v1-compare} reports mean/p95 latency,
+RTT, and payload-handshake bytes. Consistent with the wire-format analysis in
+Section~\ref{sec:complexity-bounds}, v2 adds a fixed +\claimVTwoDeltaPayloadBytes~B payload-handshake
+overhead (MessageA +\claimVTwoDeltaMessageABytes~B, MessageB +\claimVTwoDeltaMessageBBytes~B), while latency impact remains in the
+low-millisecond range.
+
 \textbf{Latency Distribution.}
 Fig.~\ref{fig:handshake-latency} shows latency percentiles across
-configurations. Classic handshakes remain near 2~ms (2.3~ms at p99); CryptoKit
-PQC stays under 6.7~ms at p99 with variance dominated by ML-DSA signature
-verification overhead. Extended statistics (mean/p50/p95/p99, std) are
+configurations. Classic handshakes remain near
+\claimClassicMeanMs~ms (\claimClassicPNineNineMs~ms at p99). The liboqs
+v2 FS configuration remains around \claimLiboqsVTwoPNineNineMs~ms at p99.
+Extended statistics
+(mean/p50/p95/p99, std) are
 available in Supplementary Tables~\ref{tab:supp-latency}--\ref{tab:supp-rtt}
-(submitted as separate file \texttt{TDSC-2026-01-0318\_supplementary.pdf}).
+(reported in the supplementary PDF).
 
 \begin{figure}
 \pandocbounded{{\centering\includegraphics[keepaspectratio,width=\columnwidth]{figures/fig_handshake_latency.pdf}\par}}
-\caption{Handshake latency percentiles for Classic vs liboqs PQC vs CryptoKit PQC (N=1000). Generated from \texttt{Artifacts/\allowbreak handshake\_\allowbreak bench\_\allowbreak \artifactdate.csv}; values match the Performance Summary (Table~\ref{tab:perf-summary}) and Supplementary Table~\ref{tab:supp-latency}.}
+\caption{Handshake latency percentiles for the core gate configurations (Classic, liboqs PQC, liboqs PQC v2 FS), warmup=10 and N=1000 per configuration. Data source: \texttt{handshake\_bench\_\artifactdate.csv}. Values align with Table~\ref{tab:perf-summary} and Supplementary Table~\ref{tab:supp-latency}.}
 \label{fig:handshake-latency}
 \end{figure}
 
 \textbf{Wire-Format Breakdown.}
-The $\approx$17$\times$ size increase from Classic (687~B) to PQC (12.0~kB) is dominated by ML-DSA signatures (3309~B) and ML-KEM ciphertexts (1088~B). Fig.~\ref{fig:message-size-breakdown} shows the per-field breakdown.
+The handshake payload size increases from Classic (\claimClassicPayloadBytes~B) to PQC (\claimLiboqsPayloadBytes~B for liboqs; \claimLiboqsVTwoPayloadBytes~B for liboqs v2 FS in the core gate), dominated by ML-DSA signatures (3309~B) and ML-KEM ciphertexts (1088~B). Apple PQC/X-Wing payloads are reported in supplementary contrast artifacts. Fig.~\ref{fig:message-size-breakdown} shows the per-field breakdown.
+\textbf{Path-MTU implication.}
+The payload-only core-gate PQC handshake (\claimLiboqsPayloadBytes~B for liboqs; \claimLiboqsVTwoPayloadBytes~B for liboqs v2 FS) spans multiple transport segments under common MTUs. In our design, handshake
+messages run over stream transports (TCP/QUIC stream), so
+segmentation/reassembly is delegated to transport rather than custom
+handshake-layer fragmentation; the practical risk is latency inflation on
+lossy paths, which is why we report controlled impairment, kernel-level,
+and real-network evidence in Section~\ref{sec:network-conditions}.
 
 \begin{figure}
 \pandocbounded{{\centering\includegraphics[keepaspectratio,width=\columnwidth]{figures/fig_message_size_breakdown.pdf}\par}}
-\caption{Handshake message size breakdown (signature, keyshare,
-identity fields, framing overhead) for MessageA/MessageB across Classic and PQC configurations. Counts reflect MessageA/B payloads only; the \emph{payload-only} handshake size adds two 38~B Finished frames (accounted for in Table~\ref{tab:perf-summary}), and detailed field sizes are reported in Supplementary Table~\ref{tab:supp-message-sizes}. Generated from \texttt{Artifacts/message\_sizes\_\artifactdate.csv}.}
+\caption{Handshake message size breakdown (signature, keyshare, identity
+fields, framing overhead) for MessageA/MessageB across Classic and PQC
+configurations. Counts reflect MessageA/B payloads only. The
+\emph{payload-only} handshake size adds two 38~B Finished frames
+(accounted for in Table~\ref{tab:perf-summary}); detailed field sizes are
+reported in Supplementary Table~\ref{tab:supp-message-sizes}. Data source:
+\texttt{message\_sizes\_\artifactdate.csv}.}
 \label{fig:message-size-breakdown}
 \end{figure}
 
-Note: X-Wing hybrid KEM adds 32~B to MessageA's keyshare (1120~B vs 1088~B for ML-KEM-768). Measured handshake sizes are reported in Supplementary Table~\ref{tab:supp-message-sizes} (\texttt{MessageA.XWing}/\texttt{MessageB.XWing}).
+Note: In the \texttt{2026-01-23} snapshot, X-Wing hybrid KEM adds
+128~B to MessageA's keyshare (1216~B vs 1088~B for ML-KEM-768). Measured
+handshake sizes are reported in Supplementary
+Table~\ref{tab:supp-message-sizes}
+(\texttt{MessageA.XWing}/\texttt{MessageB.XWing}).
 
 \textbf{Data-Plane and Provider Selection.}
 Post-handshake symmetric AEAD (AES-256-GCM) throughput reaches 3.7~GB/s for 1~MiB payloads on Apple Silicon, with CPU cost of 0.25~ns/byte. In v1 the data-plane AEAD is fixed to AES-256-GCM and recorded separately from the handshake suite; thus throughput is independent of the negotiated KEM/signature suite. Provider selection overhead is sub-microsecond for cached paths (0.17~$\mu$s p50) and under 6~$\mu$s even for fallback scenarios. Detailed breakdowns are provided in the artifact CSV files.
@@ -1554,22 +1926,25 @@ we additionally measure user-visible, session-level metrics and quantify
 how one-time handshake cost amortizes over longer sessions and larger
 transfers.
 
-\textbf{Metrics:}
-(i) \texttt{T\_connect} (connect start $\rightarrow$ handshake established, including explicit Finished key confirmation and event emission),
-(ii) \texttt{T\_first\_frame} (connect start $\rightarrow$ first decrypted remote-desktop frame processed by the rendering path), and
-(iii) \texttt{T\_total} (connect start $\rightarrow$ completion of a bulk transfer over the negotiated session keys).
+\textbf{Metrics.} We report \texttt{T\_connect} (connect start to
+handshake established, including Finished key confirmation and event
+emission), \texttt{T\_first\_frame} (to the first decrypted
+remote-desktop frame at the rendering path), and \texttt{T\_total} (to
+completion of a bulk transfer over the negotiated session keys). Because
+the handshake runs once per session, its low-millisecond cost
+(Table~\ref{tab:perf-summary}) is a one-time addend to \texttt{T\_total}:
+for any non-trivial remote-desktop session or multi-MiB transfer it falls
+below measurement noise, which is precisely why the deployment can afford
+the contract's deterministic, auditable negotiation.
 
-\textbf{Method:}
-We reuse the production \texttt{HandshakeDriver} and negotiated
-\texttt{SessionKeys} and execute (a) one encrypted ``first frame''
-payload and (b) bulk encrypted transfer workloads of 1--100~MiB. Network
-conditions are emulated as deterministic RTT+jitter on a reliable stream;
-large data-plane payloads are bandwidth-limited (MiB/s) to avoid per-chunk
-RTT artifacts while remaining reproducible. Results are emitted to
-\texttt{Artifacts/system\_impact\_\artifactdateSystemImpact.csv} by
+\textbf{Method.} We reuse the production \texttt{HandshakeDriver} and
+negotiated \texttt{SessionKeys}. The workload is one encrypted ``first
+frame'' plus bulk transfers (1--100~MiB) over a reliable stream with a
+deterministic RTT+jitter channel model; bulk payloads are rate-limited
+(MiB/s) to avoid per-chunk RTT artifacts, and the date-stamped
+system-impact CSV artifact is generated by
 \texttt{SystemImpactBenchTests}.
-
-\input{tables/system_impact}
+\textit{Results:} Supplementary Table~\ref{tab:system-impact} reports p50/p95 \texttt{T\_connect} and \texttt{T\_total} results under the controlled RTT+jitter profiles.
 
 \begin{figure}
 \pandocbounded{{\centering\includegraphics[keepaspectratio,width=\columnwidth]{figures/fig_system_impact_amortization.pdf}\par}}
@@ -1588,178 +1963,121 @@ We measure SBP2 behavior on a real protocol trace: an end-to-end handshake (SBP1
 \end{figure}
 
 \textbf{Sensitivity Study (Bucket Cap).}
-We vary the maximum bucket size for SBP2 (\emph{cap} = 64\,KiB, 128\,KiB, 256\,KiB) and re-run the same deterministic protocol trace. We report (i) padding overhead and (ii) \emph{over-cap rate} (fraction of frames whose framed payload exceeds the cap and thus cannot be further bucketed), and use \emph{bucket entropy} (Shannon entropy of padded bucket sizes per label) as a privacy proxy for size quantization strength. Supplementary Table~\ref{tab:supp-traffic-padding-sensitivity} summarizes the overhead--privacy tradeoff and distinguishes remote-desktop-like vs file-chunk-like large-frame distributions.
+We vary the maximum bucket size for SBP2 (\emph{cap} = 64\,KiB, 128\,KiB, 256\,KiB) and re-run the same deterministic protocol trace. We report two overhead definitions:
+\emph{all-frames overhead} (includes passthrough frames) and
+\emph{padded-only overhead} (restricted to frames that entered bucket
+padding), alongside \emph{over-cap rate} (fraction of frames whose framed
+payload exceeds cap) and \emph{bucket entropy} (Shannon entropy of padded
+bucket sizes per label). When over-cap is high, all-frames overhead may
+approach zero while padded-only overhead remains non-zero; this is a cap
+tradeoff, not a measurement bug. Supplementary
+Table~\ref{tab:supp-traffic-padding-sensitivity} summarizes this
+overhead--privacy tradeoff and distinguishes remote-desktop-like vs
+file-chunk-like large-frame distributions.
+
+\textbf{Operational decision guide (rule-of-thumb).}
+For interactive remote-desktop-first workloads, prefer SBP2 disabled or
+64\,KiB cap. For mixed control + moderate transfer workloads, 128\,KiB
+is a balanced default. For bulk-transfer-heavy, privacy-prioritized
+workloads, 256\,KiB improves padding coverage at the cost of higher
+bandwidth overhead.
 
 \begin{figure}
 \pandocbounded{{\centering\includegraphics[keepaspectratio,width=\columnwidth]{figures/fig_traffic_padding_sensitivity.pdf}\par}}
-\caption{SBP2 bucket-cap sensitivity (macOS 26.x). Curves show padding overhead for representative large-frame distributions (remote-desktop mix vs file-chunk mix) as the cap increases from 64\,KiB to 256\,KiB; lower over-cap rate implies broader padding coverage. Generated from \texttt{Artifacts/\allowbreak traffic\_\allowbreak padding\_\allowbreak sensitivity\_\allowbreak \artifactdate.csv}.}
+\caption{SBP2 bucket-cap sensitivity on macOS 26.x. Lower over-cap rate means broader padding coverage across 64\,KiB, 128\,KiB, and 256\,KiB caps for remote-desktop and file-transfer mixes.}
 \label{fig:traffic-padding-sensitivity}
 \end{figure}
 
-\begin{table}[!t]
-\centering
-\footnotesize
-\caption{Handshake vs data-plane AEAD selection (v1).}
-\label{tab:aead-mapping}
-\begin{tabular}{@{}lll@{}}
-\toprule
-Layer & AEAD & Negotiation source \\
-\midrule
-Handshake payloads & AES-256-GCM & Suite tuple \\
-Data-plane traffic & AES-256-GCM & Fixed (v1) \\
-\bottomrule
-\end{tabular}
-\end{table}
+\textbf{AEAD selection (v1).} Handshake payloads and data-plane traffic
+both use AES-256-GCM in v1; Supplementary
+Table~\ref{tab:aead-mapping} summarizes the handshake-negotiated vs
+fixed data-plane mapping.
 
-\subsection{External Validity Under Network Impairments}\label{sec:network-conditions}
+\subsection{Network Impairments: Controlled, Kernel-level, and Real-network Evidence}\label{sec:network-conditions}
 
-We simulate four network conditions with a retry-aware model (max 2
-retries) to approximate loss, jitter, and reordering. The simulator is
-in-process (not kernel \texttt{netem}): loss is independent Bernoulli per
-packet; jitter is sampled uniformly from $\pm$J~ms around base RTT; and
-reordering is modeled as an added random delay (50--150~ms) applied to
-10\% of packets. Table~\ref{tab:network-conditions}
-summarizes completion and p95 latency ranges across classic/liboqs/
-CryptoKit suites using \texttt{Artifacts/\allowbreak network\_\allowbreak condition\_\allowbreak 2026-01-11.csv}
-generated by \texttt{Scripts/\allowbreak run\_\allowbreak network\_\allowbreak bench\_\allowbreak retry.swift}. Even under severe loss, completion
-remains above 99.8\%, and \texttt{handshakeFailed} events track the few
-failures; no downgrade events occur because fallback is only permitted
-for PQC-unavailability (Fig.~\ref{fig:policy-downgrade}).
+To reduce external-validity ambiguity, we report a three-layer evidence
+stack with one shared profile source (\texttt{Scripts/\allowbreak netem\_\allowbreak profiles.json}):
+(i) controlled in-process simulation, (ii) kernel-level emulation
+cross-check (\texttt{dummynet}/\texttt{netem}), and (iii) real-network
+micro-study.
 
-\begin{table*}[!t]
-\centering
-\caption{Simulated network impairment results (N=10{,}000 per condition, max retries=2). Completion and latency ranges span classic/liboqs/CryptoKit suites.}
-\label{tab:network-conditions}
-\begin{tabular}{@{}lccc@{}}
-\toprule
-Condition (loss, RTT, jitter/reorder) & Completion rate (min) & p95 latency (ms, range) & handshakeFailed events / 10k (max) \\
-\midrule
-mild (1\%, 50 ms, $\pm$20 ms) & 1.0000 & 251--253 & 0 \\
-moderate (3\%, 100 ms, $\pm$50 ms) & 1.0000 & 529--532 & 0 \\
-severe (5\%, 200 ms, $\pm$100 ms) & 0.9989 & 1031--1033 & 11 \\
-reorder (10\% reorder, 50 ms, $\pm$20 ms) & 1.0000 & 368--370 & 0 \\
-\bottomrule
-\end{tabular}
-\end{table*}
+\textbf{Controlled simulation (in-process).} We simulate four network
+conditions with a retry-aware model (max 2 retries) to isolate protocol
+logic under reproducible loss/jitter/reorder perturbations. Loss is
+Bernoulli per packet; jitter is sampled uniformly from $\pm$J~ms around
+base RTT; reordering is modeled as added random delay (50--150~ms) on
+10\% of packets.
+
+\textbf{Controlled-simulation summary:} completion is \(\ge 0.9989\)
+(min), p95 latency spans 251--1033~ms, and
+\(E_{\texttt{handshakeFailed}} \le 11\) per 10k runs across the reported
+profiles/suites. Supplementary Table~\ref{tab:network-conditions}
+reports the full controlled-simulation table.
+
+\textbf{Kernel-level cross-check.} Using \texttt{dnctl/pfctl} (macOS
+dummynet) and \texttt{tc netem} (Linux) with aligned profile IDs, a
+kernel-emulation script produces the outputs summarized in Supplementary
+Table~\ref{tab:supp-kernel-emulation}. Reorder is reported only for netem
+(dummynet reorder cells are \textit{n/a}). Because dummynet with
+localhost endpoints may under-shape absolute delay on some macOS setups,
+delay-scale reading is anchored by netem and controlled simulation, while
+cross-tool completion robustness remains the primary check.
+
+\textbf{Real-network micro-study.} We collect STUN path telemetry and TCP
+end-to-end timing for payload-only handshake baselines (classic
+\claimClassicPayloadBytes~B; core-gate PQC \claimLiboqsPayloadBytes~B for
+liboqs and \claimLiboqsVTwoPayloadBytes~B for liboqs v2 FS; Apple contrast
+\claimCryptoKitPayloadBytes~B where available; artifact source
+\texttt{Artifacts/realnet\_*}), reported in Supplementary
+Table~\ref{tab:supp-realnet-microstudy}. The snapshot has one direct
+label (\texttt{wifi\_direct}, remote EC2 over TCP~443) and two overlay
+labels (\texttt{ec2\_ssh\_tunnel}, \texttt{hotspot\_ssh\_tunnel});
+direct and overlay paths are reported separately to distinguish external
+direct-path evidence from tunnel-mediated behavior under restrictive
+inbound NAT/firewall conditions. The harness sends a \texttt{4B
+length-prefix + payload} and payload-byte labels exclude the prefix. A
+dedicated direct-path EC2 Linux run (no tunnel, \texttt{n=50} per
+payload) appears in Supplementary Table~\ref{tab:supp-ec2-direct}, and
+measured Ubuntu direct/tunnel rows plus static Android/Ubuntu
+contract-consistency rows are summarized in Supplementary
+Table~\ref{tab:supp-interop-matrix}.
 
 \section{Limitations and Future Work}\label{sec:limitations}
 
-\subsection{Current Limitations}\label{a.-current-limitations}
-
+\subsection{Current Limitations}
 \begin{enumerate}
-\item
-  \textbf{iOS PQC Availability (iOS < 26):} We do not currently bundle
-  liboqs for iOS; therefore PQC suites are only available on iOS 26+
-  devices via CryptoKit PQC \cite{ref34}. To support reproducible mobile evaluation,
-  we ship an \emph{on-device} self-test and micro-benchmark harness in the
-  iOS app (Settings $\rightarrow$ PQC $\rightarrow$ ``Self-test/Bench''),
-  which exports JSON artifacts for inclusion in Supplementary tables.
-\item
-  \textbf{X-Wing Hybrid KEM:} We have reserved wire-format identifiers
-  for X-Wing hybrid KEM (wireId 0x0001, combining X25519 + ML-KEM-768).
-  CryptoKit on Apple 26+ exposes HPKE cipher suites including X-Wing
-  (ML-KEM-768 with X25519), motivating a standards-informed hybrid path.
-  Our current implementation uses a domain-separated hybrid KEM
-  composition (X25519 + ML-KEM-768) under wireId 0x0001 and reports
-  on-device measurements in Table~\ref{tab:ios-microbench}; full
-  integration with CryptoKit's PQ-HPKE ciphersuite API remains future
-  work.
-\item
-  \textbf{Key Rotation:} Session key rotation during long-lived
-  connections is not addressed in the current design.
-\item
-  \textbf{Forward Secrecy for PQC suites:} v1 does not claim PFS for
-  KEM-based PQC suites: ML-KEM encapsulation targets a peer's long-term
-  KEM public key obtained during pairing. Accordingly, post-quantum
-  confidentiality against store-now-decrypt-later adversaries holds only
-  while long-term KEM private keys remain uncompromised.
-\item
-  \textbf{Cross-Platform Interoperability:} The wire format is
-  documented but interoperability with non-Apple platforms requires
-  additional validation.
-\item
-  \textbf{Network Condition Evaluation:} We provide simulated impairment
-  results in Section~\ref{sec:network-conditions}, but have not yet
-  measured full end-to-end behavior under real NAT traversal, mobility,
-  and heterogeneous access networks.
+\item \textbf{Platform scope:} Main performance numbers are Apple-centric;
+non-Apple deployments require remeasurement under the same artifact and
+workload controls.
+\item \textbf{Secrecy scope:} v1 static-recipient KEM deployments do not
+provide the same secrecy semantics as the v2 hybrid path
+(Supplementary Table~\ref{tab:supp-v2-v1-compare}).
+\item \textbf{External validity:} Real-network evidence remains small-scale
+and does not yet cover broad mobility and ISP diversity.
 \end{enumerate}
 
-\subsection{Future Directions}\label{b.-future-directions}
-
-\begin{enumerate}
-\item
-  \textbf{Android PQC Integration:} Extend the CryptoProvider
-  architecture to support Android's BouncyCastle PQC implementations.
-\item
-  \textbf{PFS Upgrade Path for PQC:} Move from static-recipient KEM to an
-  ephemeral-ephemeral contribution (e.g., HPKE with an ephemeral sender
-  key) or a hybrid design that provides at least classic PFS (e.g.,
-  X25519+ML-KEM) while preserving the existing provider/policy split and
-  audit-event semantics.
-\item
-  \textbf{Tamper-Evident Telemetry:} Upgrade best-effort audit logs with
-  cryptographic tamper evidence, e.g., per-session event hash-chains
-  anchored into the handshake transcript or a post-handshake, cross-signed
-  event digest exchanged between peers.
-\item
-  \textbf{Traffic Analysis Mitigations:} Reduce two-attempt
-  identifiability via optional padding or constant-size framing, while
-  preserving strict Compliance-Mode semantics for deployments that
-  require zero classic establishment.
-\item
-  \textbf{Real-Network End-to-End Evaluation:} Measure handshake
-  distributions across diverse access networks (same Wi-Fi, different NAT
-  paths, LTE hotspots) and compare TCP vs QUIC control channels for
-  12~kB-class handshakes, validating that observed loss/jitter/reorder
-  traces align with our fault taxonomy.
-\item
-  \textbf{Formal Verification:} Apply model checking to the handshake
-  state machine to prove absence of deadlocks and race conditions.
-\item
-  \textbf{Performance Optimization:} Profile ML-KEM-768 encapsulation
-  latency and explore hardware acceleration opportunities.
-\item
-  \textbf{Certificate-Based Identity:} Integrate with device
-  certificates for enterprise deployment scenarios.
-\end{enumerate}
+\subsection{Future Directions}
+Priority extensions are broader Android/Ubuntu replication,
+ephemeral-ephemeral secrecy designs beyond v2, and cross-peer audit
+attestation.
 
 
 
 \section{Conclusion}\label{sec:conclusion}
-
-SkyBridge Compass shows that cryptographic agility and post-quantum
-readiness are attainable in P2P systems without sacrificing API
-stability or operational transparency. The implementation is
-production-focused. The layered CryptoProvider architecture enables
-adoption of new
-primitives as platforms evolve. The actor-isolated handshake state
-machine reduces concurrency hazards and limits sensitive-material
-exposure.
-
-Our Apple-platform deployment indicates that native PQC APIs can be
-integrated with modest overhead when available, with graceful fallback
-to library-based or classic implementations on older systems. The
-structured security event model is designed to make cryptographic
-decisions auditable, supporting both real-time monitoring and
-post-incident analysis.
-
-SkyBridge Compass prioritizes deterministic semantics and auditability in
-cryptographic migration. The default policy favors availability and
-explicit, observable downgrade signals, at the cost of attempt
-identifiability on the wire. Strict policy is now explicit in two
-operator-facing forms: Compliance Mode (fail closed, no classic
-establishment) and Bootstrap-Assisted Mode (recover paired KEM state via
-control-only bootstrap, then rekey to PQC before business traffic).
-
-As post-quantum cryptography transitions from standardization to
-deployment, systems like SkyBridge Compass provide a practical template
-for managing this transition while maintaining security and usability
-across heterogeneous device fleets.
-
-The limitations noted in Section~\ref{sec:limitations} do not change the
-core contribution: an auditable migration contract with concurrency-safe
-handshake semantics that are reproducible from released artifacts under
-our stated threat model and measurement setup.
+We presented an auditable crypto-agile migration contract for P2P
+authenticated key exchange: it separates suites from providers, confines
+classic fallback to a local-only pre-send path so timeouts cannot force a
+downgrade, and emits replayable downgrade evidence. The contract's
+guarantees---authentication, negotiation integrity, key secrecy,
+downgrade resistance, and genuine v2 forward secrecy---are
+machine-checked in a Dolev-Yao Tamarin model with an active,
+key-compromising attacker (13/13 lemmas verified). The contract is
+realized in a portable Rust core with C-ABI and UniFFI bindings,
+answering the ``generalize beyond Apple'' concern at the mechanism level,
+and its one-time handshake cost amortizes over long remote-desktop
+sessions and large transfers. Reported latencies are
+deployment-instance measurements and should be re-established on non-Apple
+targets.
 
 
 
@@ -1767,53 +2085,45 @@ our stated threat model and measurement setup.
 
 
 
-\section*{Acknowledgment}
-This work received no external funding.
+\noindent\textbf{Acknowledgment:} This work received no external funding.
 
 \section*{Data and Artifact Availability}
 
-Artifact release:
-\begin{itemize}
-\item URL: \url{\artifacturl}
-\item Git ref: \texttt{\artifacttag}
-\item Commit: \texttt{\artifactsha}
-\item Source archive: \href{\artifactzipurl}{\texttt{\artifactsha.zip}}
-  \par\noindent SHA256=\texttt{\artifactzipsha}
-\item Source archive: \href{\artifacttarurl}{\texttt{\artifactsha.tar.gz}}
-  \par\noindent SHA256=\texttt{\artifacttarsha}
-\end{itemize}
-See the repository README for environment details and CSV schemas.
+\noindent Artifacts are available at
+\href{\artifacturl}{\nolinkurl{github.com/billlza/Skybridge-Compass}}
+(commit \texttt{\artifactsha}); frozen source archives and checksums are
+documented in the Supplementary Materials.
 
-\section*{Conflict of Interest}
-The author declares no competing interests.
+\noindent\textbf{Conflict of Interest:} The author declares no competing interests.
 
-% === Column balancing for References (IEEEtran-recommended) ===
-% Tuned to avoid an almost-empty trailing references page.
-\IEEEtriggeratref{39}
-\IEEEtriggercmd{\enlargethispage{0.3in}}
+% === References column balancing (optional) ===
+% IEEEtran supports manual tuning via \IEEEtriggeratref / \IEEEtriggercmd.
+% Disabled here to avoid a sparse trailing references page as content shifts.
+% \IEEEtriggeratref{42}
+% \IEEEtriggercmd{\enlargethispage{0.3in}}
 
 \begin{thebibliography}{99}
 \bibitem{ref2} Bluetooth SIG, ``Bluetooth Core Specification v5.4,'' 2023.
 
 \bibitem{ref3} Apple Inc., ``Continuity,'' Apple Platform Security Guide, 2024.
 
-\bibitem{ref4} T. Taubert and C. A. Wood, ``SPAKE2+, an Augmented PAKE,'' RFC 9383, IETF, Sept.~2023. {[}Online{]}. Available: \url{https://datatracker.ietf.org/doc/rfc9383/}
+\bibitem{ref4} T. Taubert and C. A. Wood, ``SPAKE2+, an Augmented PAKE,'' RFC 9383, IETF, Sept.~2023.
 
 \bibitem{ref6} E. Rescorla, ``The Transport Layer Security (TLS) Protocol Version 1.3,'' RFC 8446, IETF, 2018.
 
-\bibitem{ref18} J. Iyengar and M. Thomson, ``QUIC: A UDP-Based Multiplexed and Secure Transport,'' RFC 9000, IETF, 2021. {[}Online{]}. Available: \url{https://datatracker.ietf.org/doc/rfc9000/}
+\bibitem{ref18} J. Iyengar and M. Thomson, ``QUIC: A UDP-Based Multiplexed and Secure Transport,'' RFC 9000, IETF, 2021.
 
 \bibitem{ref7} E. Barker and A. Roginsky, ``Transitioning the Use of Cryptographic Algorithms and Key Lengths,'' NIST SP 800-131A Rev.~2, 2019.
 
 \bibitem{ref38} E. Barker et al., ``Considerations for Achieving Cryptographic Agility: Strategies and Practices,'' NIST Cybersecurity White Paper (CSWP) 39, Dec.~2025, doi: 10.6028/NIST.CSWP.39.
 
-\bibitem{ref19} T. Perrin, ``The Noise Protocol Framework,'' 2018. {[}Online{]}. Available: \url{https://noiseprotocol.org/noise.pdf}
+\bibitem{ref19} T. Perrin, ``The Noise Protocol Framework,'' 2018.
 
-\bibitem{ref8} NIST, ``Post-Quantum Cryptography Standardization,'' 2024. {[}Online{]}. Available: \url{https://csrc.nist.gov/projects/post-quantum-cryptography}. Accessed: Dec.~2025.
+\bibitem{ref8} NIST, ``Post-Quantum Cryptography Standardization,'' 2024. Accessed: Dec.~2025.
 
 \bibitem{ref9} Signal Foundation, ``PQXDH Key Agreement Protocol,'' Signal Technical Documentation, 2023.
 
-\bibitem{ref10} Cloudflare, ``Post-Quantum Cryptography Goes GA,'' Cloudflare Blog, Sept.~29, 2023. {[}Online{]}. Available: \url{https://blog.cloudflare.com/post-quantum-cryptography-ga/}. Accessed: Dec.~2025.
+\bibitem{ref10} Cloudflare, ``Post-Quantum Cryptography Goes GA,'' Sept.~2023. Accessed: Dec.~2025.
 
 \bibitem{ref22} P. Schwabe, D. Stebila, and T. Wiggers, ``Post-Quantum TLS Without Handshake Signatures,'' in Proc. ACM CCS 2020, pp.~1461--1480.
 
@@ -1823,7 +2133,7 @@ The author declares no competing interests.
 
 \bibitem{ref25} L. Ducas et al., ``CRYSTALS---Dilithium: A Lattice-Based Digital Signature Scheme,'' IACR Trans. CHES, vol.~2018, no.~1, pp.~238--268.
 
-\bibitem{ref34} Apple Inc., ``Quantum-secure cryptography in Apple operating systems,'' Apple Platform Security, Jan.~2026. {[}Online{]}. Available: \url{https://support.apple.com/guide/security/quantum-secure-cryptography-apple-devices-secc7c82e533/web}. Accessed: Feb.~2026.
+\bibitem{ref34} Apple Inc., ``Quantum-secure cryptography in Apple operating systems,'' Apple Platform Security, Jan.~2026. Accessed: Feb.~2026.
 
 \bibitem{ref11} D. Beyer et al., ``Software Model Checking,'' in Handbook of Model Checking, Springer, 2018.
 
@@ -1836,19 +2146,27 @@ The author declares no competing interests.
 
 \bibitem{ref29} K. Bhargavan, C. Fournet, M. Kohlweiss, A. Pironti, and P.-Y. Strub, ``Implementing TLS with Verified Cryptographic Security,'' in Proc. IEEE S\&P 2013, pp.~445--459.
 
-\bibitem{ref1} Apple Inc., ``CryptoKit Framework,'' Apple Developer Documentation, 2025. {[}Online{]}. Available: \url{https://developer.apple.com/documentation/cryptokit}. Accessed: Dec.~2025.
+\bibitem{ref1} Apple Inc., ``CryptoKit Framework,'' Apple Developer Documentation, 2025. Accessed: Dec.~2025.
 
-\bibitem{ref16} NIST, ``Module-Lattice-Based Digital Signature Standard,'' FIPS 204, Aug.~2024. {[}Online{]}. Available: \url{https://csrc.nist.gov/pubs/fips/204/final}
+\bibitem{ref16} NIST, ``Module-Lattice-Based Digital Signature Standard,'' FIPS 204, Aug.~2024.
 
 \bibitem{ref5} D. McGrew, ``Achieving Crypto Agility,'' in Proc. RSA Conference, 2019.
 
-\bibitem{ref13} R. Barnes, K. Bhargavan, B. Lipp, and C. Wood, ``Hybrid Public Key Encryption,'' RFC 9180, IETF, Feb.~2022. {[}Online{]}. Available: \url{https://datatracker.ietf.org/doc/rfc9180/}
+\bibitem{ref13} R. Barnes, K. Bhargavan, B. Lipp, and C. Wood, ``Hybrid Public Key Encryption,'' RFC 9180, IETF, Feb.~2022.
 
-\bibitem{ref14} Apple Inc., ``Get ahead with quantum-secure cryptography,'' WWDC 2025 Session 314, June 2025. {[}Online{]}. Available: \url{https://developer.apple.com/videos/play/wwdc2025/314/}. Accessed: Dec.~2025.
+\bibitem{ref14} Apple Inc., ``Get ahead with quantum-secure cryptography,'' WWDC 2025 Session 314, June 2025. Accessed: Dec.~2025.
 
-\bibitem{ref15} NIST, ``Module-Lattice-Based Key-Encapsulation Mechanism Standard,'' FIPS 203, Aug.~2024. {[}Online{]}. Available: \url{https://csrc.nist.gov/pubs/fips/203/final}
+\bibitem{ref15} NIST, ``Module-Lattice-Based Key-Encapsulation Mechanism Standard,'' FIPS 203, Aug.~2024.
 
-\bibitem{ref17} M. Barbosa, D. Connolly, J. Duarte, A. Kaiser, P. Schwabe, K. Varber, and B. Westerbaan, ``X-Wing: The Hybrid KEM You've Been Looking For,'' IETF Internet-Draft, 2024. {[}Online{]}. Available: \url{https://datatracker.ietf.org/doc/draft-connolly-cfrg-xwing-kem/}
+\bibitem{ref40} NIST, ``Recommendations for Key-Encapsulation Mechanisms,'' SP 800-227, Final, Nov.~2025.
+
+\bibitem{ref41} K. Cremers, M. Horvat, J. Hoyland, and S. Scott, ``A Comprehensive Symbolic Analysis of TLS 1.3,'' IACR ePrint 2020/1044, 2020.
+
+\bibitem{ref42} P. Schwabe, D. Stebila, and T. Wiggers, ``KEMTLS: Authenticated Key Exchange without Signatures in TLS 1.3,'' 2020.
+
+\bibitem{ref43} S. Meier, B. Schmidt, C. Cremers, and D. Basin, ``The Tamarin Prover for the Symbolic Analysis of Security Protocols,'' in Proc. CAV 2013, LNCS 8044, pp.~696--701.
+
+\bibitem{ref17} M. Barbosa, D. Connolly, J. Duarte, A. Kaiser, P. Schwabe, K. Varber, and B. Westerbaan, ``X-Wing: The Hybrid KEM You've Been Looking For,'' IETF Internet-Draft, draft-connolly-cfrg-xwing-kem-09, Jan.~2026.
 
 \bibitem{ref20} D. J. Bernstein, ``Curve25519: New Diffie-Hellman Speed Records,'' in Proc. PKC 2006, LNCS 3958, Springer, 2006, pp.~207--228.
 
@@ -1866,9 +2184,10 @@ The author declares no competing interests.
 
 \bibitem{ref33} C. Meyer and J. Schwenk, ``Lessons Learned From Previous SSL/TLS Attacks---A Brief Chronology of Attacks and Weaknesses,'' IACR Cryptology ePrint Archive, Report 2013/049, 2013.
 
-\bibitem{ref35} T. Tarman, R. Hutchinson, L. Pierson, P. Sholander, and E. Witzke, ``Algorithm-Agile Encryption in ATM Networks,'' IEEE Computer, vol.~31, no.~9, pp.~57--64, Sept.~1998.
+\bibitem{ref44} K. Kwiatkowski, P. Kampanakis, B. Westerbaan, and D. Stebila, ``Post-quantum hybrid ECDHE-MLKEM Key Agreement for TLSv1.3,'' IETF Internet-Draft, draft-ietf-tls-ecdhe-mlkem-05, May~2026.
 
-\bibitem{ref36} B. Sullivan and V. Liu, ``Web Application Security: A Beginner's Guide,'' McGraw-Hill, 2011, ch.~6 (Cryptographic Agility).
+\bibitem{ref45} D. Connolly, ``ML-KEM Post-Quantum Key Agreement for TLS 1.3,'' IETF Internet-Draft, draft-ietf-tls-mlkem-07, Feb.~2026.
+
 
 \end{thebibliography}
 

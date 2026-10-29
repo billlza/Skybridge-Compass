@@ -5,6 +5,8 @@ import SkyBridgeCore
 public struct EnhancedDeviceRow: View {
     let device: DiscoveredDevice
     let onConnect: () -> Void
+    @StateObject private var settingsManager = SettingsManager.shared
+    @ObservedObject private var presence = ConnectionPresenceService.shared
     
     public init(device: DiscoveredDevice, onConnect: @escaping () -> Void) {
         self.device = device
@@ -12,36 +14,44 @@ public struct EnhancedDeviceRow: View {
     }
     
     public var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let transport = connectedTransport
+        let connectionTypes: [DeviceConnectionType] = transport == .usb ? [.usb] :
+            device.connectionTypes.sorted { $0.rawValue < $1.rawValue }
+        VStack(alignment: .leading, spacing: settingsManager.compactMode ? 8 : 12) {
             HStack {
  // 设备图标
-                Image(systemName: deviceIcon)
-                    .font(.title2)
-                    .foregroundColor(deviceColor)
-                    .frame(width: 32, height: 32)
+                if settingsManager.showDeviceIcons {
+                    Image(systemName: deviceIcon)
+                        .font(settingsManager.compactMode ? .body : .title2)
+                        .foregroundColor(deviceColor)
+                        .frame(width: settingsManager.compactMode ? 24 : 32, height: settingsManager.compactMode ? 24 : 32)
+                }
                 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(device.name)
                         .font(.headline)
                         .foregroundColor(.white)
                     
-                    Text(device.ipv4 ?? device.ipv6 ?? LocalizationManager.shared.localizedString("device.unknownIP"))
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    if settingsManager.showDeviceDetails {
+                        Text(transport == .usb ? "USB" :
+                            (device.ipv4 ?? device.ipv6 ?? LocalizationManager.shared.localizedString("device.unknownIP")))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 }
                 
                 Spacer()
                 
  // 连接状态指示器
                 Circle()
-                    .fill(statusColor)
+                    .fill(transport != nil ? Color.green : Color.secondary)
                     .frame(width: 8, height: 8)
             }
             
  // 连接类型标签（新增）
-            if !device.connectionTypes.isEmpty {
+            if settingsManager.showDeviceDetails && !connectionTypes.isEmpty {
                 HStack(spacing: 6) {
-                    ForEach(Array(device.connectionTypes.sorted(by: { $0.rawValue < $1.rawValue })), id: \.self) { connectionType in
+                    ForEach(connectionTypes, id: \.self) { connectionType in
                         HStack(spacing: 4) {
                             Image(systemName: connectionType.iconName)
                                 .font(.system(size: 10))
@@ -58,45 +68,56 @@ public struct EnhancedDeviceRow: View {
             }
             
  // 设备信息
-            HStack {
-                Label(LocalizationManager.shared.localizedString("device.services"), systemImage: "info.circle")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                
-                Spacer()
-                
-                Text("\(device.services.count) \(LocalizationManager.shared.localizedString("device.servicesCount"))")
-                    .font(.caption)
-                    .foregroundColor(.white)
+            if settingsManager.showConnectionStats || settingsManager.showDeviceRSSI {
+                HStack {
+                    if settingsManager.showConnectionStats {
+                        Label(LocalizationManager.shared.localizedString("device.services"), systemImage: "info.circle")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    if settingsManager.showDeviceRSSI, let signal = device.signalStrength {
+                        Text("RSSI \(Int(signal))%")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Spacer()
+                    
+                    if settingsManager.showConnectionStats {
+                        Text("\(device.services.count) \(LocalizationManager.shared.localizedString("device.servicesCount"))")
+                            .font(.caption)
+                            .foregroundColor(.white)
+                    }
+                }
             }
             
  // 连接按钮
-            Button(action: onConnect) {
-                HStack {
-                    Image(systemName: "link")
-                        .font(.caption)
-                    Text(LocalizationManager.shared.localizedString("device.action.connect"))
-                        .font(.caption.weight(.medium))
+            if transport != nil {
+                Label(LocalizationManager.shared.localizedString("device.status.connected"), systemImage: "checkmark.circle.fill")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.green)
+            } else {
+                Button(action: onConnect) {
+                    HStack {
+                        Image(systemName: "link")
+                            .font(.caption)
+                        Text(LocalizationManager.shared.localizedString("discovery.action.connect"))
+                            .font(.caption.weight(.medium))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color.blue.opacity(0.8))
+                    )
                 }
-                .foregroundColor(.white)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(Color.blue.opacity(0.8))
-                )
+                .buttonStyle(PlainButtonStyle())
             }
-            .buttonStyle(PlainButtonStyle())
         }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(red: 20/255, green: 25/255, blue: 45/255))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                )
-        )
+        .padding(settingsManager.compactMode ? 10 : 16)
+        .dashboardGlassSurface(cornerRadius: 12)
     }
     
  /// 获取连接类型的颜色
@@ -104,6 +125,8 @@ public struct EnhancedDeviceRow: View {
         switch type {
         case .wifi:
             return Color.blue.opacity(0.8)
+        case .cellular:
+            return Color.green.opacity(0.8)
         case .usb:
             return Color.green.opacity(0.8)
         case .ethernet:
@@ -143,9 +166,14 @@ public struct EnhancedDeviceRow: View {
         }
     }
     
-    private var statusColor: Color {
- // 根据是否有IP地址判断在线状态
-        (device.ipv4 != nil || device.ipv6 != nil) ? .green : .red
+    private var connectedTransport: P2PConnection.ControlTransport? {
+        guard let peerID = device.deviceId,
+              presence.activeConnection(forPeerId: peerID) != nil,
+              let connection = P2PDiscoveryService.shared.authenticatedConnection(to: device) else { return nil }
+        return DashboardDeviceProjection.connectedTransport(for: device,
+            authenticatedPeerId: connection.classicTransferResolvedPeerDeviceId(),
+            authenticatedFingerprint: connection.authenticatedProtocolFingerprint,
+            transport: connection.controlTransport)
     }
-}
 
+}

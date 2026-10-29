@@ -1,0 +1,251 @@
+{
+  "artifact_roots": {
+    "dylibs": {
+      "file_count": 6,
+      "path": "Sources/Vendor/FreeRDPDylibs",
+      "tree_sha256": "5ffa4021cacced7ad47b7f4d579b025d3b85d7be97a73ddab868042886c7c736"
+    },
+    "headers": {
+      "file_count": 262,
+      "path": "Sources/Vendor/FreeRDPHeaders",
+      "tree_sha256": "d94362cc3baa671fcafe5d3fe22a4aefdf5411bfe9bbeab7564566d246dc141e"
+    },
+    "licenses": {
+      "file_count": 8,
+      "path": "Sources/Vendor/NativeLicenses/FreeRDP-runtime",
+      "tree_sha256": "ea0c458d3c2191cc80d0a4ca9a74bc005586a6648a9ee5cf85f82ab313516c7f"
+    }
+  },
+  "binaries": [
+    {
+      "architectures": [
+        "arm64"
+      ],
+      "dependencies": [
+        "@loader_path/libcrypto.4.dylib",
+        "/usr/lib/libSystem.B.dylib"
+      ],
+      "deployment_targets": [
+        "14.0"
+      ],
+      "install_name": "@loader_path/libcrypto.4.dylib",
+      "path": "Sources/Vendor/FreeRDPDylibs/libcrypto.4.dylib",
+      "platforms": [
+        "macos"
+      ],
+      "sha256": "c7baf0dee694e0b5ee78c881b66b562182e0d724e2719f672cecbcffec9a4827",
+      "size": 5030496
+    },
+    {
+      "architectures": [
+        "arm64"
+      ],
+      "dependencies": [
+        "@loader_path/libfreerdp3.dylib",
+        "@loader_path/libssl.4.dylib",
+        "@loader_path/libcrypto.4.dylib",
+        "/System/Library/Frameworks/Carbon.framework/Versions/A/Carbon",
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+        "@loader_path/libwinpr3.dylib",
+        "/usr/lib/libSystem.B.dylib"
+      ],
+      "deployment_targets": [
+        "14.0"
+      ],
+      "install_name": "@loader_path/libfreerdp3.dylib",
+      "path": "Sources/Vendor/FreeRDPDylibs/libfreerdp3.dylib",
+      "platforms": [
+        "macos"
+      ],
+      "sha256": "7fc0f3cf326ba9683de9e4659c0e23cc00cc0cf09b14ea812730a5dc3c7123ba",
+      "size": 2196912
+    },
+    {
+      "architectures": [
+        "arm64"
+      ],
+      "dependencies": [
+        "@loader_path/libjansson.4.dylib",
+        "/usr/lib/libSystem.B.dylib"
+      ],
+      "deployment_targets": [
+        "14.0"
+      ],
+      "install_name": "@loader_path/libjansson.4.dylib",
+      "path": "Sources/Vendor/FreeRDPDylibs/libjansson.4.dylib",
+      "platforms": [
+        "macos"
+      ],
+      "sha256": "d3f61ddfeb1ee9325b0448083948bc62c024ccb319bb0e5d6af16b234ec8fb05",
+      "size": 142112
+    },
+    {
+      "architectures": [
+        "arm64"
+      ],
+      "dependencies": [
+        "@loader_path/libssl.4.dylib",
+        "@loader_path/libcrypto.4.dylib",
+        "/usr/lib/libSystem.B.dylib"
+      ],
+      "deployment_targets": [
+        "14.0"
+      ],
+      "install_name": "@loader_path/libssl.4.dylib",
+      "path": "Sources/Vendor/FreeRDPDylibs/libssl.4.dylib",
+      "platforms": [
+        "macos"
+      ],
+      "sha256": "da749f6cacf2553f1fddbf35a8ad7e4e9c45576c502d686e47febd35e11bd058",
+      "size": 1017712
+    },
+    {
+      "architectures": [
+        "arm64"
+      ],
+      "dependencies": [
+        "@loader_path/liburiparser.1.dylib",
+        "/usr/lib/libSystem.B.dylib"
+      ],
+      "deployment_targets": [
+        "14.0"
+      ],
+      "install_name": "@loader_path/liburiparser.1.dylib",
+      "path": "Sources/Vendor/FreeRDPDylibs/liburiparser.1.dylib",
+      "platforms": [
+        "macos"
+      ],
+      "sha256": "1cfe966659055422b03055296a615c92d521648e18171a48ca177472705b874c",
+      "size": 146848
+    },
+    {
+      "architectures": [
+        "arm64"
+      ],
+      "dependencies": [
+        "@loader_path/libwinpr3.dylib",
+        "@loader_path/liburiparser.1.dylib",
+        "@loader_path/libssl.4.dylib",
+        "@loader_path/libcrypto.4.dylib",
+        "@loader_path/libjansson.4.dylib",
+        "/usr/lib/libSystem.B.dylib",
+        "/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation",
+        "/usr/lib/libobjc.A.dylib"
+      ],
+      "deployment_targets": [
+        "14.0"
+      ],
+      "install_name": "@loader_path/libwinpr3.dylib",
+      "path": "Sources/Vendor/FreeRDPDylibs/libwinpr3.dylib",
+      "platforms": [
+        "macos"
+      ],
+      "sha256": "d538b3c286fe71b518e1ea1dbc283962c8f17423a8c11eade89843cf51559bb0",
+      "size": 947648
+    }
+  ],
+  "build": {
+    "inputs": {
+      "architecture": "arm64",
+      "audio": "disabled",
+      "audio_redirection": "disabled",
+      "build_jobs": "8",
+      "build_type": "Release",
+      "cairo": "disabled",
+      "channel_plugins": "not-built",
+      "channel_registration": "none",
+      "clang_format": "disabled",
+      "client_common": "disabled",
+      "dependency_resolution": "private-only",
+      "deployment_target": "14.0",
+      "device_redirection": "disabled",
+      "dsp_ffmpeg": "disabled",
+      "fdk_aac": "disabled",
+      "feature_scope": "freerdp-core-winpr-software-gdi-bgra-classic-bitmap-nscodec-basic-input-no-client-common-no-channel-plugins",
+      "freerdp_3x_deprecated": "disabled",
+      "freerdp_local_patch_sha256": "48f7bf519a230a01ab25f178ff00968e78066511b76fb9db6f1a35a8691262f3",
+      "freerdp_test_scope": "winpr-synch-all",
+      "jansson_local_patch_sha256": "eb7c26d605d020c60c9f25b62b43b0e229e12f0953b0fd0ba9b995026415b2a8",
+      "linkage": "dynamic",
+      "openssl_abi": "4",
+      "openssl_local_patch_sha256": "4e3c460e9b7f0619c80ae02bba2800ef172e4fdba07bf0b97144311774b7fb7b",
+      "openssl_sonames": "libssl.4.dylib;libcrypto.4.dylib",
+      "openssl_test_harness_jobs": "1",
+      "pcsc": "disabled",
+      "pkcs11": "disabled",
+      "private_dependency_closure": "true",
+      "runtime_gfx_h264": "disabled",
+      "runtime_graphics_pipeline": "disabled",
+      "runtime_remotefx": "disabled",
+      "smartcard": "disabled",
+      "source_revision": "embedded-and-verified",
+      "uriparser_local_patch_sha256": "65f13fb1c134ae4b06f1022d080f04124f592bf47317c389b345d948b612dca9",
+      "warning_suppressions": "forbidden",
+      "winpr_3x_deprecated": "disabled"
+    },
+    "recipe": "Scripts/build_freerdp_dylibs.sh",
+    "recipe_sha256": "e03236db392423dc2b8ca965eda8725e230a7f77b665137a61a9b81556f07a92",
+    "toolchain": {
+      "clang": "Apple clang version 21.0.0 (clang-2100.1.1.101)",
+      "cmake": "cmake version 4.3.3",
+      "macos_sdk": "26.5",
+      "ninja": "1.13.2",
+      "xcode": "Xcode 26.6; Build version 17F113"
+    }
+  },
+  "family": "freerdp-runtime",
+  "native_dependency_lock": {
+    "family": "freerdp-runtime",
+    "family_sha256": "7568e24d0c40df62ef032475f37d3071f295cc2a2ac567a2ad00110c8c4341af",
+    "path": "Config/native-dependencies.lock.json",
+    "schema_version": 2
+  },
+  "schema_version": 2,
+  "sources": [
+    {
+      "commit": "6b107f0aadbabc47941c5a5b893b88c01792af6d",
+      "git_tree": "fd0ebd1311aad2111b96f49945af81d26fda8cb0",
+      "name": "freerdp",
+      "ref": "3.30.0",
+      "repository": "https://github.com/FreeRDP/FreeRDP.git",
+      "source_archive_sha256": "6bb30fd22f359124d60b839cba6b7b7aa4f5f56b00d6703a439332cc4d484354",
+      "version": "3.30.0"
+    },
+    {
+      "commit": "1e963a8680ec78ad2072792c7a1a71f3c530bd2e",
+      "git_tree": "6b7ac39dd2fb86943398c625a90dd13662f46196",
+      "name": "openssl",
+      "ref": "openssl-4.0.1",
+      "repository": "https://github.com/openssl/openssl.git",
+      "source_archive_sha256": "f682b3dbe3410a67c1f742c3088e549ec99066cb526cf77dba3c7921a1578a6d",
+      "version": "4.0.1"
+    },
+    {
+      "commit": "dbb5fb3636e155fccfce4cd215de752779bd6971",
+      "git_tree": "42a393f9dd6520fb191d3e301630cdf245d3e504",
+      "name": "jansson",
+      "ref": "v2.15.1",
+      "repository": "https://github.com/akheron/jansson.git",
+      "source_archive_sha256": "e806924b678e60eb370fe6edb86e52409ad891ab5f4edda10047303934f24e10",
+      "version": "2.15.1"
+    },
+    {
+      "commit": "9b2bed92f5deecf740819f9bf27724bee2fe9c12",
+      "git_tree": "c1743fa4db3b5531fbff7df0d2c8e5357c458b83",
+      "name": "uriparser",
+      "ref": "uriparser-1.0.2",
+      "repository": "https://github.com/uriparser/uriparser.git",
+      "source_archive_sha256": "53ac88ba224509bee94a937d1fe001c6374ef11fb3ba4571e9fd7b0b009cbbd9",
+      "version": "1.0.2"
+    },
+    {
+      "commit": "52eb8108c5bdec04579160ae17225d66034bd723",
+      "git_tree": "ad23b2ceac4a6eef2278c48545b62ffc1f0c134a",
+      "name": "googletest",
+      "ref": "v1.17.0",
+      "repository": "https://github.com/google/googletest.git",
+      "source_archive_sha256": "3a8fea2f310f73e090dbf10dc16260ab959cccf77bc5482f453d1f4bc3af4bcb",
+      "version": "1.17.0"
+    }
+  ]
+}

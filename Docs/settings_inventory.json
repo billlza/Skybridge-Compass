@@ -1,0 +1,4656 @@
+{
+  "files_scanned": 2156,
+  "controls": [
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 131,
+      "kind": "Toggle",
+      "bound": "settingsManager.autoReconnect",
+      "snippet": "Toggle(isOn: $settingsManager.autoReconnect) {"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 135,
+      "kind": "Toggle",
+      "bound": "settingsManager.allowBackgroundConnection",
+      "snippet": "Toggle(isOn: $settingsManager.allowBackgroundConnection) {"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 158,
+      "kind": "Toggle",
+      "bound": "settingsManager.requireBiometricAuth",
+      "snippet": "Toggle(isOn: $settingsManager.requireBiometricAuth) {"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 162,
+      "kind": "Toggle",
+      "bound": "settingsManager.endToEndEncryption",
+      "snippet": "Toggle(isOn: $settingsManager.endToEndEncryption) {"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 172,
+      "kind": "Picker",
+      "bound": "themeConfiguration.isDarkMode",
+      "snippet": "Picker(\"主题\", selection: $themeConfiguration.isDarkMode) {"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 177,
+      "kind": "Picker",
+      "bound": "localizationManager.currentLanguage",
+      "snippet": "Picker(\"语言\", selection: $localizationManager.currentLanguage) {"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 183,
+      "kind": "Picker",
+      "bound": "themeConfiguration.accentColor",
+      "snippet": "ColorPicker(\"强调色\", selection: $themeConfiguration.accentColor)"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 211,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableRealTimeWeather",
+      "snippet": "Toggle(isOn: $settingsManager.enableRealTimeWeather) {"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 215,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableExperimentalFeatures",
+      "snippet": "Toggle(isOn: $settingsManager.enableExperimentalFeatures) {"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 333,
+      "kind": "Toggle",
+      "bound": "pqcManager.enforcePQCHandshake",
+      "snippet": "Toggle(\"强制 PQC 握手\", isOn: $pqcManager.enforcePQCHandshake)"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 335,
+      "kind": "Toggle",
+      "bound": "pqcManager.allowClassicFallbackForCompatibility",
+      "snippet": "Toggle(\"允许经典降级（兼容旧设备）\", isOn: $pqcManager.allowClassicFallbackForCompatibility)"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 339,
+      "kind": "Toggle",
+      "bound": "pqcManager.autoKeyRotation",
+      "snippet": "Toggle(\"密钥自动轮换\", isOn: $pqcManager.autoKeyRotation)"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 342,
+      "kind": "Picker",
+      "bound": "pqcManager.keyRotationDays",
+      "snippet": "Picker(\"轮换周期\", selection: $pqcManager.keyRotationDays) {"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 382,
+      "kind": "Toggle",
+      "bound": "settings.discoveryEnabled",
+      "snippet": "Toggle(isOn: $settings.discoveryEnabled) {"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 395,
+      "kind": "Picker",
+      "bound": "settings.discoveryModePreset",
+      "snippet": "Picker(\"模式\", selection: $settings.discoveryModePreset) {"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 426,
+      "kind": "Toggle",
+      "bound": null,
+      "snippet": "Toggle(isOn: Binding("
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 559,
+      "kind": "Toggle",
+      "bound": "settings.allowBackgroundConnection",
+      "snippet": "Toggle(\"允许后台连接（耗电更高）\", isOn: $settings.allowBackgroundConnection)"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 565,
+      "kind": "Toggle",
+      "bound": "settings.autoReconnect",
+      "snippet": "Toggle(\"自动重连\", isOn: $settings.autoReconnect)"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 573,
+      "kind": "Picker",
+      "bound": "settings.discoveryRefreshIntervalSeconds",
+      "snippet": "Picker(\"刷新周期\", selection: $settings.discoveryRefreshIntervalSeconds) {"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 590,
+      "kind": "Stepper",
+      "bound": "settings.maxConcurrentConnections",
+      "snippet": "Stepper(value: $settings.maxConcurrentConnections, in: 1...8) {"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 599,
+      "kind": "Picker",
+      "bound": "settings.clipboardMaxContentSize",
+      "snippet": "Picker(\"剪贴板最大内容大小\", selection: $settings.clipboardMaxContentSize) {"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 609,
+      "kind": "Picker",
+      "bound": "settings.clipboardMinSendIntervalSeconds",
+      "snippet": "Picker(\"剪贴板最小发送间隔\", selection: $settings.clipboardMinSendIntervalSeconds) {"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 625,
+      "kind": "Stepper",
+      "bound": "settings.fileTransferMaxConcurrentTransfers",
+      "snippet": "Stepper(value: $settings.fileTransferMaxConcurrentTransfers, in: 1...6) {"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 634,
+      "kind": "Picker",
+      "bound": "settings.fileTransferUploadLimitKBps",
+      "snippet": "Picker(\"上传限速\", selection: $settings.fileTransferUploadLimitKBps) {"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 643,
+      "kind": "Picker",
+      "bound": "settings.fileTransferDownloadLimitKBps",
+      "snippet": "Picker(\"下载限速\", selection: $settings.fileTransferDownloadLimitKBps) {"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 672,
+      "kind": "Toggle",
+      "bound": null,
+      "snippet": "Toggle(isOn: Binding("
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 682,
+      "kind": "Toggle",
+      "bound": null,
+      "snippet": "Toggle(\"同步图片\", isOn: Binding("
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 691,
+      "kind": "Toggle",
+      "bound": null,
+      "snippet": "Toggle(\"同步 URL\", isOn: Binding("
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 700,
+      "kind": "Picker",
+      "bound": null,
+      "snippet": "Picker(\"最大内容大小\", selection: Binding("
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 868,
+      "kind": "Toggle",
+      "bound": "settings.enableCloudKitSync",
+      "snippet": "Toggle(\"启用 CloudKit 同步\", isOn: $settings.enableCloudKitSync)"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift",
+      "line": 1001,
+      "kind": "Picker",
+      "bound": "minLevel",
+      "snippet": "Picker(\"最小级别\", selection: $minLevel) {"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/RemoteDesktopView.swift",
+      "line": 198,
+      "kind": "Picker",
+      "bound": "touchMode",
+      "snippet": "Picker(\"触摸模式\", selection: $touchMode) {"
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Views/Dashboard/DashboardView.swift",
+      "line": 576,
+      "kind": "Picker",
+      "bound": "mode",
+      "snippet": "Picker(\"mode\", selection: $mode) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/UI/DeviceFilterOptionsView.swift",
+      "line": 53,
+      "kind": "Toggle",
+      "bound": null,
+      "snippet": "Toggle(\"计算机设备默认展开\", isOn: Binding("
+    },
+    {
+      "file": "Sources/SkyBridgeCore/UI/DeviceFilterOptionsView.swift",
+      "line": 61,
+      "kind": "Toggle",
+      "bound": null,
+      "snippet": "Toggle(\"显示非连接设备\", isOn: Binding("
+    },
+    {
+      "file": "Sources/SkyBridgeCore/UI/DeviceFilterOptionsView.swift",
+      "line": 121,
+      "kind": "Toggle",
+      "bound": null,
+      "snippet": "Toggle(\"\", isOn: Binding("
+    },
+    {
+      "file": "Sources/SkyBridgeCore/UI/DeviceFilterOptionsView.swift",
+      "line": 123,
+      "kind": "Toggle",
+      "bound": null,
+      "snippet": "set: { @Sendable newValue in onToggle(newValue) }"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/UI/ConnectionDetailsView.swift",
+      "line": 740,
+      "kind": "Toggle",
+      "bound": "isOn",
+      "snippet": "Toggle(\"\", isOn: $isOn)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/UI/P2PConnectionView.swift",
+      "line": 954,
+      "kind": "Picker",
+      "bound": "type",
+      "snippet": "Picker(\"设备类型\", selection: $type) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/UI/SecuritySettingsView.swift",
+      "line": 830,
+      "kind": "Toggle",
+      "bound": "isEnabled",
+      "snippet": "Toggle(\"\", isOn: $isEnabled)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/UI/SecuritySettingsView.swift",
+      "line": 900,
+      "kind": "Toggle",
+      "bound": "settingsManager.enablePQC",
+      "snippet": "Toggle(isOn: $settingsManager.enablePQC) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/UI/SecuritySettingsView.swift",
+      "line": 929,
+      "kind": "Picker",
+      "bound": "settingsManager.pqcSignatureAlgorithm",
+      "snippet": "Picker(\"\", selection: $settingsManager.pqcSignatureAlgorithm) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Managers/DeviceManagementExtensionManager.swift",
+      "line": 554,
+      "kind": "Toggle",
+      "bound": "isEnabled",
+      "snippet": "Toggle(\"\", isOn: $isEnabled)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorSettingsView.swift",
+      "line": 91,
+      "kind": "Toggle",
+      "bound": "enableAutoRefresh",
+      "snippet": "Toggle(\"启用自动刷新\", isOn: $enableAutoRefresh)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorSettingsView.swift",
+      "line": 102,
+      "kind": "Slider",
+      "bound": "refreshInterval",
+      "snippet": "Slider(value: $refreshInterval, in: 0.5...10.0, step: 0.5) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorSettingsView.swift",
+      "line": 128,
+      "kind": "Slider",
+      "bound": "cpuThreshold",
+      "snippet": "Slider(value: $cpuThreshold, in: 50...95, step: 5) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorSettingsView.swift",
+      "line": 142,
+      "kind": "Slider",
+      "bound": "memoryThreshold",
+      "snippet": "Slider(value: $memoryThreshold, in: 50...95, step: 5) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorSettingsView.swift",
+      "line": 156,
+      "kind": "Slider",
+      "bound": "diskThreshold",
+      "snippet": "Slider(value: $diskThreshold, in: 70...98, step: 2) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorSettingsView.swift",
+      "line": 174,
+      "kind": "Toggle",
+      "bound": "enablePerformanceAlerts",
+      "snippet": "Toggle(\"启用性能警报\", isOn: $enablePerformanceAlerts)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorSettingsView.swift",
+      "line": 181,
+      "kind": "Toggle",
+      "bound": "enableTemperatureMonitoring",
+      "snippet": "Toggle(\"启用温度监控\", isOn: $enableTemperatureMonitoring)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorSettingsView.swift",
+      "line": 192,
+      "kind": "Slider",
+      "bound": "temperatureThreshold",
+      "snippet": "Slider(value: $temperatureThreshold, in: 60...95, step: 5) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorSettingsView.swift",
+      "line": 203,
+      "kind": "Toggle",
+      "bound": "enableFanSpeedMonitoring",
+      "snippet": "Toggle(\"启用风扇转速监控\", isOn: $enableFanSpeedMonitoring)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorSettingsView.swift",
+      "line": 214,
+      "kind": "Slider",
+      "bound": "fanSpeedThreshold",
+      "snippet": "Slider(value: $fanSpeedThreshold, in: 2000...8000, step: 200) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorSettingsView.swift",
+      "line": 224,
+      "kind": "Toggle",
+      "bound": "enableThermalThrottlingAlert",
+      "snippet": "Toggle(\"启用热量节流警报\", isOn: $enableThermalThrottlingAlert)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorSettingsView.swift",
+      "line": 237,
+      "kind": "Toggle",
+      "bound": "showTrendIndicators",
+      "snippet": "Toggle(\"显示趋势指示器\", isOn: $showTrendIndicators)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorSettingsView.swift",
+      "line": 247,
+      "kind": "Slider",
+      "bound": "maxHistoryPoints",
+      "snippet": "Slider(value: $maxHistoryPoints, in: 60...600, step: 60) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorSettingsView.swift",
+      "line": 262,
+      "kind": "Toggle",
+      "bound": "enableNotifications",
+      "snippet": "Toggle(\"启用通知提醒\", isOn: $enableNotifications)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorSettingsView.swift",
+      "line": 264,
+      "kind": "Toggle",
+      "bound": "enableSoundAlerts",
+      "snippet": "Toggle(\"启用声音提醒\", isOn: $enableSoundAlerts)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Rendering/Metal4RenderView.swift",
+      "line": 457,
+      "kind": "Toggle",
+      "bound": "aiInferenceEnabled",
+      "snippet": "Toggle(\"AI推理增强\", isOn: $aiInferenceEnabled)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Rendering/Metal4RenderView.swift",
+      "line": 463,
+      "kind": "Toggle",
+      "bound": "metalFXEnabled",
+      "snippet": "Toggle(\"MetalFX上采样\", isOn: $metalFXEnabled)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Rendering/Metal4RenderView.swift",
+      "line": 469,
+      "kind": "Toggle",
+      "bound": "frameInterpolationEnabled",
+      "snippet": "Toggle(\"帧插值\", isOn: $frameInterpolationEnabled)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Rendering/Metal4RenderView.swift",
+      "line": 475,
+      "kind": "Toggle",
+      "bound": "rayTracingEnabled",
+      "snippet": "Toggle(\"硬件光线追踪\", isOn: $rayTracingEnabled)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Rendering/Metal4RenderView.swift",
+      "line": 481,
+      "kind": "Slider",
+      "bound": "renderScale",
+      "snippet": "Slider(value: $renderScale, in: 0.25...1.0, step: 0.05)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Rendering/Metal4RenderView.swift",
+      "line": 488,
+      "kind": "Picker",
+      "bound": "targetFrameRate",
+      "snippet": "Picker(\"目标帧率\", selection: $targetFrameRate) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Rendering/Metal4RenderView.swift",
+      "line": 510,
+      "kind": "Picker",
+      "bound": "selectedConfiguration",
+      "snippet": "Picker(\"预设配置\", selection: $selectedConfiguration) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Rendering/Metal4RenderView.swift",
+      "line": 534,
+      "kind": "Toggle",
+      "bound": "showWireframe",
+      "snippet": "Toggle(\"显示线框\", isOn: $showWireframe)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Rendering/Metal4RenderView.swift",
+      "line": 542,
+      "kind": "Toggle",
+      "bound": "showNormals",
+      "snippet": "Toggle(\"显示法线\", isOn: $showNormals)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Rendering/Metal4RenderView.swift",
+      "line": 550,
+      "kind": "Toggle",
+      "bound": "showDepthBuffer",
+      "snippet": "Toggle(\"显示深度缓冲\", isOn: $showDepthBuffer)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Performance/MetalPerformanceHUDView.swift",
+      "line": 253,
+      "kind": "Toggle",
+      "bound": "configuration.autoShow",
+      "snippet": "Toggle(\"自动显示\", isOn: $configuration.autoShow)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Performance/MetalPerformanceHUDView.swift",
+      "line": 255,
+      "kind": "Picker",
+      "bound": "configuration.position",
+      "snippet": "Picker(\"位置\", selection: $configuration.position) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Performance/MetalPerformanceHUDView.swift",
+      "line": 264,
+      "kind": "Slider",
+      "bound": null,
+      "snippet": "Slider(value: Binding("
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Performance/MetalPerformanceHUDView.swift",
+      "line": 274,
+      "kind": "Toggle",
+      "bound": "configuration.showFrameRate",
+      "snippet": "Toggle(\"显示帧率\", isOn: $configuration.showFrameRate)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Performance/MetalPerformanceHUDView.swift",
+      "line": 275,
+      "kind": "Toggle",
+      "bound": "configuration.showGPUTime",
+      "snippet": "Toggle(\"显示GPU时间\", isOn: $configuration.showGPUTime)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Performance/MetalPerformanceHUDView.swift",
+      "line": 276,
+      "kind": "Toggle",
+      "bound": "configuration.showMemoryUsage",
+      "snippet": "Toggle(\"显示内存使用\", isOn: $configuration.showMemoryUsage)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Performance/MetalPerformanceHUDView.swift",
+      "line": 277,
+      "kind": "Toggle",
+      "bound": "configuration.showDeviceInfo",
+      "snippet": "Toggle(\"显示设备信息\", isOn: $configuration.showDeviceInfo)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Performance/MetalPerformanceHUDView.swift",
+      "line": 281,
+      "kind": "Picker",
+      "bound": "configuration.updateInterval",
+      "snippet": "Picker(\"更新间隔\", selection: $configuration.updateInterval) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 292,
+      "kind": "Picker",
+      "bound": null,
+      "snippet": "Picker(\"\", selection: Binding("
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 318,
+      "kind": "Toggle",
+      "bound": "settingsManager.autoScanOnStartup",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.general.autoScan\"), isOn: $settingsManager.autoScanOnStartup)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 324,
+      "kind": "Toggle",
+      "bound": "settingsManager.showSystemNotifications",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.general.systemNotifications\"), isOn: $settingsManager.showSystemNotifications)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 333,
+      "kind": "Toggle",
+      "bound": "settingsManager.useDarkMode",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.general.darkMode\"), isOn: $settingsManager.useDarkMode)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 342,
+      "kind": "Picker",
+      "bound": "settingsManager.scanInterval",
+      "snippet": "Picker(\"\", selection: $settingsManager.scanInterval) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 361,
+      "kind": "Toggle",
+      "bound": "settingsManager.showDeviceDetails",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.general.showDeviceDetails\"), isOn: $settingsManager.showDeviceDetails)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 368,
+      "kind": "Toggle",
+      "bound": "settingsManager.showConnectionStats",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.general.showConnectionStats\"), isOn: $settingsManager.showConnectionStats)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 374,
+      "kind": "Toggle",
+      "bound": "settingsManager.compactMode",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.general.compactMode\"), isOn: $settingsManager.compactMode)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 383,
+      "kind": "Picker",
+      "bound": "settingsManager.themeColor",
+      "snippet": "ColorPicker(\"\", selection: $settingsManager.themeColor)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 470,
+      "kind": "Toggle",
+      "bound": "settingsManager.autoConnectKnownNetworks",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.network.wifi.autoConnectKnown\"), isOn: $settingsManager.autoConnectKnownNetworks)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 471,
+      "kind": "Toggle",
+      "bound": "settingsManager.showHiddenNetworks",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.network.wifi.showHidden\"), isOn: $settingsManager.showHiddenNetworks)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 472,
+      "kind": "Toggle",
+      "bound": "settingsManager.prefer5GHz",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.network.wifi.prefer5GHz\"), isOn: $settingsManager.prefer5GHz)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 476,
+      "kind": "Picker",
+      "bound": "settingsManager.wifiScanTimeout",
+      "snippet": "Picker(\"\", selection: $settingsManager.wifiScanTimeout) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 490,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableBonjourDiscovery",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.network.discovery.enableBonjour\"), isOn: $settingsManager.enableBonjourDiscovery)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 491,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableMDNSResolution",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.network.discovery.enableMDNS\"), isOn: $settingsManager.enableMDNSResolution)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 492,
+      "kind": "Toggle",
+      "bound": "settingsManager.scanCustomPorts",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.network.discovery.scanCustomPorts\"), isOn: $settingsManager.scanCustomPorts)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 564,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableConnectionEncryption",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.network.connection.enableEncryption\"), isOn: $settingsManager.enableConnectionEncryption)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 565,
+      "kind": "Toggle",
+      "bound": "settingsManager.verifyCertificates",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.network.connection.verifyCertificates\"), isOn: $settingsManager.verifyCertificates)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 607,
+      "kind": "Toggle",
+      "bound": "settingsManager.autoConnectPairedDevices",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.devices.bluetooth.autoConnectPaired\"), isOn: $settingsManager.autoConnectPairedDevices)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 608,
+      "kind": "Toggle",
+      "bound": "settingsManager.showDeviceRSSI",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.devices.bluetooth.showRSSI\"), isOn: $settingsManager.showDeviceRSSI)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 609,
+      "kind": "Toggle",
+      "bound": "settingsManager.showConnectableDevicesOnly",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.devices.bluetooth.showConnectableOnly\"), isOn: $settingsManager.showConnectableDevicesOnly)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 644,
+      "kind": "Toggle",
+      "bound": "settingsManager.autoDiscoverAppleTV",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.devices.airplay.autoDiscoverAppleTV\"), isOn: $settingsManager.autoDiscoverAppleTV)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 645,
+      "kind": "Toggle",
+      "bound": "settingsManager.showHomePodDevices",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.devices.airplay.showHomePodDevices\"), isOn: $settingsManager.showHomePodDevices)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 646,
+      "kind": "Toggle",
+      "bound": "settingsManager.showThirdPartyAirPlayDevices",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.devices.airplay.showThirdPartyAirPlayDevices\"), isOn: $settingsManager.showThirdPartyAirPlayDevices)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 652,
+      "kind": "Toggle",
+      "bound": "settingsManager.hideOfflineDevices",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.devices.filters.hideOffline\"), isOn: $settingsManager.hideOfflineDevices)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 653,
+      "kind": "Toggle",
+      "bound": "settingsManager.sortBySignalStrength",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.devices.filters.sortBySignal\"), isOn: $settingsManager.sortBySignalStrength)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 654,
+      "kind": "Toggle",
+      "bound": "settingsManager.showDeviceIcons",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.devices.filters.showIcons\"), isOn: $settingsManager.showDeviceIcons)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 658,
+      "kind": "Slider",
+      "bound": "settingsManager.minimumSignalStrength",
+      "snippet": "Slider(value: $settingsManager.minimumSignalStrength, in: -100...(-30))"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 749,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableVerboseLogging",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.advanced.debug.enableVerboseLogging\"), isOn: $settingsManager.enableVerboseLogging)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 750,
+      "kind": "Toggle",
+      "bound": "settingsManager.showDebugInfo",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.advanced.debug.showDebugInfo\"), isOn: $settingsManager.showDebugInfo)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 751,
+      "kind": "Toggle",
+      "bound": "settingsManager.saveNetworkLogs",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.advanced.debug.saveNetworkLogs\"), isOn: $settingsManager.saveNetworkLogs)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 755,
+      "kind": "Picker",
+      "bound": "settingsManager.logLevel",
+      "snippet": "Picker(\"\", selection: $settingsManager.logLevel) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 781,
+      "kind": "Picker",
+      "bound": "performanceModeManager.currentMode",
+      "snippet": "Picker(localizationManager.localizedString(\"settings.advanced.performance.mode\"), selection: $performanceModeManager.currentMode) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 887,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableRealTimeWeather",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.advanced.weather.enable\"), isOn: $settingsManager.enableRealTimeWeather)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 901,
+      "kind": "Toggle",
+      "bound": "settingsManager.showRealtimeFPS",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.advanced.performance.showRealtimeFPS\"), isOn: $settingsManager.showRealtimeFPS)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 904,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableHardwareAcceleration",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.advanced.hardware.enableAcceleration\"), isOn: $settingsManager.enableHardwareAcceleration)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 905,
+      "kind": "Toggle",
+      "bound": "settingsManager.optimizeMemoryUsage",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.advanced.memory.optimize\"), isOn: $settingsManager.optimizeMemoryUsage)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 906,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableBackgroundScanning",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.advanced.backgroundScanning\"), isOn: $settingsManager.enableBackgroundScanning)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 928,
+      "kind": "Toggle",
+      "bound": null,
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.hud.enableRealtimeMonitoring\"), isOn: Binding("
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 941,
+      "kind": "Toggle",
+      "bound": null,
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.hud.showHUD\"), isOn: Binding("
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 955,
+      "kind": "Picker",
+      "bound": null,
+      "snippet": "Picker(\"\", selection: Binding("
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 979,
+      "kind": "Toggle",
+      "bound": null,
+      "snippet": "Toggle(localizationManager.localizedString(\"metric.frameRate\"), isOn: Binding("
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 989,
+      "kind": "Toggle",
+      "bound": null,
+      "snippet": "Toggle(localizationManager.localizedString(\"metric.gpuTime\"), isOn: Binding("
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 999,
+      "kind": "Toggle",
+      "bound": null,
+      "snippet": "Toggle(localizationManager.localizedString(\"metric.memory\"), isOn: Binding("
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1028,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableIPv6Support",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.advanced.experimental.enableIPv6\"), isOn: $settingsManager.enableIPv6Support)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1029,
+      "kind": "Toggle",
+      "bound": "settingsManager.useNewDiscoveryAlgorithm",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.advanced.experimental.useNewDiscovery\"), isOn: $settingsManager.useNewDiscoveryAlgorithm)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1030,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableP2PDirectConnection",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.advanced.experimental.enableP2P\"), isOn: $settingsManager.enableP2PDirectConnection)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1040,
+      "kind": "Toggle",
+      "bound": "settingsManager.enablePQC",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.advanced.pqc.enableAppLayer\"), isOn: $settingsManager.enablePQC)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1041,
+      "kind": "Toggle",
+      "bound": "settingsManager.enablePQCHybridTLS",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.advanced.pqc.enableHybridTLS\"), isOn: $settingsManager.enablePQCHybridTLS)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1044,
+      "kind": "Picker",
+      "bound": "settingsManager.pqcSignatureAlgorithm",
+      "snippet": "Picker(\"\", selection: $settingsManager.pqcSignatureAlgorithm) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1052,
+      "kind": "Toggle",
+      "bound": "settingsManager.useSecureEnclaveMLDSA",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.advanced.pqc.useSecureEnclaveMLDSA\"), isOn: $settingsManager.useSecureEnclaveMLDSA)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1053,
+      "kind": "Toggle",
+      "bound": "settingsManager.useSecureEnclaveMLKEM",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.advanced.pqc.useSecureEnclaveMLKEM\"), isOn: $settingsManager.useSecureEnclaveMLKEM)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1070,
+      "kind": "Slider",
+      "bound": "settingsManager.signalStrengthAlpha",
+      "snippet": "Slider(value: $settingsManager.signalStrengthAlpha, in: 0.10...0.95, step: 0.05)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1204,
+      "kind": "Picker",
+      "bound": "settingsManager.transferBufferSize",
+      "snippet": "Picker(\"\", selection: $settingsManager.transferBufferSize) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1219,
+      "kind": "Toggle",
+      "bound": "settingsManager.showSystemNotifications",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.fileTransfer.options.showNotification\"), isOn: $settingsManager.showSystemNotifications)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1220,
+      "kind": "Toggle",
+      "bound": "settingsManager.autoRetryFailedTransfers",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.fileTransfer.options.autoRetryFailed\"), isOn: $settingsManager.autoRetryFailedTransfers)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1221,
+      "kind": "Toggle",
+      "bound": "settingsManager.keepTransferHistory",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.fileTransfer.options.keepHistory\"), isOn: $settingsManager.keepTransferHistory)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1222,
+      "kind": "Toggle",
+      "bound": "settingsManager.keepSystemAwakeDuringTransfer",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.fileTransfer.options.keepAwake\"), isOn: $settingsManager.keepSystemAwakeDuringTransfer)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1235,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableConnectionEncryption",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.fileTransfer.security.enableEncrypt\"), isOn: $settingsManager.enableConnectionEncryption)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1236,
+      "kind": "Toggle",
+      "bound": "settingsManager.verifyCertificates",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.fileTransfer.security.verifyIntegrity\"), isOn: $settingsManager.verifyCertificates)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1237,
+      "kind": "Toggle",
+      "bound": "settingsManager.scanTransferFilesForVirus",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.fileTransfer.security.scanVirus\"), isOn: $settingsManager.scanTransferFilesForVirus)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1241,
+      "kind": "Picker",
+      "bound": "settingsManager.scanLevel",
+      "snippet": "Picker(\"\", selection: $settingsManager.scanLevel) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1256,
+      "kind": "Picker",
+      "bound": "settingsManager.encryptionAlgorithm",
+      "snippet": "Picker(\"\", selection: $settingsManager.encryptionAlgorithm) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1445,
+      "kind": "Toggle",
+      "bound": "videoSettingsManager.enableHardwareAcceleration",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.videoTransfer.enableHardwareAcceleration\"), isOn: $videoSettingsManager.enableHardwareAcceleration)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1448,
+      "kind": "Toggle",
+      "bound": "videoSettingsManager.enableAppleSiliconOptimization",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.videoTransfer.enableAppleSiliconOptimization\"), isOn: $videoSettingsManager.enableAppleSiliconOptimization)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1451,
+      "kind": "Toggle",
+      "bound": "videoSettingsManager.enableAdaptiveBitrate",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.videoTransfer.enableAdaptiveBitrate\"), isOn: $videoSettingsManager.enableAdaptiveBitrate)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1456,
+      "kind": "Picker",
+      "bound": "videoSettingsManager.compressionQuality",
+      "snippet": "Picker(\"\", selection: $videoSettingsManager.compressionQuality) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1595,
+      "kind": "Picker",
+      "bound": "remoteDesktopSettingsManager.settings.displaySettings.videoQuality",
+      "snippet": "Picker(\"\", selection: $remoteDesktopSettingsManager.settings.displaySettings.videoQuality) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1607,
+      "kind": "Slider",
+      "bound": null,
+      "snippet": "Slider("
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1619,
+      "kind": "Picker",
+      "bound": "remoteDesktopSettingsManager.settings.displaySettings.refreshRate",
+      "snippet": "Picker(\"\", selection: $remoteDesktopSettingsManager.settings.displaySettings.refreshRate) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1630,
+      "kind": "Toggle",
+      "bound": "remoteDesktopSettingsManager.settings.networkSettings.enableAdaptiveQuality",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.remote.network.enableAdaptiveQuality\"), isOn: $remoteDesktopSettingsManager.settings.networkSettings.enableAdaptiveQuality)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1631,
+      "kind": "Toggle",
+      "bound": "remoteDesktopSettingsManager.settings.displaySettings.fullScreenMode",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.remote.display.fullScreenMode\"), isOn: $remoteDesktopSettingsManager.settings.displaySettings.fullScreenMode)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1637,
+      "kind": "Toggle",
+      "bound": "remoteDesktopSettingsManager.settings.interactionSettings.enableClipboardSync",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.remote.interaction.clipboardSync\"), isOn: $remoteDesktopSettingsManager.settings.interactionSettings.enableClipboardSync)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1638,
+      "kind": "Toggle",
+      "bound": "remoteDesktopSettingsManager.settings.interactionSettings.enableAudioRedirection",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.remote.interaction.audioRedirection\"), isOn: $remoteDesktopSettingsManager.settings.interactionSettings.enableAudioRedirection)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1639,
+      "kind": "Toggle",
+      "bound": "remoteDesktopSettingsManager.settings.interactionSettings.enableFileTransfer",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.remote.interaction.fileTransfer\"), isOn: $remoteDesktopSettingsManager.settings.interactionSettings.enableFileTransfer)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1640,
+      "kind": "Toggle",
+      "bound": "remoteDesktopSettingsManager.settings.interactionSettings.enableTrackpadGestures",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.remote.interaction.trackpadGestures\"), isOn: $remoteDesktopSettingsManager.settings.interactionSettings.enableTrackpadGestures)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1644,
+      "kind": "Slider",
+      "bound": null,
+      "snippet": "Slider("
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1671,
+      "kind": "Toggle",
+      "bound": "remoteDesktopSettingsManager.settings.networkSettings.enableAdaptiveQuality",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.remote.network.enableBandwidthAdaptive\"), isOn: $remoteDesktopSettingsManager.settings.networkSettings.enableAdaptiveQuality)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1672,
+      "kind": "Toggle",
+      "bound": "remoteDesktopSettingsManager.settings.networkSettings.enableUDPTransport",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.remote.network.enableUDP\"), isOn: $remoteDesktopSettingsManager.settings.networkSettings.enableUDPTransport)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1673,
+      "kind": "Toggle",
+      "bound": "remoteDesktopSettingsManager.settings.networkSettings.enableEncryption",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.remote.network.enableCompression\"), isOn: $remoteDesktopSettingsManager.settings.networkSettings.enableEncryption)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1690,
+      "kind": "Picker",
+      "bound": "remoteDesktopSettingsManager.settings.networkSettings.bufferSize",
+      "snippet": "Picker(\"\", selection: $remoteDesktopSettingsManager.settings.networkSettings.bufferSize) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1729,
+      "kind": "Picker",
+      "bound": null,
+      "snippet": "Picker(\"\", selection: Binding("
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1742,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableAutoRefresh",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.systemMonitor.config.enableRealtime\"), isOn: $settingsManager.enableAutoRefresh)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1743,
+      "kind": "Toggle",
+      "bound": "settingsManager.showTrendIndicators",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.systemMonitor.config.enableHistory\"), isOn: $settingsManager.showTrendIndicators)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1744,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableSystemNotifications",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.systemMonitor.config.enablePerformanceAlerts\"), isOn: $settingsManager.enableSystemNotifications)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1760,
+      "kind": "Toggle",
+      "bound": "settingsManager.showDeviceDetails",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.systemMonitor.display.cpu\"), isOn: $settingsManager.showDeviceDetails)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1761,
+      "kind": "Toggle",
+      "bound": "settingsManager.showConnectionStats",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.systemMonitor.display.memory\"), isOn: $settingsManager.showConnectionStats)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1762,
+      "kind": "Toggle",
+      "bound": "settingsManager.showTrendIndicators",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.systemMonitor.display.disk\"), isOn: $settingsManager.showTrendIndicators)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1763,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableSystemNotifications",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.systemMonitor.display.network\"), isOn: $settingsManager.enableSystemNotifications)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1764,
+      "kind": "Toggle",
+      "bound": "settingsManager.showDebugInfo",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.systemMonitor.display.temperature\"), isOn: $settingsManager.showDebugInfo)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1765,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableVerboseLogging",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.systemMonitor.display.fanSpeed\"), isOn: $settingsManager.enableVerboseLogging)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1769,
+      "kind": "Picker",
+      "bound": "settingsManager.logLevel",
+      "snippet": "Picker(\"\", selection: $settingsManager.logLevel) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1784,
+      "kind": "Slider",
+      "bound": "settingsManager.cpuThreshold",
+      "snippet": "Slider(value: $settingsManager.cpuThreshold, in: 50...95, step: 5)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1792,
+      "kind": "Slider",
+      "bound": "settingsManager.memoryThreshold",
+      "snippet": "Slider(value: $settingsManager.memoryThreshold, in: 50...95, step: 5)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1800,
+      "kind": "Slider",
+      "bound": "settingsManager.diskThreshold",
+      "snippet": "Slider(value: $settingsManager.diskThreshold, in: 70...95, step: 5)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1806,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableSoundAlerts",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.systemMonitor.alerts.enableSound\"), isOn: $settingsManager.enableSoundAlerts)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1807,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableSystemNotifications",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.systemMonitor.alerts.enableNotificationCenter\"), isOn: $settingsManager.enableSystemNotifications)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1813,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableVerboseLogging",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.systemMonitor.advanced.enableVerboseLogging\"), isOn: $settingsManager.enableVerboseLogging)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1814,
+      "kind": "Toggle",
+      "bound": "settingsManager.saveNetworkLogs",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.systemMonitor.advanced.exportData\"), isOn: $settingsManager.saveNetworkLogs)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1815,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableBackgroundScanning",
+      "snippet": "Toggle(localizationManager.localizedString(\"settings.systemMonitor.advanced.enableRemoteMonitoring\"), isOn: $settingsManager.enableBackgroundScanning)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "line": 1819,
+      "kind": "Picker",
+      "bound": "settingsManager.logLevel",
+      "snippet": "Picker(\"\", selection: $settingsManager.logLevel) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementView.swift",
+      "line": 233,
+      "kind": "Picker",
+      "bound": "sortOption",
+      "snippet": "Picker(\"排序\", selection: $sortOption) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementView.swift",
+      "line": 242,
+      "kind": "Toggle",
+      "bound": "showOfflineDevices",
+      "snippet": "Toggle(\"显示离线\", isOn: $showOfflineDevices)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 93,
+      "kind": "Stepper",
+      "bound": "settingsManager.wifiScanInterval",
+      "snippet": "Stepper(value: $settingsManager.wifiScanInterval, in: 1...60, step: 1) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 102,
+      "kind": "Stepper",
+      "bound": "settingsManager.wifiScanTimeout",
+      "snippet": "Stepper(value: $settingsManager.wifiScanTimeout, in: 5...120, step: 5) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 108,
+      "kind": "Toggle",
+      "bound": "settingsManager.autoScanWiFi",
+      "snippet": "Toggle(\"自动扫描\", isOn: $settingsManager.autoScanWiFi)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 116,
+      "kind": "Stepper",
+      "bound": "settingsManager.bluetoothScanInterval",
+      "snippet": "Stepper(value: $settingsManager.bluetoothScanInterval, in: 1...60, step: 1) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 125,
+      "kind": "Stepper",
+      "bound": "settingsManager.bluetoothScanTimeout",
+      "snippet": "Stepper(value: $settingsManager.bluetoothScanTimeout, in: 5...120, step: 5) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 131,
+      "kind": "Toggle",
+      "bound": "settingsManager.autoScanBluetooth",
+      "snippet": "Toggle(\"自动扫描\", isOn: $settingsManager.autoScanBluetooth)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 134,
+      "kind": "Toggle",
+      "bound": "settingsManager.scanBLEDevices",
+      "snippet": "Toggle(\"扫描低功耗设备\", isOn: $settingsManager.scanBLEDevices)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 142,
+      "kind": "Stepper",
+      "bound": "settingsManager.airplayScanInterval",
+      "snippet": "Stepper(value: $settingsManager.airplayScanInterval, in: 1...60, step: 1) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 148,
+      "kind": "Toggle",
+      "bound": "settingsManager.autoScanAirPlay",
+      "snippet": "Toggle(\"自动扫描\", isOn: $settingsManager.autoScanAirPlay)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 164,
+      "kind": "Toggle",
+      "bound": "settingsManager.showOfflineDevices",
+      "snippet": "Toggle(\"显示离线设备\", isOn: $settingsManager.showOfflineDevices)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 167,
+      "kind": "Toggle",
+      "bound": "settingsManager.showSignalStrength",
+      "snippet": "Toggle(\"显示信号强度\", isOn: $settingsManager.showSignalStrength)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 170,
+      "kind": "Toggle",
+      "bound": "settingsManager.showDeviceIcons",
+      "snippet": "Toggle(\"显示设备图标\", isOn: $settingsManager.showDeviceIcons)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 176,
+      "kind": "Stepper",
+      "bound": "settingsManager.listRefreshInterval",
+      "snippet": "Stepper(value: $settingsManager.listRefreshInterval, in: 1...30, step: 1) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 184,
+      "kind": "Toggle",
+      "bound": "settingsManager.showMACAddress",
+      "snippet": "Toggle(\"显示MAC地址\", isOn: $settingsManager.showMACAddress)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 187,
+      "kind": "Toggle",
+      "bound": "settingsManager.showManufacturer",
+      "snippet": "Toggle(\"显示制造商信息\", isOn: $settingsManager.showManufacturer)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 190,
+      "kind": "Toggle",
+      "bound": "settingsManager.showLastSeen",
+      "snippet": "Toggle(\"显示最后发现时间\", isOn: $settingsManager.showLastSeen)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 195,
+      "kind": "Picker",
+      "bound": "settingsManager.defaultSortOption",
+      "snippet": "Picker(\"默认排序方式\", selection: $settingsManager.defaultSortOption) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 203,
+      "kind": "Toggle",
+      "bound": "settingsManager.rememberFilterSettings",
+      "snippet": "Toggle(\"记住过滤设置\", isOn: $settingsManager.rememberFilterSettings)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 222,
+      "kind": "Stepper",
+      "bound": "settingsManager.connectionTimeout",
+      "snippet": "Stepper(value: $settingsManager.connectionTimeout, in: 5...120, step: 5) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 231,
+      "kind": "Stepper",
+      "bound": "settingsManager.connectionRetryCount",
+      "snippet": "Stepper(value: $settingsManager.connectionRetryCount, in: 0...10, step: 1) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 237,
+      "kind": "Toggle",
+      "bound": "settingsManager.autoReconnect",
+      "snippet": "Toggle(\"自动重连\", isOn: $settingsManager.autoReconnect)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 242,
+      "kind": "Toggle",
+      "bound": "settingsManager.rememberWiFiPasswords",
+      "snippet": "Toggle(\"记住WiFi密码\", isOn: $settingsManager.rememberWiFiPasswords)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 245,
+      "kind": "Toggle",
+      "bound": "settingsManager.preferKnownNetworks",
+      "snippet": "Toggle(\"优先连接已知网络\", isOn: $settingsManager.preferKnownNetworks)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 250,
+      "kind": "Toggle",
+      "bound": "settingsManager.autoBluetoothPairing",
+      "snippet": "Toggle(\"自动配对\", isOn: $settingsManager.autoBluetoothPairing)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 253,
+      "kind": "Toggle",
+      "bound": "settingsManager.keepBluetoothActive",
+      "snippet": "Toggle(\"连接后保持活跃\", isOn: $settingsManager.keepBluetoothActive)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 409,
+      "kind": "Stepper",
+      "bound": "settingsManager.maxDeviceCache",
+      "snippet": "Stepper(value: $settingsManager.maxDeviceCache, in: 50...1000, step: 50) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 418,
+      "kind": "Stepper",
+      "bound": "settingsManager.cacheCleanupInterval",
+      "snippet": "Stepper(value: $settingsManager.cacheCleanupInterval, in: 1...24, step: 1) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 424,
+      "kind": "Toggle",
+      "bound": "settingsManager.enablePerformanceMonitoring",
+      "snippet": "Toggle(\"启用性能监控\", isOn: $settingsManager.enablePerformanceMonitoring)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 429,
+      "kind": "Picker",
+      "bound": "settingsManager.logLevel",
+      "snippet": "Picker(\"日志级别\", selection: $settingsManager.logLevel) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 438,
+      "kind": "Toggle",
+      "bound": "settingsManager.saveLogsToFile",
+      "snippet": "Toggle(\"保存日志到文件\", isOn: $settingsManager.saveLogsToFile)"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/DeviceManagementSettingsView.swift",
+      "line": 444,
+      "kind": "Stepper",
+      "bound": "settingsManager.logRetentionDays",
+      "snippet": "Stepper(value: $settingsManager.logRetentionDays, in: 1...30, step: 1) {"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/CloudBackup/CloudBackupSettingsView.swift",
+      "line": 47,
+      "kind": "Toggle",
+      "bound": "backupService.configuration.autoBackupEnabled",
+      "snippet": "Toggle(\"启用自动备份\", isOn: $backupService.configuration.autoBackupEnabled)"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/CloudBackup/CloudBackupSettingsView.swift",
+      "line": 51,
+      "kind": "Picker",
+      "bound": "backupService.configuration.autoBackupInterval",
+      "snippet": "Picker(\"备份间隔\", selection: $backupService.configuration.autoBackupInterval) {"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/CloudBackup/CloudBackupSettingsView.swift",
+      "line": 57,
+      "kind": "Toggle",
+      "bound": "backupService.configuration.wifiOnlyBackup",
+      "snippet": "Toggle(\"仅在 WiFi 下备份\", isOn: $backupService.configuration.wifiOnlyBackup)"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/CloudBackup/CloudBackupSettingsView.swift",
+      "line": 66,
+      "kind": "Toggle",
+      "bound": null,
+      "snippet": "Toggle(isOn: Binding("
+    },
+    {
+      "file": "Sources/SkyBridgeUI/CloudBackup/CloudBackupSettingsView.swift",
+      "line": 139,
+      "kind": "Picker",
+      "bound": "backupService.configuration.maxBackupCount",
+      "snippet": "Picker(\"保留备份数量\", selection: $backupService.configuration.maxBackupCount) {"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Security/ConnectionApprovalView.swift",
+      "line": 27,
+      "kind": "Toggle",
+      "bound": "approvalService.policy.requireApproval",
+      "snippet": "Toggle(\"启用连接审批\", isOn: $approvalService.policy.requireApproval)"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Security/ConnectionApprovalView.swift",
+      "line": 30,
+      "kind": "Stepper",
+      "bound": "approvalService.policy.requiredFactorCount",
+      "snippet": "Stepper(\"必需验证因素: \\(approvalService.policy.requiredFactorCount)\", value: $approvalService.policy.requiredFactorCount, in: 1...3)"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Security/ConnectionApprovalView.swift",
+      "line": 32,
+      "kind": "Toggle",
+      "bound": "approvalService.policy.autoApproveTrustedDevices",
+      "snippet": "Toggle(\"自动批准受信任设备\", isOn: $approvalService.policy.autoApproveTrustedDevices)"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Security/ConnectionApprovalView.swift",
+      "line": 34,
+      "kind": "Picker",
+      "bound": "approvalService.policy.requestTimeout",
+      "snippet": "Picker(\"请求超时\", selection: $approvalService.policy.requestTimeout) {"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Security/ConnectionApprovalView.swift",
+      "line": 48,
+      "kind": "Toggle",
+      "bound": null,
+      "snippet": "Toggle(isOn: Binding("
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Network/BandwidthSettingsView.swift",
+      "line": 27,
+      "kind": "Toggle",
+      "bound": "engine.isEnabled",
+      "snippet": "Toggle(\"启用带宽限速\", isOn: $engine.isEnabled)"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Network/BandwidthSettingsView.swift",
+      "line": 131,
+      "kind": "Picker",
+      "bound": null,
+      "snippet": "Picker(\"\", selection: Binding("
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Network/BandwidthSettingsView.swift",
+      "line": 263,
+      "kind": "Toggle",
+      "bound": "isEnabled",
+      "snippet": "Toggle(\"启用\", isOn: $isEnabled)"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Network/BandwidthSettingsView.swift",
+      "line": 267,
+      "kind": "Picker",
+      "bound": "startHour",
+      "snippet": "Picker(\"开始时间\", selection: $startHour) {"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Network/BandwidthSettingsView.swift",
+      "line": 276,
+      "kind": "Picker",
+      "bound": "endHour",
+      "snippet": "Picker(\"结束时间\", selection: $endHour) {"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Network/BandwidthSettingsView.swift",
+      "line": 297,
+      "kind": "Toggle",
+      "bound": null,
+      "snippet": "Toggle(dayNames[day - 1], isOn: Binding("
+    },
+    {
+      "file": "Sources/SkyBridgeUI/FileTransfer/MediaPreviewView.swift",
+      "line": 170,
+      "kind": "Slider",
+      "bound": "currentTime",
+      "snippet": "Slider(value: $currentTime, in: 0...max(duration, 1)) { editing in"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/FileTransfer/MediaPreviewView.swift",
+      "line": 229,
+      "kind": "Slider",
+      "bound": "volume",
+      "snippet": "Slider(value: $volume, in: 0...1) { _ in"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/FileTransfer/FileTransferView.swift",
+      "line": 1068,
+      "kind": "Toggle",
+      "bound": "isOn",
+      "snippet": "Toggle(\"\", isOn: $isOn)"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/FileTransfer/ModernTransferSettingsView.swift",
+      "line": 44,
+      "kind": "Toggle",
+      "bound": "enableCompression",
+      "snippet": "Toggle(\"启用数据压缩\", isOn: $enableCompression)"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/FileTransfer/ModernTransferSettingsView.swift",
+      "line": 45,
+      "kind": "Toggle",
+      "bound": "enableEncryption",
+      "snippet": "Toggle(\"端到端加密\", isOn: $enableEncryption)"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Performance/HardwareDashboardView.swift",
+      "line": 26,
+      "kind": "Picker",
+      "bound": "selectedTab",
+      "snippet": "Picker(\"\", selection: $selectedTab) {"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Performance/HardwareDashboardView.swift",
+      "line": 378,
+      "kind": "Picker",
+      "bound": "monitor.configuration.samplingInterval",
+      "snippet": "Picker(\"采样间隔\", selection: $monitor.configuration.samplingInterval) {"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Performance/HardwareDashboardView.swift",
+      "line": 385,
+      "kind": "Picker",
+      "bound": "monitor.configuration.historyRetention",
+      "snippet": "Picker(\"历史保留时间\", selection: $monitor.configuration.historyRetention) {"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Performance/HardwareDashboardView.swift",
+      "line": 396,
+      "kind": "Toggle",
+      "bound": "monitor.configuration.monitorCPU",
+      "snippet": "Toggle(\"CPU 监控\", isOn: $monitor.configuration.monitorCPU)"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Performance/HardwareDashboardView.swift",
+      "line": 397,
+      "kind": "Toggle",
+      "bound": "monitor.configuration.monitorMemory",
+      "snippet": "Toggle(\"内存监控\", isOn: $monitor.configuration.monitorMemory)"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Performance/HardwareDashboardView.swift",
+      "line": 398,
+      "kind": "Toggle",
+      "bound": "monitor.configuration.monitorGPU",
+      "snippet": "Toggle(\"GPU 监控\", isOn: $monitor.configuration.monitorGPU)"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Performance/HardwareDashboardView.swift",
+      "line": 399,
+      "kind": "Toggle",
+      "bound": "monitor.configuration.monitorNetwork",
+      "snippet": "Toggle(\"网络监控\", isOn: $monitor.configuration.monitorNetwork)"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Performance/HardwareDashboardView.swift",
+      "line": 400,
+      "kind": "Toggle",
+      "bound": "monitor.configuration.monitorDisk",
+      "snippet": "Toggle(\"磁盘监控\", isOn: $monitor.configuration.monitorDisk)"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Performance/HardwareDashboardView.swift",
+      "line": 401,
+      "kind": "Toggle",
+      "bound": "monitor.configuration.monitorThermal",
+      "snippet": "Toggle(\"温度监控\", isOn: $monitor.configuration.monitorThermal)"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Views/DeviceDetailView.swift",
+      "line": 168,
+      "kind": "Picker",
+      "bound": "securityManager.securityLevel",
+      "snippet": "Picker(\"安全级别\", selection: $securityManager.securityLevel) {"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Views/QuantumHolographicInterfaceView.swift",
+      "line": 45,
+      "kind": "Toggle",
+      "bound": "isHolographicEnabled",
+      "snippet": "Toggle(\"启用全息投影\", isOn: $isHolographicEnabled)"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Views/QuantumHolographicInterfaceView.swift",
+      "line": 79,
+      "kind": "Slider",
+      "bound": "quantumBeamIntensity",
+      "snippet": "Slider(value: $quantumBeamIntensity, in: 0...1)"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Views/QuantumHolographicInterfaceView.swift",
+      "line": 165,
+      "kind": "Toggle",
+      "bound": "gestureRecognitionEnabled",
+      "snippet": "Toggle(\"启用手势识别\", isOn: $gestureRecognitionEnabled)"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Messaging/OfflineQueueSettingsView.swift",
+      "line": 51,
+      "kind": "Toggle",
+      "bound": "queue.configuration.enablePersistence",
+      "snippet": "Toggle(\"启用持久化\", isOn: $queue.configuration.enablePersistence)"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Messaging/OfflineQueueSettingsView.swift",
+      "line": 52,
+      "kind": "Toggle",
+      "bound": "queue.configuration.priorityOrdering",
+      "snippet": "Toggle(\"按优先级排序\", isOn: $queue.configuration.priorityOrdering)"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Messaging/OfflineQueueSettingsView.swift",
+      "line": 190,
+      "kind": "Picker",
+      "bound": "queue.configuration.maxQueueSize",
+      "snippet": "Picker(\"\", selection: $queue.configuration.maxQueueSize) {"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Messaging/OfflineQueueSettingsView.swift",
+      "line": 205,
+      "kind": "Picker",
+      "bound": "queue.configuration.maxMessagesPerDevice",
+      "snippet": "Picker(\"\", selection: $queue.configuration.maxMessagesPerDevice) {"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Messaging/OfflineQueueSettingsView.swift",
+      "line": 220,
+      "kind": "Picker",
+      "bound": "queue.configuration.maxRetryCount",
+      "snippet": "Picker(\"\", selection: $queue.configuration.maxRetryCount) {"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Messaging/OfflineQueueSettingsView.swift",
+      "line": 235,
+      "kind": "Picker",
+      "bound": "queue.configuration.retryInterval",
+      "snippet": "Picker(\"\", selection: $queue.configuration.retryInterval) {"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Messaging/OfflineQueueSettingsView.swift",
+      "line": 250,
+      "kind": "Picker",
+      "bound": "queue.configuration.defaultTTL",
+      "snippet": "Picker(\"\", selection: $queue.configuration.defaultTTL) {"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Messaging/OfflineQueueSettingsView.swift",
+      "line": 265,
+      "kind": "Picker",
+      "bound": "queue.configuration.urgentTTL",
+      "snippet": "Picker(\"\", selection: $queue.configuration.urgentTTL) {"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Clipboard/ClipboardSyncSettingsView.swift",
+      "line": 26,
+      "kind": "Toggle",
+      "bound": null,
+      "snippet": "Toggle(\"启用剪贴板同步\", isOn: Binding("
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Clipboard/ClipboardSyncSettingsView.swift",
+      "line": 46,
+      "kind": "Toggle",
+      "bound": "syncService.configuration.syncImages",
+      "snippet": "Toggle(\"同步图片\", isOn: $syncService.configuration.syncImages)"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Clipboard/ClipboardSyncSettingsView.swift",
+      "line": 49,
+      "kind": "Toggle",
+      "bound": "syncService.configuration.syncFileURLs",
+      "snippet": "Toggle(\"同步文件路径\", isOn: $syncService.configuration.syncFileURLs)"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Clipboard/ClipboardSyncSettingsView.swift",
+      "line": 141,
+      "kind": "Picker",
+      "bound": null,
+      "snippet": "Picker(\"\", selection: Binding("
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Clipboard/ClipboardSyncSettingsView.swift",
+      "line": 160,
+      "kind": "Picker",
+      "bound": null,
+      "snippet": "Picker(\"\", selection: Binding("
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Clipboard/ClipboardSyncSettingsView.swift",
+      "line": 282,
+      "kind": "Toggle",
+      "bound": null,
+      "snippet": "Toggle(\"启用\", isOn: Binding("
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 104,
+      "kind": "Picker",
+      "bound": null,
+      "snippet": "Picker("
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 128,
+      "kind": "Toggle",
+      "bound": "settingsManager.autoScanOnStartup",
+      "snippet": "Toggle(\"启动时自动扫描设备\", isOn: $settingsManager.autoScanOnStartup)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 131,
+      "kind": "Toggle",
+      "bound": "settingsManager.showSystemNotifications",
+      "snippet": "Toggle(\"显示系统通知\", isOn: $settingsManager.showSystemNotifications)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 134,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableBackgroundScanning",
+      "snippet": "Toggle(\"启用后台扫描\", isOn: $settingsManager.enableBackgroundScanning)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 139,
+      "kind": "Toggle",
+      "bound": "settingsManager.useDarkMode",
+      "snippet": "Toggle(\"使用深色模式\", isOn: $settingsManager.useDarkMode)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 142,
+      "kind": "Toggle",
+      "bound": "settingsManager.compactMode",
+      "snippet": "Toggle(\"紧凑模式\", isOn: $settingsManager.compactMode)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 145,
+      "kind": "Toggle",
+      "bound": "settingsManager.showDeviceDetails",
+      "snippet": "Toggle(\"显示设备详情\", isOn: $settingsManager.showDeviceDetails)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 148,
+      "kind": "Toggle",
+      "bound": "settingsManager.showConnectionStats",
+      "snippet": "Toggle(\"显示连接统计\", isOn: $settingsManager.showConnectionStats)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 312,
+      "kind": "Toggle",
+      "bound": "settingsManager.autoConnectKnownNetworks",
+      "snippet": "Toggle(\"自动连接已知网络\", isOn: $settingsManager.autoConnectKnownNetworks)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 315,
+      "kind": "Toggle",
+      "bound": "settingsManager.showHiddenNetworks",
+      "snippet": "Toggle(\"显示隐藏网络\", isOn: $settingsManager.showHiddenNetworks)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 318,
+      "kind": "Toggle",
+      "bound": "settingsManager.prefer5GHz",
+      "snippet": "Toggle(\"优先使用5GHz/6GHz频段\", isOn: $settingsManager.prefer5GHz)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 321,
+      "kind": "Stepper",
+      "bound": null,
+      "snippet": "Stepper(\"WiFi扫描超时: \\(settingsManager.wifiScanTimeout)秒\","
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 329,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableBonjourDiscovery",
+      "snippet": "Toggle(\"启用Bonjour发现\", isOn: $settingsManager.enableBonjourDiscovery)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 332,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableMDNSResolution",
+      "snippet": "Toggle(\"启用mDNS解析\", isOn: $settingsManager.enableMDNSResolution)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 335,
+      "kind": "Toggle",
+      "bound": "settingsManager.scanCustomPorts",
+      "snippet": "Toggle(\"扫描自定义端口\", isOn: $settingsManager.scanCustomPorts)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 338,
+      "kind": "Stepper",
+      "bound": null,
+      "snippet": "Stepper(\"发现超时: \\(settingsManager.discoveryTimeout)秒\","
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 346,
+      "kind": "Stepper",
+      "bound": null,
+      "snippet": "Stepper(\"连接超时: \\(settingsManager.connectionTimeout)秒\","
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 352,
+      "kind": "Stepper",
+      "bound": null,
+      "snippet": "Stepper(\"重试次数: \\(settingsManager.retryCount)\","
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 357,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableConnectionEncryption",
+      "snippet": "Toggle(\"启用连接加密\", isOn: $settingsManager.enableConnectionEncryption)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 360,
+      "kind": "Toggle",
+      "bound": "settingsManager.verifyCertificates",
+      "snippet": "Toggle(\"验证证书\", isOn: $settingsManager.verifyCertificates)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 409,
+      "kind": "Toggle",
+      "bound": "settingsManager.showDeviceRSSI",
+      "snippet": "Toggle(\"显示设备RSSI\", isOn: $settingsManager.showDeviceRSSI)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 412,
+      "kind": "Toggle",
+      "bound": "settingsManager.showConnectableDevicesOnly",
+      "snippet": "Toggle(\"仅显示可连接设备\", isOn: $settingsManager.showConnectableDevicesOnly)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 415,
+      "kind": "Toggle",
+      "bound": "settingsManager.hideOfflineDevices",
+      "snippet": "Toggle(\"隐藏离线设备\", isOn: $settingsManager.hideOfflineDevices)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 418,
+      "kind": "Toggle",
+      "bound": "settingsManager.showDeviceIcons",
+      "snippet": "Toggle(\"显示设备图标\", isOn: $settingsManager.showDeviceIcons)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 421,
+      "kind": "Toggle",
+      "bound": "settingsManager.sortBySignalStrength",
+      "snippet": "Toggle(\"按信号强度排序\", isOn: $settingsManager.sortBySignalStrength)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 426,
+      "kind": "Toggle",
+      "bound": "settingsManager.onlyNotifyVerifiedDevices",
+      "snippet": "Toggle(\"仅提醒已验签设备\", isOn: $settingsManager.onlyNotifyVerifiedDevices)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 428,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableRealTimeWeather",
+      "snippet": "Toggle(\"启用实时天气\", isOn: $settingsManager.enableRealTimeWeather)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 430,
+      "kind": "Toggle",
+      "bound": "settingsManager.strictModeForSensitiveGroups",
+      "snippet": "Toggle(\"敏感人群更严格模式\", isOn: $settingsManager.strictModeForSensitiveGroups)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 440,
+      "kind": "Stepper",
+      "bound": "settingsManager.aqiThresholdCautionUrban",
+      "snippet": "Stepper(value: $settingsManager.aqiThresholdCautionUrban, in: 50...200, step: 10) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 448,
+      "kind": "Stepper",
+      "bound": "settingsManager.aqiThresholdSensitiveUrban",
+      "snippet": "Stepper(value: $settingsManager.aqiThresholdSensitiveUrban, in: 80...250, step: 10) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 456,
+      "kind": "Stepper",
+      "bound": "settingsManager.aqiThresholdUnhealthyUrban",
+      "snippet": "Stepper(value: $settingsManager.aqiThresholdUnhealthyUrban, in: 150...300, step: 10) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 464,
+      "kind": "Stepper",
+      "bound": "settingsManager.aqiThresholdVeryUnhealthyUrban",
+      "snippet": "Stepper(value: $settingsManager.aqiThresholdVeryUnhealthyUrban, in: 200...400, step: 10) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 475,
+      "kind": "Stepper",
+      "bound": "settingsManager.aqiThresholdCautionSuburban",
+      "snippet": "Stepper(value: $settingsManager.aqiThresholdCautionSuburban, in: 60...220, step: 10) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 483,
+      "kind": "Stepper",
+      "bound": "settingsManager.aqiThresholdSensitiveSuburban",
+      "snippet": "Stepper(value: $settingsManager.aqiThresholdSensitiveSuburban, in: 90...260, step: 10) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 491,
+      "kind": "Stepper",
+      "bound": "settingsManager.aqiThresholdUnhealthySuburban",
+      "snippet": "Stepper(value: $settingsManager.aqiThresholdUnhealthySuburban, in: 160...320, step: 10) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 499,
+      "kind": "Stepper",
+      "bound": "settingsManager.aqiThresholdVeryUnhealthySuburban",
+      "snippet": "Stepper(value: $settingsManager.aqiThresholdVeryUnhealthySuburban, in: 220...420, step: 10) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 511,
+      "kind": "Stepper",
+      "bound": "settingsManager.uvThresholdModerate",
+      "snippet": "Stepper(value: $settingsManager.uvThresholdModerate, in: 3...10, step: 0.5) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 519,
+      "kind": "Stepper",
+      "bound": "settingsManager.uvThresholdStrong",
+      "snippet": "Stepper(value: $settingsManager.uvThresholdStrong, in: 5...12, step: 0.5) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 531,
+      "kind": "Stepper",
+      "bound": "settingsManager.sortWeightVerified",
+      "snippet": "Stepper(value: $settingsManager.sortWeightVerified, in: 0...5000, step: 100) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 541,
+      "kind": "Stepper",
+      "bound": "settingsManager.sortWeightConnected",
+      "snippet": "Stepper(value: $settingsManager.sortWeightConnected, in: 0...5000, step: 100) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 551,
+      "kind": "Stepper",
+      "bound": "settingsManager.sortWeightSignalMultiplier",
+      "snippet": "Stepper(value: $settingsManager.sortWeightSignalMultiplier, in: 0...200, step: 10) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 560,
+      "kind": "Toggle",
+      "bound": "settingsManager.autoDiscoverAppleTV",
+      "snippet": "Toggle(\"自动发现Apple TV\", isOn: $settingsManager.autoDiscoverAppleTV)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 563,
+      "kind": "Toggle",
+      "bound": "settingsManager.showHomePodDevices",
+      "snippet": "Toggle(\"显示HomePod设备\", isOn: $settingsManager.showHomePodDevices)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 566,
+      "kind": "Toggle",
+      "bound": "settingsManager.showThirdPartyAirPlayDevices",
+      "snippet": "Toggle(\"显示第三方AirPlay设备\", isOn: $settingsManager.showThirdPartyAirPlayDevices)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 571,
+      "kind": "Toggle",
+      "bound": "settingsManager.autoConnectPairedDevices",
+      "snippet": "Toggle(\"自动连接配对设备\", isOn: $settingsManager.autoConnectPairedDevices)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 574,
+      "kind": "Stepper",
+      "bound": null,
+      "snippet": "Stepper(\"最小信号强度: \\(Int(settingsManager.minimumSignalStrength)) dBm\","
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 888,
+      "kind": "Picker",
+      "bound": "settingsManager.performanceMode",
+      "snippet": "Picker(\"性能模式\", selection: $settingsManager.performanceMode) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 902,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableVerboseLogging",
+      "snippet": "Toggle(\"启用详细日志\", isOn: $settingsManager.enableVerboseLogging)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 905,
+      "kind": "Toggle",
+      "bound": "settingsManager.showDebugInfo",
+      "snippet": "Toggle(\"显示调试信息\", isOn: $settingsManager.showDebugInfo)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 908,
+      "kind": "Toggle",
+      "bound": "settingsManager.saveNetworkLogs",
+      "snippet": "Toggle(\"保存网络日志\", isOn: $settingsManager.saveNetworkLogs)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 912,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableHandshakeDiagnostics",
+      "snippet": "Toggle(\"启用握手隐私诊断（ALPN/SNI）\", isOn: $settingsManager.enableHandshakeDiagnostics)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 916,
+      "kind": "Toggle",
+      "bound": "settingsManager.showRealtimeFPS",
+      "snippet": "Toggle(\"显示实时FPS\", isOn: $settingsManager.showRealtimeFPS)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 920,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableCompatibilityMode",
+      "snippet": "Toggle(\"兼容/更多设备\", isOn: $settingsManager.enableCompatibilityMode)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 923,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableCompanionLink",
+      "snippet": "Toggle(\"启用 Companion Link\", isOn: $settingsManager.enableCompanionLink)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 926,
+      "kind": "Picker",
+      "bound": "settingsManager.logLevel",
+      "snippet": "Picker(\"日志级别\", selection: $settingsManager.logLevel) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 937,
+      "kind": "Toggle",
+      "bound": "settingsManager.showRealtimeFPS",
+      "snippet": "Toggle(\"显示实时FPS\", isOn: $settingsManager.showRealtimeFPS)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 939,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableHardwareAcceleration",
+      "snippet": "Toggle(\"启用硬件加速\", isOn: $settingsManager.enableHardwareAcceleration)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 942,
+      "kind": "Toggle",
+      "bound": "settingsManager.optimizeMemoryUsage",
+      "snippet": "Toggle(\"优化内存使用\", isOn: $settingsManager.optimizeMemoryUsage)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 945,
+      "kind": "Stepper",
+      "bound": null,
+      "snippet": "Stepper(\"最大并发连接: \\(settingsManager.maxConcurrentConnections)\","
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 952,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableRealTimeWeather",
+      "snippet": "Toggle(\"实时天气API\", isOn: $settingsManager.enableRealTimeWeather)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 1030,
+      "kind": "Toggle",
+      "bound": "trustOnFirstUse",
+      "snippet": "Toggle(\"首次信任主机密钥（TOFU）\", isOn: $trustOnFirstUse)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 1083,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableIPv6Support",
+      "snippet": "Toggle(\"启用IPv6支持\", isOn: $settingsManager.enableIPv6Support)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 1086,
+      "kind": "Toggle",
+      "bound": "settingsManager.useNewDiscoveryAlgorithm",
+      "snippet": "Toggle(\"使用新发现算法\", isOn: $settingsManager.useNewDiscoveryAlgorithm)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "line": 1089,
+      "kind": "Toggle",
+      "bound": "settingsManager.enableP2PDirectConnection",
+      "snippet": "Toggle(\"启用P2P直连\", isOn: $settingsManager.enableP2PDirectConnection)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 716,
+      "kind": "Picker",
+      "bound": "selectedProtocol",
+      "snippet": "Picker(LocalizationManager.shared.localizedString(\"remote.form.protocol\"), selection: $selectedProtocol) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 862,
+      "kind": "Picker",
+      "bound": "selectedTab",
+      "snippet": "Picker(\"设置类别\", selection: $selectedTab) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 875,
+      "kind": "Picker",
+      "bound": "settingsManager.settings.displaySettings.resolution",
+      "snippet": "Picker(\"分辨率\", selection: $settingsManager.settings.displaySettings.resolution) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 881,
+      "kind": "Picker",
+      "bound": "settingsManager.settings.displaySettings.colorDepth",
+      "snippet": "Picker(\"色彩深度\", selection: $settingsManager.settings.displaySettings.colorDepth) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 887,
+      "kind": "Picker",
+      "bound": "settingsManager.settings.displaySettings.refreshRate",
+      "snippet": "Picker(\"刷新率\", selection: $settingsManager.settings.displaySettings.refreshRate) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 893,
+      "kind": "Toggle",
+      "bound": "settingsManager.settings.displaySettings.fullScreenMode",
+      "snippet": "Toggle(\"全屏模式\", isOn: $settingsManager.settings.displaySettings.fullScreenMode)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 894,
+      "kind": "Toggle",
+      "bound": "settingsManager.settings.displaySettings.multiMonitorSupport",
+      "snippet": "Toggle(\"多显示器支持\", isOn: $settingsManager.settings.displaySettings.multiMonitorSupport)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 898,
+      "kind": "Picker",
+      "bound": "settingsManager.settings.displaySettings.videoQuality",
+      "snippet": "Picker(\"视频质量\", selection: $settingsManager.settings.displaySettings.videoQuality) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 907,
+      "kind": "Slider",
+      "bound": null,
+      "snippet": "Slider("
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 924,
+      "kind": "Toggle",
+      "bound": "settingsManager.settings.displaySettings.enableHardwareAcceleration",
+      "snippet": "Toggle(\"启用硬件加速\", isOn: $settingsManager.settings.displaySettings.enableHardwareAcceleration)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 927,
+      "kind": "Toggle",
+      "bound": "settingsManager.settings.displaySettings.enableAppleSiliconOptimization",
+      "snippet": "Toggle(\"Apple Silicon 优化\", isOn: $settingsManager.settings.displaySettings.enableAppleSiliconOptimization)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 930,
+      "kind": "Picker",
+      "bound": "settingsManager.settings.displaySettings.preferredCodec",
+      "snippet": "Picker(\"视频编码器\", selection: $settingsManager.settings.displaySettings.preferredCodec) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 939,
+      "kind": "Slider",
+      "bound": null,
+      "snippet": "Slider("
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 960,
+      "kind": "Slider",
+      "bound": null,
+      "snippet": "Slider("
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 989,
+      "kind": "Slider",
+      "bound": null,
+      "snippet": "Slider("
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 1007,
+      "kind": "Slider",
+      "bound": null,
+      "snippet": "Slider("
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 1022,
+      "kind": "Toggle",
+      "bound": "settingsManager.settings.interactionSettings.enableMouseAcceleration",
+      "snippet": "Toggle(\"启用鼠标加速\", isOn: $settingsManager.settings.interactionSettings.enableMouseAcceleration)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 1023,
+      "kind": "Toggle",
+      "bound": "settingsManager.settings.interactionSettings.enableTrackpadGestures",
+      "snippet": "Toggle(\"启用触控板手势\", isOn: $settingsManager.settings.interactionSettings.enableTrackpadGestures)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 1024,
+      "kind": "Toggle",
+      "bound": "settingsManager.settings.interactionSettings.enableContextMenu",
+      "snippet": "Toggle(\"启用右键菜单\", isOn: $settingsManager.settings.interactionSettings.enableContextMenu)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 1028,
+      "kind": "Picker",
+      "bound": "settingsManager.settings.interactionSettings.keyboardMapping",
+      "snippet": "Picker(\"键盘映射\", selection: $settingsManager.settings.interactionSettings.keyboardMapping) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 1037,
+      "kind": "Slider",
+      "bound": null,
+      "snippet": "Slider("
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 1057,
+      "kind": "Toggle",
+      "bound": "settingsManager.settings.interactionSettings.enableClipboardSync",
+      "snippet": "Toggle(\"剪贴板同步\", isOn: $settingsManager.settings.interactionSettings.enableClipboardSync)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 1060,
+      "kind": "Toggle",
+      "bound": "settingsManager.settings.interactionSettings.enableAudioRedirection",
+      "snippet": "Toggle(\"音频重定向\", isOn: $settingsManager.settings.interactionSettings.enableAudioRedirection)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 1063,
+      "kind": "Toggle",
+      "bound": "settingsManager.settings.interactionSettings.enablePrinterRedirection",
+      "snippet": "Toggle(\"打印机重定向\", isOn: $settingsManager.settings.interactionSettings.enablePrinterRedirection)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 1066,
+      "kind": "Toggle",
+      "bound": "settingsManager.settings.interactionSettings.enableFileTransfer",
+      "snippet": "Toggle(\"文件传输\", isOn: $settingsManager.settings.interactionSettings.enableFileTransfer)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 1077,
+      "kind": "Picker",
+      "bound": "settingsManager.settings.networkSettings.connectionType",
+      "snippet": "Picker(\"连接类型\", selection: $settingsManager.settings.networkSettings.connectionType) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 1086,
+      "kind": "Slider",
+      "bound": null,
+      "snippet": "Slider("
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 1104,
+      "kind": "Slider",
+      "bound": null,
+      "snippet": "Slider("
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 1127,
+      "kind": "Slider",
+      "bound": null,
+      "snippet": "Slider("
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 1148,
+      "kind": "Slider",
+      "bound": null,
+      "snippet": "Slider("
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 1168,
+      "kind": "Toggle",
+      "bound": "settingsManager.settings.networkSettings.enableEncryption",
+      "snippet": "Toggle(\"启用网络加密\", isOn: $settingsManager.settings.networkSettings.enableEncryption)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 1171,
+      "kind": "Toggle",
+      "bound": "settingsManager.settings.networkSettings.enableUDPTransport",
+      "snippet": "Toggle(\"启用 UDP 传输\", isOn: $settingsManager.settings.networkSettings.enableUDPTransport)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 1174,
+      "kind": "Toggle",
+      "bound": "settingsManager.settings.networkSettings.enableAdaptiveQuality",
+      "snippet": "Toggle(\"启用自适应质量\", isOn: $settingsManager.settings.networkSettings.enableAdaptiveQuality)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 1177,
+      "kind": "Toggle",
+      "bound": "settingsManager.settings.networkSettings.enableNetworkStats",
+      "snippet": "Toggle(\"启用网络统计\", isOn: $settingsManager.settings.networkSettings.enableNetworkStats)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 1183,
+      "kind": "Slider",
+      "bound": null,
+      "snippet": "Slider("
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 1204,
+      "kind": "Slider",
+      "bound": null,
+      "snippet": "Slider("
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 1216,
+      "kind": "Slider",
+      "bound": null,
+      "snippet": "Slider("
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/RemoteDesktopView.swift",
+      "line": 1228,
+      "kind": "Slider",
+      "bound": null,
+      "snippet": "Slider("
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/AuthenticationView.swift",
+      "line": 895,
+      "kind": "Toggle",
+      "bound": "viewModel.rememberCredentials",
+      "snippet": "Toggle(isOn: $viewModel.rememberCredentials) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/Dashboard/Sections/DeviceDiscoveryPanelView.swift",
+      "line": 59,
+      "kind": "Toggle",
+      "bound": null,
+      "snippet": "Toggle(LocalizationManager.shared.localizedString(\"discovery.compatibilityMode\"), isOn: Binding("
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/Views/SSHTerminalView.swift",
+      "line": 87,
+      "kind": "Toggle",
+      "bound": "autoScrollToBottom",
+      "snippet": "Toggle(\"自动滚动\", isOn: $autoScrollToBottom)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/Views/UnifiedDeviceDiscoveryIntegrationView.swift",
+      "line": 316,
+      "kind": "Toggle",
+      "bound": "enableBluetooth",
+      "snippet": "Toggle(\"启用蓝牙扫描\", isOn: $enableBluetooth)"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/Views/UnifiedDeviceDiscoveryIntegrationView.swift",
+      "line": 317,
+      "kind": "Stepper",
+      "bound": "concurrentLimit",
+      "snippet": "Stepper(value: $concurrentLimit, in: 1...3) {"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/Views/EnhancedDeviceDiscoveryView.swift",
+      "line": 222,
+      "kind": "Toggle",
+      "bound": null,
+      "snippet": "Toggle(LocalizationManager.shared.localizedString(\"discovery.compatibilityMode\"), isOn: Binding("
+    }
+  ],
+  "bool_state_vars": [
+    {
+      "file": "Sources/SkyBridgeCore/Managers/DeviceManagementExtensionManager.swift",
+      "var": "isEnabled"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorView.swift",
+      "var": "helperInstalled"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorView.swift",
+      "var": "pollingStarted"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorSettingsView.swift",
+      "var": "enableNotifications"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorSettingsView.swift",
+      "var": "enableAutoRefresh"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorSettingsView.swift",
+      "var": "showTrendIndicators"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorSettingsView.swift",
+      "var": "enableSoundAlerts"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorSettingsView.swift",
+      "var": "enablePerformanceAlerts"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorSettingsView.swift",
+      "var": "enableTemperatureMonitoring"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorSettingsView.swift",
+      "var": "enableFanSpeedMonitoring"
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorSettingsView.swift",
+      "var": "enableThermalThrottlingAlert"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Network/BandwidthSettingsView.swift",
+      "var": "isEnabled"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Agent/AgentStatusView.swift",
+      "var": "showDetails"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/P2P/P2PScreenMirrorView.swift",
+      "var": "isFullscreen"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/P2P/P2PScreenMirrorView.swift",
+      "var": "showControls"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/FileTransfer/FileTransferView.swift",
+      "var": "lastSignatureOk"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Views/BehaviorCaptchaView.swift",
+      "var": "isDragging"
+    },
+    {
+      "file": "Sources/SkyBridgeUI/Views/BehaviorCaptchaView.swift",
+      "var": "isVerifying"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/GlassSidebar.swift",
+      "var": "isExpanded"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/Dashboard/DashboardView.swift",
+      "var": "showManualConnectSheet"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/Dashboard/DashboardView.swift",
+      "var": "wasPausedByInactive"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/Dashboard/DashboardView.swift",
+      "var": "wasPausedByOcclusion"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/Dashboard/Components/WeatherStatCard.swift",
+      "var": "isFetchingAnimated"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/Dashboard/Components/WeatherStatCard.swift",
+      "var": "statusShake"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/Dashboard/Components/WeatherStatCard.swift",
+      "var": "refreshFlash"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/Views/CinematicRainEffectView.swift",
+      "var": "isRemoteDesktopActive"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/Views/CinematicClearSkyEffectView.swift",
+      "var": "isRemoteDesktopActive"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/Views/NotificationBellView.swift",
+      "var": "showEventDetailAlert"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/Views/CinematicSnowEffectView.swift",
+      "var": "isRemoteDesktopActive"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/Views/EnhancedDeviceDiscoveryView.swift",
+      "var": "showingScanner"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/Views/EnhancedDeviceDiscoveryView.swift",
+      "var": "showManualConnectSheet"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/Views/WeatherDashboardCard.swift",
+      "var": "refreshFlash"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/Views/WeatherDashboardCard.swift",
+      "var": "isHovering"
+    }
+  ],
+  "appstorage": [
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "key": "ssh.trustOnFirstUse",
+      "var": "trustOnFirstUse"
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/Views/SSHTerminalView.swift",
+      "key": "ssh.autoScrollToBottom",
+      "var": "autoScrollToBottom"
+    }
+  ],
+  "placeholder_hits": [
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Core/CryptoProviderFactory.swift",
+      "hits": [
+        {
+          "line": 81,
+          "text": "// TODO: iOS 上的 liboqs 支持需要构建 iOS 架构的 XCFramework"
+        },
+        {
+          "line": 118,
+          "text": "// TODO: 当 iOS liboqs 可用时添加 OQSPQCProvider"
+        }
+      ]
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Core/Handshake/TwoAttemptHandshakeManager.swift",
+      "hits": [
+        {
+          "line": 72,
+          "text": "/// 4. 事件审计：每次 fallback 都发射 `cryptoDowngrade`（与论文 downgrade/audit 叙述一致）"
+        },
+        {
+          "line": 272,
+          "text": "print(\"[SecurityEvent] cryptoDowngrade: PQC handshake failed, falling back to Classic. reason=\\(reason), deviceId=\\(deviceId)\")"
+        }
+      ]
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Core/QRCode/QRCodeManager.swift",
+      "hits": [
+        {
+          "line": 387,
+          "text": "// v=1 只包含 id/t（旧占位），无法直接连接；仍然解析出来以便 UI 给提示。"
+        }
+      ]
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopManager.swift",
+      "hits": [
+        {
+          "line": 224,
+          "text": "// 这里简化处理，实际使用时需要从 ScreenData 获取宽高"
+        }
+      ]
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Managers/CloudKitSyncManager.swift",
+      "hits": [
+        {
+          "line": 86,
+          "text": "// TODO: 实现 CloudKit 同步逻辑"
+        }
+      ]
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Managers/TrustedDeviceStore.swift",
+      "hits": [
+        {
+          "line": 5,
+          "text": "/// - 目的：让 iOS 端的“受信任设备”不再是占位 UI，并能和握手/验证流程挂钩"
+        }
+      ]
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Managers/LocalizationManager.swift",
+      "hits": [
+        {
+          "line": 27,
+          "text": "// TODO: 实际本地化实现"
+        }
+      ]
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Managers/DeviceDiscoveryManager.swift",
+      "hits": [
+        {
+          "line": 595,
+          "text": "signalStrength: -50, // TODO: 实际 RSSI 值"
+        },
+        {
+          "line": 1098,
+          "text": "// TODO: 使用 NWConnection 解析服务端点"
+        }
+      ]
+    },
+    {
+      "file": "SkyBridge Compass iOS__inside_release_backup_20260120_175411/SkyBridgeCompassiOS/Sources/Managers/PQCCryptoManager.swift",
+      "hits": [
+        {
+          "line": 231,
+          "text": "// TODO: 实际验证逻辑"
+        },
+        {
+          "line": 269,
+          "text": "// TODO: 从 Keychain 加载密钥生成日期"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Tests/SystemTests/TestingInfrastructure.swift",
+      "hits": [
+        {
+          "line": 41,
+          "text": "// TODO: want a source location stack, more fidelity, kinds of stack entries, etc"
+        },
+        {
+          "line": 45,
+          "text": "// TODO: Instead have an attribute to register a test in a allTests var, similar to the argument parser."
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Tests/SystemTests/FileTypesTest.swift",
+      "hits": [
+        {
+          "line": 74,
+          "text": "// TODO: test string conversion"
+        },
+        {
+          "line": 75,
+          "text": "// TODO: test option set string conversion"
+        },
+        {
+          "line": 83,
+          "text": "// TODO: exhaustive tests"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Tests/SystemTests/SystemStringTests.swift",
+      "hits": [
+        {
+          "line": 12,
+          "text": "// TODO: Adapt test to Windows"
+        },
+        {
+          "line": 155,
+          "text": "// TODO: Below works after we add last component optimization"
+        },
+        {
+          "line": 225,
+          "text": "// TODO: Unpaired surrogates"
+        },
+        {
+          "line": 244,
+          "text": "// TODO: More exhaustive RAC+RRC SystemString tests"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Tests/SystemTests/ErrnoTest.swift",
+      "hits": [
+        {
+          "line": 236,
+          "text": "// TODO: `_code/_domain` for NSError bridging"
+        },
+        {
+          "line": 238,
+          "text": "// TODO: `description`"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Tests/SystemTests/FileOperationsTest.swift",
+      "hits": [
+        {
+          "line": 157,
+          "text": "// TODO: Test writeAll, writeAll(toAbsoluteOffset), closeAfter"
+        },
+        {
+          "line": 184,
+          "text": "// TODO: Test this against a virtual in-memory file system"
+        },
+        {
+          "line": 206,
+          "text": "// TODO: seek"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Tests/SystemTests/FilePathTests/FilePathSyntaxTest.swift",
+      "hits": [
+        {
+          "line": 270,
+          "text": "// TODO: Windows root analysis tests"
+        },
+        {
+          "line": 768,
+          "text": "// TODO: partially-formed Windows roots, we should fully form them..."
+        },
+        {
+          "line": 844,
+          "text": "// TODO: Test Windows path with root pushed"
+        },
+        {
+          "line": 1185,
+          "text": "// TODO: Some of these are kinda funky (like `\\\\` -> `\\\\\\\\`), but"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Tests/SystemTests/FilePathTests/FilePathExtras.swift",
+      "hits": [
+        {
+          "line": 64,
+          "text": "// TODO: better than this naive algorithm"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Tests/SystemTests/FilePathTests/FilePathComponentsTest.swift",
+      "hits": [
+        {
+          "line": 73,
+          "text": "// TODO: programmatic tests showing parity with Array<Component>"
+        },
+        {
+          "line": 291,
+          "text": "// TODO: Test hashValue and equatable for equal components, i.e. make"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Tests/SystemTests/FilePathTests/FilePathTest.swift",
+      "hits": [
+        {
+          "line": 85,
+          "text": "// TODO: test component CodeUnit representation validation"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Sources/System/FileDescriptor.swift",
+      "hits": [
+        {
+          "line": 371,
+          "text": "// TODO: These are available on some versions of Linux with appropriate"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Sources/System/Errno.swift",
+      "hits": [
+        {
+          "line": 977,
+          "text": "// TODO: Add Linux's RPC equivalents"
+        },
+        {
+          "line": 1057,
+          "text": "/// Function not implemented."
+        },
+        {
+          "line": 1525,
+          "text": "// TODO: We want to provide safe access to `errno`, but we need a"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Sources/System/UtilConsumers.swift",
+      "hits": [
+        {
+          "line": 10,
+          "text": "// TODO: Below should return an optional of what was eaten"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Sources/System/FileOperations.swift",
+      "hits": [
+        {
+          "line": 426,
+          "text": "fatalError(\"Not implemented\")"
+        },
+        {
+          "line": 432,
+          "text": "fatalError(\"Not implemented\")"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Sources/System/SystemString.swift",
+      "hits": [
+        {
+          "line": 245,
+          "text": "// TODO: Can avoid extra strlen"
+        },
+        {
+          "line": 251,
+          "text": "// TODO: Can avoid extra strlen"
+        },
+        {
+          "line": 265,
+          "text": "// TODO: can avoid extra strlen"
+        },
+        {
+          "line": 290,
+          "text": "// TODO: Is this the right way?"
+        },
+        {
+          "line": 329,
+          "text": "// TODO: SystemString should use a COW-interchangable storage form rather"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Sources/System/FilePath/FilePathParsing.swift",
+      "hits": [
+        {
+          "line": 18,
+          "text": "// TODO: Make private"
+        },
+        {
+          "line": 24,
+          "text": "// TODO: Make private"
+        },
+        {
+          "line": 137,
+          "text": "// TODO: all this logic might be nicer if _parseComponent considered"
+        },
+        {
+          "line": 278,
+          "text": "// TODO: Store this..."
+        },
+        {
+          "line": 309,
+          "text": "// TODO: public"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Sources/System/FilePath/FilePathComponentView.swift",
+      "hits": [
+        {
+          "line": 50,
+          "text": "// TODO(perf): Small-form root (especially on Unix). Have Root"
+        },
+        {
+          "line": 109,
+          "text": "// TODO(perf): We probably want to have concrete overrides or generic"
+        },
+        {
+          "line": 136,
+          "text": "// TODO(perf): Avoid extra allocation by sliding elements down and"
+        },
+        {
+          "line": 189,
+          "text": "fatalError(\"TODO: consider dropping proto req\")"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Sources/System/FilePath/FilePathWindows.swift",
+      "hits": [
+        {
+          "line": 13,
+          "text": "// TODO: Remove when I normalize to always (except `C:`)"
+        },
+        {
+          "line": 135,
+          "text": "// TODO: Intern empty system string"
+        },
+        {
+          "line": 153,
+          "text": "// TODO: NT paths? Admin paths using `$`?"
+        },
+        {
+          "line": 161,
+          "text": "// TODO: GUID type?"
+        },
+        {
+          "line": 168,
+          "text": "// TODO: Legacy DOS devices, such as COM1?"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Sources/System/FilePath/FilePathSyntax.swift",
+      "hits": [
+        {
+          "line": 55,
+          "text": "// TODO(Windows docs): examples with roots, such as whether `\\foo\\bar`"
+        },
+        {
+          "line": 74,
+          "text": "// TODO(Windows docs): examples with roots, such as whether `C:\\foo\\bar`"
+        },
+        {
+          "line": 89,
+          "text": "// TODO: anything tricky here for Windows?"
+        },
+        {
+          "line": 435,
+          "text": "// TODO(Windows docs): example with roots"
+        },
+        {
+          "line": 455,
+          "text": "// TODO(Windows docs): example with roots"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Sources/System/FilePath/FilePathString.swift",
+      "hits": [
+        {
+          "line": 317,
+          "text": "// TODO: static assert"
+        },
+        {
+          "line": 341,
+          "text": "// TODO: static assert"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Sources/System/FilePath/FilePath.swift",
+      "hits": [
+        {
+          "line": 42,
+          "text": "// TODO(docs): Section on all the new syntactic operations, lexical normalization, decomposition,"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Sources/System/FilePath/FilePathComponents.swift",
+      "hits": [
+        {
+          "line": 41,
+          "text": "// TODO: Definitely want a small form for this on Windows,"
+        },
+        {
+          "line": 63,
+          "text": "// TODO: Make a small-component form to save on ARC overhead when"
+        },
+        {
+          "line": 105,
+          "text": "// TODO: Windows analysis APIs"
+        },
+        {
+          "line": 111,
+          "text": "// TODO: take insertLeadingSlash: Bool"
+        },
+        {
+          "line": 112,
+          "text": "// TODO: turn into an insert operation with slide"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Sources/System/Internals/Constants.swift",
+      "hits": [
+        {
+          "line": 512,
+          "text": "// TODO: API?"
+        },
+        {
+          "line": 552,
+          "text": "// TODO: API?"
+        },
+        {
+          "line": 602,
+          "text": "// TODO: API?"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Sources/System/Internals/Exports.swift",
+      "hits": [
+        {
+          "line": 13,
+          "text": "// TODO: Should CSystem just include all the header files we need?"
+        },
+        {
+          "line": 48,
+          "text": "// TODO(compnerd) handle the error?"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Sources/System/IORing/IORequest.swift",
+      "hits": [
+        {
+          "line": 399,
+          "text": "// TODO: use rawValue less"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-system/Sources/System/IORing/IORing.swift",
+      "hits": [
+        {
+          "line": 91,
+          "text": "//TODO: omitting signal mask for now"
+        },
+        {
+          "line": 102,
+          "text": "// TODO: support SQPOLL here"
+        },
+        {
+          "line": 112,
+          "text": "//TODO: should we wait a bit on AGAIN?"
+        },
+        {
+          "line": 316,
+          "text": "// kept around for unmap / cleanup. TODO: we can save a few words of memory by figuring out how to handle cleanup for non-IORING_FEAT_SINGLE_MMAP better"
+        },
+        {
+          "line": 356,
+          "text": "//TODO: figure out how to expose IORING_SETUP_SQ_AFF, IORING_SETUP_CQSIZE, IORING_SETUP_ATTACH_WQ"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio-ssh/Tests/NIOSSHTests/EndToEndTests.swift",
+      "hits": [
+        {
+          "line": 53,
+          "text": "var workToDo = true"
+        },
+        {
+          "line": 55,
+          "text": "while workToDo {"
+        },
+        {
+          "line": 56,
+          "text": "workToDo = false"
+        },
+        {
+          "line": 64,
+          "text": "workToDo = true"
+        },
+        {
+          "line": 69,
+          "text": "workToDo = true"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio-ssh/Sources/NIOSSH/NIOSSHHandler.swift",
+      "hits": [
+        {
+          "line": 230,
+          "text": "// TODO(cory): This is not right, but for now it's good enough."
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio-ssh/Sources/NIOSSH/GlobalRequestDelegate.swift",
+      "hits": [
+        {
+          "line": 22,
+          "text": "/// All delegate methods for this delegate are optional: if not implemented, they default to rejecting"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio-ssh/Sources/NIOSSH/Connection State Machine/SSHConnectionStateMachine.swift",
+      "hits": [
+        {
+          "line": 180,
+          "text": "// TODO: enforce RFC 4253:"
+        },
+        {
+          "line": 240,
+          "text": "// TODO: enforce RFC 4253:"
+        },
+        {
+          "line": 473,
+          "text": "// TODO: enforce RFC 4253:"
+        },
+        {
+          "line": 607,
+          "text": "// TODO: enforce RFC 4253:"
+        },
+        {
+          "line": 642,
+          "text": "// TODO(cory): One day soon we'll need to support re-keying in this state."
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio-ssh/Sources/NIOSSH/User Authentication/UserAuthenticationStateMachine.swift",
+      "hits": [
+        {
+          "line": 23,
+          "text": "// TODO: The server SHOULD limit the number of authentication attempts the client may make."
+        },
+        {
+          "line": 84,
+          "text": "// TODO(cory): We should be limiting the maximum number of authentication attempts."
+        },
+        {
+          "line": 169,
+          "text": "// TODO(cory): We should be limiting the maximum number of authentication attempts."
+        },
+        {
+          "line": 312,
+          "text": "// TODO(cory): We could probably support parallel auth attempts if we wanted to."
+        },
+        {
+          "line": 414,
+          "text": "// TODO(cory): We could probably support parallel auth attempts if we wanted to."
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio-ssh/Sources/NIOSSH/Child Channels/SSHChannelMultiplexer.swift",
+      "hits": [
+        {
+          "line": 195,
+          "text": "// TODO: We need a better channel ID system. Maybe use indices into Arrays instead?"
+        },
+        {
+          "line": 204,
+          "text": "// TODO: Make the window management parameters configurable"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio-ssh/Sources/NIOSSH/Child Channels/SSHChildChannel.swift",
+      "hits": [
+        {
+          "line": 266,
+          "text": "fatalError(\"not implemented \\(#function)\")"
+        },
+        {
+          "line": 270,
+          "text": "fatalError(\"not implemented \\(#function)\")"
+        },
+        {
+          "line": 274,
+          "text": "fatalError(\"not implemented \\(#function)\")"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio-ssh/Sources/NIOSSH/Child Channels/SSHChannelData.swift",
+      "hits": [
+        {
+          "line": 109,
+          "text": "// TODO: Support fileregion!"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio-ssh/Sources/NIOSSHPerformanceTester/shared.swift",
+      "hits": [
+        {
+          "line": 35,
+          "text": "var workToDo = true"
+        },
+        {
+          "line": 37,
+          "text": "while workToDo {"
+        },
+        {
+          "line": 38,
+          "text": "workToDo = false"
+        },
+        {
+          "line": 46,
+          "text": "workToDo = true"
+        },
+        {
+          "line": 51,
+          "text": "workToDo = true"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Snippets/NIOFileSystemTour.swift",
+      "hits": [
+        {
+          "line": 44,
+          "text": "let plan = ByteBuffer(string: \"TODO...\")"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Tests/NIOPosixTests/IPv4Header.swift",
+      "hits": [
+        {
+          "line": 207,
+          "text": "// TODO: fragmentOffset is in host byte order as well but it is always zero in our tests"
+        },
+        {
+          "line": 269,
+          "text": "// TODO: fragmentOffset needs to be in host byte order as well but it is always zero in our tests"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Tests/NIOPosixTests/SyscallAbstractionLayer.swift",
+      "hits": [
+        {
+          "line": 70,
+          "text": "// TODO: a condition-locked-value-box could hide some of the unchecked-ness here."
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Tests/NIOPosixTests/UniversalBootstrapSupportTest.swift",
+      "hits": [
+        {
+          "line": 165,
+          "text": "fatalError(\"Not implemented\")"
+        },
+        {
+          "line": 169,
+          "text": "fatalError(\"Not implemented\")"
+        },
+        {
+          "line": 188,
+          "text": "fatalError(\"Not implemented\")"
+        },
+        {
+          "line": 192,
+          "text": "fatalError(\"Not implemented\")"
+        },
+        {
+          "line": 196,
+          "text": "fatalError(\"Not implemented\")"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Tests/NIOPosixTests/SocketOptionProviderTest.swift",
+      "hits": [
+        {
+          "line": 270,
+          "text": "// TODO: test this when we know what the interface indices are."
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Tests/NIOPosixTests/EventLoopTest.swift",
+      "hits": [
+        {
+          "line": 2113,
+          "text": "preconditionFailure(\"not implemented\")"
+        },
+        {
+          "line": 2117,
+          "text": "preconditionFailure(\"not implemented\")"
+        },
+        {
+          "line": 2121,
+          "text": "preconditionFailure(\"not implemented\")"
+        },
+        {
+          "line": 2126,
+          "text": "preconditionFailure(\"not implemented\")"
+        },
+        {
+          "line": 2131,
+          "text": "preconditionFailure(\"not implemented\")"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Tests/NIOFSTests/Internal/MockingInfrastructure.swift",
+      "hits": [
+        {
+          "line": 47,
+          "text": "// TODO: want a source location stack, more fidelity, kinds of stack entries, etc"
+        },
+        {
+          "line": 51,
+          "text": "// TODO: Instead have an attribute to register a test in a allTests var, similar to the argument parser."
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Sources/NIOFS/FileChunks.swift",
+      "hits": [
+        {
+          "line": 52,
+          "text": "// TODO: choose reasonable watermarks; this should likely be at least somewhat dependent"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Sources/NIOFS/Internal/System Calls/Mocking.swift",
+      "hits": [
+        {
+          "line": 277,
+          "text": "// TODO: Should CSystem just include all the header files we need?"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Sources/NIOFS/Internal/System Calls/FileDescriptor+Syscalls.swift",
+      "hits": [
+        {
+          "line": 220,
+          "text": "// TODO: can we do this more cheaply?"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Sources/NIOPosix/VsockAddress.swift",
+      "hits": [
+        {
+          "line": 27,
+          "text": "let vsockUnimplemented = \"VSOCK support is not implemented for this platform\""
+        },
+        {
+          "line": 181,
+          "text": "// MARK: - Public API that might throw runtime error if not implemented on the platform."
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Sources/NIOPosix/SelectorWSAPoll.swift",
+      "hits": [
+        {
+          "line": 148,
+          "text": "// TODO (@fabian): We need to replace the pollFDs array with something"
+        },
+        {
+          "line": 161,
+          "text": "fatalError(\"TODO: Unimplemented\")"
+        },
+        {
+          "line": 170,
+          "text": "fatalError(\"TODO: Unimplemented\")"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Sources/NIOPosix/BSDSocketAPIWindows.swift",
+      "hits": [
+        {
+          "line": 166,
+          "text": "// TODO(compnerd) rather than query the `WSARecvMsg` and `WSASendMsg` on each"
+        },
+        {
+          "line": 169,
+          "text": "// TODO(compnerd) create a simpler shared wrapper to query the extension"
+        },
+        {
+          "line": 304,
+          "text": "// TODO(compnerd) see comment above"
+        },
+        {
+          "line": 343,
+          "text": "// TODO(compnerd) see comment above"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Sources/NIOPosix/System.swift",
+      "hits": [
+        {
+          "line": 615,
+          "text": "// TODO: Allow varargs"
+        },
+        {
+          "line": 1105,
+          "text": "// TODO: Figure out how to specify a typealias to the kevent struct without run into trouble with the swift compiler"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Sources/NIOPosix/SocketChannel.swift",
+      "hits": [
+        {
+          "line": 741,
+          "text": "// TODO: this could be a channel option to do other things instead here, e.g. fail the connect"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Sources/NIOPosix/PendingDatagramWritesManager.swift",
+      "hits": [
+        {
+          "line": 98,
+          "text": "// TODO(cory): I can't see this limit documented in a man page anywhere, but it seems"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Sources/NIOPosix/DatagramVectorReadManager.swift",
+      "hits": [
+        {
+          "line": 116,
+          "text": "// TODO(cory): almost all of this except for the iovec could be done at allocation time. Maybe we should?"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Sources/NIOPosix/Socket.swift",
+      "hits": [
+        {
+          "line": 30,
+          "text": "// TODO: scattering support"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Sources/NIOHTTP1/HTTPTypes.swift",
+      "hits": [
+        {
+          "line": 1086,
+          "text": "return \"Not Implemented\""
+        },
+        {
+          "line": 1124,
+          "text": "// TODO: add '103: Early Hints' (requires bumping SemVer major)."
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Sources/NIOHTTP1/HTTPEncoder.swift",
+      "hits": [
+        {
+          "line": 459,
+          "text": "self.writeStaticString(\"HTTP/1.0 501 Not Implemented\\r\\n\")"
+        },
+        {
+          "line": 583,
+          "text": "self.writeStaticString(\"HTTP/1.1 501 Not Implemented\\r\\n\")"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Sources/NIOCore/ByteBuffer-core.swift",
+      "hits": [
+        {
+          "line": 349,
+          "text": "// TODO: Use realloc if possible"
+        },
+        {
+          "line": 1265,
+          "text": "// TODO: I don't think this makes sense. This should compare bytes 0..<writerIndex instead."
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Sources/NIOCore/EventLoopFuture.swift",
+      "hits": [
+        {
+          "line": 424,
+          "text": "// TODO: Provide a tracing facility.  It would be nice to be able to set '.debugTrace = true' on any EventLoopFuture or EventLoopPromise and have every subsequent chained EventLoopFuture report the su"
+        },
+        {
+          "line": 824,
+          "text": "// TODO: We want to remove @preconcurrency but it results in more allocations in 1000_udpconnections"
+        },
+        {
+          "line": 991,
+          "text": "value: OtherValue  // TODO: This should be transferring"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Sources/NIOCore/Codec.swift",
+      "hits": [
+        {
+          "line": 38,
+          "text": "// TODO: For NIO 3, make this an enum case (or whatever best way for Errors we have come up with)."
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Sources/NIOCore/EventLoop.swift",
+      "hits": [
+        {
+          "line": 910,
+          "text": "/// - TODO: Investigate optimizing the call to `DispatchTime.now()` away on other platforms too."
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Sources/NIOCore/Interfaces.swift",
+      "hits": [
+        {
+          "line": 134,
+          "text": "// TODO(compnerd) handle broadcast/ppp/multicast information"
+        },
+        {
+          "line": 431,
+          "text": "// TODO(compnerd) handle broadcast/ppp/multicast information"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Sources/NIOCore/BSDSocketAPI.swift",
+      "hits": [
+        {
+          "line": 562,
+          "text": "// TODO(compnerd) use `InetPtonW` to ensure that we handle unicode properly"
+        },
+        {
+          "line": 586,
+          "text": "// TODO(compnerd) use `InetNtopW` to ensure that we handle unicode properly"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Sources/_NIOFileSystem/FileChunks.swift",
+      "hits": [
+        {
+          "line": 52,
+          "text": "// TODO: choose reasonable watermarks; this should likely be at least somewhat dependent"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Sources/_NIOFileSystem/Internal/System Calls/Mocking.swift",
+      "hits": [
+        {
+          "line": 277,
+          "text": "// TODO: Should CSystem just include all the header files we need?"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-nio/Sources/_NIOFileSystem/Internal/System Calls/FileDescriptor+Syscalls.swift",
+      "hits": [
+        {
+          "line": 220,
+          "text": "// TODO: can we do this more cheaply?"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-crypto/Tests/CryptoTests/ASN1/ASN1Tests.swift",
+      "hits": [
+        {
+          "line": 319,
+          "text": "struct Stub: ASN1Parseable {"
+        },
+        {
+          "line": 335,
+          "text": "_ = try Stub(asn1Encoded: &nodes)"
+        },
+        {
+          "line": 653,
+          "text": "// This is a stubbed PKCS8 key with mismatched OIDs in the inner and outer payload. We have to serialize it out, sadly."
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-crypto/Sources/Crypto/HPKE/Ciphersuite/KEM/Conformances/DHKEM.swift",
+      "hits": [
+        {
+          "line": 66,
+          "text": "// TODO: Validate Ciphersuite Mismatches"
+        },
+        {
+          "line": 92,
+          "text": "// TODO: Validate Ciphersuite Mismatches"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-asn1/Tests/SwiftASN1Tests/ASN1Tests.swift",
+      "hits": [
+        {
+          "line": 382,
+          "text": "struct Stub: DERParseable {"
+        },
+        {
+          "line": 398,
+          "text": "_ = try Stub(derEncoded: &nodes)"
+        },
+        {
+          "line": 1063,
+          "text": "// This is a stubbed PKCS8 key with mismatched OIDs in the inner and outer payload. We have to serialize it out, sadly."
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-asn1/Sources/SwiftASN1/Basic ASN1 Types/GeneralizedTime.swift",
+      "hits": [
+        {
+          "line": 215,
+          "text": "// TODO: BER supports relaxed timestamp parsing, which is not yet supported"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-collections/Tests/HashTreeCollectionsTests/TreeDictionary Tests.swift",
+      "hits": [
+        {
+          "line": 1718,
+          "text": "// TODO: determine how to best calculate the expected order of the hash tree"
+        },
+        {
+          "line": 1738,
+          "text": "// TODO: determine how to best calculate the expected order of the hash tree"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-collections/Tests/BasicContainersTests/RigidArrayTests.swift",
+      "hits": [
+        {
+          "line": 306,
+          "text": "#if false // TODO"
+        },
+        {
+          "line": 337,
+          "text": "#if false // TODO"
+        },
+        {
+          "line": 558,
+          "text": "#if false // TODO"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-collections/Tests/BasicContainersTests/UniqueArrayTests.swift",
+      "hits": [
+        {
+          "line": 326,
+          "text": "#if false // TODO"
+        },
+        {
+          "line": 340,
+          "text": "#if false // TODO"
+        },
+        {
+          "line": 541,
+          "text": "#if false // TODO"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-collections/Sources/SortedCollections/SortedSet/SortedSet+Equatable.swift",
+      "hits": [
+        {
+          "line": 24,
+          "text": "// TODO: optimize/benchmarking by comparing node identity."
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-collections/Sources/SortedCollections/SortedSet/SortedSet+SetAlgebra.swift",
+      "hits": [
+        {
+          "line": 146,
+          "text": "// TODO: might want to consider uniqueness to minimize CoW copies."
+        },
+        {
+          "line": 295,
+          "text": "// TODO: could be worthwhile to evaluate recursive approach"
+        },
+        {
+          "line": 296,
+          "text": "// TODO: in some cases, it could be faster to search from the root each time"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-collections/Sources/SortedCollections/SortedSet/SortedSet+Partial RangeReplaceableCollection.swift",
+      "hits": [
+        {
+          "line": 154,
+          "text": "// TODO: optimize to not perform excessive traversals"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-collections/Sources/SortedCollections/SortedDictionary/SortedDictionary.swift",
+      "hits": [
+        {
+          "line": 208,
+          "text": "// TODO: Optimize to reuse dictionary structure."
+        },
+        {
+          "line": 209,
+          "text": "// TODO: optimize to use identify fastest iteration method"
+        },
+        {
+          "line": 210,
+          "text": "// TODO: optimize CoW checks"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-collections/Sources/SortedCollections/SortedDictionary/SortedDictionary+Equatable.swift",
+      "hits": [
+        {
+          "line": 24,
+          "text": "// TODO: optimize/benchmarking by comparing node identity/shared subtrees."
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-collections/Sources/SortedCollections/BTree/_BTree+BidirectionalCollection.swift",
+      "hits": [
+        {
+          "line": 29,
+          "text": "// TODO: further consider O(1) implementation"
+        },
+        {
+          "line": 95,
+          "text": "// TODO: this might be redundant given the fact the same (but generalized)"
+        },
+        {
+          "line": 161,
+          "text": "// TODO: optimization for searching within children"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-collections/Sources/SortedCollections/BTree/_BTree+SubSequence.swift",
+      "hits": [
+        {
+          "line": 172,
+          "text": "// TODO: implement optimized `var indices`"
+        },
+        {
+          "line": 187,
+          "text": "// TODO: implement partial RangeReplaceableCollection methods"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-collections/Sources/SortedCollections/BTree/_Node.UnsafeHandle.swift",
+      "hits": [
+        {
+          "line": 352,
+          "text": "// TODO: make this info a conditional_mov"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-collections/Sources/SortedCollections/BTree/_Node.UnsafeHandle+Deletion.swift",
+      "hits": [
+        {
+          "line": 39,
+          "text": "// TODO: potentially be smarter about using the predecessor or successor."
+        },
+        {
+          "line": 73,
+          "text": "// TODO: performing the remove and then balancing may result in an"
+        },
+        {
+          "line": 399,
+          "text": "// TODO: create optimized version that avoids a CoW copy for when the"
+        },
+        {
+          "line": 447,
+          "text": "// TODO: might be more optimal to memcpy the right child, and avoid"
+        },
+        {
+          "line": 483,
+          "text": "// TODO: As part of deletion, we probably already visited the right"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-collections/Sources/SortedCollections/BTree/_BTree.swift",
+      "hits": [
+        {
+          "line": 221,
+          "text": "// TODO: It is possible that there is a single transient CoW copied made"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-collections/Sources/SortedCollections/BTree/_Node.UnsafeHandle+Insertion.swift",
+      "hits": [
+        {
+          "line": 61,
+          "text": "// TODO: Potential transient ARC traffic here."
+        },
+        {
+          "line": 267,
+          "text": "// TODO: potentially extract out this logic to reduce code duplication."
+        },
+        {
+          "line": 341,
+          "text": "// TODO: potentially evaluate min(left.children, right.children),"
+        },
+        {
+          "line": 433,
+          "text": "// TODO: adjust counts"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-collections/Sources/SortedCollections/BTree/_BTree+Partial RangeReplaceableCollection.swift",
+      "hits": [
+        {
+          "line": 123,
+          "text": "// TODO: potentially use empty storage class."
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-collections/Sources/InternalCollectionsUtilities/autogenerated/LifetimeOverride.swift",
+      "hits": [
+        {
+          "line": 37,
+          "text": "// TODO: Remove @_unsafeNonescapableResult. Instead, the unsafe dependence"
+        },
+        {
+          "line": 55,
+          "text": "// TODO: Remove @_unsafeNonescapableResult. Instead, the unsafe dependence"
+        },
+        {
+          "line": 73,
+          "text": "// TODO: Remove @_unsafeNonescapableResult. Instead, the unsafe dependence"
+        },
+        {
+          "line": 93,
+          "text": "// TODO: Remove @_unsafeNonescapableResult. Instead, the unsafe dependence"
+        },
+        {
+          "line": 108,
+          "text": "// TODO: Remove @_unsafeNonescapableResult. Instead, the unsafe dependence"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-collections/Sources/BasicContainers/UniqueArray+Experimental.swift",
+      "hits": [
+        {
+          "line": 20,
+          "text": "#if false // TODO"
+        },
+        {
+          "line": 42,
+          "text": "#if false // TODO"
+        },
+        {
+          "line": 53,
+          "text": "#if false // TODO"
+        },
+        {
+          "line": 63,
+          "text": "#if false // TODO"
+        },
+        {
+          "line": 82,
+          "text": "#if false // TODO"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-collections/Sources/ContainersPreview/Shared.swift",
+      "hits": [
+        {
+          "line": 14,
+          "text": "#if false // TODO"
+        }
+      ]
+    },
+    {
+      "file": ".build/checkouts/swift-collections/Sources/HashTreeCollections/HashNode/_HashNode+Structural isEqualSet.swift",
+      "hits": [
+        {
+          "line": 12,
+          "text": "// TODO: `Equatable` needs more test coverage, apart from hash-collision smoke test"
+        }
+      ]
+    },
+    {
+      "file": "Tests/SkyBridgeCoreTests/PolicyDowngradeBenchTests.swift",
+      "hits": [
+        {
+          "line": 76,
+          "text": "let fallbackEvents = await collector.count(of: .cryptoDowngrade)"
+        }
+      ]
+    },
+    {
+      "file": "Tests/SkyBridgeCoreTests/P2PConnectionTests.swift",
+      "hits": [
+        {
+          "line": 13,
+          "text": "// **Feature: p2p-todo-completion**"
+        },
+        {
+          "line": 290,
+          "text": "// MARK: - Property 5: Metrics Update Consistency (p2p-todo-completion)"
+        },
+        {
+          "line": 292,
+          "text": "/// **Feature: p2p-todo-completion, Property 5: Metrics Update Consistency**"
+        },
+        {
+          "line": 330,
+          "text": "/// **Feature: p2p-todo-completion, Property 5: Metrics Update Consistency**"
+        },
+        {
+          "line": 358,
+          "text": "/// **Feature: p2p-todo-completion, Property 5: Metrics Update Consistency**"
+        }
+      ]
+    },
+    {
+      "file": "Tests/SkyBridgeCoreTests/PQCProbeTests.swift",
+      "hits": [
+        {
+          "line": 681,
+          "text": "/// 占位测试 - 当 HAS_APPLE_PQC_SDK 未定义时"
+        }
+      ]
+    },
+    {
+      "file": "Tests/SkyBridgeCoreTests/HandshakeDriverTests.swift",
+      "hits": [
+        {
+          "line": 677,
+          "text": "// **Feature: p2p-todo-completion, Property 2: Signing Callback Invocation**"
+        },
+        {
+          "line": 779,
+          "text": "private var cryptoDowngradeCount: Int = 0"
+        },
+        {
+          "line": 785,
+          "text": "if event.type == .cryptoDowngrade {"
+        },
+        {
+          "line": 786,
+          "text": "cryptoDowngradeCount += 1"
+        },
+        {
+          "line": 790,
+          "text": "func snapshot() -> (handshakeFailed: Int, cryptoDowngrade: Int) {"
+        }
+      ]
+    },
+    {
+      "file": "Tests/SkyBridgeCoreTests/DowngradeEventTests.swift",
+      "hits": [
+        {
+          "line": 12,
+          "text": "if event.type == .cryptoDowngrade {"
+        },
+        {
+          "line": 39,
+          "text": "if event.type == .cryptoDowngrade {"
+        }
+      ]
+    },
+    {
+      "file": "Tests/SkyBridgeCoreTests/SecureEnclaveSigningCallbackTests.swift",
+      "hits": [
+        {
+          "line": 6,
+          "text": "// **Feature: p2p-todo-completion, 4.3: 签名回调单元测试**"
+        }
+      ]
+    },
+    {
+      "file": "Tests/SkyBridgeCoreTests/ProtocolSignatureRegressionTests.swift",
+      "hits": [
+        {
+          "line": 311,
+          "text": "/// Regression 12.6: cryptoDowngrade 事件必须包含完整上下文"
+        },
+        {
+          "line": 314,
+          "text": "func testRegression_CryptoDowngradeEvent_HasContext() {"
+        },
+        {
+          "line": 315,
+          "text": "// 创建 cryptoDowngrade 事件"
+        },
+        {
+          "line": 316,
+          "text": "let event = SecurityEvent.cryptoDowngradeWithContext("
+        },
+        {
+          "line": 325,
+          "text": "XCTAssertEqual(event.type, .cryptoDowngrade,"
+        }
+      ]
+    },
+    {
+      "file": "Tests/SkyBridgeCoreTests/HandshakeFaultInjectionBenchTests.swift",
+      "hits": [
+        {
+          "line": 114,
+          "text": "public let cryptoDowngradeCount: Int"
+        },
+        {
+          "line": 123,
+          "text": "/// Format: policy,scenario,n_runs,n_success,n_fail,n_unexpected_error,n_double_resume,zeroization_called_pct,E_handshakeFailed,E_cryptoDowngrade"
+        },
+        {
+          "line": 125,
+          "text": "\"\\(policyLabel),\\(scenario.rawValue),\\(totalRuns),\\(successCount),\\(failureCount),\\(unexpectedErrorCount),\\(doubleResumeCount),\\(String(format: \"%.1f\", zeroizationCalledPct)),\\(handshakeFailedCount),\\"
+        },
+        {
+          "line": 148,
+          "text": "self.cryptoDowngradeCount = 0"
+        },
+        {
+          "line": 162,
+          "text": "cryptoDowngradeCount: Int"
+        }
+      ]
+    },
+    {
+      "file": "Tests/SkyBridgeCoreTests/SecurityEventCollectorTests.swift",
+      "hits": [
+        {
+          "line": 71,
+          "text": "await emitter.emit(SecurityEvent.create(type: .cryptoDowngrade, message: \"Test 3\"))"
+        },
+        {
+          "line": 78,
+          "text": "let downgradeCount = await collector.cryptoDowngradeCount"
+        },
+        {
+          "line": 122,
+          "text": "await emitter.emit(SecurityEvent.create(type: .cryptoDowngrade, message: \"Test\"))"
+        },
+        {
+          "line": 135,
+          "text": "let downgradeCount = await collector.cryptoDowngradeCount"
+        },
+        {
+          "line": 180,
+          "text": "await emitter.emit(SecurityEvent.create(type: .cryptoDowngrade, message: \"B\"))"
+        }
+      ]
+    },
+    {
+      "file": "Tests/SkyBridgeCoreTests/HandshakeContextTests.swift",
+      "hits": [
+        {
+          "line": 179,
+          "text": "if received.type == .cryptoDowngrade {"
+        },
+        {
+          "line": 253,
+          "text": "XCTAssertNotNil(receivedEvent, \"Expected cryptoDowngrade event to be emitted\")"
+        }
+      ]
+    },
+    {
+      "file": "Tests/SkyBridgeCoreTests/TwoAttemptHandshakeManagerPropertyTests.swift",
+      "hits": [
+        {
+          "line": 37,
+          "text": "/// - Each fallback SHALL emit a `cryptoDowngrade` event"
+        },
+        {
+          "line": 171,
+          "text": "if event.type == .cryptoDowngrade {"
+        },
+        {
+          "line": 205,
+          "text": "if event.type == .cryptoDowngrade {"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCore/UI/P2PConnectionView.swift",
+      "hits": [
+        {
+          "line": 94,
+          "text": "// 构造最小设备信息并发起连接（公钥为空为占位）"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Connection/USBCConnectionManager.swift",
+      "hits": [
+        {
+          "line": 670,
+          "text": "// 这里简化处理，实际应该解析USB描述符"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Security/SecurityEvent.swift",
+      "hits": [
+        {
+          "line": 51,
+          "text": "case cryptoDowngrade = \"crypto_downgrade\""
+        },
+        {
+          "line": 166,
+          "text": "case .cryptoDowngrade: return .warning"
+        },
+        {
+          "line": 487,
+          "text": "public static func cryptoDowngrade("
+        },
+        {
+          "line": 502,
+          "text": "type: .cryptoDowngrade,"
+        },
+        {
+          "line": 509,
+          "text": "@available(*, deprecated, message: \"Use cryptoDowngrade(fromSuite:toSuite:reason:deviceId:)\")"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Security/SecurityEventCollector.swift",
+      "hits": [
+        {
+          "line": 6,
+          "text": "// 测试期间收集 SecurityEvent 的 actor，用于统计 E_handshakeFailed / E_cryptoDowngrade"
+        },
+        {
+          "line": 14,
+          "text": "/// - 统计 handshakeFailed 和 cryptoDowngrade 事件数量"
+        },
+        {
+          "line": 15,
+          "text": "/// - 为论文 Table V 提供 E_handshakeFailed / E_cryptoDowngrade 数据"
+        },
+        {
+          "line": 87,
+          "text": "/// 获取 cryptoDowngrade 事件数量"
+        },
+        {
+          "line": 89,
+          "text": "/// **Requirement 2.2**: CSV 输出应包含 E_cryptoDowngrade 列"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCore/RemoteDesktop/Metal4EnhancedRenderer.swift",
+      "hits": [
+        {
+          "line": 624,
+          "text": "// MARK: - 兼容性占位符"
+        },
+        {
+          "line": 627,
+          "text": "// MetalFX 占位符类型（macOS < 15.0）"
+        },
+        {
+          "line": 648,
+          "text": "/// 旧系统优雅降级的简单缩放器——当无法使用 MetalFX 时，提供基本的纹理复制/缩放占位实现。"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCore/QuantumSecure/EnhancedPostQuantumCrypto.swift",
+      "hits": [
+        {
+          "line": 224,
+          "text": "// 如果没有私钥，创建一个占位符（仅用于验证）"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCore/QuantumSecure/QuantumSecureP2PNetwork.swift",
+      "hits": [
+        {
+          "line": 9,
+          "text": "// 无需额外导入占位类型"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Models/DeviceTypes.swift",
+      "hits": [
+        {
+          "line": 6,
+          "text": "// ⚡ 重构：移除占位符实现，连接到真实服务或标记为已弃用"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Common/SystemSymbolIcon.swift",
+      "hits": [
+        {
+          "line": 69,
+          "text": "logger.fault(\"蓝牙图标所有回退均失败，回退至 questionmark.circle 占位符\")"
+        },
+        {
+          "line": 113,
+          "text": "// 最终占位，提示符号缺失（不再使用电波类图标）"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCore/SystemMonitor/AppleOfficialSystemMonitor.swift",
+      "hits": [
+        {
+          "line": 326,
+          "text": "// 这里简化处理，实际应该使用IOKit"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCore/P2P/SecureEnclaveSigningCallback.swift",
+      "hits": [
+        {
+          "line": 5,
+          "text": "// P2P TODO Completion - 4: Secure Enclave Signing Callback"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCore/P2P/QUICTransportService.swift",
+      "hits": [
+        {
+          "line": 311,
+          "text": "return \"Not implemented: \\(detail)\""
+        },
+        {
+          "line": 628,
+          "text": "throw QUICTransportError.notImplemented(\"QUIC streams are not implemented in QUICTransportService (endpoint=\\(ep)). Use TCP framed transport (HandshakeDriver) or implement stream multiplexing explicit"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCore/P2P/TwoAttemptHandshakeManager.swift",
+      "hits": [
+        {
+          "line": 70,
+          "text": "/// 3. 每次 fallback 都发射 `cryptoDowngrade` event"
+        },
+        {
+          "line": 318,
+          "text": "type: .cryptoDowngrade,"
+        },
+        {
+          "line": 381,
+          "text": "type: .cryptoDowngrade,"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCore/P2P/DeviceCertificateIssuer.swift",
+      "hits": [
+        {
+          "line": 394,
+          "text": "throw CertificateError.verificationFailed(\"User domain verification not implemented\")"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCore/P2P/PreNegotiationSignatureSelector.swift",
+      "hits": [
+        {
+          "line": 153,
+          "text": "// TODO: 2 将废弃此方法，改用 selectProvider(for: ProtocolSigningAlgorithm)"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCore/P2P/CryptoProviders.swift",
+      "hits": [
+        {
+          "line": 165,
+          "text": "// 注意：这里简化处理，实际 KEM 封装需要更精细的实现"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCore/P2P/CryptoProviderSelector.swift",
+      "hits": [
+        {
+          "line": 618,
+          "text": "return \"Not implemented: \\(msg)\""
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCore/P2P/HandshakeContext.swift",
+      "hits": [
+        {
+          "line": 608,
+          "text": "/// 14.3: classic fallback 时发射 SecurityEvent(.cryptoDowngrade)"
+        },
+        {
+          "line": 724,
+          "text": "// Requirement 14.3: suite 降级时发射 SecurityEvent(.cryptoDowngrade)"
+        },
+        {
+          "line": 730,
+          "text": "type: .cryptoDowngrade,"
+        },
+        {
+          "line": 1206,
+          "text": "type: .cryptoDowngrade,"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCore/P2P/STUNClient.swift",
+      "hits": [
+        {
+          "line": 227,
+          "text": "// 消息长度 (2字节) - 占位符，在函数末尾更新为实际长度"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Device/DevicePermissionManager.swift",
+      "hits": [
+        {
+          "line": 290,
+          "text": "// 这里简化处理，实际应用中可能需要更复杂的检查"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Weather/WeatherEffectView.swift",
+      "hits": [
+        {
+          "line": 61,
+          "text": "// ☀️ 晴天 - 简化占位符（由 DashboardView 处理完整效果）"
+        },
+        {
+          "line": 65,
+          "text": "// ☁️ 多云 - 简化占位符（由 DashboardView 处理完整效果）"
+        },
+        {
+          "line": 69,
+          "text": "// 🌧️ 雨天 - 简化占位符（由 DashboardView 处理完整效果）"
+        },
+        {
+          "line": 73,
+          "text": "// ❄️ 雪天 - 简化占位符（由 DashboardView 处理完整效果）"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Accessibility/AccessibilityManager.swift",
+      "hits": [
+        {
+          "line": 113,
+          "text": "/// - placeholder: 占位符文本"
+        },
+        {
+          "line": 119,
+          "text": "// 文本字段的占位符不应作为无障碍提示（hint）。"
+        },
+        {
+          "line": 120,
+          "text": "// hint 应描述操作或用途，避免与占位内容混淆，因此此处不设置 hint。"
+        },
+        {
+          "line": 128,
+          "text": "// 设置占位符"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Views/SettingsView.swift",
+      "hits": [
+        {
+          "line": 900,
+          "text": "// 显示实时FPS（顶部导航全局显示，开启后无数据时显示占位 — FPS）"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCore/Services/VerificationCodeService.swift",
+      "hits": [
+        {
+          "line": 570,
+          "text": "// 简化处理：假设我们有这个信息"
+        },
+        {
+          "line": 973,
+          "text": "// 调用 EmailService 发送（这里简化处理）"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeUI/MenuBar/MenuBarPopoverView.swift",
+      "hits": [
+        {
+          "line": 217,
+          "text": "// 设备列表或占位符"
+        },
+        {
+          "line": 238,
+          "text": "/// 空设备列表占位符"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeUI/P2P/P2PScreenMirrorView.swift",
+      "hits": [
+        {
+          "line": 79,
+          "text": "// 占位符"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/PreferencesView.swift",
+      "hits": [
+        {
+          "line": 591,
+          "text": "// 这里用“已配置/未配置”表达（避免占位假数据）。"
+        },
+        {
+          "line": 938,
+          "text": ".help(\"在顶部导航显示Metal渲染FPS；无数据时显示占位字符 — FPS\")"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/DeepSpaceBackground.swift",
+      "hits": [
+        {
+          "line": 79,
+          "text": "// 暂停时显示的静态占位"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/SupabaseConfiguration.swift",
+      "hits": [
+        {
+          "line": 121,
+          "text": "// 设置为离线/演示状态，而不是使用无效的占位符密钥"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/NSTextFieldRepresentable.swift",
+      "hits": [
+        {
+          "line": 89,
+          "text": "// 更新占位符"
+        }
+      ]
+    },
+    {
+      "file": "Sources/SkyBridgeCompassApp/Views/SimplifiedWeatherBridge.swift",
+      "hits": [
+        {
+          "line": 78,
+          "text": "// 显示占位符并异步加载配置"
+        },
+        {
+          "line": 161,
+          "text": "// 显示占位符并异步加载配置"
+        }
+      ]
+    }
+  ]
+}

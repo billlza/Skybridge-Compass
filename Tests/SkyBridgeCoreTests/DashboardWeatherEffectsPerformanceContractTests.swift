@@ -1,0 +1,155 @@
+import XCTest
+
+final class DashboardWeatherEffectsPerformanceContractTests: XCTestCase {
+    func testHazeUsesOneNativeAtmosphereWithoutLegacyParticleLayers() throws {
+        let mac = try repositorySource("Sources/SkyBridgeCore/Weather/CinematicHazeView.swift")
+        let dashboard = try repositorySource("Sources/SkyBridgeCompassApp/Dashboard/DashboardBackgroundView.swift")
+        let ios = try repositorySource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Views/Dashboard/DashboardWeatherEffectsView.swift")
+        XCTAssertEqual(Self.countOccurrences(of: "SkyBridgeWeatherRendering.CinematicHazeView(", in: mac), 1)
+        XCTAssertFalse(mac.contains("TimelineView("))
+        XCTAssertFalse(mac.contains("MetalHazeParticleView("))
+        XCTAssertTrue(mac.contains(".opacity(clearManager.globalOpacity)"))
+        XCTAssertTrue(mac.contains("!isRemoteDesktopActive"))
+        XCTAssertEqual(Self.countOccurrences(of: "GlobalHazeBackground(", in: dashboard), 1)
+        XCTAssertTrue(dashboard.contains("if enableWeatherEffects, weatherSettings.isEnabled,"))
+        XCTAssertTrue(dashboard.contains("weatherManager.currentTheme.condition == .foggy"))
+        XCTAssertTrue(ios.contains("snapshot.condition == .haze"))
+        XCTAssertEqual(Self.countOccurrences(of: "SkyBridgeWeatherRendering.CinematicHazeView(", in: ios), 1)
+        XCTAssertTrue(ios.contains("fogParticles = condition == .foggy ?"))
+    }
+
+    func testIOSDashboardWeatherEffectsUseSinglePureTimelineRenderer() throws {
+        let source = try repositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Views/Dashboard/DashboardWeatherEffectsView.swift"
+        )
+
+        XCTAssertEqual(
+            Self.countOccurrences(of: "TimelineView(", in: source),
+            1,
+            "Weather effects must have one cadence owner; per-condition TimelineView instances multiply wakeups."
+        )
+        XCTAssertTrue(source.contains("WeatherParticleField(seed: snapshot.seed, condition: snapshot.condition)"))
+        XCTAssertTrue(source.contains("Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true)"))
+        XCTAssertTrue(source.contains("shimmerParticles = condition == .clear ?"))
+        XCTAssertEqual(Self.countOccurrences(of: "CinematicRainView(", in: source), 1)
+        XCTAssertFalse(source.contains("rainParticles"))
+        XCTAssertTrue(source.contains("storm: snapshot.condition == .stormy, allowsLightning: allowsStormFlash"))
+        XCTAssertTrue(source.contains("Notification.Name.NSProcessInfoPowerStateDidChange"))
+        XCTAssertTrue(source.contains("ProcessInfo.thermalStateDidChangeNotification"))
+        XCTAssertTrue(source.contains("@Environment(\\.accessibilityReduceMotion)"))
+        XCTAssertTrue(source.contains("@Environment(\\.accessibilityReduceTransparency)"))
+        XCTAssertTrue(source.contains("@Environment(\\.accessibilityDifferentiateWithoutColor)"))
+        XCTAssertTrue(source.contains("let shouldAnimate = WeatherEffectsFrameRatePolicy.shouldAnimate"))
+        XCTAssertTrue(source.contains("let allowsStormFlash = WeatherEffectsFrameRatePolicy.allowsStormFlash"))
+        XCTAssertTrue(source.contains("if !shouldAnimate"))
+        XCTAssertTrue(source.contains(".animation(shouldAnimate ? .easeInOut(duration: 0.8) : nil"))
+        XCTAssertTrue(source.contains(".id(framePolicyGeneration)"))
+        XCTAssertTrue(source.contains("guard !processInfo.isLowPowerModeEnabled else { return false }"))
+        XCTAssertTrue(source.contains("case .serious, .critical:\n            return false"))
+        XCTAssertFalse(source.contains("drawRain("))
+        XCTAssertFalse(source.contains("Timer.scheduledTimer"))
+        XCTAssertFalse(source.contains("Double.random"))
+        XCTAssertFalse(source.contains("Text(\"•\")"))
+        XCTAssertFalse(source.contains(".onChange(of: time"))
+        XCTAssertFalse(source.contains("@Published"))
+        XCTAssertFalse(source.contains("animationTime"))
+    }
+
+    func testIOSDashboardViewUsesExtractedWeatherBackgroundLayer() throws {
+        let source = try repositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Views/Dashboard/DashboardView.swift"
+        )
+
+        XCTAssertTrue(source.contains("DashboardWeatherEffectsBackgroundLayer("))
+        XCTAssertTrue(source.contains("isHomeVisible: selectedTab == .home"))
+        XCTAssertTrue(source.contains("isHomeVisible &&"))
+        XCTAssertTrue(source.contains("let highLoadMode = fileTransferManager.isTransferring || remoteDesktopManager.isStreaming"))
+        XCTAssertTrue(source.contains("let lowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled"))
+        XCTAssertTrue(source.contains("let thermalPressureMode = thermalState == .serious || thermalState == .critical"))
+        XCTAssertTrue(source.contains("let shouldAnimateBackground ="))
+        XCTAssertTrue(source.contains("let shouldRunWeatherEffects ="))
+        XCTAssertTrue(source.contains("!highLoadMode &&"))
+        XCTAssertTrue(source.contains("!reduceMotion &&"))
+        XCTAssertTrue(source.contains("!lowPowerMode &&"))
+        XCTAssertTrue(source.contains("!thermalPressureMode &&"))
+        XCTAssertTrue(source.contains("!reduceTransparency &&"))
+        XCTAssertTrue(source.contains("!differentiateWithoutColor"))
+        XCTAssertTrue(source.contains("if shouldAnimateBackground"))
+        XCTAssertTrue(source.contains(".id(animationPolicyGeneration)"))
+        XCTAssertFalse(source.contains("CinematicRainEffectView_iOS"))
+        XCTAssertFalse(source.contains("CinematicSnowEffectView_iOS"))
+        XCTAssertFalse(source.contains("CinematicClearSkyEffectView_iOS"))
+        XCTAssertFalse(source.contains("private struct WeatherEffectsBackgroundLayer"))
+    }
+
+    func testMacCinematicWeatherEffectsDoNotWriteStateEveryFrame() throws {
+        let effectSources = try [
+            "Sources/SkyBridgeCore/Weather/Effects/Cinematic/CinematicClearSkyEffectView.swift",
+            "Sources/SkyBridgeCore/Weather/Effects/Cinematic/CinematicSnowEffectView.swift"
+        ].map(repositorySource)
+
+        for source in effectSources {
+            XCTAssertTrue(source.contains("TimelineView(.animation"))
+            XCTAssertTrue(
+                source.contains("timeIntervalSince(Self.animationEpoch)"),
+                "Mac cinematic weather effects should render from a stable epoch and avoid huge reference-date phase values."
+            )
+            XCTAssertFalse(
+                source.contains(".onChange(of: time"),
+                "TimelineView-backed effects must derive animation from timeline.date without mutating SwiftUI state every frame."
+            )
+            XCTAssertFalse(
+                source.contains("Timer.scheduledTimer"),
+                "Per-effect timers compete with scroll tracking and duplicate TimelineView's cadence."
+            )
+            XCTAssertFalse(
+                source.contains("Task { @MainActor"),
+                "Frame paths should not enqueue MainActor work; all per-frame rendering must be pure Canvas computation."
+            )
+        }
+    }
+
+    func testMacDashboardStagesHeavyFirstFrameWork() throws {
+        let dashboardSource = try repositorySource(
+            "Sources/SkyBridgeCompassApp/Dashboard/DashboardView.swift"
+        )
+        let contentSource = try repositorySource(
+            "Sources/SkyBridgeCompassApp/Dashboard/Sections/DashboardContentView.swift"
+        )
+        let backgroundSource = try repositorySource(
+            "Sources/SkyBridgeCompassApp/Dashboard/DashboardBackgroundView.swift"
+        )
+        let appSource = try repositorySource(
+            "Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift"
+        )
+
+        XCTAssertTrue(dashboardSource.contains("private enum DashboardPresentationPhase"))
+        XCTAssertTrue(dashboardSource.contains("presentationPhase = .animatedBackground"))
+        XCTAssertTrue(dashboardSource.contains("presentationPhase = .fullContent"))
+        XCTAssertTrue(dashboardSource.contains("showDeferredContent: presentationPhase.enablesDeferredContent"))
+        XCTAssertEqual(
+            Self.countOccurrences(of: "ScrollView {", in: contentSource),
+            0,
+            "DashboardContentView must rely on the owning Dashboard scroll view instead of nesting scroll containers."
+        )
+        XCTAssertTrue(contentSource.contains("LazyVStack(spacing: sectionSpacing)"))
+        XCTAssertTrue(backgroundSource.contains("weatherManager.currentWeather != nil"))
+        XCTAssertTrue(backgroundSource.contains("enableWeatherEffects"))
+        XCTAssertFalse(
+            appSource.contains(".animation(.easeInOut(duration: 0.25), value: authModel.currentSession != nil)"),
+            "Authentication routing must not retain both heavyweight roots for an implicit transition animation."
+        )
+    }
+
+    private static func countOccurrences(of needle: String, in haystack: String) -> Int {
+        haystack.components(separatedBy: needle).count - 1
+    }
+
+    private func repositorySource(_ relativePath: String) throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        return try String(contentsOf: root.appendingPathComponent(relativePath), encoding: .utf8)
+    }
+}

@@ -24,7 +24,7 @@ final class LegacyFallbackPreconditionTests: XCTestCase {
  /// **Validates: Requirements 11.1, 11.2**
     func testPureNetworkStrangerNotAllowed() async throws {
         let verifier = FirstContactVerifier()
-        
+
  // 创建测试数据
         let testData = Data("test message".utf8)
         let (publicKey, signature) = try generateP256TestSignature(data: testData)
@@ -194,7 +194,7 @@ final class LegacyFallbackPreconditionTests: XCTestCase {
  /// **Validates: Requirements 11.2**
     func testExistingTrustRecordWithoutLegacyKeyNotAllowed() async throws {
         let testData = Data("test message".utf8)
-        let (publicKey, signature) = try generateP256TestSignature(data: testData)
+        _ = try generateP256TestSignature(data: testData)
         
  // 创建不含 legacy P-256 公钥的 TrustRecord
         let trustRecord = TrustRecord(
@@ -298,7 +298,7 @@ final class LegacyFallbackPreconditionTests: XCTestCase {
             offeredSuites: [.mlkem768MLDSA65]
         )
         XCTAssertEqual(pqcAlgorithm, ProtocolSigningAlgorithm.mlDSA65)
-        
+
  // Mixed (has PQC) → ML-DSA-65
         let mixedAlgorithm = verifier.selectModernAlgorithm(
             offeredSuites: [.x25519Ed25519, .mlkem768MLDSA65]

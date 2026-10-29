@@ -35,7 +35,7 @@ final class CryptoProviderFactoryTests: XCTestCase {
         
         for capability in capabilityCombinations {
             for policy in policies {
-                #if DEBUG
+                #if DEBUG || SKYBRIDGE_TESTING
                 let env = MockCryptoEnvironment(
                     hasApplePQC: capability.hasApplePQC,
                     hasLiboqs: capability.hasLiboqs
@@ -74,7 +74,7 @@ final class CryptoProviderFactoryTests: XCTestCase {
     
  /// Test that preferPQC policy selects PQC when available
     func testProperty1_PreferPQCSelectsPQCWhenAvailable() {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
  // When liboqs is available, should select liboqs
         let envWithLiboqs = MockCryptoEnvironment(hasApplePQC: false, hasLiboqs: true)
         let provider = CryptoProviderFactory.make(policy: .preferPQC, environment: envWithLiboqs)
@@ -88,7 +88,7 @@ final class CryptoProviderFactoryTests: XCTestCase {
     
  /// Test that preferPQC policy falls back to classic when PQC unavailable
     func testProperty1_PreferPQCFallsBackToClassic() {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         let envNoOQC = MockCryptoEnvironment(hasApplePQC: false, hasLiboqs: false)
         let provider = CryptoProviderFactory.make(policy: .preferPQC, environment: envNoOQC)
         
@@ -101,7 +101,7 @@ final class CryptoProviderFactoryTests: XCTestCase {
     
  /// Test that classicOnly policy always selects classic
     func testProperty1_ClassicOnlyAlwaysSelectsClassic() {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
  // Even when PQC is available, classicOnly should select classic
         let envWithPQC = MockCryptoEnvironment(hasApplePQC: false, hasLiboqs: true)
         let provider = CryptoProviderFactory.make(policy: .classicOnly, environment: envWithPQC)
@@ -115,18 +115,23 @@ final class CryptoProviderFactoryTests: XCTestCase {
     
  /// Test that requirePQC returns unavailable provider when PQC not available
     func testProperty1_RequirePQCReturnsUnavailableWhenNoPQC() {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         let envNoPQC = MockCryptoEnvironment(hasApplePQC: false, hasLiboqs: false)
         let provider = CryptoProviderFactory.make(policy: .requirePQC, environment: envNoPQC)
         
         XCTAssertEqual(provider.providerName, "Unavailable",
                        "requirePQC should return Unavailable provider when PQC not available")
+        XCTAssertEqual(provider.tier, .classic)
+        XCTAssertEqual(provider.activeSuite, .unknown(0xFFFF))
+        XCTAssertTrue(provider.supportedSuites.isEmpty)
+        XCTAssertFalse(provider.supportsSuite(.x25519Ed25519))
+        XCTAssertFalse(provider.supportsSuite(.mlkem768MLDSA65))
         #endif
     }
     
  /// Test that requirePQC selects PQC when available
     func testProperty1_RequirePQCSelectsPQCWhenAvailable() {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         let envWithLiboqs = MockCryptoEnvironment(hasApplePQC: false, hasLiboqs: true)
         let provider = CryptoProviderFactory.make(policy: .requirePQC, environment: envWithLiboqs)
         
@@ -142,6 +147,28 @@ final class CryptoProviderFactoryTests: XCTestCase {
  // Hybrid PQC (0x00xx)
         XCTAssertEqual(CryptoSuite.xwingMLDSA.wireId, 0x0001)
         XCTAssertEqual(CryptoSuite.xwingMLDSA.tierFromWireId, "hybridPQC")
+        XCTAssertEqual(CryptoSuite.qperiaptContextBound.wireId, 0x0011)
+        XCTAssertEqual(CryptoSuite.qperiaptABI2PolicyBound.wireId, 0x0012)
+        XCTAssertEqual(
+            CryptoSuite.qperiaptContextBound.rawValue,
+            P2PCryptoAlgorithm.qperiaptContextBound.rawValue
+        )
+        XCTAssertEqual(
+            CryptoSuite.qperiaptABI2PolicyBound.rawValue,
+            P2PCryptoAlgorithm.qperiaptABI2PolicyBound.rawValue
+        )
+        XCTAssertTrue(CryptoSuite.qperiaptContextBound.isLegacyOnly)
+        XCTAssertFalse(CryptoSuite.qperiaptContextBound.isNegotiable)
+        XCTAssertFalse(CryptoSuite.qperiaptABI2PolicyBound.isLegacyOnly)
+        XCTAssertTrue(CryptoSuite.qperiaptABI2PolicyBound.isNegotiable)
+        XCTAssertFalse(
+            CryptoSuite(rawValue: "forged-suite-name", wireId: 0x0012).isNegotiable,
+            "A non-canonical descriptor must not borrow a known negotiable wire ID"
+        )
+        XCTAssertNotEqual(
+            CryptoSuite.qperiaptContextBound.kdfCompositionLabel,
+            CryptoSuite.qperiaptABI2PolicyBound.kdfCompositionLabel
+        )
         
  // Pure PQC (0x01xx)
         XCTAssertEqual(CryptoSuite.mlkem768MLDSA65.wireId, 0x0101)
@@ -158,6 +185,12 @@ final class CryptoProviderFactoryTests: XCTestCase {
     func testCryptoSuiteParsingFromWireId() {
  // Known suites
         XCTAssertEqual(CryptoSuite(wireId: 0x0001), .xwingMLDSA)
+        XCTAssertEqual(CryptoSuite(wireId: 0x0011), .qperiaptContextBound)
+        XCTAssertEqual(CryptoSuite(wireId: 0x0012), .qperiaptABI2PolicyBound)
+        XCTAssertEqual(
+            CryptoSuite(rawValue: P2PCryptoAlgorithm.qperiaptABI2PolicyBound.rawValue),
+            .qperiaptABI2PolicyBound
+        )
         XCTAssertEqual(CryptoSuite(wireId: 0x0101), .mlkem768MLDSA65)
         XCTAssertEqual(CryptoSuite(wireId: 0x1001), .x25519Ed25519)
         XCTAssertEqual(CryptoSuite(wireId: 0x1002), .p256ECDSA)
@@ -172,6 +205,8 @@ final class CryptoProviderFactoryTests: XCTestCase {
  /// Test CryptoSuite isPQC property
     func testCryptoSuiteIsPQC() {
         XCTAssertTrue(CryptoSuite.xwingMLDSA.isPQC)
+        XCTAssertTrue(CryptoSuite.qperiaptContextBound.isPQC)
+        XCTAssertTrue(CryptoSuite.qperiaptABI2PolicyBound.isPQC)
         XCTAssertTrue(CryptoSuite.mlkem768MLDSA65.isPQC)
         XCTAssertFalse(CryptoSuite.x25519Ed25519.isPQC)
         XCTAssertFalse(CryptoSuite.p256ECDSA.isPQC)
@@ -181,7 +216,7 @@ final class CryptoProviderFactoryTests: XCTestCase {
     
  /// Test capability detection
     func testCapabilityDetection() {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         let env = MockCryptoEnvironment(hasApplePQC: true, hasLiboqs: true)
         let capability = CryptoProviderFactory.detectCapability(environment: env)
         
@@ -204,6 +239,42 @@ final class CryptoProviderFactoryTests: XCTestCase {
         XCTAssertFalse(capability.hasApplePQC,
                        "Apple PQC should be false without HAS_APPLE_PQC_SDK")
         #endif
+    }
+
+    func testSystemApplePQCProbeIsCachedOffHotPath() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/SkyBridgeCore/P2P/CryptoProviderFactory.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("ApplePQCAvailabilityCache"))
+        XCTAssertTrue(source.contains("static let applePQC"))
+        XCTAssertTrue(source.contains("static let xwing"))
+        XCTAssertTrue(source.contains("return ApplePQCAvailabilityCache.applePQC"))
+        XCTAssertTrue(source.contains("return ApplePQCAvailabilityCache.xwing"))
+    }
+
+    func testInboundResponderRequiresXWingRuntimeSupportForXWingOnlyPeer() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/SkyBridgeCore/P2P/CryptoProviderFactory.swift"),
+            encoding: .utf8
+        )
+
+        let branchStart = try XCTUnwrap(source.range(of: "case (true, false):"))
+        let branchEnd = try XCTUnwrap(source.range(of: "case (false, true):", range: branchStart.lowerBound..<source.endIndex))
+        let xwingOnlyBranch = String(source[branchStart.lowerBound..<branchEnd.lowerBound])
+
+        XCTAssertTrue(xwingOnlyBranch.contains("guard isAppleXWingAvailable() else"))
+        XCTAssertTrue(xwingOnlyBranch.contains("return UnavailablePQCProvider()"))
+        XCTAssertTrue(xwingOnlyBranch.contains("return AppleXWingCryptoProvider()"))
     }
 }
 
@@ -235,6 +306,70 @@ final class HPKESealedBoxTests: XCTestCase {
         XCTAssertEqual(parsed.nonce, nonce)
         XCTAssertEqual(parsed.ciphertext, ciphertext)
         XCTAssertEqual(parsed.tag, tag)
+    }
+
+    func testHPKESealedBoxAcceptsNonZeroStartIndexSlice() throws {
+        let box = HPKESealedBox(
+            encapsulatedKey: Data(repeating: 0x11, count: 32),
+            nonce: Data(repeating: 0x22, count: 12),
+            ciphertext: Data(repeating: 0x33, count: 128),
+            tag: Data(repeating: 0x44, count: 16)
+        )
+        let wire = box.combinedWithHeader(suite: .x25519Ed25519)
+        var storage = Data(repeating: 0xEE, count: 17)
+        storage.append(wire)
+        let slice = storage.dropFirst(17)
+        XCTAssertNotEqual(slice.startIndex, 0)
+
+        let parsed = try HPKESealedBox(combined: slice, isHandshake: true)
+        XCTAssertEqual(parsed.encapsulatedKey, box.encapsulatedKey)
+        XCTAssertEqual(parsed.nonce, box.nonce)
+        XCTAssertEqual(parsed.ciphertext, box.ciphertext)
+        XCTAssertEqual(parsed.tag, box.tag)
+        XCTAssertEqual(parsed.encapsulatedKey.startIndex, 0)
+        XCTAssertEqual(parsed.nonce.startIndex, 0)
+        XCTAssertEqual(parsed.ciphertext.startIndex, 0)
+        XCTAssertEqual(parsed.tag.startIndex, 0)
+    }
+
+    func testHPKESealedBoxRejectsOversizedNonZeroStartIndexSliceBeforeBodyParsing() {
+        let maximumHandshakeCombinedByteCount = 17 + 4_096 + 12 + (64 * 1_024) + 16
+        let maximumPostAuthCombinedByteCount = 17 + 4_096 + 12 + (256 * 1_024) + 16
+        let cases = [
+            (isHandshake: true, maximum: maximumHandshakeCombinedByteCount),
+            (isHandshake: false, maximum: maximumPostAuthCombinedByteCount),
+        ]
+
+        for testCase in cases {
+            var oversized = Data(repeating: 0xA5, count: testCase.maximum + 1)
+            oversized.replaceSubrange(0..<4, with: [0x48, 0x50, 0x4B, 0x45])
+            oversized[4] = 1
+            oversized[9] = 32
+            oversized[10] = 0
+            oversized[11] = 12
+            oversized[12] = 16
+            oversized[13] = 16
+            oversized[14] = 0
+            oversized[15] = 0
+            oversized[16] = 0
+
+            var storage = Data(repeating: 0xEE, count: 17)
+            storage.append(oversized)
+            let slice = storage.dropFirst(17)
+            XCTAssertNotEqual(slice.startIndex, 0)
+
+            XCTAssertThrowsError(
+                try HPKESealedBox(combined: slice, isHandshake: testCase.isHandshake)
+            ) { error in
+                guard case CryptoProviderError.lengthExceeded(let field, let actual, let maximum) = error else {
+                    XCTFail("Expected CryptoProviderError.lengthExceeded, got \(error)")
+                    return
+                }
+                XCTAssertEqual(field, "combined")
+                XCTAssertEqual(actual, testCase.maximum + 1)
+                XCTAssertEqual(maximum, testCase.maximum)
+            }
+        }
     }
     
  /// Test HPKESealedBox rejects invalid magic
@@ -577,7 +712,7 @@ final class KeyMaterialTests: XCTestCase {
     }
     
  /// Test KeyPair requires matching suite and usage
-    func testKeyPairRequiresMatchingSuiteAndUsage() {
+    func testKeyPairRequiresMatchingSuiteAndUsage() throws {
         let pubKey = KeyMaterial(
             suite: .x25519Ed25519,
             usage: .keyExchange,
@@ -590,8 +725,58 @@ final class KeyMaterialTests: XCTestCase {
         )
         
  // Should not crash
-        let keyPair = KeyPair(publicKey: pubKey, privateKey: privKey)
+        let keyPair = try KeyPair(publicKey: pubKey, privateKey: privKey)
         XCTAssertEqual(keyPair.publicKey.suite, keyPair.privateKey.suite)
+    }
+
+    func testKeyPairRejectsSuiteMismatchWithTypedError() {
+        let publicKey = KeyMaterial(
+            suite: .x25519Ed25519,
+            usage: .keyExchange,
+            bytes: Data(repeating: 0x01, count: 32)
+        )
+        let privateKey = KeyMaterial(
+            suite: .p256ECDSA,
+            usage: .keyExchange,
+            bytes: Data(repeating: 0x02, count: 32)
+        )
+
+        XCTAssertThrowsError(
+            try KeyPair(publicKey: publicKey, privateKey: privateKey)
+        ) { error in
+            XCTAssertEqual(
+                error as? KeyPairError,
+                .suiteMismatch(
+                    publicSuite: .x25519Ed25519,
+                    privateSuite: .p256ECDSA
+                )
+            )
+        }
+    }
+
+    func testKeyPairRejectsUsageMismatchWithTypedError() {
+        let publicKey = KeyMaterial(
+            suite: .x25519Ed25519,
+            usage: .keyExchange,
+            bytes: Data(repeating: 0x01, count: 32)
+        )
+        let privateKey = KeyMaterial(
+            suite: .x25519Ed25519,
+            usage: .signing,
+            bytes: Data(repeating: 0x02, count: 64)
+        )
+
+        XCTAssertThrowsError(
+            try KeyPair(publicKey: publicKey, privateKey: privateKey)
+        ) { error in
+            XCTAssertEqual(
+                error as? KeyPairError,
+                .usageMismatch(
+                    publicUsage: .keyExchange,
+                    privateUsage: .signing
+                )
+            )
+        }
     }
     
  // MARK: - Property 12: Key Material Type Safety
@@ -1315,20 +1500,21 @@ final class ApplePQCProviderSelectionTests: XCTestCase {
     
  // MARK: - Provider Selection with Apple PQC Available
     
-    #if DEBUG
- /// Test that preferPQC selects ApplePQC when available
+    #if DEBUG || SKYBRIDGE_TESTING
+ /// Test that preferPQC selects a nativePQC provider when available
  /// **Validates: Requirements 4.1**
-    func testPreferPQCSelectsApplePQCWhenAvailable() {
+    func testPreferPQCSelectsNativePQCWhenAvailable() {
         let env = MockCryptoEnvironment(hasApplePQC: true, hasLiboqs: true)
         let provider = CryptoProviderFactory.make(policy: .preferPQC, environment: env)
-        
- // When Apple PQC is available, it should be preferred over liboqs
+
+ // When Apple PQC is available, preferPQC should stay on nativePQC tier.
+ // The concrete native provider may be ApplePQC or AppleXWing, depending on user preference.
         #if HAS_APPLE_PQC_SDK
         if #available(macOS 26.0, *) {
-            XCTAssertEqual(provider.providerName, "ApplePQC",
-                           "preferPQC should select ApplePQC when available")
             XCTAssertEqual(provider.tier, .nativePQC,
-                           "ApplePQC should have nativePQC tier")
+                           "preferPQC should select nativePQC when Apple PQC is available")
+            XCTAssertTrue(["ApplePQC", "AppleXWing"].contains(provider.providerName),
+                          "Expected Apple native provider, got \(provider.providerName)")
         } else {
  // On older macOS, should fall back to liboqs
             XCTAssertEqual(provider.tier, .liboqsPQC,
@@ -1380,7 +1566,7 @@ final class ApplePQCProviderSelectionTests: XCTestCase {
     
  // MARK: - Provider Selection Fallback
     
-    #if DEBUG
+    #if DEBUG || SKYBRIDGE_TESTING
  /// Test fallback from Apple PQC to liboqs when Apple PQC unavailable
  /// **Validates: Requirements 4.2**
     func testFallbackToLiboqsWhenApplePQCUnavailable() {
@@ -1408,7 +1594,7 @@ final class ApplePQCProviderSelectionTests: XCTestCase {
     
  // MARK: - Capability Detection
     
-    #if DEBUG
+    #if DEBUG || SKYBRIDGE_TESTING
  /// Test capability detection with Apple PQC
  /// **Validates: Requirements 4.3**
     func testCapabilityDetectionWithApplePQC() {
@@ -1438,7 +1624,7 @@ final class ApplePQCProviderSelectionTests: XCTestCase {
     
  // MARK: - Provider Selection Priority
     
-    #if DEBUG
+    #if DEBUG || SKYBRIDGE_TESTING
  /// Test that Apple PQC has higher priority than liboqs
  /// **Validates: Requirements 4.1, 4.4**
     func testApplePQCHasHigherPriorityThanLiboqs() {
@@ -1455,6 +1641,36 @@ final class ApplePQCProviderSelectionTests: XCTestCase {
         }
         #endif
     }
+
+    func testInboundResponderKeepsApplePQCWhenPeerProviderTypeIsLiboqs() {
+        let env = MockCryptoEnvironment(hasApplePQC: true, hasLiboqs: true)
+        let provider = CryptoProviderFactory.makeInboundPQCResponderProvider(
+            policy: .requirePQC,
+            peerSupportedSuites: [.mlkem768MLDSA65, .x25519Ed25519],
+            environment: env
+        )
+
+        #if HAS_APPLE_PQC_SDK
+        if #available(macOS 26.0, *) {
+            XCTAssertEqual(provider.tier, .nativePQC)
+            XCTAssertNotEqual(provider.providerName, "liboqs")
+        }
+        #else
+        XCTAssertEqual(provider.tier, .liboqsPQC)
+        #endif
+    }
+
+    func testInboundResponderUsesLiboqsOnlyWhenApplePQCUnavailable() {
+        let env = MockCryptoEnvironment(hasApplePQC: false, hasLiboqs: true)
+        let provider = CryptoProviderFactory.makeInboundPQCResponderProvider(
+            policy: .requirePQC,
+            peerSupportedSuites: [.mlkem768MLDSA65, .x25519Ed25519],
+            environment: env
+        )
+
+        XCTAssertEqual(provider.tier, .liboqsPQC)
+        XCTAssertEqual(provider.providerName, "liboqs")
+    }
     
  /// Test provider selection event emission
  /// **Validates: Requirements 4.4**
@@ -1469,6 +1685,35 @@ final class ApplePQCProviderSelectionTests: XCTestCase {
  // Verify provider was created successfully
         XCTAssertFalse(provider.providerName.isEmpty,
                        "Provider should have a name")
+    }
+
+    func testRequirePQCUnavailableProviderEmitsHighSeverityEvent() async {
+        let eventExpectation = expectation(description: "strictPQC unavailable provider event")
+        let subscriptionId = await SecurityEventEmitter.shared.subscribe { event in
+            guard event.type == .cryptoProviderSelected,
+                  event.context["policy"] == CryptoProviderFactory.SelectionPolicy.requirePQC.rawValue,
+                  event.context["providerName"] == "Unavailable"
+            else {
+                return
+            }
+            XCTAssertEqual(event.severity, .high)
+            XCTAssertEqual(event.context["providerStatus"], "pqc_unavailable")
+            XCTAssertEqual(event.context["strictPQCUnavailable"], "true")
+            XCTAssertEqual(event.context["fallbackAllowed"], "false")
+            XCTAssertEqual(event.context["selectedTier"], CryptoTier.classic.rawValue)
+            XCTAssertEqual(event.context["suite"], CryptoSuite.unknown(0xFFFF).rawValue)
+            eventExpectation.fulfill()
+        }
+        defer {
+            Task {
+                await SecurityEventEmitter.shared.unsubscribe(subscriptionId)
+            }
+        }
+
+        let env = MockCryptoEnvironment(hasApplePQC: false, hasLiboqs: false)
+        _ = CryptoProviderFactory.make(policy: .requirePQC, environment: env)
+
+        await fulfillment(of: [eventExpectation], timeout: 2)
     }
     #endif
     
@@ -1527,17 +1772,17 @@ final class ApplePQCProviderIntegrationTests: XCTestCase {
                       "Provider suite should be PQC")
     }
     
- /// Test factory creates ApplePQCProvider on macOS 26+
+ /// Test factory creates a nativePQC provider on macOS 26+
  /// **Validates: Requirements 4.1, 4.2**
-    func testFactoryCreatesApplePQCProvider() {
-        #if DEBUG
+    func testFactoryCreatesNativePQCProvider() {
+        #if DEBUG || SKYBRIDGE_TESTING
         let env = MockCryptoEnvironment(hasApplePQC: true, hasLiboqs: true)
         let provider = CryptoProviderFactory.make(policy: .preferPQC, environment: env)
-        
-        XCTAssertEqual(provider.providerName, "ApplePQC",
-                       "Factory should create ApplePQCProvider when available")
+
         XCTAssertEqual(provider.tier, .nativePQC,
-                       "Provider should have nativePQC tier")
+                       "Provider should stay on nativePQC tier when Apple PQC is available")
+        XCTAssertTrue(["ApplePQC", "AppleXWing"].contains(provider.providerName),
+                      "Expected Apple native provider, got \(provider.providerName)")
         #endif
     }
 }

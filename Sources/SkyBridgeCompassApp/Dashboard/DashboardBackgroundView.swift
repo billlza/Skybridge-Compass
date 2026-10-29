@@ -1,5 +1,21 @@
 import SwiftUI
 import SkyBridgeCore
+import SkyBridgeWeatherRendering
+
+/// Lightweight first-frame background shared by the launch screen and Dashboard shell.
+struct LaunchTransitionBackground: View {
+    var body: some View {
+        LinearGradient(
+            colors: [
+                Color(red: 0.01, green: 0.01, blue: 0.08),
+                Color(red: 0.03, green: 0.04, blue: 0.15),
+                Color(red: 0.07, green: 0.08, blue: 0.22)
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+    }
+}
 
 /// 仪表盘背景视图 - 包含主题壁纸和天气效果
 @available(macOS 14.0, *)
@@ -7,35 +23,57 @@ public struct DashboardBackgroundView: View {
     @EnvironmentObject var themeConfiguration: ThemeConfiguration
     @EnvironmentObject var weatherManager: WeatherIntegrationManager
     @EnvironmentObject var weatherSettings: WeatherEffectsSettings
-    
+    @ObservedObject private var settingsManager = SettingsManager.shared
+
     @ObservedObject var hazeClearManager: InteractiveClearManager
-    
-    public init(hazeClearManager: InteractiveClearManager) {
+    private let enableWeatherEffects: Bool
+    private let glassRegions: [WeatherGlassRegion]
+    private let rainScene: WeatherRainScene?
+    private let frameRateMonitor: WeatherFrameRateMonitor?
+
+    public init(
+        hazeClearManager: InteractiveClearManager,
+        enableWeatherEffects: Bool = true,
+        glassRegions: [WeatherGlassRegion] = [], rainScene: WeatherRainScene? = nil,
+        frameRateMonitor: WeatherFrameRateMonitor? = nil
+    ) {
         self._hazeClearManager = ObservedObject(wrappedValue: hazeClearManager)
+        self.enableWeatherEffects = enableWeatherEffects
+        self.glassRegions = glassRegions
+        self.rainScene = rainScene
+        self.frameRateMonitor = frameRateMonitor
     }
-    
+
     public var body: some View {
         ZStack {
  // 主题壁纸背景 - 按当前主题切换，并联动实时天气参数
             themeBackgroundView()
                 .opacity(themeConfiguration.backgroundIntensity)
                 .ignoresSafeArea(.all)
-            
- // 全页面雾霾背景 - 鼠标悬停驱散效果（联动交互式驱散全局透明度）
-            GlobalHazeBackground(clearManager: hazeClearManager)
-                .ignoresSafeArea(.all)
-            
+
+            // Haze owns its complete atmosphere through WeatherEffectView. The existing
+            // additional fog layer is retained only for foggy weather.
+            if enableWeatherEffects, weatherSettings.isEnabled,
+               weatherManager.currentWeather != nil,
+               weatherManager.currentTheme.condition == .foggy {
+                GlobalHazeBackground(clearManager: hazeClearManager)
+                    .ignoresSafeArea(.all)
+            }
+
  // 🌦️ 天气效果覆盖层（根据实时天气动态切换）
             ZStack {
-                if weatherSettings.isEnabled {
+                if enableWeatherEffects,
+                   weatherSettings.isEnabled,
+                   weatherManager.currentWeather != nil {
                     dynamicWeatherEffectView(for: weatherManager.currentTheme.condition)
+                        .environment(\.weatherFrameRateMonitor, settingsManager.showRealtimeFPS ? frameRateMonitor : nil)
                         .ignoresSafeArea(.all)
                         .id(weatherManager.currentTheme.condition) // 🔥 强制视图重建以切换效果
                 }
             }
         }
     }
-    
+
  /// 根据当前主题选择壁纸背景视图，并向壁纸注入实时天气数据（如风速、湿度、AQI）。
     @ViewBuilder
     private func themeBackgroundView() -> some View {
@@ -43,55 +81,24 @@ public struct DashboardBackgroundView: View {
         case .starryNight:
             StarryBackground()
         case .deepSpace:
-            DeepSpaceBackground(weather: weatherManager.currentWeather)
+            DeepSpaceBackground(weather: weatherSettings.isEnabled ? weatherManager.currentWeather : nil)
                 .environmentObject(themeConfiguration)
         case .aurora:
-            AuroraBackgroundV2(weather: weatherManager.currentWeather)
+            AuroraBackgroundV2(weather: weatherSettings.isEnabled ? weatherManager.currentWeather : nil)
                 .environmentObject(themeConfiguration)
         case .classic:
-            ClassicBackgroundV2(weather: weatherManager.currentWeather)
+            ClassicBackgroundV2(weather: weatherSettings.isEnabled ? weatherManager.currentWeather : nil)
                 .environmentObject(themeConfiguration)
         case .custom:
             CustomBackgroundView()
                 .environmentObject(themeConfiguration)
         }
     }
-    
+
  /// 根据天气条件返回对应的动态天气效果视图
     @ViewBuilder
     private func dynamicWeatherEffectView(for condition: WeatherCondition) -> some View {
-        switch condition {
-        case .clear:
- // ☀️ 晴天 - 太阳系统 + God Rays + 白云 + 浮尘
-            CinematicClearSkyEffectView()
-            
-        case .cloudy:
- // ☁️ 多云 - 体积云 + 光线漫射
-            CinematicCloudySkyView()
-            
-        case .rainy, .stormy:
- // 🌧️ 雨天/暴风雨 - 物理雨滴 + 闪电 + 玻璃水珠
-            CinematicRainEffectView()
-            
-        case .snowy:
- // ❄️ 雪天 - 物理雪花 + 360°旋转 + 积雪
-            CinematicSnowEffectView()
-            
-        case .foggy:
- // 🌫️ 雾天 - 体积雾 + 光线步进
-            CinematicFogView()
-            
-        case .haze:
- // 😶‍🌫️ 霾天 - 轻度体积雾 + 沙尘
-            SkyBridgeCore.CinematicHazeView(
-                weatherManager: WeatherIntegrationManager.shared,
-                clearManager: hazeClearManager
-            )
-            
-        default:
- // 未知天气 - 默认晴天
-            CinematicClearSkyEffectView()
-        }
+        // ✅ 统一入口：所有天气覆盖层都通过 SkyBridgeCore.WeatherEffectView 渲染
+        WeatherEffectView(theme: weatherManager.currentTheme, glassRegions: glassRegions, rainScene: rainScene)
     }
 }
-

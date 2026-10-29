@@ -1,12 +1,24 @@
 #!/usr/bin/env python3
 import csv
+import os
 from pathlib import Path
 
 CSV_PATH = Path("Artifacts")
 OUT_PATH = Path("Docs/figures/fig_policy_downgrade.svg")
 
 
-def latest_csv():
+def select_csv():
+    requested_date = (
+        os.environ.get("ARTIFACT_DATE")
+        or os.environ.get("SKYBRIDGE_ARTIFACT_DATE")
+        or ""
+    ).strip()
+    if requested_date:
+        pinned = CSV_PATH / f"policy_downgrade_{requested_date}.csv"
+        if not pinned.exists():
+            raise SystemExit(f"Missing pinned artifact: {pinned}")
+        return pinned
+
     files = sorted(CSV_PATH.glob("policy_downgrade_*.csv"))
     if not files:
         raise SystemExit("No policy_downgrade_*.csv found in Artifacts/")
@@ -97,7 +109,7 @@ def svg_bar_chart(rows):
 
 
 def main():
-    csv_path = latest_csv()
+    csv_path = select_csv()
     rows = load_rows(csv_path)
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUT_PATH.write_text(svg_bar_chart(rows), encoding="utf-8")

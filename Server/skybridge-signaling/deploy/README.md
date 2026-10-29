@@ -1,0 +1,411 @@
+# SkyBridge Signaling Deployment Guide
+
+This folder provides a production-ready deployment baseline for the signaling service,
+with explicit support for dynamic TURN credentials (`/api/turn/credentials`) and
+WebSocket signaling (`/ws`).
+
+It now includes two deployment tracks:
+- `deploy/nginx/skybridge-signaling.conf`: single-instance baseline
+- `deploy/nginx/skybridge-signaling-multi-instance-sticky.conf`: low-risk multi-instance sticky/session-shard rollout
+
+Auth email/SMS production runbook:
+- `Docs/ops/auth-email-and-sms-production.md`
+
+## 1. Prepare the server
+
+1. Install the current patched Node.js 24.x LTS and npm (minimum accepted:
+   24.6.0, the first runtime with the native ML-DSA key import, signing, and
+   verification used by admission).
+2. Create runtime config:
+   - `sudo mkdir -p /opt/skybridge-signaling/shared/config`
+   - `sudo cp production.env.example /opt/skybridge-signaling/shared/config/production.env`
+   - Fill real values in `production.env`.
+3. Ensure Nginx reverse proxy is configured using `deploy/nginx/skybridge-signaling.conf`
+   for single-instance deployments, or `deploy/nginx/skybridge-signaling-multi-instance-sticky.conf`
+   for low-risk multi-instance sticky deployments.
+
+### 1.1 Device identity-rotation database prerequisite
+
+Identity rotation fails closed until the v6 schema is present. Apply database
+changes before deploying a server build that exposes the rotation endpoints:
+
+1. Take and verify a restorable database backup.
+2. Confirm the existing Supabase migration chain, including the v5 hardening
+   migration, is already applied.
+3. Apply the canonical
+   `supabase/migrations/20260722041138_device_identity_rotation_v6.sql` through
+   the approved Supabase migration pipeline. The migration contains its own
+   `BEGIN`/`COMMIT`, lock timeout, statement timeout, privilege assertions, and
+   audit-trigger assertion; never split it into autocommitted statements.
+4. Verify all of the following before starting the new server:
+   - `registered_devices.identity_generation` is non-null and existing rows are generation 1.
+   - `device_identity_rotations`, `device_identity_history`, and
+     `device_identity_rotation_audit` have RLS enabled.
+   - anon/authenticated cannot execute the v6 issue/commit/expiry RPCs and
+     `service_role` can execute them.
+   - `device_identity_rotation_audit_immutable_v6` exists.
+   - the partial unique indexes allow only one active history identity per
+     device and one issued owner per candidate key.
+5. Only then roll out Node instances. Probe challenge idempotency in staging
+   with a persisted UUIDv4 `Idempotency-Key`; do not commit a production device
+   rotation as a deployment smoke test.
+
+`supabase/migrations/20260722041138_device_identity_rotation_v6.sql` is the
+canonical schema source. `sql/security_v6.sql` is a byte-for-byte operational
+mirror for server-only recovery and review workflows. The Node migration
+contract test rejects any drift; never edit or deploy the mirror independently.
+
+## Account login registration and removal
+
+Account lifecycle is shared by all native clients; see
+[`Docs/account-device-lifecycle.md`](../../../Docs/account-device-lifecycle.md).
+After a verified login, `POST /api/devices/register-current` registers the exact
+committed signing identity even when the account already contains other devices.
+This requires `20261001150000_account_login_device_registration.sql` and
+`20261001170000_pin_account_device_registration_search_path.sql`; the reviewed
+production policy enables `SIGNALING_ALLOW_ACCOUNT_LOGIN_REGISTRATION` explicitly.
+
+Apply `20261001190000_account_device_removal.sql` before deploying
+`POST /api/devices/remove`. Take a restorable backup, dry-run the migration chain,
+then verify the new columns, exact function/search path and service-role-only
+execution before switching the service. Keep existing runtime configuration.
+Removal checks the real active caller, verified account owner and exact target
+signing identity. A revoked tombstone and revoked key history prevent automatic
+re-registration. Do not delete existing device identities for deployment smoke;
+positive removal acceptance uses disposable test identities only. A partial
+Redis cleanup failure remains an explicit failure after the database revocation.
+
+## Presence metadata schema (v7)
+
+`/api/devices/list` and the presence persistence path require the v7 schema.
+Apply `supabase/migrations/20260905120000_device_presence_metadata_v7.sql`
+(mirror: `sql/security_v7.sql`, byte-identical, enforced by
+`test/security_v7_sql.test.js`) before rolling out a server build that exposes
+the account device list:
+
+1. Take and verify a restorable database backup.
+2. Apply the canonical v7 migration through the approved Supabase migration
+   pipeline. It is a single transaction (own `BEGIN`/`COMMIT`, lock and
+   statement timeouts, fail-closed self checks) and is idempotent.
+3. Verify before starting the new server:
+   - `public.registered_devices` has row level security enabled and `anon` /
+     `authenticated` hold no privileges on it (the migration's self check
+     raises `security_v7_registered_devices_exposed_to_client_roles` otherwise).
+   - `public.touch_registered_device_presence_v7` exists, `anon` cannot execute
+     it and `service_role` can.
+   - If PostgREST does not see the new RPC immediately, run
+     `notify pgrst, 'reload schema';`.
+4. Only then roll out Node instances. Until the columns exist the server keeps
+   heartbeats alive but answers `persisted:false, persistReason:registry_unavailable`
+   and `/api/devices/list` fails closed with `503 registry_schema_outdated`.
+
+The v7 change is additive. `last_seen_at` on `registered_devices` now also
+advances on every persisted heartbeat (at most once per
+`SIGNALING_PRESENCE_PERSIST_INTERVAL_MS` per device unless the reported metadata
+changed); nothing else reads that column.
+
+The v6 change is additive, so a server rollback may leave the schema installed.
+Do not down-migrate identity history after any rotation has committed. Restore a
+verified pre-migration backup only when no post-migration authority changes must
+be preserved; otherwise use a reviewed forward repair.
+
+Operational maintenance:
+
+- Run `expire_device_identity_grace_v6(<bounded batch size>)` periodically to
+  transition elapsed grace metadata to revoked. Grace records are never valid
+  for new admission; they only describe authority already frozen into existing
+  session tokens.
+- The RPC limits new rotation records to 8 per device and 64 per user in 24
+  hours. Monitor those errors and table growth.
+- Rotation/history/audit evidence is security-sensitive. Archive it under the
+  organization's audit-retention policy through a separately reviewed migration;
+  never update or delete the immutable audit table ad hoc.
+
+## Client-role lock-down for tenant policy and enrollment invites (v8)
+
+`public.tenant_security_policy` and `public.device_enrollment_invites` were
+created by security v5 without row level security and without revoking the
+default Supabase client-role grants, so the shipped anon key could read or
+rewrite tenant policy flags and forge enrollment invites. Apply
+`supabase/migrations/20260905130000_lock_down_tenant_policy_and_enrollment_invites_v8.sql`
+(mirror: `sql/security_v8.sql`, byte-identical, enforced by
+`test/security_v8_sql.test.js`) right after v7:
+
+1. It is privilege-only (RLS on, client roles revoked, `service_role`
+   granted), single-transaction, idempotent, and raises
+   `security_v8_<table>_exposed_to_client_roles` / `security_v8_<table>_rls_disabled`
+   if the boundary is not in place afterwards.
+2. The signaling server needs no change: it reads `tenant_security_policy`
+   with the service role and reaches invites only through SECURITY DEFINER
+   RPCs. Nothing in this repository uses the anon or authenticated role on
+   these tables.
+3. If an external admin tool wrote invites or policy rows through the anon or
+   authenticated role, it will start receiving empty results / permission
+   errors. Move it to the service role or a SECURITY DEFINER RPC; do not
+   re-grant client roles.
+4. Verify with `select relname, relrowsecurity from pg_class where relname in
+   ('tenant_security_policy','device_enrollment_invites');` (both `true`) and
+   `select has_table_privilege('anon','public.device_enrollment_invites','SELECT');`
+   (`false`).
+
+## 2. Deploy from local workspace
+
+```bash
+bash Server/skybridge-signaling/deploy/scripts/deploy_remote.sh \
+  --host <server-ip-or-dns> \
+  --user <ssh-user> \
+  --node-runtime-dir /opt/skybridge-signaling/runtime/<reviewed-node-distribution>
+```
+
+Common flags:
+- `--service skybridge-signaling`
+- `--app-dir /opt/skybridge-signaling`
+- `--health-url http://127.0.0.1:8443/readyz`
+- `--node-runtime-dir` is required. Install and review the matching official Node
+  distribution before deployment; the deploy script never upgrades system Node.
+- `--skip-systemd`: prepare and verify the isolated candidate only; leave the
+  `current` symlink and running service unchanged.
+
+Deployment verifies the same contract before promotion and after restarting the
+service: the packaged build fingerprint must match the root, health and readiness
+responses, both account-device endpoints must be advertised, and the actual
+unauthenticated requests must return `401 missing_bearer_token`. A healthy older
+process or an entry proxy returning a generic `401` does not satisfy this gate.
+The candidate boot log remains in its release directory on success or failure.
+If verification after restart fails, deployment uses the existing rollback path.
+
+This route and build check does not verify database schema, authenticated account
+access or device interoperability. Complete the schema prerequisites above and
+the authenticated product acceptance separately before promotion.
+
+### Selected Node runtime and service rollback
+
+The selected directory must contain `bin/node` and its bundled
+`lib/node_modules/npm/bin/npm-cli.js`. Preflight verifies Node 24.6.0 or newer and
+the host platform/architecture. Preflight, npm installation and candidate startup
+use that Node explicitly. The service receives a managed
+`/etc/systemd/system/<service>.service.d/20-node-runtime.conf` drop-in that resets
+`ExecStart` to the same absolute Node executable. System Node and the machine's
+global `PATH` are unchanged.
+
+`APP_DIR` and `APP_DIR/releases` must be deployment-managed and not writable by
+the service account, including through ACLs. Review and fix only those named
+parent directories when migrating an older installation. The archive is extracted
+without restoring workstation ownership. Only the candidate's `node_modules` and
+dedicated npm cache are writable by the service during `npm ci`; they are frozen
+under root ownership afterwards, including when installation fails. Deployment
+never recursively changes ownership of `APP_DIR`, shared configuration or the
+selected Node distribution.
+
+Before changing service configuration, the candidate receives a private
+`.service-runtime-journal` with the original unit and managed drop-in, preserving
+their contents, ownership, permissions and absence state. Both automatic rollback
+and `rollback_remote.sh` use `release_runtime_journal.sh` to restore this same
+configuration before reloading and restarting the service. A legacy direct
+predecessor needs no new runtime metadata: its captured original unit and missing
+drop-in state restore its original default-Node behavior.
+
+```bash
+bash Server/skybridge-signaling/deploy/scripts/rollback_remote.sh \
+  --host <server-ip-or-dns> --user <ssh-user>
+```
+
+The default target is the recorded direct predecessor, never the newest directory
+by modification time. `--release <name>` may select another release only when its
+Node binding and successful `.deployment-verified` record exist. Prepared or failed
+candidates and unknown legacy history are rejected rather than assigned a guessed
+runtime. This restores service configuration and the current release; it does not
+roll back database migrations, shared environment configuration or runtime files.
+
+Rollback also requires the configured health endpoint to return the exact target
+build. It uses the target's `.skybridge-build-fingerprint`, or the private
+pre-promotion health receipt for a direct legacy predecessor without that file.
+HTTP 200 with a different or missing build is a rollback verification failure.
+Legacy rollback does not require the newer account-device routes.
+
+SSH and SCP use batch mode, strict existing host-key verification, a 10-second
+connection timeout and bounded server-alive checks. No user SSH configuration is
+modified, and a connection or authentication failure cannot open an interactive
+password prompt or claim successful deployment.
+
+## 3. Post-deploy smoke checks
+
+```bash
+bash Server/skybridge-signaling/deploy/scripts/smoke_local.sh \
+  http://127.0.0.1:8443 "" 'skybridge-signaling/<expected-release-name>'
+```
+
+Use the fingerprint from the reviewed release's `.skybridge-build-fingerprint`
+file; do not derive the expected value from the server being checked. The third
+argument is required unless `SKYBRIDGE_EXPECTED_SERVER_BUILD_FINGERPRINT` is set.
+An explicitly empty second argument keeps every deployment probe credential-free.
+The base URL must use HTTP(S), without credentials, query or fragment. Redirects
+are rejected, TLS verification stays enabled, and response bodies are never
+printed, including TURN credentials.
+
+For a real PNVS hook probe in staging:
+
+```bash
+SUPABASE_SEND_SMS_HOOK_SECRET='<staging hook secret>' \
+bash Server/skybridge-signaling/deploy/scripts/probe_supabase_send_sms_hook.sh \
+  https://<staging-host> \
+  <mainland-test-phone>
+```
+
+Expected behavior:
+- `GET /` returns JSON with advertised endpoints.
+- `GET /health` returns `200`.
+- `GET /health` includes an `sms` readiness block.
+- `GET /readyz` returns `200` only when the signaling backend and required SMS OTP dependencies are ready.
+- `GET /`, `GET /health` and `GET /readyz` report the exact expected `serverBuildFingerprint`.
+- `GET /` advertises `/api/presence/register` and `/api/devices/list`.
+- Unauthenticated `POST /api/presence/register` with `{}` and `GET /api/devices/list`
+  both return `401` with JSON `error=missing_bearer_token`.
+- `probe_supabase_send_sms_hook.sh` returns `200`, then PNVS control panel shows a matching sending record.
+- `GET /api/turn/credentials` is not `404`.
+- `GET /api/turn/credentials` returns short-lived mode (`mode=shared_secret_hmac`) in production.
+- `POST /api/webrtc/register-code` returns a short-lived `code + initiatorToken`.
+- `POST /api/webrtc/register-session` returns a server-issued `sessionId + signalingToken`.
+
+If `REQUIRE_SMS_AUTH_READY=true`, production readiness now fails closed until:
+- `SUPABASE_SEND_SMS_HOOK_SECRET` is configured
+- the selected Aliyun provider is fully configured
+- `/readyz` reports `smsReady=true`
+
+Recommended pre-release regression:
+
+```bash
+bash Scripts/check_turn_tls_regression.sh https://api.nebula-technologies.net
+```
+
+## 3.1 Low-risk multi-instance sticky/session-shard rollout
+
+Recommended order:
+
+1. Keep `SIGNALING_STATE_BACKEND=memory`
+2. Enable `ENABLE_STICKY_HINT_COOKIE=true`
+3. Deploy 2+ Node instances with unique `INSTANCE_ID`
+4. Give each instance a non-overlapping `INSTANCE_CODE_PREFIXES`
+   - Example A: `ABCDEFGHJKLMNPQ`
+   - Example B: `RSTUVWXYZ23456789`
+5. Put Nginx in front using `deploy/nginx/skybridge-signaling-multi-instance-sticky.conf`
+6. Verify:
+   - `GET /health` returns `instanceId`
+   - responses include `X-SkyBridge-Instance`
+   - responses from sharded nodes include `X-SkyBridge-Code-Prefixes`
+   - `/api/lookup/:code` / `/api/webrtc/lookup/:code` / `/api/answer/:code` / `/api/ice/:sessionId` are routed by the first code/session character
+   - `/ws?shard=<sessionId>` lands on the same backend instance for both peers
+
+Why this is low-risk:
+
+- No signaling payload change
+- No Redis dependency introduced into the hot path
+- Existing in-memory semantics remain valid because `/api/register`, `/api/webrtc/register-code`, and `/api/webrtc/register-session` emit only ids owned by the current instance
+- Later HTTP + WebSocket traffic deterministically returns to that same instance by code/session prefix
+
+Operational note:
+
+- `/api/register`, `/api/webrtc/register-code`, and `/api/webrtc/register-session` can hit any instance; that instance becomes the owner by generating only codes/session ids from its configured prefix bucket.
+- `/api/lookup/:code`, `/api/webrtc/lookup/:code`, `/api/answer/:code`, and `/api/ice/:sessionId` should be routed by code/session prefix extracted from the path.
+- `/ws` should route by `?shard=<sessionId>` (first character) to the same backend.
+- The sticky hint cookie is a supplemental fallback for browser/cookie-aware clients, but current Apple `NWWebSocket` clients should not rely on it.
+- Do **not** use `$request_uri` for prefix extraction because query strings will break the match; use `$uri` for REST path extraction.
+
+Example 2-node split:
+
+- `signaling-a`: `INSTANCE_CODE_PREFIXES=ABCDEFGHJKLMNPQ`
+- `signaling-b`: `INSTANCE_CODE_PREFIXES=RSTUVWXYZ23456789`
+
+## 3.2 Preparing for future Redis without breaking today
+
+Before enabling Redis in production, keep these invariants:
+
+- Treat current mode as `SIGNALING_STATE_BACKEND=memory`
+- Keep the sticky/session-shard topology even after Redis is introduced
+- Expose `INSTANCE_ID` in logs/headers so cross-instance routing can be debugged
+
+Recommended Redis mode for first rollout:
+
+- Use a **single-primary Redis/Valkey deployment (cluster mode disabled)**
+- Keep one same-region replica for failover/backup if desired
+- Keep sticky/session-shard routing enabled during Redis rollout
+- Store only short-lived signaling state; do not move media/data payloads into Redis
+
+When moving to Redis later, the minimum shared state scope is:
+
+1. `connectionCodes`
+2. `iceCandidates`
+3. room membership metadata (`sessionId -> instanceId/deviceId`)
+4. inter-instance message fan-out for `/ws`
+
+Important:
+
+- Do **not** move only `rooms` to Redis while leaving `connectionCodes` / `iceCandidates` in memory.
+- Do **not** remove sticky routing on day one of Redis migration; keep it until Redis pub/sub and cleanup semantics are proven.
+- Do **not** use plain URI hashing for memory mode unless `register` can deterministically produce codes that map back to the same backend.
+- When Redis is ready, you can stop caring about `INSTANCE_CODE_PREFIXES` ownership for correctness, but keeping it during rollout still reduces cross-instance fan-out and simplifies debugging.
+- The server now supports `SIGNALING_STATE_BACKEND=redis` with:
+  - `SIGNALING_REDIS_URL`
+  - `SIGNALING_REDIS_KEY_PREFIX`
+  - `SIGNALING_REDIS_CHANNEL_PREFIX`
+  - `ROOM_MEMBERSHIP_TTL_MS`
+  - `LEGACY_BINDING_TTL_MS`
+
+## 4. Rollback
+
+```bash
+bash Server/skybridge-signaling/deploy/scripts/rollback_remote.sh \
+  --host <server-ip-or-dns> \
+  --user <ssh-user>
+```
+
+Optional explicit release target:
+
+```bash
+bash Server/skybridge-signaling/deploy/scripts/rollback_remote.sh \
+  --host <server-ip-or-dns> \
+  --user <ssh-user> \
+  --release <release-name>
+```
+
+## Security notes
+
+- Keep `ALLOW_INSECURE=false` in production.
+- Must configure `TURN_SHARED_SECRET` for short-lived TURN REST credentials.
+- Keep `TURN_ALLOW_STATIC_FALLBACK=false` in production (enable only for temporary rollback).
+- Keep `TURN_URIS` dual-stack (`turns:...:5349?transport=tcp` first, `turn:...:3478?transport=udp` fallback).
+- Keep `TURN_ENFORCE_API_KEY=true` and use a deployment-specific `TURN_CLIENT_API_KEY` aligned with app-side `SKYBRIDGE_CLIENT_API_KEY` (do not reuse a repo-wide constant).
+- Keep Node bound to localhost (`HOST=127.0.0.1`) and expose through Nginx TLS only.
+- For Nginx-terminated client mTLS, include `nginx/snippets/skybridge-client-mtls.conf`, keep `TLS_CA` empty in Node, set `SKYBRIDGE_SIGNALING_MTLS_CLIENT_CERT_SOURCE=trusted_proxy`, and keep `SKYBRIDGE_SIGNALING_TRUSTED_PROXY_MTLS_REMOTE_ADDRESSES` limited to the Nginx-to-Node source addresses.
+- In multi-instance mode, keep `ENABLE_STICKY_HINT_COOKIE=true` and `STICKY_HINT_COOKIE_SECURE=true`.
+- In memory-mode multi-instance deployments, `INSTANCE_CODE_PREFIXES` must be configured and must not overlap across instances.
+
+## Same-account listener routes
+
+Desktop presence may include `lanControlPort` (integer 1–65535) together with
+`lanAddresses` for the actual ready MAIN listener. An omitted or null port
+withdraws a prior route. This field stays in ephemeral presence; it is not a
+new database column, RPC argument, or authority grant. The existing v7 presence
+and account registration/removal prerequisites above still apply.
+
+`GET /api/devices/list` returns `lanControlRoute` only for the exact active
+registered signer with live presence. Its `addresses`, `port`, and `expiresAt`
+are one routing observation. Clients must validate the full identity, keep the
+locally verified account scope, and consume the server-relative lifetime
+(`expiresAt - generatedAt`, capped at 90 seconds) starting before the request.
+Request latency and device sleep consume that lifetime. Expiry retires pending
+route selection; it does not revoke an established authenticated connection.
+A route is not proof of LAN reachability and does not cross network isolation.
+
+For rollout, compare the reviewed runtime files against the current release,
+keep a rollback target, then use the existing candidate readiness and promotion
+flow. Package reviewed source only; never include local environment files or
+unrelated working-tree changes. The current presence-result validation change
+must travel with `server.js` and `lib/registry_store.js`; an invalid RPC response
+must remain a registry failure rather than marking an active device inactive.
+
+Acceptance requires real desktop heartbeat publication, a mobile account list
+with the same current port, successful ordinary-entry connection, then another
+connection after restarting the desktop listener. Verify listener withdrawal,
+account change, expiry, and a stale response as separate negative cases. The
+HTTP fixture tests and a healthy server do not satisfy that device acceptance.

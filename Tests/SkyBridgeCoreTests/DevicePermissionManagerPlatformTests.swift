@@ -128,8 +128,7 @@ struct DevicePermissionManagerPlatformExtensionTests {
             #expect(permissions[.accessibility] != nil)
             #expect(permissions[.localNetwork] != nil)
             
- // 本地网络权限应始终授权
-            #expect(permissions[.localNetwork] == .authorized)
+            #expect(permissions[.localNetwork] == .notDetermined)
         }
     }
 }

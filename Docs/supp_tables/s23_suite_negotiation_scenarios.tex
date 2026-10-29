@@ -1,0 +1,29 @@
+\begin{table*}[!t]
+\centering
+\caption{Suite negotiation scenarios under the two-attempt strategy (homogeneous per attempt).}
+\label{tab:suite-negotiation-scenarios}
+\begin{tabular}{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.4219}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.3281}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.1406}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.1094}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+Initiator attempt(s)
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Responder Capability
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Outcome
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Notes
+\end{minipage} \\
+\midrule
+Attempt 1: PQC-only & PQC available & PQC established & Best available selected \\
+Attempt 1: PQC-only; Attempt 2: classic-only & Classic only (no PQC material) & Classic established & Graceful fallback (evented) \\
+PQC-only (\texttt{strictPQC}, bootstrap-assisted) & Missing/stale paired KEM key & PQC established after rekey & Classic channel is control-only before rekey \\
+PQC-only (\texttt{strictPQC}) & Classic only & Handshake failed & Policy enforced (no fallback) \\
+Classic-only & PQC available & Classic established & Initiator policy respected \\
+\bottomrule
+\end{tabular}
+\end{table*}
+

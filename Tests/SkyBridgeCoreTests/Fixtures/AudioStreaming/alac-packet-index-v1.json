@@ -1,0 +1,542 @@
+{
+  "schema": "alac-packet-index-v1",
+  "scope": "Independent packet offsets/sizes/durations for valid fixtures; not a decoder or playback witness",
+  "vectors": [
+    {
+      "name": "44100-1-s16",
+      "sourceSha256": "41f963fac0681c8c6ad5fd235ef0ded02d2af7916f2f34750e24ad798ccdb177",
+      "packets": [
+        {
+          "index": 0,
+          "offset": 4096,
+          "length": 8196,
+          "firstFrameIndex": 0,
+          "frames": 4096
+        },
+        {
+          "index": 1,
+          "offset": 12292,
+          "length": 670,
+          "firstFrameIndex": 4096,
+          "frames": 331
+        }
+      ]
+    },
+    {
+      "name": "44100-1-s20",
+      "sourceSha256": "e92d12bdfdf059dd16b12960e41daf8a06f7309c0dbc9cabb3ebdf01974cdd8f",
+      "packets": [
+        {
+          "index": 0,
+          "offset": 4096,
+          "length": 10244,
+          "firstFrameIndex": 0,
+          "frames": 4096
+        },
+        {
+          "index": 1,
+          "offset": 14340,
+          "length": 835,
+          "firstFrameIndex": 4096,
+          "frames": 331
+        }
+      ]
+    },
+    {
+      "name": "44100-1-s24",
+      "sourceSha256": "732989d24c8e6a0b3726ed41c4e0ed7e1487a3b6ff5af111494b0c34f672dcd6",
+      "packets": [
+        {
+          "index": 0,
+          "offset": 4096,
+          "length": 11202,
+          "firstFrameIndex": 0,
+          "frames": 4096
+        },
+        {
+          "index": 1,
+          "offset": 15298,
+          "length": 1001,
+          "firstFrameIndex": 4096,
+          "frames": 331
+        }
+      ]
+    },
+    {
+      "name": "44100-1-s32",
+      "sourceSha256": "3bd685a632e238dff317fb231638d2c13d249e297db78047b2c886b949f16da0",
+      "packets": [
+        {
+          "index": 0,
+          "offset": 4096,
+          "length": 11165,
+          "firstFrameIndex": 0,
+          "frames": 4096
+        },
+        {
+          "index": 1,
+          "offset": 15261,
+          "length": 1006,
+          "firstFrameIndex": 4096,
+          "frames": 331
+        }
+      ]
+    },
+    {
+      "name": "44100-2-s16",
+      "sourceSha256": "18f01541a78d5abd3db439c5496b0f122c9c52dd377a9ffdaae26759d2df7c16",
+      "packets": [
+        {
+          "index": 0,
+          "offset": 4096,
+          "length": 16388,
+          "firstFrameIndex": 0,
+          "frames": 4096
+        },
+        {
+          "index": 1,
+          "offset": 20484,
+          "length": 1332,
+          "firstFrameIndex": 4096,
+          "frames": 331
+        }
+      ]
+    },
+    {
+      "name": "44100-2-s20",
+      "sourceSha256": "f16140b6f039bcc4c31af419e13f9a08121e993100e5b5c64e1ae0485f1b3cc8",
+      "packets": [
+        {
+          "index": 0,
+          "offset": 4096,
+          "length": 20484,
+          "firstFrameIndex": 0,
+          "frames": 4096
+        },
+        {
+          "index": 1,
+          "offset": 24580,
+          "length": 1663,
+          "firstFrameIndex": 4096,
+          "frames": 331
+        }
+      ]
+    },
+    {
+      "name": "44100-2-s24",
+      "sourceSha256": "cd3fcd1ce9f6d2b14b15a248d6e4e36c38df84c03b2511bd32bad8ead035ef2f",
+      "packets": [
+        {
+          "index": 0,
+          "offset": 4096,
+          "length": 24580,
+          "firstFrameIndex": 0,
+          "frames": 4096
+        },
+        {
+          "index": 1,
+          "offset": 28676,
+          "length": 1994,
+          "firstFrameIndex": 4096,
+          "frames": 331
+        }
+      ]
+    },
+    {
+      "name": "44100-2-s32",
+      "sourceSha256": "dc39163618ed85e9935e9ec424b7e11a2aab17cbc2922c37e520a7a5a3fdba7d",
+      "packets": [
+        {
+          "index": 0,
+          "offset": 4096,
+          "length": 21628,
+          "firstFrameIndex": 0,
+          "frames": 4096
+        },
+        {
+          "index": 1,
+          "offset": 25724,
+          "length": 1902,
+          "firstFrameIndex": 4096,
+          "frames": 331
+        }
+      ]
+    },
+    {
+      "name": "48000-1-s16",
+      "sourceSha256": "ad594933d6cadc5cf33eed9b8f27e9b48fb7a7b0b5f7af0e28a4d8eef01de34b",
+      "packets": [
+        {
+          "index": 0,
+          "offset": 4096,
+          "length": 8196,
+          "firstFrameIndex": 0,
+          "frames": 4096
+        },
+        {
+          "index": 1,
+          "offset": 12292,
+          "length": 1450,
+          "firstFrameIndex": 4096,
+          "frames": 721
+        }
+      ]
+    },
+    {
+      "name": "48000-1-s20",
+      "sourceSha256": "8cefd8708781e5820f6d7face6dfa81f303054c2f676f47920efbd2eb297bcd6",
+      "packets": [
+        {
+          "index": 0,
+          "offset": 4096,
+          "length": 10244,
+          "firstFrameIndex": 0,
+          "frames": 4096
+        },
+        {
+          "index": 1,
+          "offset": 14340,
+          "length": 1810,
+          "firstFrameIndex": 4096,
+          "frames": 721
+        }
+      ]
+    },
+    {
+      "name": "48000-1-s24",
+      "sourceSha256": "69f32b998e37c202b2dd2bb0931d59de4a60a18cfb307f410d301a8d201a0b4e",
+      "packets": [
+        {
+          "index": 0,
+          "offset": 4096,
+          "length": 11202,
+          "firstFrameIndex": 0,
+          "frames": 4096
+        },
+        {
+          "index": 1,
+          "offset": 15298,
+          "length": 2171,
+          "firstFrameIndex": 4096,
+          "frames": 721
+        }
+      ]
+    },
+    {
+      "name": "48000-1-s32",
+      "sourceSha256": "976cbb8670d7ec8eb22af88e851dfd3379034d099f9b5167be088557915d8bf2",
+      "packets": [
+        {
+          "index": 0,
+          "offset": 4096,
+          "length": 11165,
+          "firstFrameIndex": 0,
+          "frames": 4096
+        },
+        {
+          "index": 1,
+          "offset": 15261,
+          "length": 2160,
+          "firstFrameIndex": 4096,
+          "frames": 721
+        }
+      ]
+    },
+    {
+      "name": "48000-2-s16",
+      "sourceSha256": "d3114d4af5256079facd17764319898d5b75475267d32ee224f3248627b86665",
+      "packets": [
+        {
+          "index": 0,
+          "offset": 4096,
+          "length": 16388,
+          "firstFrameIndex": 0,
+          "frames": 4096
+        },
+        {
+          "index": 1,
+          "offset": 20484,
+          "length": 2892,
+          "firstFrameIndex": 4096,
+          "frames": 721
+        }
+      ]
+    },
+    {
+      "name": "48000-2-s20",
+      "sourceSha256": "db63226780f608b1e7b933ca0ea639966b0ed48e12fe2851362a26e9dfaafc42",
+      "packets": [
+        {
+          "index": 0,
+          "offset": 4096,
+          "length": 20484,
+          "firstFrameIndex": 0,
+          "frames": 4096
+        },
+        {
+          "index": 1,
+          "offset": 24580,
+          "length": 3613,
+          "firstFrameIndex": 4096,
+          "frames": 721
+        }
+      ]
+    },
+    {
+      "name": "48000-2-s24",
+      "sourceSha256": "34f940ba7591ee804e2fb94c06102022f34631eb51e907a6d6630d865c76a4bc",
+      "packets": [
+        {
+          "index": 0,
+          "offset": 4096,
+          "length": 24580,
+          "firstFrameIndex": 0,
+          "frames": 4096
+        },
+        {
+          "index": 1,
+          "offset": 28676,
+          "length": 4334,
+          "firstFrameIndex": 4096,
+          "frames": 721
+        }
+      ]
+    },
+    {
+      "name": "48000-2-s32",
+      "sourceSha256": "13eb6d30c814e3973f13a0ab5fcdc958835b1f0d8fe15fb2b5a28e3b4a2e3175",
+      "packets": [
+        {
+          "index": 0,
+          "offset": 4096,
+          "length": 21628,
+          "firstFrameIndex": 0,
+          "frames": 4096
+        },
+        {
+          "index": 1,
+          "offset": 25724,
+          "length": 4106,
+          "firstFrameIndex": 4096,
+          "frames": 721
+        }
+      ]
+    },
+    {
+      "name": "96000-1-s16",
+      "sourceSha256": "2633b40630b6c1369266fcf7b1482208d14267d22e4abbf0745ae1155e2b963a",
+      "packets": [
+        {
+          "index": 0,
+          "offset": 4096,
+          "length": 8196,
+          "firstFrameIndex": 0,
+          "frames": 4096
+        },
+        {
+          "index": 1,
+          "offset": 12292,
+          "length": 8196,
+          "firstFrameIndex": 4096,
+          "frames": 4096
+        },
+        {
+          "index": 2,
+          "offset": 20488,
+          "length": 2858,
+          "firstFrameIndex": 8192,
+          "frames": 1425
+        }
+      ]
+    },
+    {
+      "name": "96000-1-s20",
+      "sourceSha256": "56f222deeca74a7a4f4e4a2f6582fdbf5b22cf5d65d60e84374ff3183e365e62",
+      "packets": [
+        {
+          "index": 0,
+          "offset": 4096,
+          "length": 10244,
+          "firstFrameIndex": 0,
+          "frames": 4096
+        },
+        {
+          "index": 1,
+          "offset": 14340,
+          "length": 10244,
+          "firstFrameIndex": 4096,
+          "frames": 4096
+        },
+        {
+          "index": 2,
+          "offset": 24584,
+          "length": 3570,
+          "firstFrameIndex": 8192,
+          "frames": 1425
+        }
+      ]
+    },
+    {
+      "name": "96000-1-s24",
+      "sourceSha256": "3a5802df57411546d09bc9435710ecfe471c314aa9f35023fe86e4279ed7c64d",
+      "packets": [
+        {
+          "index": 0,
+          "offset": 4096,
+          "length": 11202,
+          "firstFrameIndex": 0,
+          "frames": 4096
+        },
+        {
+          "index": 1,
+          "offset": 15298,
+          "length": 12159,
+          "firstFrameIndex": 4096,
+          "frames": 4096
+        },
+        {
+          "index": 2,
+          "offset": 27457,
+          "length": 4283,
+          "firstFrameIndex": 8192,
+          "frames": 1425
+        }
+      ]
+    },
+    {
+      "name": "96000-1-s32",
+      "sourceSha256": "c2ddbbd9470ed0d038623bc8ab3727b9e5173886d6aaa146a1d2c48025f98dc5",
+      "packets": [
+        {
+          "index": 0,
+          "offset": 4096,
+          "length": 11165,
+          "firstFrameIndex": 0,
+          "frames": 4096
+        },
+        {
+          "index": 1,
+          "offset": 15261,
+          "length": 12273,
+          "firstFrameIndex": 4096,
+          "frames": 4096
+        },
+        {
+          "index": 2,
+          "offset": 27534,
+          "length": 4452,
+          "firstFrameIndex": 8192,
+          "frames": 1425
+        }
+      ]
+    },
+    {
+      "name": "96000-2-s16",
+      "sourceSha256": "83c715185979467d41593de1dfe832888d7b0a53ac8ad60e17f0876235ebc4c9",
+      "packets": [
+        {
+          "index": 0,
+          "offset": 4096,
+          "length": 16388,
+          "firstFrameIndex": 0,
+          "frames": 4096
+        },
+        {
+          "index": 1,
+          "offset": 20484,
+          "length": 16388,
+          "firstFrameIndex": 4096,
+          "frames": 4096
+        },
+        {
+          "index": 2,
+          "offset": 36872,
+          "length": 5708,
+          "firstFrameIndex": 8192,
+          "frames": 1425
+        }
+      ]
+    },
+    {
+      "name": "96000-2-s20",
+      "sourceSha256": "d44a156b942f401be13f42239e18711a47fbaf8bd0843a732a0e346e3549581b",
+      "packets": [
+        {
+          "index": 0,
+          "offset": 4096,
+          "length": 20484,
+          "firstFrameIndex": 0,
+          "frames": 4096
+        },
+        {
+          "index": 1,
+          "offset": 24580,
+          "length": 20484,
+          "firstFrameIndex": 4096,
+          "frames": 4096
+        },
+        {
+          "index": 2,
+          "offset": 45064,
+          "length": 7133,
+          "firstFrameIndex": 8192,
+          "frames": 1425
+        }
+      ]
+    },
+    {
+      "name": "96000-2-s24",
+      "sourceSha256": "ffcc03bed4ad411b909dc8f682ffdb9a4bf0ae69ae6a1c7c5d22ca9ec67ff926",
+      "packets": [
+        {
+          "index": 0,
+          "offset": 4096,
+          "length": 24580,
+          "firstFrameIndex": 0,
+          "frames": 4096
+        },
+        {
+          "index": 1,
+          "offset": 28676,
+          "length": 24580,
+          "firstFrameIndex": 4096,
+          "frames": 4096
+        },
+        {
+          "index": 2,
+          "offset": 53256,
+          "length": 8558,
+          "firstFrameIndex": 8192,
+          "frames": 1425
+        }
+      ]
+    },
+    {
+      "name": "96000-2-s32",
+      "sourceSha256": "a7967cb42f104cfc0b8f6f65c356b23009f4ca67d349ead5d5f1cc3df82be788",
+      "packets": [
+        {
+          "index": 0,
+          "offset": 4096,
+          "length": 21628,
+          "firstFrameIndex": 0,
+          "frames": 4096
+        },
+        {
+          "index": 1,
+          "offset": 25724,
+          "length": 23070,
+          "firstFrameIndex": 4096,
+          "frames": 4096
+        },
+        {
+          "index": 2,
+          "offset": 48794,
+          "length": 7923,
+          "firstFrameIndex": 8192,
+          "frames": 1425
+        }
+      ]
+    }
+  ]
+}

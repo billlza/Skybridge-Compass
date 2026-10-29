@@ -222,6 +222,7 @@ public struct LimitedJSONDecoder: Sendable {
 
 // MARK: - Convenience Extensions
 
+#if DEBUG || SKYBRIDGE_TESTING
 extension LimitedJSONDecoder {
     
  /// Create a decoder for testing with custom limits
@@ -239,3 +240,4 @@ extension LimitedJSONDecoder {
         return LimitedJSONDecoder(limits: limits, maxMessageBytes: maxMessageBytes)
     }
 }
+#endif

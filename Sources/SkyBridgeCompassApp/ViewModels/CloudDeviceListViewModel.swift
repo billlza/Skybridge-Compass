@@ -37,13 +37,34 @@ public final class CloudDeviceListViewModel: ObservableObject {
     }
     
     public func connectToDevice(_ device: iCloudDevice) {
-        SkyBridgeLogger.discovery.info("Connecting to device: \(device.name, privacy: .public)")
+        Task { await connectToDeviceAsync(device) }
     }
-    
+
+    public func connectToDeviceAsync(_ device: iCloudDevice) async {
+        do {
+            guard let liveDevice = UnifiedOnlineDeviceManager.shared.resolvedOnlineDevice(for: device),
+                  UnifiedOnlineDeviceManager.shared.hasResolvedConnectableControlRoute(for: liveDevice) else {
+                errorMessage = "没有发现这台设备的本地 P2P/Bonjour 端点，iCloud 自动连接暂不可用。请确认 iPad 与 Mac 在同一局域网、SkyBridge 在前台，并刷新设备。"
+                return
+            }
+
+            try await OnlineDeviceConnectionCoordinator.connect(to: liveDevice)
+            errorMessage = nil
+        } catch {
+            let localized = HandshakeErrorLocalizer.localizedMessage(for: error)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            errorMessage = localized.isEmpty ? error.localizedDescription : localized
+            SkyBridgeLogger.discovery.error("iCloud device connect failed: \(device.name, privacy: .public) \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
  // MARK: - Compatibility Properties
     
     public var authorizedDevices: [iCloudDevice] {
-        devices
+        CloudDevicePresentationPolicy.visibleICloudDevices(
+            from: devices,
+            currentDeviceId: currentDeviceId
+        )
     }
     
     public var accountStatusDescription: String {

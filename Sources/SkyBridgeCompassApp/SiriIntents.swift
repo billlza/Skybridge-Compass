@@ -4,7 +4,8 @@ import SkyBridgeCore
 @available(macOS 14.0, *)
 struct StartSkyBridgeSessionIntent: AppIntent {
     static let title: LocalizedStringResource = "连接云桥司南设备"
-    static let description = IntentDescription("通过Siri直接唤醒云桥司南并连接指定的远程终端。")
+    static let description = IntentDescription("通过Siri唤醒云桥司南并准备指定远程终端的连接确认。")
+    static let openAppWhenRun = true
 
     @Parameter(title: "设备名称")
     var deviceName: String
@@ -19,7 +20,7 @@ struct StartSkyBridgeSessionIntent: AppIntent {
             object: nil,
             userInfo: [SkyBridgeIntentPayloadKey.deviceName: deviceName]
         )
-        return .result(dialog: "已为您唤醒云桥司南，准备连接 \(deviceName)")
+        return .result(dialog: "已为您唤醒云桥司南，请在应用内确认连接 \(deviceName)")
     }
 }
 

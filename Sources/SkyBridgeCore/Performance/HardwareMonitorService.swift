@@ -1,3 +1,8 @@
+// macOS-exclusive: built on macOS-only APIs (AppKit / IOKit / ScreenCaptureKit / CoreWLAN /
+// MetalFX / ServiceManagement / ApplicationServices / CoreGraphics display services).
+// Excluded from other platforms so SkyBridgeCore can be the single shared core for iOS as
+// well. No behaviour changes on macOS.
+#if os(macOS)
 //
 // HardwareMonitorService.swift
 // SkyBridgeCore
@@ -26,6 +31,12 @@ public final class HardwareMonitorService: ObservableObject {
     // MARK: - Singleton
 
     public static let shared = HardwareMonitorService()
+    private static let configurationStore = CodablePersistenceStore<HardwareMonitorConfiguration>(
+        location: .protectedApplicationSupport(
+            path: "HardwareMonitor/configuration.json",
+            legacyUserDefaultsKey: "com.skybridge.hardware.config"
+        )
+    )
 
     // MARK: - Published Properties
 
@@ -117,12 +128,13 @@ public final class HardwareMonitorService: ObservableObject {
     // MARK: - Private Methods - Collection
 
     private func collectMetrics() async {
+        let unifiedSnapshot = await UnifiedMetricsBackend.shared.collectSnapshot(force: false)
         let cpu = configuration.monitorCPU ? collectCPUMetrics() : .zero
         let memory = configuration.monitorMemory ? collectMemoryMetrics() : .zero
-        let gpu = configuration.monitorGPU ? collectGPUMetrics() : .zero
+        let gpu = configuration.monitorGPU ? collectGPUMetrics(from: unifiedSnapshot) : .zero
         let network = configuration.monitorNetwork ? collectNetworkMetrics() : .zero
         let disk = configuration.monitorDisk ? collectDiskMetrics() : .zero
-        let thermal = configuration.monitorThermal ? collectThermalMetrics() : .normal
+        let thermal = configuration.monitorThermal ? collectThermalMetrics(from: unifiedSnapshot) : .normal
 
         let snapshot = SystemMetricsSnapshot(
             cpu: cpu,
@@ -244,26 +256,15 @@ public final class HardwareMonitorService: ObservableObject {
 
     // MARK: - GPU Metrics
 
-    private func collectGPUMetrics() -> GPUMetrics {
-        // 使用 IOKit 获取 GPU 信息
-        // 注意: Apple Silicon 的 GPU 信息有限
-
-        let gpuName = "Apple Silicon GPU"
-        let rendererUtil: Double = 0
-        let tilerUtil: Double = 0
-        let deviceUtil: Double = 0
-        let vramUsed: UInt64 = 0
-        let vramTotal: UInt64 = 0
-
-        // Metal 设备信息需要在 SkyBridgeUI 层获取
-        // 这里返回基本信息
-
+    private func collectGPUMetrics(from snapshot: UnifiedMetricsSnapshot) -> GPUMetrics {
+        let deviceUtil = snapshot.gpuUsageState.availability == .unavailable ? 0 : snapshot.gpuUsage
+        let vramTotal = ProcessInfo.processInfo.physicalMemory
         return GPUMetrics(
-            gpuName: gpuName,
-            rendererUtilization: rendererUtil,
-            tilerUtilization: tilerUtil,
+            gpuName: "Apple Silicon GPU",
+            rendererUtilization: 0,
+            tilerUtilization: 0,
             deviceUtilization: deviceUtil,
-            vramUsed: vramUsed,
+            vramUsed: 0,
             vramTotal: vramTotal,
             isIntegrated: true
         )
@@ -284,11 +285,13 @@ public final class HardwareMonitorService: ObservableObject {
         defer { freeifaddrs(ifaddr) }
 
         var ptr = ifaddr
-        while ptr != nil {
-            let addr = ptr!.pointee
+        while let current = ptr {
+            let addr = current.pointee
+            ptr = addr.ifa_next
+            guard let addressPtr = addr.ifa_addr else { continue }
 
             // 只统计物理接口
-            if addr.ifa_addr.pointee.sa_family == UInt8(AF_LINK) {
+            if addressPtr.pointee.sa_family == UInt8(AF_LINK) {
                 if let data = addr.ifa_data {
                     let networkData = data.assumingMemoryBound(to: if_data.self).pointee
                     bytesIn += UInt64(networkData.ifi_ibytes)
@@ -297,7 +300,6 @@ public final class HardwareMonitorService: ObservableObject {
                     packetsOut += UInt64(networkData.ifi_opackets)
                 }
             }
-            ptr = addr.ifa_next
         }
 
         // 计算速率
@@ -362,14 +364,12 @@ public final class HardwareMonitorService: ObservableObject {
 
     // MARK: - Thermal Metrics
 
-    private func collectThermalMetrics() -> ThermalMetrics {
-        let state = ProcessInfo.processInfo.thermalState
-
+    private func collectThermalMetrics(from snapshot: UnifiedMetricsSnapshot) -> ThermalMetrics {
         return ThermalMetrics(
-            thermalState: HardwareThermalState.from(state),
-            cpuTemperature: nil, // 需要 SMC 访问
-            gpuTemperature: nil,
-            fanSpeed: nil
+            thermalState: HardwareThermalState.from(ProcessInfo.processInfo.thermalState),
+            cpuTemperature: snapshot.cpuTemperatureState.availability == .unavailable ? nil : snapshot.cpuTemperature,
+            gpuTemperature: snapshot.gpuTemperatureState.availability == .unavailable ? nil : snapshot.gpuTemperature,
+            fanSpeed: snapshot.fanState.availability == .unavailable ? nil : snapshot.fanRPMs.first
         )
     }
 
@@ -397,16 +397,11 @@ public final class HardwareMonitorService: ObservableObject {
     // MARK: - Persistence
 
     private func saveConfiguration() {
-        if let data = try? JSONEncoder().encode(configuration) {
-            UserDefaults.standard.set(data, forKey: "com.skybridge.hardware.config")
-        }
+        try? Self.configurationStore.save(configuration)
     }
 
     private static func loadConfiguration() -> HardwareMonitorConfiguration? {
-        guard let data = UserDefaults.standard.data(forKey: "com.skybridge.hardware.config"),
-              let config = try? JSONDecoder().decode(HardwareMonitorConfiguration.self, from: data) else {
-            return nil
-        }
-        return config
+        Self.configurationStore.load()
     }
 }
+#endif

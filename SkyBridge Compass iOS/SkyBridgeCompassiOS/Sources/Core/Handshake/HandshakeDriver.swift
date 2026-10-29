@@ -1,0 +1,3663 @@
+//
+// HandshakeDriver.swift
+// SkyBridgeCompassiOS
+//
+// 握手驱动器 Actor - 与 macOS SkyBridgeCore 完全兼容
+// 管理握手状态机，实现竞态防护和取消语义
+//
+
+import Foundation
+import CryptoKit
+import SkyBridgeProtocolCore
+
+// MARK: - DiscoveryTransport Protocol
+
+/// 发现传输协议
+public protocol DiscoveryTransport: Sendable {
+    /// 发送数据到对端
+    func send(to peer: PeerIdentifier, data: Data) async throws
+}
+
+private enum IOSResponderCapabilityPayloadError: Error {
+    case payloadTooLarge
+    case collectionTooLarge
+    case stringTooLarge
+    case truncated
+    case invalidUTF8
+    case invalidBoolean
+    case invalidProviderType
+    case trailingBytes
+    case nonCanonicalEncoding
+}
+
+/// Bounded decoder for authenticated MessageB capability data. It validates
+/// attacker-controlled collection counts before allocating storage.
+private struct IOSResponderCapabilityPayloadDecoder {
+    private static let maximumPayloadLength = 4_096
+    private static let maximumCollectionCount = 32
+    private static let maximumStringLength = 512
+
+    private let data: Data
+    private var offset = 0
+
+    init(data: Data) {
+        self.data = data
+    }
+
+    mutating func decode() throws -> CryptoCapabilities {
+        guard data.count <= Self.maximumPayloadLength else {
+            throw IOSResponderCapabilityPayloadError.payloadTooLarge
+        }
+
+        let supportedKEM = try decodeStringArray()
+        let supportedSignature = try decodeStringArray()
+        let supportedAuthProfiles = try decodeStringArray()
+        let supportedAEAD = try decodeStringArray()
+        let pqcAvailable = try decodeBool()
+        let platformVersion = try decodeString()
+        let providerTypeRaw = try decodeString()
+
+        guard let providerType = CryptoProviderType(rawValue: providerTypeRaw) else {
+            throw IOSResponderCapabilityPayloadError.invalidProviderType
+        }
+        guard offset == data.count else {
+            throw IOSResponderCapabilityPayloadError.trailingBytes
+        }
+
+        return CryptoCapabilities(
+            supportedKEM: supportedKEM,
+            supportedSignature: supportedSignature,
+            supportedAuthProfiles: supportedAuthProfiles,
+            supportedAEAD: supportedAEAD,
+            pqcAvailable: pqcAvailable,
+            platformVersion: platformVersion,
+            providerType: providerType
+        )
+    }
+
+    private mutating func decodeStringArray() throws -> [String] {
+        let count = Int(try decodeUInt32())
+        guard count <= Self.maximumCollectionCount else {
+            throw IOSResponderCapabilityPayloadError.collectionTooLarge
+        }
+        var values: [String] = []
+        values.reserveCapacity(count)
+        for _ in 0..<count {
+            values.append(try decodeString())
+        }
+        return values
+    }
+
+    private mutating func decodeString() throws -> String {
+        let length = Int(try decodeUInt32())
+        guard length <= Self.maximumStringLength else {
+            throw IOSResponderCapabilityPayloadError.stringTooLarge
+        }
+        guard offset <= data.count, length <= data.count - offset else {
+            throw IOSResponderCapabilityPayloadError.truncated
+        }
+        let startIndex = data.index(data.startIndex, offsetBy: offset)
+        let endIndex = data.index(startIndex, offsetBy: length)
+        let bytes = data[startIndex..<endIndex]
+        offset += length
+        guard let value = String(data: bytes, encoding: .utf8) else {
+            throw IOSResponderCapabilityPayloadError.invalidUTF8
+        }
+        return value
+    }
+
+    private mutating func decodeBool() throws -> Bool {
+        guard offset < data.count else {
+            throw IOSResponderCapabilityPayloadError.truncated
+        }
+        let index = data.index(data.startIndex, offsetBy: offset)
+        let byte = data[index]
+        offset += 1
+        switch byte {
+        case 0: return false
+        case 1: return true
+        default: throw IOSResponderCapabilityPayloadError.invalidBoolean
+        }
+    }
+
+    private mutating func decodeUInt32() throws -> UInt32 {
+        let width = MemoryLayout<UInt32>.size
+        guard offset <= data.count, width <= data.count - offset else {
+            throw IOSResponderCapabilityPayloadError.truncated
+        }
+        let startIndex = data.index(data.startIndex, offsetBy: offset)
+        let value = UInt32(data[startIndex])
+            | (UInt32(data[data.index(startIndex, offsetBy: 1)]) << 8)
+            | (UInt32(data[data.index(startIndex, offsetBy: 2)]) << 16)
+            | (UInt32(data[data.index(startIndex, offsetBy: 3)]) << 24)
+        offset += width
+        return value
+    }
+}
+
+// MARK: - HandshakeTrustProvider
+
+/// Identity pinning provider for handshake trust checks
+@available(iOS 17.0, *)
+public protocol HandshakeTrustProvider: Sendable {
+    /// Returns the canonical protocol identity fingerprint for `deviceId`.
+    ///
+    /// Implementations must use the same construction as
+    /// `IdentityPublicKeys.authoritativeProtocolFingerprint()`: lowercase hex
+    /// over the protocol signing algorithm tag plus the raw protocol public key
+    /// bytes. Do not return a raw SHA-256 of the wire blob or bare public key.
+    func trustedFingerprint(for deviceId: String) async -> String?
+    /// Returns the exact raw protocol key authorized for an algorithm. This is
+    /// mandatory for ML-DSA-87; fingerprint unions alone cannot authorize it.
+    func trustedProtocolIdentityPublicKey(
+        for deviceId: String,
+        algorithm: ProtocolSigningAlgorithm
+    ) async -> Data?
+    func trustedKEMPublicKeys(for deviceId: String) async -> [CryptoSuite: Data]
+    func trustedSecureEnclavePublicKey(for deviceId: String) async -> Data?
+    func requiresPinnedProtocolIdentity(for deviceId: String) async -> Bool
+}
+
+@available(iOS 17.0, *)
+public protocol MultiFingerprintHandshakeTrustProvider: HandshakeTrustProvider {
+    /// Returns every canonical protocol identity fingerprint trusted for `deviceId`.
+    ///
+    /// A stable device may carry multiple protocol signing identities during
+    /// PQC migration, for example Ed25519 and ML-DSA-65. The handshake validates
+    /// the actual signed identity against this full pin set.
+    func trustedFingerprints(for deviceId: String) async -> Set<String>
+}
+
+@available(iOS 17.0, *)
+public extension HandshakeTrustProvider {
+    func requiresPinnedProtocolIdentity(for deviceId: String) async -> Bool {
+        _ = deviceId
+        return false
+    }
+
+    func trustedFingerprintSet(for deviceId: String) async -> Set<String> {
+        if let multi = self as? any MultiFingerprintHandshakeTrustProvider {
+            return await multi.trustedFingerprints(for: deviceId)
+        }
+        guard let fingerprint = await trustedFingerprint(for: deviceId)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+              !fingerprint.isEmpty else {
+            return []
+        }
+        return [fingerprint]
+    }
+
+    func trustedProtocolIdentityPublicKey(
+        for deviceId: String,
+        algorithm: ProtocolSigningAlgorithm
+    ) async -> Data? {
+        _ = deviceId
+        _ = algorithm
+        return nil
+    }
+}
+
+@available(iOS 17.0, *)
+public struct AuthenticatedRemoteAuthority: Sendable, Equatable {
+    public let protocolSigningAlgorithm: String
+    public let protocolPublicKeyFingerprint: String
+    /// Exact wire public key whose authenticated handshake signature produced
+    /// `protocolPublicKeyFingerprint`. Callers must persist this together with
+    /// the algorithm and fingerprint; a fingerprint-only record cannot later
+    /// prove which key bytes were actually authenticated.
+    public let protocolPublicKeyBytes: Data?
+
+    public init(
+        protocolSigningAlgorithm: String,
+        protocolPublicKeyFingerprint: String,
+        protocolPublicKeyBytes: Data? = nil
+    ) {
+        self.protocolSigningAlgorithm = protocolSigningAlgorithm
+        self.protocolPublicKeyFingerprint = protocolPublicKeyFingerprint
+        self.protocolPublicKeyBytes = protocolPublicKeyBytes
+    }
+}
+
+/// Atomic proof exported by a completed handshake. Keeping the protocol-key
+/// authority and the signed SOA peer identifier in one value prevents callers
+/// from observing values from different handshake attempts across actor awaits.
+@available(iOS 17.0, *)
+public struct AuthenticatedHandshakePeerBinding: Sendable, Equatable {
+    public let authority: AuthenticatedRemoteAuthority
+    public let authenticatedRemoteSOAPeerId: Data?
+
+    public init(
+        authority: AuthenticatedRemoteAuthority,
+        authenticatedRemoteSOAPeerId: Data?
+    ) {
+        self.authority = authority
+        self.authenticatedRemoteSOAPeerId = authenticatedRemoteSOAPeerId
+    }
+}
+
+/// Both identities belong to one Finished-confirmed incarnation. Missing local
+/// SOA evidence leaves ordinary MAIN usable but cannot authorize audio accounts.
+@available(iOS 17.0, *)
+public struct AuthenticatedAudioHandshakeBinding: Sendable {
+    public let local: ProtocolIdentityBinding
+    public let peer: AuthenticatedHandshakePeerBinding
+}
+
+@available(iOS 17.0, *)
+struct DefaultHandshakeTrustProvider: HandshakeTrustProvider, Sendable {
+    func trustedFingerprint(for deviceId: String) async -> String? { nil }
+    func trustedKEMPublicKeys(for deviceId: String) async -> [CryptoSuite: Data] {
+        await KEMTrustStore.shared.kemPublicKeys(for: deviceId)
+    }
+    func trustedSecureEnclavePublicKey(for deviceId: String) async -> Data? { nil }
+}
+
+// MARK: - SOA Metadata / Arbiter
+
+@available(iOS 17.0, *)
+public struct HandshakeSOAMetadata: Sendable, Equatable {
+    public let initiatorPeerId: Data // 32 bytes
+    public let targetPeerId: Data // 32 bytes
+    public let attemptId: Data // 16 bytes
+    public let extensionRaw: Data
+
+    public init(initiatorPeerId: Data, targetPeerId: Data, attemptId: Data) throws {
+        guard initiatorPeerId.count == HandshakeSOAExtension.initiatorPeerIdLength else {
+            throw HandshakeError.failed(.invalidMessageFormat("SOA initiatorPeerId must be 32 bytes"))
+        }
+        guard targetPeerId.count == HandshakeSOAExtension.targetPeerIdLength else {
+            throw HandshakeError.failed(.invalidMessageFormat("SOA targetPeerId must be 32 bytes"))
+        }
+        guard attemptId.count == HandshakeSOAExtension.attemptIdLength else {
+            throw HandshakeError.failed(.invalidMessageFormat("SOA attemptId must be 16 bytes"))
+        }
+        self.initiatorPeerId = initiatorPeerId
+        self.targetPeerId = targetPeerId
+        self.attemptId = attemptId
+        self.extensionRaw = try HandshakeSOAExtension(
+            initiatorPeerId: initiatorPeerId,
+            targetPeerId: targetPeerId,
+            attemptId: attemptId
+        ).encodedTLV
+    }
+}
+
+@available(iOS 17.0, *)
+public actor PeerSessionArbiter {
+    public static let shared = PeerSessionArbiter()
+
+    public enum RegisterDecision: Sendable {
+        case accepted(EstablishmentReservation)
+        case alreadyConnected
+        case alreadyInProgress
+    }
+
+    public enum IncomingEstablishedPolicy: Sendable {
+        case rejectDuplicate
+        case replaceAuthenticated
+    }
+
+    public enum SessionScope: String, Sendable {
+        case p2p = "p2p"
+        case remoteControl = "remote-control"
+    }
+
+    public enum IncomingDecision: Sendable {
+        case accept(EstablishmentReservation)
+        case rejectAlreadyConnected
+        case rejectBinding
+        case rejectRateLimited
+        case rejectLocalWinner
+        case acceptAndReplaceEstablished(EstablishmentReservation)
+        case acceptAndSupersedeLocal(
+            reservation: EstablishmentReservation,
+            winnerPeerId: Data,
+            winnerAttemptId: Data
+        )
+    }
+
+    public struct OutgoingAttempt: Sendable {
+        public let pairKey: Data
+        public let initiatorPeerId: Data
+        public let attemptId: Data
+        public let startedAt: Date
+        public let onSuperseded: @Sendable (Data, Data) async -> Void
+    }
+
+    public struct EstablishedLease: Sendable, Equatable {
+        public let pairKey: Data
+        public let sessionId: String
+        private let ownerId: UUID
+
+        public init(pairKey: Data, sessionId: String) {
+            self.pairKey = pairKey
+            self.sessionId = sessionId
+            ownerId = UUID()
+        }
+    }
+
+    /// A one-shot authorization to publish a session into an arbiter slot.
+    /// The actor retains the expected owner privately; callers cannot widen or
+    /// forge the compare-and-swap precondition.
+    public struct EstablishmentReservation: Sendable, Equatable {
+        public let pairKey: Data
+        public let attemptId: Data
+        private let reservationId: UUID
+
+        fileprivate init(pairKey: Data, attemptId: Data, reservationId: UUID) {
+            self.pairKey = pairKey
+            self.attemptId = attemptId
+            self.reservationId = reservationId
+        }
+    }
+
+    public enum EstablishmentCommitError: Error, Sendable, Equatable {
+        case reservationInvalidated
+        case establishedOwnerChanged
+    }
+
+    private struct EstablishmentAttemptKey: Hashable {
+        let pairKey: Data
+        let attemptId: Data
+    }
+
+    private struct EstablishmentReservationRecord: Equatable {
+        let reservation: EstablishmentReservation
+        let expectedOwner: EstablishedLease?
+    }
+
+    private struct RegisteredOutgoingAttempt {
+        let attempt: OutgoingAttempt
+        let reservation: EstablishmentReservation
+    }
+
+    private let pendingWindowSeconds: TimeInterval = 10
+    private let supersedeRateLimit: Int = 3
+    private let supersedeRateWindowSeconds: TimeInterval = 60
+
+    private var outgoingByPair: [Data: RegisteredOutgoingAttempt] = [:]
+    private var establishedOwnerByPair: [Data: EstablishedLease] = [:]
+    private var establishmentReservationByAttempt: [
+        EstablishmentAttemptKey: EstablishmentReservationRecord
+    ] = [:]
+    private var supersedeTimestampsByPair: [Data: [Date]] = [:]
+#if DEBUG || SKYBRIDGE_TESTING
+    public enum TestEstablishmentBarrierError: Error, Sendable, Equatable {
+        case barrierAlreadyConfigured
+        case attemptDoesNotOwnBarrier
+    }
+
+    private var testSuspendedEstablishmentAttemptId: Data?
+    private var testEstablishmentCommitContinuation: CheckedContinuation<Void, Never>?
+    private var testEstablishmentCommitIsSuspended = false
+
+    public func testOnlySuspendEstablishmentCommit(attemptId: Data) throws {
+        guard testEstablishmentCommitContinuation == nil,
+              testSuspendedEstablishmentAttemptId == nil else {
+            throw TestEstablishmentBarrierError.barrierAlreadyConfigured
+        }
+        testSuspendedEstablishmentAttemptId = attemptId
+    }
+
+    public func testOnlyIsEstablishmentCommitSuspended() -> Bool {
+        testEstablishmentCommitIsSuspended
+    }
+
+    public func testOnlyResumeEstablishmentCommit(attemptId: Data) throws {
+        guard testSuspendedEstablishmentAttemptId == attemptId else {
+            throw TestEstablishmentBarrierError.attemptDoesNotOwnBarrier
+        }
+        testSuspendedEstablishmentAttemptId = nil
+        let continuation = testEstablishmentCommitContinuation
+        testEstablishmentCommitContinuation = nil
+        continuation?.resume()
+    }
+#endif
+
+    public func registerOutgoing(_ attempt: OutgoingAttempt) -> RegisterDecision {
+        if establishedOwnerByPair[attempt.pairKey] != nil {
+            return .alreadyConnected
+        }
+        if let existing = outgoingByPair[attempt.pairKey] {
+            if Date().timeIntervalSince(existing.attempt.startedAt) <= pendingWindowSeconds {
+                return .alreadyInProgress
+            }
+            removeOutgoingAttempt(existing, pairKey: attempt.pairKey)
+        }
+        let reservation = reserveEstablishment(
+            pairKey: attempt.pairKey,
+            attemptId: attempt.attemptId,
+            expectedOwner: nil
+        )
+        outgoingByPair[attempt.pairKey] = RegisteredOutgoingAttempt(
+            attempt: attempt,
+            reservation: reservation
+        )
+        return .accepted(reservation)
+    }
+
+    /// Removes only the outgoing registration that owns this unforgeable
+    /// reservation. This is the teardown primitive for suspended drivers: a
+    /// replacement may deliberately reuse the public pair/attempt bytes, but
+    /// it cannot reuse the private reservation UUID.
+    @discardableResult
+    func clearOutgoing(_ reservation: EstablishmentReservation) -> Bool {
+        guard let existing = outgoingByPair[reservation.pairKey],
+              existing.reservation == reservation else {
+            return false
+        }
+        removeOutgoingAttempt(existing, pairKey: reservation.pairKey)
+        return true
+    }
+
+    @discardableResult
+    public func commitEstablished(
+        _ reservation: EstablishmentReservation,
+        sessionId: String
+    ) async throws -> EstablishedLease {
+#if DEBUG || SKYBRIDGE_TESTING
+        await waitAtTestEstablishmentBarrierIfNeeded(attemptId: reservation.attemptId)
+#endif
+
+        let attemptKey = EstablishmentAttemptKey(
+            pairKey: reservation.pairKey,
+            attemptId: reservation.attemptId
+        )
+        guard let record = establishmentReservationByAttempt[attemptKey],
+              record.reservation == reservation else {
+            throw EstablishmentCommitError.reservationInvalidated
+        }
+        guard establishedOwnerByPair[reservation.pairKey] == record.expectedOwner else {
+            establishmentReservationByAttempt.removeValue(forKey: attemptKey)
+            throw EstablishmentCommitError.establishedOwnerChanged
+        }
+
+        let lease = EstablishedLease(pairKey: reservation.pairKey, sessionId: sessionId)
+        establishedOwnerByPair[reservation.pairKey] = lease
+        if outgoingByPair[reservation.pairKey]?.reservation == reservation {
+            outgoingByPair.removeValue(forKey: reservation.pairKey)
+        }
+        invalidateEstablishmentReservations(for: reservation.pairKey)
+        return lease
+    }
+
+    @discardableResult
+    public func clearEstablished(_ lease: EstablishedLease) -> Bool {
+        guard establishedOwnerByPair[lease.pairKey] == lease else {
+            return false
+        }
+        establishedOwnerByPair.removeValue(forKey: lease.pairKey)
+        return true
+    }
+
+    @discardableResult
+    public func restoreEstablishedIfVacant(_ lease: EstablishedLease) -> Bool {
+        guard establishedOwnerByPair[lease.pairKey] == nil else { return false }
+        establishedOwnerByPair[lease.pairKey] = lease
+        outgoingByPair.removeValue(forKey: lease.pairKey)
+        invalidateEstablishmentReservations(for: lease.pairKey)
+        return true
+    }
+
+    public func evaluateIncoming(
+        pairKey: Data,
+        remoteInitiatorPeerId: Data,
+        remoteAttemptId: Data,
+        targetPeerId: Data,
+        expectedRemotePeerId: Data,
+        localPeerId: Data,
+        establishedPolicy: IncomingEstablishedPolicy = .rejectDuplicate
+    ) -> IncomingDecision {
+        guard targetPeerId == localPeerId, remoteInitiatorPeerId == expectedRemotePeerId else {
+            return .rejectBinding
+        }
+        if establishedOwnerByPair[pairKey] != nil {
+            switch establishedPolicy {
+            case .rejectDuplicate:
+                return .rejectAlreadyConnected
+            case .replaceAuthenticated:
+                if let outgoing = outgoingByPair[pairKey] {
+                    removeOutgoingAttempt(outgoing, pairKey: pairKey)
+                }
+                let reservation = reserveEstablishment(
+                    pairKey: pairKey,
+                    attemptId: remoteAttemptId,
+                    expectedOwner: establishedOwnerByPair[pairKey]
+                )
+                return .acceptAndReplaceEstablished(reservation)
+            }
+        }
+
+        guard let localRegistration = outgoingByPair[pairKey] else {
+            return .accept(reserveEstablishment(
+                pairKey: pairKey,
+                attemptId: remoteAttemptId,
+                expectedOwner: nil
+            ))
+        }
+        let local = localRegistration.attempt
+
+        if Date().timeIntervalSince(local.startedAt) > pendingWindowSeconds {
+            removeOutgoingAttempt(localRegistration, pairKey: pairKey)
+            return .accept(reserveEstablishment(
+                pairKey: pairKey,
+                attemptId: remoteAttemptId,
+                expectedOwner: nil
+            ))
+        }
+
+        if !canSupersede(pairKey: pairKey) {
+            return .rejectRateLimited
+        }
+
+        let remoteWins = isRemoteWinner(
+            localInitiatorPeerId: local.initiatorPeerId,
+            localAttemptId: local.attemptId,
+            remoteInitiatorPeerId: remoteInitiatorPeerId,
+            remoteAttemptId: remoteAttemptId
+        )
+
+        if remoteWins {
+            recordSupersede(pairKey: pairKey)
+            removeOutgoingAttempt(localRegistration, pairKey: pairKey)
+            Task { await local.onSuperseded(remoteInitiatorPeerId, remoteAttemptId) }
+            return .acceptAndSupersedeLocal(
+                reservation: reserveEstablishment(
+                    pairKey: pairKey,
+                    attemptId: remoteAttemptId,
+                    expectedOwner: nil
+                ),
+                winnerPeerId: remoteInitiatorPeerId,
+                winnerAttemptId: remoteAttemptId
+            )
+        }
+
+        return .rejectLocalWinner
+    }
+
+    private func reserveEstablishment(
+        pairKey: Data,
+        attemptId: Data,
+        expectedOwner: EstablishedLease?
+    ) -> EstablishmentReservation {
+        // One pending committer per pair keeps admission bounded and makes a
+        // newer accepted attempt explicitly supersede an older suspended one.
+        invalidateEstablishmentReservations(for: pairKey)
+        let attemptKey = EstablishmentAttemptKey(pairKey: pairKey, attemptId: attemptId)
+        let reservation = EstablishmentReservation(
+            pairKey: pairKey,
+            attemptId: attemptId,
+            reservationId: UUID()
+        )
+        establishmentReservationByAttempt[attemptKey] = EstablishmentReservationRecord(
+            reservation: reservation,
+            expectedOwner: expectedOwner
+        )
+        return reservation
+    }
+
+    @discardableResult
+    func cancelEstablishment(_ reservation: EstablishmentReservation) -> Bool {
+        cancelEstablishmentIfCurrent(reservation)
+    }
+
+    @discardableResult
+    private func cancelEstablishmentIfCurrent(
+        _ reservation: EstablishmentReservation
+    ) -> Bool {
+        let attemptKey = EstablishmentAttemptKey(
+            pairKey: reservation.pairKey,
+            attemptId: reservation.attemptId
+        )
+        guard establishmentReservationByAttempt[attemptKey]?.reservation == reservation else {
+            return false
+        }
+        establishmentReservationByAttempt.removeValue(forKey: attemptKey)
+        return true
+    }
+
+    private func removeOutgoingAttempt(
+        _ registration: RegisteredOutgoingAttempt,
+        pairKey: Data
+    ) {
+        guard outgoingByPair[pairKey]?.reservation == registration.reservation else { return }
+        outgoingByPair.removeValue(forKey: pairKey)
+        cancelEstablishmentIfCurrent(registration.reservation)
+    }
+
+    private func invalidateEstablishmentReservations(for pairKey: Data) {
+        establishmentReservationByAttempt = establishmentReservationByAttempt.filter {
+            $0.key.pairKey != pairKey
+        }
+    }
+
+#if DEBUG || SKYBRIDGE_TESTING
+    private func waitAtTestEstablishmentBarrierIfNeeded(attemptId: Data) async {
+        guard testSuspendedEstablishmentAttemptId == attemptId else { return }
+        testEstablishmentCommitIsSuspended = true
+        await withCheckedContinuation { continuation in
+            testEstablishmentCommitContinuation = continuation
+        }
+        testEstablishmentCommitIsSuspended = false
+    }
+#endif
+
+    public nonisolated static func pairKey(
+        localPeerId: Data,
+        remotePeerId: Data,
+        scope: SessionScope = .p2p
+    ) -> Data {
+        let baseKey: Data
+        if localPeerId.lexicographicallyPrecedes(remotePeerId) {
+            baseKey = localPeerId + remotePeerId
+        } else {
+            baseKey = remotePeerId + localPeerId
+        }
+        guard scope != .p2p else { return baseKey }
+
+        var scoped = Data(scope.rawValue.utf8)
+        scoped.append(0)
+        scoped.append(baseKey)
+        return scoped
+    }
+
+    public nonisolated static func soaPeerId(from identifier: String) -> Data {
+        let canonical = canonicalSOAIdentifier(identifier)
+        return Data(SHA256.hash(data: Data(canonical.utf8)))
+    }
+
+    public nonisolated static func canonicalSOAIdentifier(_ raw: String) -> String {
+        var normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        while normalized.hasPrefix("recent:") {
+            normalized.removeFirst("recent:".count)
+        }
+        if normalized.hasPrefix("mac:") {
+            normalized.removeFirst("mac:".count)
+        }
+        if normalized.hasPrefix("id:") {
+            normalized.removeFirst("id:".count)
+            return normalizedUUID(in: normalized) ?? normalized
+        }
+        if normalized.hasPrefix("bonjour:") {
+            let payload = String(normalized.dropFirst("bonjour:".count))
+            let components = payload.split(separator: "@", maxSplits: 1).map(String.init)
+            let name = components.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let rawDomain = components.count > 1 ? components[1] : "local."
+            let domain = rawDomain.trimmingCharacters(in: .whitespacesAndNewlines)
+            return "bonjour:\(name)@\(domain.isEmpty ? "local." : domain)"
+        }
+        if normalized.hasPrefix("host:") {
+            return normalized
+        }
+        return normalizedUUID(in: normalized) ?? normalized
+    }
+
+    private nonisolated static func normalizedUUID(in raw: String) -> String? {
+        let direct = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let parsed = UUID(uuidString: direct.uppercased()) else {
+            return nil
+        }
+        return parsed.uuidString.lowercased()
+    }
+
+    private func isRemoteWinner(
+        localInitiatorPeerId: Data,
+        localAttemptId: Data,
+        remoteInitiatorPeerId: Data,
+        remoteAttemptId: Data
+    ) -> Bool {
+        if remoteInitiatorPeerId == localInitiatorPeerId {
+            return remoteAttemptId.lexicographicallyPrecedes(localAttemptId)
+        }
+        return remoteInitiatorPeerId.lexicographicallyPrecedes(localInitiatorPeerId)
+    }
+
+    private func canSupersede(pairKey: Data) -> Bool {
+        let now = Date()
+        let recent = (supersedeTimestampsByPair[pairKey] ?? []).filter {
+            now.timeIntervalSince($0) <= supersedeRateWindowSeconds
+        }
+        supersedeTimestampsByPair[pairKey] = recent
+        return recent.count < supersedeRateLimit
+    }
+
+    private func recordSupersede(pairKey: Data) {
+        let now = Date()
+        let recent = (supersedeTimestampsByPair[pairKey] ?? []).filter {
+            now.timeIntervalSince($0) <= supersedeRateWindowSeconds
+        }
+        supersedeTimestampsByPair[pairKey] = recent + [now]
+    }
+}
+
+// MARK: - HandshakeDriver
+
+/// 握手驱动器 Actor
+///
+/// **关键设计：竞态与取消语义**
+/// - 双 resume 防护：使用 finishOnce() 统一收敛成功/失败
+/// - MessageB 早到防护：pendingResult 暂存早到的结果
+/// - 取消语义：调用方取消时 zeroize + emit event
+struct ProductConnectivityHandshakeAttemptSnapshot: Sendable, Equatable {
+    let localActiveSuite: CryptoSuite
+    let localOfferedSuites: [CryptoSuite]
+    let requirePQC: Bool
+    let allowClassicFallback: Bool
+    let outboundSOAAttemptID: Data?
+    let localProtocolSigningAlgorithm: ProtocolSigningAlgorithm
+    let localProtocolSigningKeyProtection: ProtocolSigningKeyProtection
+    let localProtocolPublicKey: Data
+}
+
+@available(iOS 17.0, *)
+public actor HandshakeDriver {
+    /// Applications carry this exact attempt receipt through any post-Finished
+    /// awaits and recheck it at their synchronous keys publication boundary.
+    public func frozenPQCModePolicy() throws -> PQCModePolicySnapshot {
+        try localModePolicy.get()
+    }
+
+
+    public struct AuthenticatedFinishedConfirmation: Sendable {
+        public let sessionId: String
+        public let suite: CryptoSuite
+        public let sessionReference: String
+
+        fileprivate init(sessionId: String, suite: CryptoSuite, sessionReference: String) {
+            self.sessionId = sessionId
+            self.suite = suite
+            self.sessionReference = sessionReference
+        }
+    }
+
+    private enum LocalFinishedDelivery {
+        case sending(token: UUID, sessionId: String)
+        case sent(sessionId: String)
+    }
+
+    /// A peer Finished may reenter this actor while our transport send is suspended.
+    /// Only the exact send completion can make its session eligible for publication.
+    private var localFinishedDelivery: LocalFinishedDelivery?
+    private var responderOperationToken: UUID?
+
+    public func authenticatedFinishedConfirmation(
+        matching keys: SessionKeys
+    ) -> AuthenticatedFinishedConfirmation? {
+        guard case .established(let current) = state,
+              case .some(.sent(let deliveredSessionId)) = localFinishedDelivery,
+              deliveredSessionId == current.sessionId,
+              keys.sessionId == current.sessionId,
+              keys.negotiatedSuite == current.negotiatedSuite,
+              keys.role == current.role,
+              constantTimeEqual(keys.transcriptHash, current.transcriptHash),
+              constantTimeEqual(keys.sendKey, current.sendKey),
+              constantTimeEqual(keys.receiveKey, current.receiveKey) else {
+            return nil
+        }
+        guard let reference = SkyBridgeProtocolCore.P2PEvidenceReference.sessionIncarnation(
+            sessionID: current.sessionId,
+            transcriptHash: current.transcriptHash
+        ) else { return nil }
+        return AuthenticatedFinishedConfirmation(
+            sessionId: current.sessionId,
+            suite: current.negotiatedSuite,
+            sessionReference: reference
+        )
+    }
+    
+    // MARK: - Properties
+    
+    /// 当前状态
+    private var state: HandshakeState = .idle
+    
+    /// 传输层
+    private let transport: any DiscoveryTransport
+    
+    /// 加密 Provider
+    private let cryptoProvider: any CryptoProvider
+
+    /// Driver-creation-time Q-Periapt admission. The retained provider is
+    /// bound to this decision and cannot be enabled by later global changes.
+    private let qPeriaptAdmissionSnapshot: QPeriaptHandshakeAdmissionSnapshot
+    
+    /// 协议签名 Provider
+    private let protocolSignatureProvider: any ProtocolSignatureProvider
+    
+    /// 身份密钥句柄
+    private let identityKeyHandle: SigningKeyHandle?
+    
+    /// 身份公钥
+    private let identityPublicKey: Data
+    
+    /// 超时时间
+    private let timeout: Duration
+    
+    /// 握手策略
+    // Captured before the attempt can suspend. Malformed local policy remains
+    // a failure and cannot become an unrestricted/default policy at commit.
+    private let localModePolicy = Result { try PQCModePolicyStore.standard.snapshot() }
+    private let policy: HandshakePolicy
+
+    /// 本地 crypto suite 准入策略（用于避免 iOS / macOS 在 hybrid/X-Wing 上分叉）
+    private let cryptoPolicy: CryptoPolicy
+
+    /// 发起方本次尝试准备好的 suites。
+    /// iOS 本地实现仍按 single-suite 发包，但这里必须以调用方准备结果为准，
+    /// 不能再偷偷退回 provider.activeSuite。
+    private let offeredSuites: [CryptoSuite]?
+    
+    /// 等待中的 continuation
+    private var pendingContinuation: CheckedContinuation<SessionKeys, Error>?
+    
+    /// 超时任务
+    private var timeoutTask: Task<Void, Never>?
+    
+    /// 早到的结果
+    private var pendingResult: Result<SessionKeys, Error>?
+
+    /// FINISHED can arrive while MessageB verification awaits trust/KEM work.
+    /// Buffer it so the initiator does not drop key confirmation and later time out.
+    private var pendingFinished: HandshakeFinished?
+    
+    /// 对端标识
+    private var currentPeer: PeerIdentifier?
+    
+    /// 信任提供方
+    private let trustProvider: any HandshakeTrustProvider
+    
+    /// 握手上下文
+    private var context: HandshakeContext?
+    
+    /// MessageB 处理 epoch（防重入）
+    private var messageBEpoch: UInt64 = 0
+    
+    /// sigA 使用的签名算法
+    private let sigAAlgorithm: ProtocolSigningAlgorithm
+
+    /// Exact private-key residency bound when this driver was created.
+    private let protocolSigningKeyProtection: ProtocolSigningKeyProtection
+
+    /// 可选 SOA 元数据（initiator）
+    private let soaMetadata: HandshakeSOAMetadata?
+
+    /// 本地 SOA peer id（32B）
+    private let localSOAPeerId: Data?
+    private let localProtocolDeviceId: String?
+    private var candidateLocalIdentityBinding: ProtocolIdentityBinding?
+    private var authenticatedLocalIdentityBinding: ProtocolIdentityBinding?
+    private var localIdentityCaptureFailure: String?
+
+    /// 期望远端 SOA peer id（32B）
+    private let expectedRemoteSOAPeerId: Data?
+
+    /// 会话仲裁器
+    private let sessionArbiter: PeerSessionArbiter
+
+    /// 已认证入站 MessageA 命中旧 established guard 时的处理策略。
+    private let authenticatedIncomingEstablishedPolicy: PeerSessionArbiter.IncomingEstablishedPolicy
+
+    /// SOA 仲裁会话域。P2P 控制/文件传输与远控需要独立仲裁槽位。
+    private let soaSessionScope: PeerSessionArbiter.SessionScope
+
+    /// 当前尝试 pair key
+    private var soaPairKey: Data?
+
+    /// 当前尝试 attempt id
+    private var soaAttemptId: Data?
+
+    /// One-shot CAS capability issued by `PeerSessionArbiter` for this exact
+    /// SOA attempt. A Finished message cannot publish without this reservation.
+    private var establishmentReservation: PeerSessionArbiter.EstablishmentReservation?
+
+    /// Distinguishes a locally registered outgoing slot from an inbound
+    /// reservation that happens to use the same pair/attempt bytes.
+    private var soaAttemptRegisteredAsOutgoing = false
+
+    /// Exact owner for the established arbiter slot. Teardown/rekey must clear
+    /// this lease rather than deleting by pair key alone.
+    private var establishedArbiterLease: PeerSessionArbiter.EstablishedLease?
+
+    /// Serializes the Finished commit across actor reentrancy. Authority and
+    /// `.established` remain unpublished until the arbiter lease is durable.
+    private var finishedCommitToken: UUID?
+
+    /// Exact owner of an outbound handshake from the first suspension point
+    /// through terminal publication. The state becomes non-idle before the
+    /// cross-actor arbiter call, while this token rejects stale continuations.
+    private var activeOutboundOperationToken: UUID?
+
+    /// 已完成 Finished key confirmation 的远端协议身份快照。
+    private var authenticatedRemoteAuthority: AuthenticatedRemoteAuthority?
+
+    /// SOA identity authenticated by the same handshake attempt as
+    /// `authenticatedRemoteAuthority`. For an initiator this is the exact
+    /// target put on MessageA; for a responder it is the initiator accepted
+    /// from the signed MessageA extension after arbitration succeeds.
+    private var authenticatedRemoteSOAPeerId: Data?
+
+    /// Signature-authenticated candidate retained while Finished is pending.
+    /// It is never exported as a completed handshake authority.
+    private var candidateRemoteAuthority: AuthenticatedRemoteAuthority?
+
+    /// Candidate SOA binding for the active attempt. It is promoted into the
+    /// exported atomic binding only together with an authenticated authority.
+    private var candidateRemoteSOAPeerId: Data?
+    
+    // MARK: - Initialization
+    
+    /// 初始化握手驱动器
+    public init(
+        transport: any DiscoveryTransport,
+        cryptoProvider: any CryptoProvider,
+        protocolSignatureProvider: any ProtocolSignatureProvider,
+        identityKeyHandle: SigningKeyHandle?,
+        sigAAlgorithm: ProtocolSigningAlgorithm,
+        protocolSigningKeyProtection: ProtocolSigningKeyProtection,
+        identityPublicKey: Data,
+        policy: HandshakePolicy = .default,
+        cryptoPolicy: CryptoPolicy = .default,
+        offeredSuites: [CryptoSuite]? = nil,
+        timeout: Duration = HandshakeConstants.defaultTimeout,
+        trustProvider: (any HandshakeTrustProvider)? = nil,
+        soaMetadata: HandshakeSOAMetadata? = nil,
+        localSOAPeerId: Data? = nil,
+        localProtocolDeviceId: String? = nil,
+        expectedRemoteSOAPeerId: Data? = nil,
+        sessionArbiter: PeerSessionArbiter = .shared,
+        authenticatedIncomingEstablishedPolicy: PeerSessionArbiter.IncomingEstablishedPolicy = .rejectDuplicate,
+        soaSessionScope: PeerSessionArbiter.SessionScope = .p2p
+    ) {
+        let qPeriaptAdmissionSnapshot: QPeriaptHandshakeAdmissionSnapshot
+        if sigAAlgorithm == protocolSignatureProvider.signatureAlgorithm {
+            qPeriaptAdmissionSnapshot = .capture(
+                provider: cryptoProvider,
+                protocolIdentityConfiguration: ProtocolIdentityConfigurationRecord(
+                    algorithm: sigAAlgorithm,
+                    keyProtection: protocolSigningKeyProtection
+                )
+            )
+        } else {
+            qPeriaptAdmissionSnapshot = .unavailable
+        }
+        self.transport = transport
+        self.qPeriaptAdmissionSnapshot = qPeriaptAdmissionSnapshot
+        self.cryptoProvider = qPeriaptAdmissionSnapshot.bind(provider: cryptoProvider)
+        self.protocolSignatureProvider = protocolSignatureProvider
+        self.identityKeyHandle = identityKeyHandle
+        self.sigAAlgorithm = sigAAlgorithm
+        self.protocolSigningKeyProtection = protocolSigningKeyProtection
+        self.identityPublicKey = identityPublicKey
+        self.policy = policy
+        self.cryptoPolicy = cryptoPolicy
+        self.offeredSuites = offeredSuites
+        self.timeout = timeout
+        self.trustProvider = trustProvider ?? DefaultHandshakeTrustProvider()
+        self.soaMetadata = soaMetadata
+        self.localSOAPeerId = localSOAPeerId
+        self.localProtocolDeviceId = localProtocolDeviceId
+        self.expectedRemoteSOAPeerId = expectedRemoteSOAPeerId
+        self.sessionArbiter = sessionArbiter
+        self.authenticatedIncomingEstablishedPolicy = authenticatedIncomingEstablishedPolicy
+        self.soaSessionScope = soaSessionScope
+    }
+
+    public func getAuthenticatedRemoteAuthority() -> AuthenticatedRemoteAuthority? {
+        authenticatedRemoteAuthority
+    }
+
+    public func getAuthenticatedHandshakePeerBinding() -> AuthenticatedHandshakePeerBinding? {
+        guard let authenticatedRemoteAuthority else { return nil }
+        return AuthenticatedHandshakePeerBinding(
+            authority: authenticatedRemoteAuthority,
+            authenticatedRemoteSOAPeerId: authenticatedRemoteSOAPeerId
+        )
+    }
+
+    public func getAuthenticatedAudioHandshakeBinding(matching keys: SessionKeys) -> AuthenticatedAudioHandshakeBinding? {
+        guard authenticatedFinishedConfirmation(matching: keys) != nil,
+              let local = authenticatedLocalIdentityBinding,
+              let peer = getAuthenticatedHandshakePeerBinding() else { return nil }
+        return AuthenticatedAudioHandshakeBinding(local: local, peer: peer)
+    }
+
+    func audioLocalIdentityCaptureDiagnostic() -> String? { localIdentityCaptureFailure }
+
+    public func getEstablishedArbiterLease() -> PeerSessionArbiter.EstablishedLease? {
+        establishedArbiterLease
+    }
+
+    /// Immutable local facts captured when this exact driver was created.
+    /// This exposes no peer identity or key material and does not participate
+    /// in suite selection or admission.
+    func productConnectivityAttemptSnapshot()
+        -> ProductConnectivityHandshakeAttemptSnapshot {
+        ProductConnectivityHandshakeAttemptSnapshot(
+            localActiveSuite: cryptoProvider.activeSuite,
+            localOfferedSuites: offeredSuites ?? [cryptoProvider.activeSuite],
+            requirePQC: policy.requirePQC,
+            allowClassicFallback: policy.allowClassicFallback,
+            outboundSOAAttemptID: soaMetadata?.attemptId,
+            localProtocolSigningAlgorithm: sigAAlgorithm,
+            localProtocolSigningKeyProtection: protocolSigningKeyProtection,
+            localProtocolPublicKey: identityPublicKey
+        )
+    }
+    
+    // MARK: - Public API
+    
+    /// 发起握手（发起方调用）
+    public func initiateHandshake(with peer: PeerIdentifier) async throws -> SessionKeys {
+        guard case .idle = state, activeOutboundOperationToken == nil else {
+            throw HandshakeError.alreadyInProgress
+        }
+
+        let operationToken = UUID()
+        activeOutboundOperationToken = operationToken
+        // cancel() and inbound dispatch must observe the outbound attempt before
+        // registerOutgoing crosses the actor boundary.
+        state = .sendingMessageA
+
+        clearAuthenticatedRemoteAuthority()
+        currentPeer = peer
+
+        let outboundSOA = try resolveOutboundSOAMetadata(for: peer)
+        if let outboundSOA {
+            let pairKey = PeerSessionArbiter.pairKey(
+                localPeerId: outboundSOA.initiatorPeerId,
+                remotePeerId: outboundSOA.targetPeerId,
+                scope: soaSessionScope
+            )
+            let decision = await sessionArbiter.registerOutgoing(.init(
+                pairKey: pairKey,
+                initiatorPeerId: outboundSOA.initiatorPeerId,
+                attemptId: outboundSOA.attemptId,
+                startedAt: Date(),
+                onSuperseded: { [weak self] winnerPeerId, winnerAttemptId in
+                    await self?.handleSupersededByConcurrentAttempt(
+                        winnerPeerId: winnerPeerId,
+                        winnerAttemptId: winnerAttemptId
+                    )
+                }
+            ))
+            guard activeOutboundOperationToken == operationToken else {
+                if case .accepted(let reservation) = decision {
+                    _ = await sessionArbiter.clearOutgoing(reservation)
+                }
+                throw inactiveOutboundOperationError()
+            }
+            switch decision {
+            case .accepted(let reservation):
+                soaPairKey = pairKey
+                soaAttemptId = outboundSOA.attemptId
+                establishmentReservation = reservation
+                soaAttemptRegisteredAsOutgoing = true
+                candidateRemoteSOAPeerId = outboundSOA.targetPeerId
+            case .alreadyConnected:
+                activeOutboundOperationToken = nil
+                state = .idle
+                currentPeer = nil
+                throw HandshakeError.failed(.peerRejected("already_connected"))
+            case .alreadyInProgress:
+                activeOutboundOperationToken = nil
+                state = .idle
+                currentPeer = nil
+                throw HandshakeError.alreadyInProgress
+            }
+        } else {
+            soaPairKey = nil
+            soaAttemptId = nil
+            establishmentReservation = nil
+            soaAttemptRegisteredAsOutgoing = false
+            candidateRemoteSOAPeerId = nil
+        }
+        
+        // 创建握手上下文
+        let peerKEMPublicKeys = await trustProvider.trustedKEMPublicKeys(for: peer.deviceId)
+        guard activeOutboundOperationToken == operationToken else {
+            throw inactiveOutboundOperationError()
+        }
+        let ctx = HandshakeContext(
+            role: .initiator,
+            cryptoProvider: cryptoProvider,
+            protocolSignatureProvider: protocolSignatureProvider,
+            identityKeyHandle: identityKeyHandle,
+            identityPublicKey: identityPublicKey,
+            policy: policy,
+            cryptoPolicy: cryptoPolicy,
+            offeredSuites: offeredSuites,
+            peerKEMPublicKeys: peerKEMPublicKeys
+        )
+        context = ctx
+        
+        // 构建 MessageA
+        let messageA: HandshakeMessageA
+        do {
+            messageA = try await ctx.buildMessageA(
+                extensionsRaw: outboundSOA?.extensionRaw ?? Data()
+            )
+        } catch {
+            await ctx.zeroize()
+            guard activeOutboundOperationToken == operationToken else {
+                throw inactiveOutboundOperationError()
+            }
+            context = nil
+            activeOutboundOperationToken = nil
+            state = .idle
+            currentPeer = nil
+            await releasePendingArbiterAttempt()
+            throw error
+        }
+        guard activeOutboundOperationToken == operationToken else {
+            await ctx.zeroize()
+            throw inactiveOutboundOperationError()
+        }
+        
+        // Capture the actual signed wire identity before send can reenter this actor.
+        do {
+            captureCandidateLocalIdentity(try messageA.decodedIdentityPublicKeys(),
+                authenticatedLocalSOAPeerId: messageA.soaExtension?.initiatorPeerId)
+        } catch { recordLocalIdentityCaptureFailure("malformed_public_identity") }
+
+        // 发送 MessageA
+        do {
+            // 关键调试：确认 iOS 端正在发送“新 deterministic 编码”（UInt32 LE）
+            let capBytes = (try? messageA.capabilities.deterministicEncode()) ?? Data()
+            let policyBytes = messageA.policy.deterministicEncode()
+            SkyBridgeLogger.shared.info("📤 Handshake MessageA: total=\(messageA.encoded.count) bytes, cap=\(capBytes.count) bytes, policy=\(policyBytes.count) bytes")
+            let padded = try HandshakePadding.wrapIfEnabled(messageA.encoded, label: "MessageA")
+            // Handshake frames MUST NOT apply SBP2 (TrafficPadding). Keep parity with macOS core.
+            try await transport.send(to: peer, data: padded)
+        } catch {
+            guard activeOutboundOperationToken == operationToken else {
+                await ctx.zeroize()
+                throw inactiveOutboundOperationError()
+            }
+            if case .established = state {
+                // The peer may complete MessageB/Finished while send(MessageA)
+                // is suspended. Authenticated Finished is stronger terminal
+                // evidence than a late transport completion error.
+            } else {
+                await ctx.zeroize()
+                context = nil
+                await transitionToFailed(.transportError(error.localizedDescription))
+                throw HandshakeError.failed(.transportError(error.localizedDescription))
+            }
+        }
+        guard activeOutboundOperationToken == operationToken else {
+            await ctx.zeroize()
+            throw inactiveOutboundOperationError()
+        }
+        
+        // 等待 MessageB（带超时）
+        let clock = ContinuousClock()
+        let shouldScheduleMessageBTimeout: Bool
+        if case .sendingMessageA = state {
+            let deadline = clock.now + timeout
+            state = .waitingMessageB(deadline: deadline)
+            shouldScheduleMessageBTimeout = true
+        } else {
+            // Actor reentrancy can deliver MessageB/Finished while transport.send(MessageA) is awaiting.
+            // Preserve the advanced state instead of rolling it back to waitingMessageB.
+            shouldScheduleMessageBTimeout = false
+        }
+
+        if pendingResult == nil {
+            switch state {
+            case .established(let keys):
+                pendingResult = .success(keys)
+            case .failed(let reason):
+                pendingResult = .failure(HandshakeError.failed(reason))
+            default:
+                break
+            }
+        }
+        if case .established = state {
+            // Early Finished kept the token alive so this exact initiate call
+            // could consume its cached success after send(MessageA) returned.
+            activeOutboundOperationToken = nil
+        }
+        
+        return try await withCheckedThrowingContinuation { continuation in
+            // 检查是否有早到的结果
+            if let result = self.pendingResult {
+                self.pendingResult = nil
+                switch result {
+                case .success(let keys):
+                    continuation.resume(returning: keys)
+                case .failure(let error):
+                    continuation.resume(throwing: error)
+                }
+                return
+            }
+            
+            self.pendingContinuation = continuation
+            
+            // 设置超时任务
+            if shouldScheduleMessageBTimeout {
+                self.timeoutTask = Task {
+                    do {
+                        try await Task.sleep(
+                            until: clock.now + self.timeout,
+                            tolerance: HandshakeConstants.timeoutTolerance,
+                            clock: clock
+                        )
+                        await self.handleTimeout()
+                    } catch is CancellationError {
+                        return
+                    } catch {
+                        SkyBridgeLogger.shared.error(
+                            "Handshake MessageB timeout task failed unexpectedly: \(error.localizedDescription)"
+                        )
+                        await self.handleTimeout()
+                    }
+                }
+            }
+        }
+    }
+    
+    /// 处理收到的消息
+    public func handleMessage(_ data: Data, from peer: PeerIdentifier) async {
+        // Compatibility: older iOS builds mistakenly applied SBP2 (TrafficPadding) to handshake frames.
+        // Unwrap SBP2 first if present, then unwrap SBP1 (HandshakePadding).
+        let untraffic = TrafficPadding.unwrapIfNeeded(data, label: "HS/rx")
+        // Phase C1: unwrap padded handshake frames (SBP1).
+        let unwrapped = HandshakePadding.unwrapIfNeeded(untraffic, label: "rx")
+
+        // 检查是否是 Finished 消息
+        if isFinishedMessage(unwrapped) {
+            if let finished = try? HandshakeFinished.decode(from: unwrapped) {
+                await handleFinished(finished, from: peer)
+                return
+            }
+        }
+
+        // Rekey hardening (Classic -> PQC):
+        // During in-band rekey, ciphertext from the previous session can arrive interleaved with handshake frames.
+        // Those bytes must NOT fail the handshake parser (e.g. versionMismatch 1 vs 135).
+        let isHandshakeControl = isCompleteHandshakeControlFrame(unwrapped)
+        
+        switch state {
+        case .sendingMessageA, .waitingMessageB:
+            if !isHandshakeControl { return }
+            await handleMessageB(unwrapped)
+        case .idle:
+            // 作为响应方处理 MessageA
+            await handleMessageA(unwrapped, from: peer)
+        case .waitingFinished:
+            if let finished = try? HandshakeFinished.decode(from: unwrapped) {
+                await handleFinished(finished, from: peer)
+            }
+        default:
+            break
+        }
+    }
+    
+    /// 取消握手
+    public func cancel() async {
+        guard case .idle = state else {
+            responderOperationToken = nil
+            activeOutboundOperationToken = nil
+            finishedCommitToken = nil
+            localFinishedDelivery = nil
+            let contextToZeroize = context
+            context = nil
+            pendingFinished = nil
+            clearAuthenticatedRemoteAuthority()
+            state = .failed(reason: .cancelled)
+
+            // 取消超时任务
+            timeoutTask?.cancel()
+            timeoutTask = nil
+
+            if let contextToZeroize {
+                await contextToZeroize.zeroize()
+            }
+
+            await releasePendingArbiterAttempt()
+            if let lease = establishedArbiterLease {
+                establishedArbiterLease = nil
+                _ = await sessionArbiter.clearEstablished(lease)
+            }
+            
+            finishOnce(with: .failure(HandshakeError.failed(.cancelled)))
+            return
+        }
+    }
+    
+    /// 获取当前状态
+    public func getCurrentState() -> HandshakeState {
+        return state
+    }
+    
+    // MARK: - Private Methods
+
+    private enum HandshakeWireMessageKind: Sendable {
+        case messageA
+        case messageB
+    }
+    
+    /// 处理 MessageA（响应方）
+    private func handleMessageA(_ data: Data, from peer: PeerIdentifier) async {
+        let operationToken = UUID()
+        responderOperationToken = operationToken
+        state = .processingMessageA
+        defer {
+            if responderOperationToken == operationToken {
+                responderOperationToken = nil
+            }
+        }
+        currentPeer = peer
+        clearAuthenticatedRemoteAuthority()
+        
+        do {
+            let messageA = try HandshakeMessageA.decode(from: data)
+            
+            // 创建响应方上下文
+            let ctx = HandshakeContext(
+                role: .responder,
+                cryptoProvider: cryptoProvider,
+                protocolSignatureProvider: protocolSignatureProvider,
+                identityKeyHandle: identityKeyHandle,
+                identityPublicKey: identityPublicKey,
+                policy: policy,
+                cryptoPolicy: cryptoPolicy,
+                offeredSuites: offeredSuites
+            )
+            context = ctx
+            
+            // 处理 MessageA
+            do {
+                try await ctx.processMessageA(messageA)
+                try await enforceIdentityPinning(
+                    deviceId: peer.deviceId,
+                    identityPublicKey: messageA.identityPublicKey
+                )
+            } catch {
+                guard responderOperationToken == operationToken else { return }
+                await handleHandshakeError(error, context: ctx, expectedResponderOperation: operationToken)
+                return
+            }
+
+            guard responderOperationToken == operationToken else { return }
+            if let soa = messageA.soaExtension,
+               let localPeerId = localSOAPeerId {
+                // SOA binding must be driven by authenticated MessageA fields.
+                // If caller did not pre-bind a remote peer id, bind to initiatorPeerId after signature verification.
+                let expectedRemotePeerId = expectedRemoteSOAPeerId ?? soa.initiatorPeerId
+                let pairKey = PeerSessionArbiter.pairKey(
+                    localPeerId: localPeerId,
+                    remotePeerId: soa.initiatorPeerId,
+                    scope: soaSessionScope
+                )
+                let decision = await sessionArbiter.evaluateIncoming(
+                    pairKey: pairKey,
+                    remoteInitiatorPeerId: soa.initiatorPeerId,
+                    remoteAttemptId: soa.attemptId,
+                    targetPeerId: soa.targetPeerId,
+                    expectedRemotePeerId: expectedRemotePeerId,
+                    localPeerId: localPeerId,
+                    establishedPolicy: authenticatedIncomingEstablishedPolicy
+                )
+                guard case .processingMessageA = state else {
+                    switch decision {
+                    case .accept(let reservation),
+                         .acceptAndReplaceEstablished(let reservation),
+                         .acceptAndSupersedeLocal(let reservation, _, _):
+                        _ = await sessionArbiter.cancelEstablishment(reservation)
+                    case .rejectAlreadyConnected,
+                         .rejectBinding,
+                         .rejectRateLimited,
+                         .rejectLocalWinner:
+                        break
+                    }
+                    return
+                }
+                switch decision {
+                case .accept(let reservation):
+                    soaPairKey = pairKey
+                    soaAttemptId = soa.attemptId
+                    establishmentReservation = reservation
+                    soaAttemptRegisteredAsOutgoing = false
+                    candidateRemoteSOAPeerId = soa.initiatorPeerId
+                case .acceptAndReplaceEstablished(let reservation):
+                    soaPairKey = pairKey
+                    soaAttemptId = soa.attemptId
+                    establishmentReservation = reservation
+                    soaAttemptRegisteredAsOutgoing = false
+                    candidateRemoteSOAPeerId = soa.initiatorPeerId
+                case .acceptAndSupersedeLocal(let reservation, _, _):
+                    soaPairKey = pairKey
+                    soaAttemptId = soa.attemptId
+                    establishmentReservation = reservation
+                    soaAttemptRegisteredAsOutgoing = false
+                    candidateRemoteSOAPeerId = soa.initiatorPeerId
+                case .rejectAlreadyConnected:
+                    await transitionToFailed(.peerRejected("already_connected"))
+                    return
+                case .rejectBinding:
+                    await transitionToFailed(.invalidMessageFormat("SOA binding check failed"))
+                    return
+                case .rejectRateLimited:
+                    await transitionToFailed(.peerRejected("soa_rate_limited"))
+                    return
+                case .rejectLocalWinner:
+                    let winnerPeer = hexString(localPeerId)
+                    let winnerAttempt = hexString(soaAttemptId ?? Data())
+                    await transitionToFailed(.supersededByConcurrentAttempt(
+                        winnerPeerId: winnerPeer,
+                        winnerAttemptId: winnerAttempt
+                    ))
+                    return
+                }
+            }
+            
+            // 构建 MessageB
+            state = .sendingMessageB
+            let messageB: HandshakeMessageB
+            let sharedSecret: SecureBytes
+            do {
+                let result = try await ctx.buildMessageB()
+                messageB = result.message
+                sharedSecret = result.sharedSecret
+            } catch {
+                guard responderOperationToken == operationToken else { return }
+                await handleHandshakeError(error, context: ctx, expectedResponderOperation: operationToken)
+                return
+            }
+            defer { sharedSecret.zeroize() }
+            guard responderOperationToken == operationToken else { return }
+            
+            // The admitted MessageA target and actual signed MessageB key form
+            // this attempt's local identity. A later Keychain read cannot replace it.
+            do {
+                captureCandidateLocalIdentity(try messageB.decodedIdentityPublicKeys(),
+                    authenticatedLocalSOAPeerId: messageA.soaExtension?.targetPeerId)
+            } catch { recordLocalIdentityCaptureFailure("malformed_public_identity") }
+
+            // 发送 MessageB
+            do {
+                let padded = try HandshakePadding.wrapIfEnabled(messageB.encoded, label: "MessageB")
+                // Handshake frames MUST NOT apply SBP2 (TrafficPadding). Keep parity with macOS core.
+                try await transport.send(to: peer, data: padded)
+            } catch {
+                guard responderOperationToken == operationToken else { return }
+                await handleHandshakeError(HandshakeError.failed(.transportError(error.localizedDescription)), context: ctx, expectedResponderOperation: operationToken)
+                return
+            }
+            
+            guard responderOperationToken == operationToken else { return }
+            // 派生会话密钥
+            let sessionKeys: SessionKeys
+            do {
+                sessionKeys = try await ctx.finalizeResponderSessionKeys(sharedSecret: sharedSecret)
+            } catch {
+                guard responderOperationToken == operationToken else { return }
+                await handleHandshakeError(error, context: ctx, expectedResponderOperation: operationToken)
+                return
+            }
+
+            guard responderOperationToken == operationToken else { return }
+            let remoteAuthority = await ctx.getAuthenticatedRemoteAuthority()
+            guard responderOperationToken == operationToken else { return }
+            captureCandidateRemoteAuthority(
+                remoteAuthority,
+                authenticatedRemoteSOAPeerId: candidateRemoteSOAPeerId
+            )
+            
+            // 清理敏感数据
+            await ctx.zeroize()
+            guard responderOperationToken == operationToken else { return }
+            context = nil
+            
+            // 等待 Finished
+            let clock = ContinuousClock()
+            let deadline = clock.now + timeout
+            state = .waitingFinished(deadline: deadline, sessionKeys: sessionKeys, expectingFrom: .initiator)
+            let finishedDeliveryToken = UUID()
+            localFinishedDelivery = .sending(
+                token: finishedDeliveryToken,
+                sessionId: sessionKeys.sessionId
+            )
+            
+            // The timeout also owns a suspended local Finished send.
+            timeoutTask?.cancel()
+            timeoutTask = Task {
+                do {
+                    try await Task.sleep(until: clock.now + self.timeout, tolerance: HandshakeConstants.timeoutTolerance, clock: clock)
+                    await self.handleTimeout()
+                } catch is CancellationError {
+                    return
+                } catch {
+                    SkyBridgeLogger.shared.error(
+                        "Handshake responder timeout task failed unexpectedly: \(error.localizedDescription)"
+                    )
+                    await self.handleTimeout()
+                }
+            }
+
+            do {
+                let finished = try makeFinished(direction: .responderToInitiator, sessionKeys: sessionKeys)
+                let padded = try HandshakePadding.wrapIfEnabled(finished.encoded, label: "Finished")
+                // Handshake frames MUST NOT apply SBP2 (TrafficPadding). Keep parity with macOS core.
+                try await transport.send(to: peer, data: padded)
+            } catch {
+                guard isCurrentLocalFinishedSend(
+                    finishedDeliveryToken,
+                    sessionId: sessionKeys.sessionId
+                ) else { return }
+                await transitionToFailed(.transportError(error.localizedDescription), negotiatedSuite: sessionKeys.negotiatedSuite)
+                return
+            }
+
+            guard isCurrentLocalFinishedSend(
+                finishedDeliveryToken,
+                sessionId: sessionKeys.sessionId
+            ) else { return }
+            localFinishedDelivery = .sent(sessionId: sessionKeys.sessionId)
+
+            if let pending = pendingFinished {
+                pendingFinished = nil
+                await handleFinished(pending, from: peer)
+            }
+            
+        } catch {
+            guard responderOperationToken == operationToken else { return }
+            await handleHandshakeError(error, rawHandshakeData: data, messageKind: .messageA, expectedResponderOperation: operationToken)
+        }
+    }
+    
+    /// 处理 MessageB（发起方）
+    private func handleMessageB(_ data: Data) async {
+        guard let ctx = context else {
+            await transitionToFailed(.invalidMessageFormat("No context available"))
+            return
+        }
+        
+        let epoch = messageBEpoch &+ 1
+        messageBEpoch = epoch
+        state = .processingMessageB(epoch: epoch)
+        
+        do {
+            let messageB = try HandshakeMessageB.decode(from: data)
+            
+            // 处理 MessageB
+            let sessionKeys = try await ctx.processMessageB(messageB)
+            if let pinnedDeviceId = currentPeer?.deviceId {
+                try await enforceIdentityPinning(
+                    deviceId: pinnedDeviceId,
+                    identityPublicKey: messageB.identityPublicKey
+                )
+            }
+            
+            guard case .processingMessageB(let currentEpoch) = state, currentEpoch == epoch else {
+                await ctx.zeroize()
+                context = nil
+                return
+            }
+
+            captureCandidateRemoteAuthority(
+                await ctx.getAuthenticatedRemoteAuthority(),
+                authenticatedRemoteSOAPeerId: candidateRemoteSOAPeerId
+            )
+            await ctx.zeroize()
+            context = nil
+            
+            // 等待 Finished
+            let clock = ContinuousClock()
+            let deadline = clock.now + timeout
+            state = .waitingFinished(deadline: deadline, sessionKeys: sessionKeys, expectingFrom: .responder)
+            
+            timeoutTask?.cancel()
+            timeoutTask = Task {
+                do {
+                    try await Task.sleep(until: clock.now + self.timeout, tolerance: HandshakeConstants.timeoutTolerance, clock: clock)
+                    await self.handleTimeout()
+                } catch is CancellationError {
+                    return
+                } catch {
+                    SkyBridgeLogger.shared.error(
+                        "Handshake initiator timeout task failed unexpectedly: \(error.localizedDescription)"
+                    )
+                    await self.handleTimeout()
+                }
+            }
+
+            if let pending = pendingFinished {
+                pendingFinished = nil
+                await handleFinished(pending, from: currentPeer ?? PeerIdentifier(deviceId: "unknown"))
+            }
+            
+        } catch {
+            await handleHandshakeError(error, context: ctx, rawHandshakeData: data, messageKind: .messageB)
+        }
+    }
+    
+    /// 处理超时
+    private func handleTimeout() async {
+        let suite: CryptoSuite?
+        switch state {
+        case .waitingMessageB:
+            suite = nil
+        case .waitingFinished(_, let sessionKeys, _):
+            suite = sessionKeys.negotiatedSuite
+        default:
+            return
+        }
+        
+        if let ctx = context {
+            await ctx.zeroize()
+            context = nil
+        }
+        
+        await transitionToFailed(.timeout, negotiatedSuite: suite)
+    }
+
+    private func captureCandidateLocalIdentity(_ identityKeys: IdentityPublicKeys, authenticatedLocalSOAPeerId: Data?) {
+        candidateLocalIdentityBinding = nil
+        guard let localProtocolDeviceId, let actual = authenticatedLocalSOAPeerId, let localSOAPeerId else { return }
+        guard actual == localSOAPeerId, PeerSessionArbiter.soaPeerId(from: localProtocolDeviceId) == actual else {
+            recordLocalIdentityCaptureFailure("local_device_soa_mismatch"); return
+        }
+        guard let nativeAlgorithm = ProtocolSigningAlgorithm(from: identityKeys.protocolAlgorithm),
+              let algorithm = SkyBridgeProtocolCore.ProtocolSigningAlgorithm(rawValue: nativeAlgorithm.rawValue) else { return }
+        do {
+            candidateLocalIdentityBinding = try ProtocolIdentityBinding(deviceId: localProtocolDeviceId,
+                protocolSigningAlgorithm: algorithm, protocolPublicKeyBytes: identityKeys.protocolPublicKey)
+        } catch CurrentPathSecurityError.invalidDeviceId {
+            recordLocalIdentityCaptureFailure("invalid_device_identifier")
+        } catch CurrentPathSecurityError.invalidProtocolIdentity(_) {
+            recordLocalIdentityCaptureFailure("invalid_public_key_encoding")
+        } catch { recordLocalIdentityCaptureFailure("identity_binding_rejected") }
+    }
+
+    private func recordLocalIdentityCaptureFailure(_ reason: String) {
+        candidateLocalIdentityBinding = nil
+        guard localIdentityCaptureFailure == nil else { return }
+        localIdentityCaptureFailure = reason
+        SkyBridgeLogger.shared.warning("Audio local identity unavailable: \(reason)")
+    }
+
+    private func captureCandidateRemoteAuthority(
+        _ authority: AuthenticatedRemoteAuthority?,
+        authenticatedRemoteSOAPeerId: Data?
+    ) {
+        candidateRemoteAuthority = authority
+        candidateRemoteSOAPeerId = authority == nil ? nil : authenticatedRemoteSOAPeerId
+    }
+
+    private func promoteCandidateRemoteAuthority() -> Bool {
+        guard let candidateRemoteAuthority else { return false }
+        authenticatedRemoteAuthority = candidateRemoteAuthority
+        authenticatedRemoteSOAPeerId = candidateRemoteSOAPeerId
+        self.candidateRemoteAuthority = nil
+        candidateRemoteSOAPeerId = nil
+        return true
+    }
+
+    private func clearAuthenticatedRemoteAuthority() {
+        candidateLocalIdentityBinding = nil
+        authenticatedLocalIdentityBinding = nil
+        localIdentityCaptureFailure = nil
+        authenticatedRemoteAuthority = nil
+        authenticatedRemoteSOAPeerId = nil
+        candidateRemoteAuthority = nil
+        candidateRemoteSOAPeerId = nil
+    }
+
+    private func enforceIdentityPinning(deviceId: String, identityPublicKey: Data) async throws {
+        let identityKeys = try IdentityPublicKeys.decodeWithLegacyFallback(
+            from: identityPublicKey
+        )
+        if identityKeys.protocolAlgorithm == .mlDSA87 {
+            let exactPublicKey = await trustProvider.trustedProtocolIdentityPublicKey(
+                for: deviceId,
+                algorithm: .mlDSA87
+            )
+            try Self.validateExactMLDSA87Authority(
+                messageAlgorithm: .mlDSA87,
+                messagePublicKey: identityKeys.protocolPublicKey,
+                trustedPublicKey: exactPublicKey
+            )
+        }
+        let trustedFingerprints = await trustProvider.trustedFingerprintSet(for: deviceId)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+        guard !trustedFingerprints.isEmpty else {
+            if await trustProvider.requiresPinnedProtocolIdentity(for: deviceId) {
+                throw HandshakeError.failed(.identityMismatch(
+                    expected: "pinned_protocol_identity",
+                    actual: "missing"
+                ))
+            }
+            return
+        }
+        let actualFingerprint = try identityKeys.authoritativeProtocolFingerprint().lowercased()
+        guard trustedFingerprints.contains(actualFingerprint) else {
+            throw HandshakeError.failed(.identityMismatch(
+                expected: trustedFingerprints.sorted().joined(separator: ","),
+                actual: actualFingerprint
+            ))
+        }
+    }
+
+    nonisolated static func validateExactMLDSA87Authority(
+        messageAlgorithm: ProtocolSigningAlgorithm,
+        messagePublicKey: Data,
+        trustedPublicKey: Data?
+    ) throws {
+        guard messageAlgorithm == .mlDSA87 else { return }
+        guard trustedPublicKey == messagePublicKey else {
+            throw HandshakeError.failed(.identityMismatch(
+                expected: "exact authenticated ML-DSA-87 protocol key",
+                actual: "missing or non-matching ML-DSA-87 protocol key"
+            ))
+        }
+    }
+
+    private nonisolated func isFinishedMessage(_ data: Data) -> Bool {
+        guard data.count >= 4 else { return false }
+        return data.prefix(4).elementsEqual([0x46, 0x49, 0x4E, 0x31])
+    }
+
+    private nonisolated func isCompleteHandshakeControlFrame(_ data: Data) -> Bool {
+        if (try? HandshakeFinished.decode(from: data)) != nil { return true }
+        guard data.count >= 5, data.first == HandshakeConstants.protocolVersion else { return false }
+        if (try? HandshakeMessageA.decode(from: data)) != nil { return true }
+        if (try? HandshakeMessageB.decode(from: data)) != nil { return true }
+        return false
+    }
+    
+    private func makeFinished(direction: HandshakeFinished.Direction, sessionKeys: SessionKeys) throws -> HandshakeFinished {
+        let baseKey: Data
+        let label: String
+        switch direction {
+        case .responderToInitiator:
+            baseKey = sessionKeys.sendKey
+            label = "R2I"
+        case .initiatorToResponder:
+            baseKey = sessionKeys.sendKey
+            label = "I2R"
+        }
+        
+        let macKey = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: SymmetricKey(data: baseKey),
+            salt: Data(),
+            info: Data("SkyBridge-FINISHED|\(label)|".utf8) + sessionKeys.transcriptHash,
+            outputByteCount: 32
+        )
+        let mac = HMAC<SHA256>.authenticationCode(for: sessionKeys.transcriptHash, using: macKey)
+        return HandshakeFinished(direction: direction, mac: Data(mac))
+    }
+    
+    private func verifyFinished(
+        _ finished: HandshakeFinished,
+        sessionKeys: SessionKeys,
+        expectingFrom: HandshakeRole
+    ) -> Bool {
+        let expectedDirection: HandshakeFinished.Direction
+        let baseKey: Data
+        let label: String
+        
+        switch expectingFrom {
+        case .initiator:
+            expectedDirection = .initiatorToResponder
+            baseKey = sessionKeys.receiveKey
+            label = "I2R"
+        case .responder:
+            expectedDirection = .responderToInitiator
+            baseKey = sessionKeys.receiveKey
+            label = "R2I"
+        }
+        
+        guard finished.direction == expectedDirection else { return false }
+        guard finished.mac.count == 32 else { return false }
+        
+        let macKey = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: SymmetricKey(data: baseKey),
+            salt: Data(),
+            info: Data("SkyBridge-FINISHED|\(label)|".utf8) + sessionKeys.transcriptHash,
+            outputByteCount: 32
+        )
+        let expectedMac = Data(HMAC<SHA256>.authenticationCode(for: sessionKeys.transcriptHash, using: macKey))
+        return constantTimeEqual(expectedMac, finished.mac)
+    }
+    
+    private nonisolated func constantTimeEqual(_ a: Data, _ b: Data) -> Bool {
+        if a.count != b.count { return false }
+        var diff: UInt8 = 0
+        for i in 0..<a.count {
+            diff |= a[i] ^ b[i]
+        }
+        return diff == 0
+    }
+    
+    private func handleFinished(_ finished: HandshakeFinished, from peer: PeerIdentifier) async {
+        switch state {
+        case .waitingMessageB, .processingMessageB:
+            guard pendingFinished == nil else {
+                await transitionToFailed(.invalidMessageFormat("Duplicate pending Finished"))
+                return
+            }
+            pendingFinished = finished
+            return
+        case .waitingFinished(_, let sessionKeys, let expectingFrom):
+            guard verifyFinished(finished, sessionKeys: sessionKeys, expectingFrom: expectingFrom) else {
+                await transitionToFailed(.keyConfirmationFailed, negotiatedSuite: sessionKeys.negotiatedSuite)
+                return
+            }
+
+            if expectingFrom == .initiator {
+                switch localFinishedDelivery {
+                case .some(.sending(_, let sessionId)) where sessionId == sessionKeys.sessionId:
+                    guard pendingFinished == nil else {
+                        await transitionToFailed(
+                            .invalidMessageFormat("Duplicate pending Finished"),
+                            negotiatedSuite: sessionKeys.negotiatedSuite
+                        )
+                        return
+                    }
+                    pendingFinished = finished
+                    return
+                case .some(.sent(let sessionId)) where sessionId == sessionKeys.sessionId:
+                    break
+                default:
+                    await transitionToFailed(
+                        .invalidMessageFormat("Finished delivery does not own the current session"),
+                        negotiatedSuite: sessionKeys.negotiatedSuite
+                    )
+                    return
+                }
+            }
+
+            guard finishedCommitToken == nil else { return }
+            let commitToken = UUID()
+            finishedCommitToken = commitToken
+            
+            if expectingFrom == .responder {
+                localFinishedDelivery = .sending(
+                    token: commitToken,
+                    sessionId: sessionKeys.sessionId
+                )
+                do {
+                    let clientFinished = try makeFinished(direction: .initiatorToResponder, sessionKeys: sessionKeys)
+                    let padded = try HandshakePadding.wrapIfEnabled(clientFinished.encoded, label: "Finished")
+                    // Handshake frames MUST NOT apply SBP2 (TrafficPadding). Keep parity with macOS core.
+                    try await transport.send(to: peer, data: padded)
+                } catch {
+                    guard isCurrentFinishedCommit(
+                        commitToken,
+                        sessionId: sessionKeys.sessionId
+                    ) else { return }
+                    await transitionToFailed(.transportError(error.localizedDescription), negotiatedSuite: sessionKeys.negotiatedSuite)
+                    return
+                }
+                guard isCurrentFinishedCommit(
+                    commitToken,
+                    sessionId: sessionKeys.sessionId
+                ), isCurrentLocalFinishedSend(
+                    commitToken,
+                    sessionId: sessionKeys.sessionId
+                ) else {
+                    return
+                }
+                localFinishedDelivery = .sent(sessionId: sessionKeys.sessionId)
+            }
+
+            guard case .some(.sent(let deliveredSessionId)) = localFinishedDelivery,
+                  deliveredSessionId == sessionKeys.sessionId else {
+                await transitionToFailed(
+                    .invalidMessageFormat("Local Finished has not been delivered"),
+                    negotiatedSuite: sessionKeys.negotiatedSuite
+                )
+                return
+            }
+
+            let committedArbiterLease: PeerSessionArbiter.EstablishedLease?
+            if let pairKey = soaPairKey {
+                guard let establishmentReservation,
+                      establishmentReservation.pairKey == pairKey else {
+                    await transitionToFailed(
+                        .invalidMessageFormat("Missing SOA establishment reservation"),
+                        negotiatedSuite: sessionKeys.negotiatedSuite
+                    )
+                    return
+                }
+                let lease: PeerSessionArbiter.EstablishedLease
+                do {
+                    lease = try await sessionArbiter.commitEstablished(
+                        establishmentReservation,
+                        sessionId: sessionKeys.sessionId
+                    )
+                } catch let error as PeerSessionArbiter.EstablishmentCommitError {
+                    guard isCurrentFinishedCommit(
+                        commitToken,
+                        sessionId: sessionKeys.sessionId
+                    ) else {
+                        return
+                    }
+                    let reason: String
+                    switch error {
+                    case .reservationInvalidated:
+                        reason = "soa_establishment_reservation_invalidated"
+                    case .establishedOwnerChanged:
+                        reason = "soa_established_owner_changed"
+                    }
+                    await transitionToFailed(
+                        .peerRejected(reason),
+                        negotiatedSuite: sessionKeys.negotiatedSuite
+                    )
+                    return
+                } catch {
+                    guard isCurrentFinishedCommit(
+                        commitToken,
+                        sessionId: sessionKeys.sessionId
+                    ) else {
+                        return
+                    }
+                    await transitionToFailed(
+                        .peerRejected("soa_establishment_commit_failed"),
+                        negotiatedSuite: sessionKeys.negotiatedSuite
+                    )
+                    return
+                }
+                guard isCurrentFinishedCommit(
+                    commitToken,
+                    sessionId: sessionKeys.sessionId
+                ) else {
+                    _ = await sessionArbiter.clearEstablished(lease)
+                    return
+                }
+                committedArbiterLease = lease
+            } else {
+                committedArbiterLease = nil
+            }
+
+            guard promoteCandidateRemoteAuthority() else {
+                establishedArbiterLease = committedArbiterLease
+                await transitionToFailed(
+                    .invalidMessageFormat("Finished verified without an authenticated remote authority"),
+                    negotiatedSuite: sessionKeys.negotiatedSuite
+                )
+                return
+            }
+
+            do {
+                let mode = try localModePolicy.get()
+                try PQCModePolicyStore.standard.withCurrent(mode) {
+                    guard !sessionKeys.negotiatedSuite.isPQCGroup
+                        || mode.selection.permittedSuiteWireIds.contains(sessionKeys.negotiatedSuite.wireId) else {
+                        throw PQCModeSelectionError.invalidCapabilities
+                    }
+                    establishedArbiterLease = committedArbiterLease
+                    establishmentReservation = nil
+                    soaAttemptRegisteredAsOutgoing = false
+                    if pendingContinuation != nil {
+                        activeOutboundOperationToken = nil
+                    }
+                    finishedCommitToken = nil
+                    authenticatedLocalIdentityBinding = candidateLocalIdentityBinding
+                    candidateLocalIdentityBinding = nil
+                    state = .established(sessionKeys: sessionKeys)
+                }
+            } catch {
+                establishedArbiterLease = committedArbiterLease
+                await transitionToFailed(.peerRejected("pqc_mode_policy_changed_or_disallowed"), negotiatedSuite: sessionKeys.negotiatedSuite)
+                return
+            }
+            finishOnce(with: .success(sessionKeys))
+            
+        default:
+            break
+        }
+    }
+    
+    private func transitionToFailed(_ reason: HandshakeFailureReason, negotiatedSuite: CryptoSuite? = nil) async {
+        responderOperationToken = nil
+        activeOutboundOperationToken = nil
+        finishedCommitToken = nil
+        localFinishedDelivery = nil
+        let contextToZeroize = context
+        context = nil
+        pendingFinished = nil
+        clearAuthenticatedRemoteAuthority()
+        state = .failed(reason: reason)
+        if let contextToZeroize {
+            await contextToZeroize.zeroize()
+        }
+        await releasePendingArbiterAttempt()
+        if let lease = establishedArbiterLease {
+            establishedArbiterLease = nil
+            _ = await sessionArbiter.clearEstablished(lease)
+        }
+        finishOnce(with: .failure(HandshakeError.failed(reason)))
+    }
+
+    private func isCurrentLocalFinishedSend(
+        _ token: UUID,
+        sessionId: String
+    ) -> Bool {
+        guard case .some(.sending(let currentToken, let currentSessionId)) = localFinishedDelivery,
+              currentToken == token,
+              currentSessionId == sessionId,
+              case .waitingFinished(_, let currentKeys, _) = state else {
+            return false
+        }
+        return currentKeys.sessionId == sessionId
+    }
+
+    private func isCurrentFinishedCommit(
+        _ token: UUID,
+        sessionId: String
+    ) -> Bool {
+        guard finishedCommitToken == token,
+              case .waitingFinished(_, let currentKeys, _) = state else {
+            return false
+        }
+        return currentKeys.sessionId == sessionId
+    }
+
+    private func releasePendingArbiterAttempt() async {
+        let reservation = establishmentReservation
+        let registeredAsOutgoing = soaAttemptRegisteredAsOutgoing
+        establishmentReservation = nil
+        soaAttemptRegisteredAsOutgoing = false
+        soaPairKey = nil
+        soaAttemptId = nil
+        guard let reservation else { return }
+        if registeredAsOutgoing {
+            _ = await sessionArbiter.clearOutgoing(reservation)
+        } else {
+            _ = await sessionArbiter.cancelEstablishment(reservation)
+        }
+    }
+
+    private func inactiveOutboundOperationError() -> HandshakeError {
+        if case .failed(let reason) = state {
+            return .failed(reason)
+        }
+        return .failed(.cancelled)
+    }
+    
+    private func finishOnce(with result: Result<SessionKeys, Error>) {
+        timeoutTask?.cancel()
+        timeoutTask = nil
+        
+        guard let continuation = pendingContinuation else {
+            pendingResult = result
+            return
+        }
+        pendingContinuation = nil
+        
+        switch result {
+        case .success(let keys):
+            continuation.resume(returning: keys)
+        case .failure(let error):
+            continuation.resume(throwing: error)
+        }
+    }
+    
+    private func handleHandshakeError(
+        _ error: Error,
+        context: HandshakeContext? = nil,
+        rawHandshakeData: Data? = nil,
+        messageKind: HandshakeWireMessageKind? = nil,
+        expectedResponderOperation: UUID? = nil
+    ) async {
+        if let expectedResponderOperation,
+           responderOperationToken != expectedResponderOperation { return }
+        let negotiatedSuite = await context?.negotiatedSuite
+        if let expectedResponderOperation,
+           responderOperationToken != expectedResponderOperation { return }
+        if let ctx = context {
+            await ctx.zeroize()
+            if let expectedResponderOperation,
+               responderOperationToken != expectedResponderOperation { return }
+            self.context = nil
+        }
+        
+        if let handshakeError = error as? HandshakeError {
+            switch handshakeError {
+            case .failed(let reason):
+                if case .unknownSuite(let wireId) = reason,
+                   let rawHandshakeData,
+                   let messageKind {
+                    let stage = firstUnknownSuite(in: rawHandshakeData, messageKind: messageKind)?.stage
+                        ?? defaultUnknownSuiteStage(for: messageKind)
+                    emitUnknownSuiteRejected(wireId: wireId, stage: stage)
+                }
+                await transitionToFailed(reason, negotiatedSuite: negotiatedSuite)
+            default:
+                await transitionToFailed(.cryptoError(handshakeError.localizedDescription), negotiatedSuite: negotiatedSuite)
+            }
+            return
+        }
+        
+        await transitionToFailed(.cryptoError(error.localizedDescription), negotiatedSuite: negotiatedSuite)
+    }
+
+    private nonisolated func firstUnknownSuite(
+        in rawHandshakeData: Data,
+        messageKind: HandshakeWireMessageKind
+    ) -> (wireId: UInt16, stage: String)? {
+        let data = HandshakePadding.unwrapIfNeeded(rawHandshakeData, label: "unknown-suite-audit")
+        switch messageKind {
+        case .messageA:
+            guard data.count >= 5, data.first == HandshakeConstants.protocolVersion else {
+                return nil
+            }
+            var offset = 1
+            guard let supportedCount = Self.readUInt16LE(from: data, offset: &offset),
+                  supportedCount > 0,
+                  supportedCount <= HandshakeConstants.maxSupportedSuites else {
+                return nil
+            }
+            for _ in 0..<Int(supportedCount) {
+                guard let suiteId = Self.readUInt16LE(from: data, offset: &offset) else {
+                    return nil
+                }
+                if !CryptoSuite(wireId: suiteId).isKnown {
+                    return (suiteId, "decode.messageA.supportedSuites")
+                }
+            }
+            guard let keyShareCount = Self.readUInt16LE(from: data, offset: &offset),
+                  keyShareCount <= HandshakeConstants.maxKeyShareCount,
+                  keyShareCount <= supportedCount else {
+                return nil
+            }
+            for _ in 0..<Int(keyShareCount) {
+                guard let suiteId = Self.readUInt16LE(from: data, offset: &offset),
+                      let shareLen = Self.readUInt16LE(from: data, offset: &offset) else {
+                    return nil
+                }
+                if !CryptoSuite(wireId: suiteId).isKnown {
+                    return (suiteId, "decode.messageA.keyShares")
+                }
+                guard offset + Int(shareLen) <= data.count else {
+                    return nil
+                }
+                offset += Int(shareLen)
+            }
+            return nil
+        case .messageB:
+            guard data.count >= 3, data.first == HandshakeConstants.protocolVersion else {
+                return nil
+            }
+            var offset = 1
+            guard let suiteId = Self.readUInt16LE(from: data, offset: &offset),
+                  !CryptoSuite(wireId: suiteId).isKnown else {
+                return nil
+            }
+            return (suiteId, "decode.messageB.selectedSuite")
+        }
+    }
+
+    private nonisolated func defaultUnknownSuiteStage(
+        for messageKind: HandshakeWireMessageKind
+    ) -> String {
+        switch messageKind {
+        case .messageA:
+            return "decode.messageA.supportedSuites"
+        case .messageB:
+            return "decode.messageB.selectedSuite"
+        }
+    }
+
+    private nonisolated func emitUnknownSuiteRejected(wireId: UInt16, stage: String) {
+        let wireHex = String(format: "0x%04X", wireId)
+        SecurityEventEmitter.emitDetached(SecurityEvent(
+            type: .handshakeFailed,
+            severity: .warning,
+            message: "suite_rejected_unknown",
+            context: [
+                "reason": "suite_rejected_unknown",
+                "wireId": wireHex,
+                "stage": stage,
+                "fallbackEligible": "0"
+            ]
+        ))
+    }
+
+    private nonisolated static func readUInt16LE(from data: Data, offset: inout Int) -> UInt16? {
+        guard offset + 2 <= data.count else {
+            return nil
+        }
+        let value = UInt16(data[offset]) | (UInt16(data[offset + 1]) << 8)
+        offset += 2
+        return value
+    }
+
+    private func resolveOutboundSOAMetadata(for _: PeerIdentifier) throws -> HandshakeSOAMetadata? {
+        if let soaMetadata {
+            return soaMetadata
+        }
+        guard let localSOAPeerId,
+              localSOAPeerId.count == HandshakeSOAExtension.initiatorPeerIdLength,
+              let expectedRemoteSOAPeerId,
+              expectedRemoteSOAPeerId.count == HandshakeSOAExtension.targetPeerIdLength else {
+            return nil
+        }
+        let attemptId = Self.randomAttemptId()
+        return try HandshakeSOAMetadata(
+            initiatorPeerId: localSOAPeerId,
+            targetPeerId: expectedRemoteSOAPeerId,
+            attemptId: attemptId
+        )
+    }
+
+    private func handleSupersededByConcurrentAttempt(
+        winnerPeerId: Data,
+        winnerAttemptId: Data
+    ) async {
+        guard case .idle = state else {
+            responderOperationToken = nil
+            activeOutboundOperationToken = nil
+            finishedCommitToken = nil
+            localFinishedDelivery = nil
+            let contextToZeroize = context
+            context = nil
+            timeoutTask?.cancel()
+            timeoutTask = nil
+            establishmentReservation = nil
+            soaAttemptRegisteredAsOutgoing = false
+            clearAuthenticatedRemoteAuthority()
+            let reason = HandshakeFailureReason.supersededByConcurrentAttempt(
+                winnerPeerId: hexString(winnerPeerId),
+                winnerAttemptId: hexString(winnerAttemptId)
+            )
+            state = .failed(reason: reason)
+            if let contextToZeroize {
+                await contextToZeroize.zeroize()
+            }
+            finishOnce(with: .failure(HandshakeError.failed(reason)))
+            return
+        }
+    }
+
+    private nonisolated static func randomAttemptId() -> Data {
+        var bytes = [UInt8](repeating: 0, count: HandshakeSOAExtension.attemptIdLength)
+        if SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) != errSecSuccess {
+            for idx in bytes.indices {
+                bytes[idx] = UInt8.random(in: UInt8.min...UInt8.max)
+            }
+        }
+        return Data(bytes)
+    }
+
+    private nonisolated func hexString(_ data: Data) -> String {
+        data.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+// MARK: - HandshakeContext
+
+/// 握手上下文 Actor
+@available(iOS 17.0, *)
+public actor HandshakeContext {
+    
+    // MARK: - Properties
+    
+    public let role: HandshakeRole
+    private let cryptoProvider: any CryptoProvider
+    private let qPeriaptAdmissionSnapshot: QPeriaptHandshakeAdmissionSnapshot
+    private let pqcProvider: (any CryptoProvider)?
+    private let hybridProvider: (any CryptoProvider)?
+    private let protocolSignatureProvider: any ProtocolSignatureProvider
+    private let identityKeyHandle: SigningKeyHandle?
+    private let identityPublicKey: Data
+    private let policy: HandshakePolicy
+    private let cryptoPolicy: CryptoPolicy
+    private let offeredSuites: [CryptoSuite]?
+    
+    /// 临时密钥对
+    private var ephemeralPrivateKey: SecureBytes?
+    private var ephemeralPublicKey: Data?
+
+    /// v2 发起方临时贡献私钥（X25519）
+    private var v2InitiatorContributionPrivateKey: SecureBytes?
+
+    /// v2 响应方缓存的发起方临时贡献公钥（X25519）
+    private var v2PeerInitiatorContribution: Data?
+
+    /// 对端 keyShares（按套件）
+    private var peerKeyShares: [CryptoSuite: Data] = [:]
+    
+    /// 对端 KEM 身份公钥（仅 PQC suites 需要，initiator encapsulate 用）
+    private let peerKEMPublicKeys: [CryptoSuite: Data]
+
+    /// KEM 共享密钥（PQC suites：initiator 侧在 MessageA 时生成；responder 侧在 MessageA 时解封装）
+    private var kemSharedSecrets: [CryptoSuite: SecureBytes] = [:]
+
+    /// 发起方已发送的 supportedSuites / keyShares（用于 Anti-Downgrade 校验）
+    private var sentSupportedSuites: [CryptoSuite] = []
+    private var sentKeyShares: [CryptoSuite: Data] = [:]
+    
+    /// Transcript hash
+    private var transcriptHashA: Data?
+    private var transcriptHashB: Data?
+    
+    /// 协商的套件
+    public private(set) var negotiatedSuite: CryptoSuite?
+    
+    /// Nonce
+    private var localNonce: Data?
+    private var peerNonce: Data?
+    
+    /// 是否已被清理
+    public private(set) var isZeroized: Bool = false
+
+    /// 最近一次成功验签得到的远端协议身份 authority
+    private var authenticatedRemoteAuthority: AuthenticatedRemoteAuthority?
+
+    /// Guards suspended actor work from committing after cancellation or
+    /// zeroization and rejects overlapping public handshake operations.
+    private var lifecycleGeneration: UInt64 = 0
+    private var isProcessingHandshakeMessage = false
+
+    /// Authenticated peer capabilities. MessageA sets this for responders;
+    /// MessageB sets it only after payload decoding and suite binding succeeds.
+    public private(set) var peerCapabilities: CryptoCapabilities?
+    
+    // MARK: - Initialization
+    
+    public init(
+        role: HandshakeRole,
+        cryptoProvider: any CryptoProvider,
+        protocolSignatureProvider: any ProtocolSignatureProvider,
+        identityKeyHandle: SigningKeyHandle?,
+        identityPublicKey: Data,
+        policy: HandshakePolicy,
+        cryptoPolicy: CryptoPolicy = .default,
+        offeredSuites: [CryptoSuite]? = nil,
+        peerKEMPublicKeys: [CryptoSuite: Data] = [:]
+    ) {
+        self.role = role
+        self.cryptoProvider = cryptoProvider
+        if let provider = cryptoProvider as? any QPeriaptHandshakeBoundCryptoProvider {
+            self.qPeriaptAdmissionSnapshot = .freeze(
+                provider: provider,
+                protocolIdentityConfiguration: provider.qPeriaptProtocolIdentityConfiguration
+            )
+        } else {
+            self.qPeriaptAdmissionSnapshot = .unavailable
+        }
+        #if HAS_APPLE_PQC_SDK
+        if #available(iOS 26.0, macOS 26.0, *), cryptoProvider.tier == .nativePQC {
+            self.pqcProvider = ApplePQCCryptoProvider()
+            self.hybridProvider = AppleXWingCryptoProvider()
+        } else {
+            self.pqcProvider = nil
+            self.hybridProvider = nil
+        }
+        #else
+        self.pqcProvider = nil
+        self.hybridProvider = nil
+        #endif
+        self.protocolSignatureProvider = protocolSignatureProvider
+        self.identityKeyHandle = identityKeyHandle
+        self.identityPublicKey = identityPublicKey
+        self.policy = policy
+        self.cryptoPolicy = cryptoPolicy
+        self.offeredSuites = offeredSuites
+        self.peerKEMPublicKeys = peerKEMPublicKeys
+    }
+
+    public func getAuthenticatedRemoteAuthority() -> AuthenticatedRemoteAuthority? {
+        authenticatedRemoteAuthority
+    }
+
+    private func provider(for suite: CryptoSuite) -> (any CryptoProvider)? {
+        guard suite.isNegotiable else { return nil }
+        if suite == .qperiaptABI2PolicyBound {
+            guard qPeriaptAdmissionSnapshot.admits(provider: cryptoProvider) else {
+                return nil
+            }
+            return cryptoProvider
+        }
+        if let hybridProvider, hybridProvider.supportsSuite(suite) {
+            return hybridProvider
+        }
+        if let pqcProvider, pqcProvider.supportsSuite(suite) {
+            return pqcProvider
+        }
+        if cryptoProvider.supportsSuite(suite) {
+            return cryptoProvider
+        }
+        return nil
+    }
+
+    private static func decodeResponderCapabilities(from payload: Data) throws -> CryptoCapabilities {
+        do {
+            var decoder = IOSResponderCapabilityPayloadDecoder(data: payload)
+            let capabilities = try decoder.decode()
+            guard try capabilities.deterministicEncode() == payload else {
+                throw IOSResponderCapabilityPayloadError.nonCanonicalEncoding
+            }
+            return capabilities
+        } catch {
+            throw HandshakeError.failed(
+                .invalidMessageFormat("Responder capabilities payload is invalid or non-canonical")
+            )
+        }
+    }
+
+    private func ensureActive(generation: UInt64) throws {
+        guard !isZeroized, lifecycleGeneration == generation else {
+            throw HandshakeError.contextZeroized
+        }
+    }
+
+    private static func validatedMessageAKeyShares(
+        _ messageA: HandshakeMessageA
+    ) throws -> [CryptoSuite: Data] {
+        guard messageA.version == HandshakeConstants.protocolVersion else {
+            throw HandshakeError.failed(.versionMismatch(
+                local: HandshakeConstants.protocolVersion,
+                remote: messageA.version
+            ))
+        }
+        guard messageA.clientNonce.count == HandshakeConstants.nonceSize else {
+            throw HandshakeError.failed(.invalidMessageFormat("Invalid MessageA nonce length"))
+        }
+        guard !messageA.supportedSuites.isEmpty,
+              messageA.supportedSuites.count <= Int(HandshakeConstants.maxSupportedSuites),
+              messageA.supportedSuites.allSatisfy(\.isNegotiable),
+              Set(messageA.supportedSuites.map(\.wireId)).count == messageA.supportedSuites.count else {
+            throw HandshakeError.failed(.invalidMessageFormat("Invalid or duplicate supported suite"))
+        }
+        guard messageA.keyShares.count <= Int(HandshakeConstants.maxKeyShareCount),
+              messageA.keyShares.count <= messageA.supportedSuites.count else {
+            throw HandshakeError.failed(.invalidMessageFormat("Invalid MessageA keyShare count"))
+        }
+
+        let supportedIndexes = Dictionary(
+            uniqueKeysWithValues: messageA.supportedSuites.enumerated().map { ($0.element.wireId, $0.offset) }
+        )
+        var previousIndex = -1
+        var result: [CryptoSuite: Data] = [:]
+        result.reserveCapacity(messageA.keyShares.count)
+        for keyShare in messageA.keyShares {
+            guard keyShare.suite.isNegotiable,
+                  let index = supportedIndexes[keyShare.suite.wireId],
+                  index >= previousIndex else {
+                throw HandshakeError.failed(
+                    .invalidMessageFormat("MessageA keyShares are unsupported or out of order")
+                )
+            }
+            guard result.updateValue(keyShare.shareBytes, forKey: keyShare.suite) == nil else {
+                throw HandshakeError.failed(.invalidMessageFormat("Duplicate keyShare suite"))
+            }
+            previousIndex = index
+        }
+        return result
+    }
+
+    private func validateResponderCapabilities(
+        _ capabilities: CryptoCapabilities,
+        selectedSuite: CryptoSuite
+    ) throws {
+        guard selectedSuite.isNegotiable,
+              Self.suiteMeetsHandshakePolicy(selectedSuite, policy: policy) else {
+            throw Self.responderCapabilityBindingFailure(
+                "selected suite violates the local handshake policy"
+            )
+        }
+
+        guard Self.capabilityValuesAreCanonicalAndUnique(capabilities.supportedKEM),
+              Self.capabilityValuesAreCanonicalAndUnique(capabilities.supportedSignature),
+              Self.capabilityValuesAreCanonicalAndUnique(capabilities.supportedAuthProfiles),
+              Self.capabilityValuesAreCanonicalAndUnique(capabilities.supportedAEAD) else {
+            throw Self.responderCapabilityBindingFailure(
+                "capability sets contain empty or duplicate values"
+            )
+        }
+
+        let requiredKEM: String
+        switch selectedSuite.wireId {
+        case CryptoSuite.xwing.wireId:
+            requiredKEM = "X-Wing"
+        case CryptoSuite.qperiaptABI2PolicyBound.wireId:
+            requiredKEM = CryptoSuite.qperiaptABI2PolicyBound.rawValue
+        case CryptoSuite.mlkem768.wireId,
+             CryptoSuite.mlkem768fs.wireId:
+            requiredKEM = "ML-KEM-768"
+        case CryptoSuite.x25519Ed25519.wireId:
+            requiredKEM = "X25519"
+        case CryptoSuite.p256.wireId:
+            requiredKEM = "P-256"
+        default:
+            throw Self.responderCapabilityBindingFailure(
+                "selected suite has no admitted iOS capability mapping"
+            )
+        }
+
+        let advertisesRequiredKEM: Bool
+        let advertisesRequiredAEAD: Bool
+        if selectedSuite == .qperiaptABI2PolicyBound {
+            advertisesRequiredKEM = capabilities.supportedKEM.contains(requiredKEM)
+            advertisesRequiredAEAD = capabilities.supportedAEAD.contains("AES-256-GCM")
+        } else {
+            advertisesRequiredKEM = Self.containsCanonicalCapability(
+                requiredKEM,
+                in: capabilities.supportedKEM
+            )
+            advertisesRequiredAEAD = Self.containsCanonicalCapability(
+                "AES-256-GCM",
+                in: capabilities.supportedAEAD
+            )
+        }
+        guard advertisesRequiredKEM, advertisesRequiredAEAD else {
+            throw Self.responderCapabilityBindingFailure(
+                "selected suite or payload AEAD was not advertised"
+            )
+        }
+
+        if selectedSuite == .qperiaptABI2PolicyBound {
+            guard qPeriaptAdmissionSnapshot.isPeerEligible(capabilities) else {
+                throw Self.responderCapabilityBindingFailure(
+                    "Q-Periapt signed-policy capability binding is invalid"
+                )
+            }
+            return
+        }
+
+        let requiredAuthProfile: String
+        if selectedSuite.isHybrid {
+            requiredAuthProfile = "Hybrid"
+        } else if selectedSuite.isPQC {
+            requiredAuthProfile = "PQC"
+        } else {
+            requiredAuthProfile = "Classic"
+        }
+        guard Self.containsCanonicalCapability(
+            requiredAuthProfile,
+            in: capabilities.supportedAuthProfiles
+        ) else {
+            throw Self.responderCapabilityBindingFailure(
+                "selected suite authentication profile was not advertised"
+            )
+        }
+
+        if selectedSuite.isPQC {
+            guard capabilities.pqcAvailable,
+                  capabilities.providerType == .cryptoKitPQC
+                    || capabilities.providerType == .liboqs else {
+                throw Self.responderCapabilityBindingFailure(
+                    "selected PQC suite contradicts the responder provider capability"
+                )
+            }
+        }
+    }
+
+    private static func containsCanonicalCapability(_ required: String, in values: [String]) -> Bool {
+        let canonicalRequired = canonicalCapabilityToken(required)
+        return values.contains { canonicalCapabilityToken($0) == canonicalRequired }
+    }
+
+    private static func capabilityValuesAreCanonicalAndUnique(_ values: [String]) -> Bool {
+        let canonicalValues = values.map(canonicalCapabilityToken)
+        return canonicalValues.allSatisfy { !$0.isEmpty }
+            && Set(canonicalValues).count == canonicalValues.count
+    }
+
+    private static func canonicalCapabilityToken(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .filter { $0.isLetter || $0.isNumber }
+    }
+
+    private static func responderCapabilityBindingFailure(_ reason: String) -> HandshakeError {
+        .failed(.invalidMessageFormat("Responder capabilities do not match MessageB: \(reason)"))
+    }
+
+    nonisolated static func suiteMeetsHandshakePolicy(
+        _ suite: CryptoSuite,
+        policy: HandshakePolicy
+    ) -> Bool {
+        if policy.requirePQC && !suite.isPQCGroup {
+            return false
+        }
+        if policy.minimumTier != .classic && !suite.isPQCGroup {
+            return false
+        }
+        return true
+    }
+
+    nonisolated static func suiteMeetsLocalCryptoPolicy(
+        _ suite: CryptoSuite,
+        cryptoPolicy: CryptoPolicy,
+        forAdvertising: Bool = false
+    ) -> Bool {
+        if suite.isHybrid {
+            guard cryptoPolicy.allowExperimentalHybrid else {
+                return false
+            }
+            if forAdvertising && !cryptoPolicy.advertiseHybrid {
+                return false
+            }
+        }
+
+        switch cryptoPolicy.minimumSecurityTier {
+        case .classicOnly:
+            return !suite.isPQCGroup
+        case .pqcPreferred:
+            return true
+        case .hybridPreferred:
+            return true
+        case .pqcOnly:
+            return suite.isPQCGroup && !suite.isHybrid
+        }
+    }
+
+    private func localSupportsHybrid() -> Bool {
+        if let hybridProvider, hybridProvider.supportsSuite(.xwing) {
+            return true
+        }
+        if let pqcProvider, pqcProvider.supportsSuite(.xwing) {
+            return true
+        }
+        return cryptoProvider.supportsSuite(.xwing)
+    }
+
+    private func makeAuthenticatedRemoteAuthority(
+        from identityKeys: IdentityPublicKeys
+    ) throws -> AuthenticatedRemoteAuthority {
+        AuthenticatedRemoteAuthority(
+            protocolSigningAlgorithm: identityKeys.protocolAlgorithm.rawValue,
+            protocolPublicKeyFingerprint: try identityKeys.authoritativeProtocolFingerprint().lowercased(),
+            protocolPublicKeyBytes: identityKeys.protocolPublicKey
+        )
+    }
+
+    private func suiteIsLocallyNegotiable(
+        _ suite: CryptoSuite,
+        candidateSuites: [CryptoSuite],
+        peerPolicy: HandshakePolicy? = nil,
+        forAdvertising: Bool = false
+    ) -> Bool {
+        guard suite.isNegotiable,
+              Self.suiteMeetsHandshakePolicy(suite, policy: policy),
+              Self.suiteMeetsLocalCryptoPolicy(
+                suite,
+                cryptoPolicy: cryptoPolicy,
+                forAdvertising: forAdvertising
+              ) else {
+            return false
+        }
+
+        if let peerPolicy,
+           !Self.suiteMeetsHandshakePolicy(suite, policy: peerPolicy) {
+            return false
+        }
+
+        if cryptoPolicy.requireHybridIfAvailable,
+           localSupportsHybrid(),
+           candidateSuites.contains(where: \.isHybrid),
+           !suite.isHybrid {
+            return false
+        }
+
+        return true
+    }
+
+    private func selectInitiatorSuite() throws -> CryptoSuite {
+        let candidates = (offeredSuites?.isEmpty == false ? offeredSuites : nil) ?? [cryptoProvider.activeSuite]
+
+        for suite in candidates {
+            guard suite.isKnown else {
+                emitUnknownSuiteRejected(wireId: suite.wireId, stage: "buildMessageA.activeSuite")
+                throw HandshakeError.failed(.unknownSuite(wireId: suite.wireId))
+            }
+            guard provider(for: suite) != nil else { continue }
+            guard suiteIsLocallyNegotiable(
+                suite,
+                candidateSuites: candidates,
+                forAdvertising: true
+            ) else { continue }
+            if suite.isPQC, peerKEMPublicKey(for: suite) == nil {
+                continue
+            }
+            return suite
+        }
+
+        if let missingPeerKEMSuite = candidates.first(where: { $0.isPQC && peerKEMPublicKey(for: $0) == nil }) {
+            throw HandshakeError.failed(.missingPeerKEMPublicKey(suite: missingPeerKEMSuite.rawValue))
+        }
+        throw HandshakeError.failed(.suiteNegotiationFailed)
+    }
+
+    internal func selectResponderSuite(for messageA: HandshakeMessageA) throws -> CryptoSuite {
+        let advertisedKeyShareSuites = Set(messageA.keyShares.map(\.suite))
+        for suite in messageA.supportedSuites {
+            guard isFrozenLocalSuiteOffered(suite) else { continue }
+            guard provider(for: suite) != nil else { continue }
+            guard suiteIsLocallyNegotiable(
+                suite,
+                candidateSuites: messageA.supportedSuites,
+                peerPolicy: messageA.policy
+            ) else { continue }
+            guard advertisedKeyShareSuites.contains(suite) else { continue }
+            if suite == .qperiaptABI2PolicyBound,
+               !qPeriaptAdmissionSnapshot.isPeerEligible(messageA.capabilities) {
+                continue
+            }
+            if suite.requiresV2EphemeralContribution,
+               messageA.initiatorContribution == nil {
+                continue
+            }
+            return suite
+        }
+
+        throw HandshakeError.failed(.suiteNegotiationFailed)
+    }
+
+    private func isFrozenLocalSuiteOffered(_ suite: CryptoSuite) -> Bool {
+        guard let offeredSuites else { return true }
+        return offeredSuites.contains { $0.wireId == suite.wireId }
+    }
+
+    private func peerKEMPublicKey(for suite: CryptoSuite) -> Data? {
+        if let direct = peerKEMPublicKeys[suite] {
+            return direct
+        }
+        let canonical = suite.canonicalKEMSuite
+        if canonical.wireId != suite.wireId,
+           let canonicalKey = peerKEMPublicKeys[canonical] {
+            return canonicalKey
+        }
+        if canonical.wireId == CryptoSuite.mlkem768.wireId,
+           let upgraded = peerKEMPublicKeys[.mlkem768fs] {
+            return upgraded
+        }
+        return nil
+    }
+    
+    // MARK: - MessageA Building (Initiator)
+    
+    public func buildMessageA(extensionsRaw: Data = Data()) async throws -> HandshakeMessageA {
+        guard !isZeroized else {
+            throw HandshakeError.contextZeroized
+        }
+        guard !isProcessingHandshakeMessage else {
+            throw HandshakeError.alreadyInProgress
+        }
+        isProcessingHandshakeMessage = true
+        let generation = lifecycleGeneration
+        var completed = false
+        defer {
+            isProcessingHandshakeMessage = false
+            if !completed {
+                zeroize()
+            }
+        }
+
+        if cryptoProvider.activeSuite == .qperiaptABI2PolicyBound,
+           !qPeriaptAdmissionSnapshot.admits(provider: cryptoProvider) {
+            throw HandshakeError.failed(.suiteNegotiationFailed)
+        }
+        
+        // 生成 nonce
+        var nonceBytes = [UInt8](repeating: 0, count: HandshakeConstants.nonceSize)
+        guard SecRandomCopyBytes(kSecRandomDefault, nonceBytes.count, &nonceBytes) == errSecSuccess else {
+            throw HandshakeError.failed(.cryptoError("Failed to generate nonce"))
+        }
+        let nonce = Data(nonceBytes)
+        localNonce = nonce
+        
+        // iOS 本地栈必须使用调用方为本次尝试准备好的 suite，而不是无条件回退到 activeSuite。
+        let suite = try selectInitiatorSuite()
+        let supportedSuites = [suite]
+        guard let suiteProvider = provider(for: suite) else {
+            throw HandshakeError.failed(.suiteNegotiationFailed)
+        }
+
+        // Commit the same identity envelope that MessageA places on the wire. The responder
+        // reconstructs its KEM application context from that encoded field, not the raw key.
+        let identityKeys = IdentityPublicKeys(
+            protocolPublicKey: identityPublicKey,
+            protocolAlgorithm: protocolSignatureProvider.signatureAlgorithm.wire,
+            secureEnclavePublicKey: nil
+        )
+
+        // Capabilities are committed by the canonical Q-Periapt MessageA
+        // application context, so they must be finalized before KEM execution.
+        let capabilities = CryptoCapabilities.fromProvider(
+            suiteProvider,
+            protocolSigningAlgorithm: protocolSignatureProvider.signatureAlgorithm
+        )
+        
+        // 创建 KeyShare（与 supportedSuites 绑定）
+        let keyShares: [HandshakeKeyShare]
+        if suite.isPQC {
+            guard let peerKEM = peerKEMPublicKey(for: suite) else {
+                throw HandshakeError.failed(.missingPeerKEMPublicKey(suite: suite.rawValue))
+            }
+            let encaps: (encapsulatedKey: Data, sharedSecret: SecureBytes)
+            if suite == .qperiaptABI2PolicyBound {
+                guard let contextBoundProvider = suiteProvider as? any ApplicationContextBoundCryptoProvider else {
+                    throw HandshakeError.failed(
+                        .cryptoError("Q-Periapt provider lacks its application-context contract")
+                    )
+                }
+                let applicationContext = try QPeriaptHandshakeApplicationContext.messageA(
+                    version: HandshakeConstants.protocolVersion,
+                    suite: suite,
+                    clientNonce: nonce,
+                    recipientPublicKey: peerKEM,
+                    policy: policy,
+                    offeredSuites: supportedSuites,
+                    capabilities: capabilities,
+                    identityPublicKey: identityKeys.encoded,
+                    extensionsRaw: extensionsRaw
+                )
+                encaps = try await contextBoundProvider.kemEncapsulate(
+                    recipientPublicKey: peerKEM,
+                    applicationContext: applicationContext
+                )
+            } else {
+                encaps = try await suiteProvider.kemEncapsulate(recipientPublicKey: peerKEM)
+            }
+            do {
+                try ensureActive(generation: generation)
+            } catch {
+                encaps.sharedSecret.zeroize()
+                throw error
+            }
+            kemSharedSecrets[suite] = encaps.sharedSecret
+            keyShares = [HandshakeKeyShare(suite: suite, shareBytes: encaps.encapsulatedKey)]
+        } else {
+            let keyPair = try await suiteProvider.generateKeyPair(for: .ephemeral)
+            try ensureActive(generation: generation)
+            ephemeralPrivateKey = SecureBytes(data: keyPair.privateKey.bytes)
+            ephemeralPublicKey = keyPair.publicKey.bytes
+            keyShares = [HandshakeKeyShare(suite: suite, shareBytes: keyPair.publicKey.bytes)]
+        }
+
+        let initiatorContribution: Data?
+        if supportedSuites.contains(where: { $0.requiresV2EphemeralContribution }) {
+            initiatorContribution = try generateV2InitiatorContribution()
+        } else {
+            v2InitiatorContributionPrivateKey?.zeroize()
+            v2InitiatorContributionPrivateKey = nil
+            initiatorContribution = nil
+        }
+
+        self.sentSupportedSuites = supportedSuites
+        self.sentKeyShares = Dictionary(uniqueKeysWithValues: keyShares.map { ($0.suite, $0.shareBytes) })
+        
+        // 构建未签名消息（以 HandshakeMessageA 的 deterministic wire bytes 为准）
+        let unsigned = HandshakeMessageA(
+            version: HandshakeConstants.protocolVersion,
+            supportedSuites: supportedSuites,
+            keyShares: keyShares,
+            clientNonce: nonce,
+            policy: policy,
+            capabilities: capabilities,
+            signature: Data(),
+            identityPublicKeys: identityKeys,
+            extensionsRaw: extensionsRaw,
+            initiatorContribution: initiatorContribution
+        )
+        
+        // 计算 transcriptA（与 macOS 一致：SHA256(MessageA.transcriptBytes)）
+        transcriptHashA = Data(SHA256.hash(data: unsigned.transcriptBytes))
+        
+        // 签名（preimage 自带域分离前缀 + encodedWithoutSignature）
+        let signaturePreimage = unsigned.signaturePreimage
+        let signature: Data
+        if let keyHandle = identityKeyHandle {
+            signature = try await protocolSignatureProvider.sign(signaturePreimage, key: keyHandle)
+            try ensureActive(generation: generation)
+        } else {
+            throw HandshakeError.noSigningCapability
+        }
+        
+        let signedMessage = HandshakeMessageA(
+            version: unsigned.version,
+            supportedSuites: unsigned.supportedSuites,
+            keyShares: unsigned.keyShares,
+            clientNonce: unsigned.clientNonce,
+            policy: unsigned.policy,
+            capabilities: unsigned.capabilities,
+            signature: signature,
+            identityPublicKeys: identityKeys,
+            extensionsRaw: unsigned.extensionsRaw,
+            initiatorContribution: unsigned.initiatorContribution
+        )
+        completed = true
+        return signedMessage
+    }
+    
+    // MARK: - MessageA Processing (Responder)
+    
+    public func processMessageA(_ messageA: HandshakeMessageA) async throws {
+        guard !isZeroized else {
+            throw HandshakeError.contextZeroized
+        }
+        guard role == .responder else {
+            throw HandshakeError.failed(.invalidMessageFormat("Only a responder context can process MessageA"))
+        }
+        guard !isProcessingHandshakeMessage else {
+            throw HandshakeError.alreadyInProgress
+        }
+        isProcessingHandshakeMessage = true
+        let generation = lifecycleGeneration
+        var completed = false
+        defer {
+            isProcessingHandshakeMessage = false
+            if !completed {
+                zeroize()
+            }
+        }
+
+        if let unknown = messageA.supportedSuites.first(where: { !$0.isKnown }) {
+            emitUnknownSuiteRejected(wireId: unknown.wireId, stage: "processMessageA.supportedSuites")
+            throw HandshakeError.failed(.unknownSuite(wireId: unknown.wireId))
+        }
+        if let unknownKeyShare = messageA.keyShares.first(where: { !$0.suite.isKnown }) {
+            emitUnknownSuiteRejected(wireId: unknownKeyShare.suite.wireId, stage: "processMessageA.keyShares")
+            throw HandshakeError.failed(.unknownSuite(wireId: unknownKeyShare.suite.wireId))
+        }
+        let candidatePeerKeyShares = try Self.validatedMessageAKeyShares(messageA)
+
+        // 解析身份公钥
+        let identityKeys = try messageA.decodedIdentityPublicKeys()
+
+        // 验证签名
+        let isValid = try await protocolSignatureProvider.verify(
+            messageA.signaturePreimage,
+            signature: messageA.signature,
+            publicKey: identityKeys.protocolPublicKey
+        )
+        try ensureActive(generation: generation)
+        guard isValid else {
+            throw HandshakeError.failed(.signatureVerificationFailed)
+        }
+        let candidateRemoteAuthority = try makeAuthenticatedRemoteAuthority(from: identityKeys)
+
+        // 选择套件：按发起方优先级，从 offered 列表中选择本端支持的首个套件
+        let suite = try selectResponderSuite(for: messageA)
+
+        // Anti-Downgrade: selectedSuite 必须有对应 keyShare
+        guard candidatePeerKeyShares[suite] != nil else {
+            throw HandshakeError.failed(.suiteNegotiationFailed)
+        }
+        let candidateV2PeerContribution: Data?
+        if suite.requiresV2EphemeralContribution {
+            guard let contribution = messageA.initiatorContribution else {
+                throw HandshakeError.failed(.invalidMessageFormat("Missing v2 initiator contribution"))
+            }
+            candidateV2PeerContribution = contribution
+        } else {
+            candidateV2PeerContribution = nil
+        }
+
+        // PQC suites：responder 需要使用本地长期 KEM 身份私钥解封装 initiator 的 encapsulatedKey
+        var candidateKEMSharedSecret: SecureBytes?
+        defer { candidateKEMSharedSecret?.zeroize() }
+        if suite.isPQC {
+            guard let encapsulatedKey = candidatePeerKeyShares[suite] else {
+                throw HandshakeError.failed(.suiteNegotiationFailed)
+            }
+            guard let suiteProvider = provider(for: suite) else {
+                throw HandshakeError.failed(.suiteNegotiationFailed)
+            }
+            let local = try await P2PKEMIdentityKeyStore.shared.getOrCreateIdentityKey(
+                for: suite.canonicalKEMSuite,
+                provider: suiteProvider
+            )
+            try ensureActive(generation: generation)
+            let sharedSecret: SecureBytes
+            if suite == .qperiaptABI2PolicyBound {
+                guard let contextBoundProvider = suiteProvider as? any ApplicationContextBoundCryptoProvider else {
+                    throw HandshakeError.failed(
+                        .cryptoError("Q-Periapt provider lacks its application-context contract")
+                    )
+                }
+                let applicationContext = try QPeriaptHandshakeApplicationContext.messageA(
+                    version: messageA.version,
+                    suite: suite,
+                    clientNonce: messageA.clientNonce,
+                    recipientPublicKey: local.publicKey,
+                    policy: messageA.policy,
+                    offeredSuites: messageA.supportedSuites,
+                    capabilities: messageA.capabilities,
+                    identityPublicKey: messageA.identityPublicKey,
+                    extensionsRaw: messageA.extensionsRaw
+                )
+                sharedSecret = try await contextBoundProvider.kemDecapsulate(
+                    encapsulatedKey: encapsulatedKey,
+                    privateKey: local.privateKey,
+                    applicationContext: applicationContext
+                )
+            } else {
+                sharedSecret = try await suiteProvider.kemDecapsulate(
+                    encapsulatedKey: encapsulatedKey,
+                    privateKey: local.privateKey
+                )
+            }
+            candidateKEMSharedSecret = sharedSecret
+            try ensureActive(generation: generation)
+        }
+
+        let candidateTranscriptHashA = Data(SHA256.hash(data: messageA.transcriptBytes))
+        peerKeyShares = candidatePeerKeyShares
+        peerNonce = messageA.clientNonce
+        peerCapabilities = messageA.capabilities
+        negotiatedSuite = suite
+        v2PeerInitiatorContribution = candidateV2PeerContribution
+        transcriptHashA = candidateTranscriptHashA
+        authenticatedRemoteAuthority = candidateRemoteAuthority
+        if let sharedSecret = candidateKEMSharedSecret {
+            kemSharedSecrets[suite] = sharedSecret
+            candidateKEMSharedSecret = nil
+        }
+        completed = true
+    }
+    
+    // MARK: - MessageB Building (Responder)
+    
+    public func buildMessageB() async throws -> (message: HandshakeMessageB, sharedSecret: SecureBytes) {
+        guard !isZeroized else {
+            throw HandshakeError.contextZeroized
+        }
+        guard !isProcessingHandshakeMessage else {
+            throw HandshakeError.alreadyInProgress
+        }
+        isProcessingHandshakeMessage = true
+        let generation = lifecycleGeneration
+        var completed = false
+        defer {
+            isProcessingHandshakeMessage = false
+            if !completed {
+                zeroize()
+            }
+        }
+        guard let suite = negotiatedSuite else {
+            throw HandshakeError.failed(.suiteNegotiationFailed)
+        }
+        guard let suiteProvider = provider(for: suite) else {
+            throw HandshakeError.failed(.suiteNegotiationFailed)
+        }
+        
+        // 生成 nonce
+        var nonceBytes = [UInt8](repeating: 0, count: HandshakeConstants.nonceSize)
+        guard SecRandomCopyBytes(kSecRandomDefault, nonceBytes.count, &nonceBytes) == errSecSuccess else {
+            throw HandshakeError.failed(.cryptoError("Failed to generate nonce"))
+        }
+        let nonce = Data(nonceBytes)
+        localNonce = nonce
+        
+        let encryptedPayload: HPKESealedBox
+        let sharedSecret: SecureBytes
+        let responderShare: Data
+
+        if suite.isPQC {
+            guard let staticSecret = kemSharedSecrets[suite] else {
+                throw HandshakeError.failed(.cryptoError("Missing KEM shared secret for \(suite.rawValue) (responder)"))
+            }
+            let payloadSecret: SecureBytes
+            if suite.requiresV2EphemeralContribution {
+                guard let initiatorContribution = v2PeerInitiatorContribution else {
+                    throw HandshakeError.failed(.invalidMessageFormat("Missing v2 initiator contribution"))
+                }
+                let responderContribution = try deriveResponderV2Contribution(
+                    initiatorContribution: initiatorContribution
+                )
+                responderShare = responderContribution.publicKey
+                payloadSecret = try composeV2SharedSecret(
+                    staticSecret: staticSecret,
+                    ephemeralSecret: responderContribution.sharedSecret,
+                    suite: suite
+                )
+                responderContribution.sharedSecret.zeroize()
+                staticSecret.zeroize()
+            } else {
+                responderShare = Data()
+                payloadSecret = staticSecret
+            }
+            let payloadPlaintext = try CryptoCapabilities.fromProvider(
+                suiteProvider,
+                protocolSigningAlgorithm: protocolSignatureProvider.signatureAlgorithm
+            ).deterministicEncode()
+            encryptedPayload = try sealPayloadWithSharedSecret(
+                payloadSecret,
+                plaintext: payloadPlaintext,
+                info: Data("handshake-payload".utf8),
+                encapsulatedKey: Data()
+            )
+            sharedSecret = payloadSecret
+            kemSharedSecrets.removeValue(forKey: suite)
+            v2PeerInitiatorContribution = nil
+        } else {
+            guard let peerShare = peerKeyShares[suite] else {
+                throw HandshakeError.failed(.suiteNegotiationFailed)
+            }
+            let payloadPlaintext = try CryptoCapabilities.fromProvider(
+                suiteProvider,
+                protocolSigningAlgorithm: protocolSignatureProvider.signatureAlgorithm
+            ).deterministicEncode()
+            let sealResult = try await suiteProvider.kemDemSealWithSecret(
+                plaintext: payloadPlaintext,
+                recipientPublicKey: peerShare,
+                info: Data("handshake-payload".utf8)
+            )
+            do {
+                try ensureActive(generation: generation)
+            } catch {
+                sealResult.sharedSecret.zeroize()
+                throw error
+            }
+            encryptedPayload = sealResult.sealedBox
+            sharedSecret = sealResult.sharedSecret
+            responderShare = encryptedPayload.encapsulatedKey
+        }
+        defer {
+            if !completed {
+                sharedSecret.zeroize()
+            }
+        }
+        
+        // 创建身份公钥结构
+        let identityKeys = IdentityPublicKeys(
+            protocolPublicKey: identityPublicKey,
+            protocolAlgorithm: protocolSignatureProvider.signatureAlgorithm.wire,
+            secureEnclavePublicKey: nil
+        )
+        
+        guard let transcriptHashA else {
+            throw HandshakeError.failed(.cryptoError("Missing transcript hash A"))
+        }
+
+        // 构建签名 preimage
+        var signatureData = Data("SkyBridge-B".utf8)
+        signatureData.append(transcriptHashA)
+        HandshakeEncoding.appendUInt16LE(suite.wireId, to: &signatureData)
+        HandshakeEncoding.appendUInt16LE(UInt16(responderShare.count), to: &signatureData)
+        signatureData.append(responderShare)
+        signatureData.append(nonce)
+        let payloadHash = SHA256.hash(data: encryptedPayload.combinedWithHeader(suite: suite))
+        signatureData.append(contentsOf: payloadHash)
+        HandshakeEncoding.appendUInt16LE(UInt16(identityKeys.encoded.count), to: &signatureData)
+        signatureData.append(identityKeys.encoded)
+        
+        // 签名
+        let signature: Data
+        if let keyHandle = identityKeyHandle {
+            signature = try await protocolSignatureProvider.sign(signatureData, key: keyHandle)
+            try ensureActive(generation: generation)
+        } else {
+            throw HandshakeError.noSigningCapability
+        }
+        
+        // 计算 transcript hash B
+        let messageB = HandshakeMessageB(
+            selectedSuite: suite,
+            responderShare: responderShare,
+            serverNonce: nonce,
+            encryptedPayload: encryptedPayload,
+            signature: signature,
+            identityPublicKeys: identityKeys
+        )
+        transcriptHashB = Data(SHA256.hash(data: messageB.transcriptBytes))
+        completed = true
+        return (messageB, sharedSecret)
+    }
+    
+    // MARK: - MessageB Processing (Initiator)
+    
+    public func processMessageB(_ messageB: HandshakeMessageB) async throws -> SessionKeys {
+        guard !isZeroized else {
+            throw HandshakeError.contextZeroized
+        }
+        guard role == .initiator else {
+            throw HandshakeError.failed(.invalidMessageFormat("Only an initiator context can process MessageB"))
+        }
+        // 验证版本
+        guard messageB.version == HandshakeConstants.protocolVersion else {
+            throw HandshakeError.failed(.versionMismatch(
+                local: HandshakeConstants.protocolVersion,
+                remote: messageB.version
+            ))
+        }
+        guard messageB.serverNonce.count == HandshakeConstants.nonceSize else {
+            throw HandshakeError.failed(.invalidMessageFormat("Invalid MessageB nonce length"))
+        }
+        
+        // 解析身份公钥
+        let identityKeys = try messageB.decodedIdentityPublicKeys()
+        
+        guard let transcriptHashA else {
+            throw HandshakeError.failed(.cryptoError("Missing transcript hash A"))
+        }
+        guard let candidateLocalNonce = localNonce else {
+            throw HandshakeError.failed(.cryptoError("Missing local nonce for MessageB"))
+        }
+        guard !isProcessingHandshakeMessage else {
+            throw HandshakeError.alreadyInProgress
+        }
+        isProcessingHandshakeMessage = true
+        let generation = lifecycleGeneration
+        var completed = false
+        defer {
+            isProcessingHandshakeMessage = false
+            if !completed {
+                zeroize()
+            }
+        }
+
+        // 验证签名
+        let isValid = try await protocolSignatureProvider.verify(
+            messageB.signaturePreimage(transcriptHashA: transcriptHashA),
+            signature: messageB.signature,
+            publicKey: identityKeys.protocolPublicKey
+        )
+        try ensureActive(generation: generation)
+        guard isValid else {
+            throw HandshakeError.failed(.signatureVerificationFailed)
+        }
+        let responderAuthority = try makeAuthenticatedRemoteAuthority(from: identityKeys)
+        
+        // Anti-Downgrade: 必须是我们在 MessageA 里发过的 suite
+        guard messageB.selectedSuite.isKnown else {
+            emitUnknownSuiteRejected(wireId: messageB.selectedSuite.wireId, stage: "processMessageB.selectedSuite")
+            throw HandshakeError.failed(.unknownSuite(wireId: messageB.selectedSuite.wireId))
+        }
+        guard sentSupportedSuites.contains(where: { $0.wireId == messageB.selectedSuite.wireId }) else {
+            throw HandshakeError.failed(.suiteNegotiationFailed)
+        }
+        guard suiteIsLocallyNegotiable(
+            messageB.selectedSuite,
+            candidateSuites: sentSupportedSuites
+        ) else {
+            throw HandshakeError.failed(.suiteNegotiationFailed)
+        }
+        // 并且必须有对应 keyShare（我们持有该 suite 的私钥）
+        guard sentKeyShares[messageB.selectedSuite] != nil else {
+            throw HandshakeError.failed(.suiteNegotiationFailed)
+        }
+        if messageB.selectedSuite.requiresV2EphemeralContribution {
+            guard messageB.responderShare.count == 32 else {
+                throw HandshakeError.failed(.invalidMessageFormat("v2 responder contribution missing"))
+            }
+        } else {
+            // responderShare 必须与 sealedBox.encapsulatedKey 一致（避免不一致输入）
+            guard messageB.responderShare == messageB.encryptedPayload.encapsulatedKey else {
+                throw HandshakeError.failed(.invalidMessageFormat("Responder share mismatch"))
+            }
+        }
+        
+        let candidateTranscriptHashB = Data(SHA256.hash(data: messageB.transcriptBytes))
+        
+        if messageB.selectedSuite.isPQC {
+            guard let payloadSecret = kemSharedSecrets[messageB.selectedSuite] else {
+                throw HandshakeError.failed(.cryptoError("Missing KEM shared secret for \(messageB.selectedSuite.rawValue) (initiator)"))
+            }
+            let sessionSecret: SecureBytes
+            if messageB.selectedSuite.requiresV2EphemeralContribution {
+                let ephemeralSecret = try deriveInitiatorV2SharedSecret(
+                    responderContribution: messageB.responderShare
+                )
+                sessionSecret = try composeV2SharedSecret(
+                    staticSecret: payloadSecret,
+                    ephemeralSecret: ephemeralSecret,
+                    suite: messageB.selectedSuite
+                )
+                ephemeralSecret.zeroize()
+                payloadSecret.zeroize()
+            } else {
+                sessionSecret = payloadSecret
+            }
+            defer { sessionSecret.zeroize() }
+            let payload = try openPayloadWithSharedSecret(
+                messageB.encryptedPayload,
+                sharedSecret: sessionSecret,
+                info: Data("handshake-payload".utf8),
+                selectedSuite: messageB.selectedSuite
+            )
+            let responderCapabilities = try Self.decodeResponderCapabilities(from: payload)
+            try validateResponderCapabilities(
+                responderCapabilities,
+                selectedSuite: messageB.selectedSuite
+            )
+            let sessionKeys = try deriveSessionKeys(
+                sharedSecret: sessionSecret,
+                suite: messageB.selectedSuite,
+                transcriptA: transcriptHashA,
+                transcriptB: candidateTranscriptHashB,
+                localNonce: candidateLocalNonce,
+                remoteNonce: messageB.serverNonce
+            )
+            kemSharedSecrets[messageB.selectedSuite]?.zeroize()
+            kemSharedSecrets.removeValue(forKey: messageB.selectedSuite)
+            commitProcessedMessageB(
+                messageB,
+                transcriptB: candidateTranscriptHashB,
+                capabilities: responderCapabilities,
+                authority: responderAuthority
+            )
+            completed = true
+            return sessionKeys
+        }
+        
+        guard let privateKey = ephemeralPrivateKey else {
+            throw HandshakeError.failed(.cryptoError("Missing initiator ephemeral private key"))
+        }
+
+        guard let suiteProvider = provider(for: messageB.selectedSuite) else {
+            throw HandshakeError.failed(.suiteNegotiationFailed)
+        }
+
+        let openResult = try await suiteProvider.kemDemOpenWithSecret(
+            sealedBox: messageB.encryptedPayload,
+            privateKey: privateKey,
+            info: Data("handshake-payload".utf8)
+        )
+        defer { openResult.sharedSecret.zeroize() }
+        try ensureActive(generation: generation)
+        let responderCapabilities = try Self.decodeResponderCapabilities(from: openResult.plaintext)
+        try validateResponderCapabilities(
+            responderCapabilities,
+            selectedSuite: messageB.selectedSuite
+        )
+        let sessionKeys = try deriveSessionKeys(
+            sharedSecret: openResult.sharedSecret,
+            suite: messageB.selectedSuite,
+            transcriptA: transcriptHashA,
+            transcriptB: candidateTranscriptHashB,
+            localNonce: candidateLocalNonce,
+            remoteNonce: messageB.serverNonce
+        )
+        commitProcessedMessageB(
+            messageB,
+            transcriptB: candidateTranscriptHashB,
+            capabilities: responderCapabilities,
+            authority: responderAuthority
+        )
+        completed = true
+        return sessionKeys
+    }
+
+    private func commitProcessedMessageB(
+        _ messageB: HandshakeMessageB,
+        transcriptB: Data,
+        capabilities: CryptoCapabilities,
+        authority: AuthenticatedRemoteAuthority
+    ) {
+        negotiatedSuite = messageB.selectedSuite
+        peerNonce = messageB.serverNonce
+        transcriptHashB = transcriptB
+        peerCapabilities = capabilities
+        authenticatedRemoteAuthority = authority
+        v2InitiatorContributionPrivateKey?.zeroize()
+        v2InitiatorContributionPrivateKey = nil
+    }
+
+    private func generateV2InitiatorContribution() throws -> Data {
+        let privateKey = Curve25519.KeyAgreement.PrivateKey()
+        v2InitiatorContributionPrivateKey = SecureBytes(data: privateKey.rawRepresentation)
+        return privateKey.publicKey.rawRepresentation
+    }
+
+    private func deriveResponderV2Contribution(
+        initiatorContribution: Data
+    ) throws -> (publicKey: Data, sharedSecret: SecureBytes) {
+        guard initiatorContribution.count == 32 else {
+            throw HandshakeError.failed(.invalidMessageFormat("Invalid v2 initiator contribution length"))
+        }
+        let initiatorPublic = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: initiatorContribution)
+        let responderPrivate = Curve25519.KeyAgreement.PrivateKey()
+        let shared = try responderPrivate.sharedSecretFromKeyAgreement(with: initiatorPublic)
+        let sharedData = shared.withUnsafeBytes { Data($0) }
+        return (publicKey: responderPrivate.publicKey.rawRepresentation, sharedSecret: SecureBytes(data: sharedData))
+    }
+
+    private func deriveInitiatorV2SharedSecret(
+        responderContribution: Data
+    ) throws -> SecureBytes {
+        guard responderContribution.count == 32 else {
+            throw HandshakeError.failed(.invalidMessageFormat("Invalid v2 responder contribution length"))
+        }
+        guard let privateKeyData = v2InitiatorContributionPrivateKey?.copyData() else {
+            throw HandshakeError.failed(.cryptoError("Missing v2 initiator private contribution"))
+        }
+        let initiatorPrivate = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: privateKeyData)
+        let responderPublic = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: responderContribution)
+        let shared = try initiatorPrivate.sharedSecretFromKeyAgreement(with: responderPublic)
+        let sharedData = shared.withUnsafeBytes { Data($0) }
+        return SecureBytes(data: sharedData)
+    }
+
+    private func composeV2SharedSecret(
+        staticSecret: SecureBytes,
+        ephemeralSecret: SecureBytes,
+        suite: CryptoSuite
+    ) throws -> SecureBytes {
+        var ikm = Data("SkyBridge-v2-compose|".utf8)
+        ikm.append(staticSecret.copyData())
+        ikm.append(ephemeralSecret.copyData())
+        let inputKey = SymmetricKey(data: ikm)
+        let salt = transcriptHashA ?? Data("SkyBridge-v2-salt".utf8)
+        var info = Data("SkyBridge-v2-static+ephemeral".utf8)
+        var wireId = suite.wireId.littleEndian
+        info.append(Data(bytes: &wireId, count: MemoryLayout<UInt16>.size))
+        let derived = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: inputKey,
+            salt: salt,
+            info: info,
+            outputByteCount: 32
+        )
+        return SecureBytes(data: derived.withUnsafeBytes { Data($0) })
+    }
+
+    // MARK: - KEM Payload Helpers (PQC suites)
+
+    private func sealPayloadWithSharedSecret(
+        _ sharedSecret: SecureBytes,
+        plaintext: Data,
+        info: Data,
+        encapsulatedKey: Data
+    ) throws -> HPKESealedBox {
+        guard let transcriptHashA else {
+            throw HandshakeError.failed(.cryptoError("Missing transcript hash A"))
+        }
+
+        let inputKey = SymmetricKey(data: sharedSecret.copyData())
+        let derivedKey = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: inputKey,
+            salt: transcriptHashA,
+            info: info,
+            outputByteCount: 32
+        )
+
+        var nonceBytes = [UInt8](repeating: 0, count: 12)
+        let status = SecRandomCopyBytes(kSecRandomDefault, nonceBytes.count, &nonceBytes)
+        guard status == errSecSuccess else {
+            throw HandshakeError.failed(.cryptoError("Failed to generate payload nonce"))
+        }
+        let nonce = try AES.GCM.Nonce(data: Data(nonceBytes))
+
+        let sealed = try AES.GCM.seal(plaintext, using: derivedKey, nonce: nonce)
+        return HPKESealedBox(
+            encapsulatedKey: encapsulatedKey,
+            ciphertext: sealed.ciphertext,
+            tag: sealed.tag,
+            nonce: Data(nonceBytes)
+        )
+    }
+
+    private func openPayloadWithSharedSecret(
+        _ sealedBox: HPKESealedBox,
+        sharedSecret: SecureBytes,
+        info: Data,
+        selectedSuite: CryptoSuite? = nil
+    ) throws -> Data {
+        guard let transcriptHashA else {
+            throw HandshakeError.failed(.cryptoError("Missing transcript hash A"))
+        }
+
+        let inputKey = SymmetricKey(data: sharedSecret.copyData())
+        let derivedKey = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: inputKey,
+            salt: transcriptHashA,
+            info: info,
+            outputByteCount: 32
+        )
+
+        guard sealedBox.nonce.count == 12 else {
+            throw HandshakeError.failed(.invalidMessageFormat("Invalid MessageB payload nonce length"))
+        }
+        guard sealedBox.tag.count == 16 else {
+            throw HandshakeError.failed(.invalidMessageFormat("Invalid MessageB payload authentication tag length"))
+        }
+
+        let nonce = try AES.GCM.Nonce(data: sealedBox.nonce)
+        let gcmBox = try AES.GCM.SealedBox(nonce: nonce, ciphertext: sealedBox.ciphertext, tag: sealedBox.tag)
+        do {
+            return try AES.GCM.open(gcmBox, using: derivedKey)
+        } catch {
+            let suite = selectedSuite?.rawValue ?? "unknown"
+            throw HandshakeError.failed(
+                .cryptoError("messageBPayloadAuthenticationFailed suite=\(suite): \(error.localizedDescription)")
+            )
+        }
+    }
+    
+    // MARK: - Session Key Derivation
+    
+    public func finalizeResponderSessionKeys(sharedSecret: SecureBytes) async throws -> SessionKeys {
+        guard !isZeroized else {
+            throw HandshakeError.contextZeroized
+        }
+        guard !isProcessingHandshakeMessage else {
+            throw HandshakeError.alreadyInProgress
+        }
+        defer { sharedSecret.zeroize() }
+        return try deriveSessionKeys(sharedSecret: sharedSecret)
+    }
+    
+    private func deriveSessionKeys(sharedSecret: SecureBytes) throws -> SessionKeys {
+        guard let transcriptA = transcriptHashA,
+              let transcriptB = transcriptHashB,
+              let suite = negotiatedSuite,
+              let localNonce = localNonce,
+              let remoteNonce = peerNonce else {
+            throw HandshakeError.failed(.cryptoError("Missing transcript, suite, nonces, or shared secret"))
+        }
+
+        return try deriveSessionKeys(
+            sharedSecret: sharedSecret,
+            suite: suite,
+            transcriptA: transcriptA,
+            transcriptB: transcriptB,
+            localNonce: localNonce,
+            remoteNonce: remoteNonce
+        )
+    }
+
+    /// Pure derivation used before an inbound MessageB is committed to actor
+    /// state. The caller retains ownership of the shared secret.
+    private func deriveSessionKeys(
+        sharedSecret: SecureBytes,
+        suite: CryptoSuite,
+        transcriptA: Data,
+        transcriptB: Data,
+        localNonce: Data,
+        remoteNonce: Data
+    ) throws -> SessionKeys {
+        
+        // role 决定 clientNonce/serverNonce 的归属（与 macOS 保持一致）
+        let clientNonce: Data
+        let serverNonce: Data
+        if role == .initiator {
+            clientNonce = localNonce
+            serverNonce = remoteNonce
+        } else {
+            clientNonce = remoteNonce
+            serverNonce = localNonce
+        }
+        
+        var kdfInfo = Data("SkyBridge-KDF".utf8)
+        kdfInfo.append(0x01)
+        var suiteWireId = suite.wireId.littleEndian
+        kdfInfo.append(Data(bytes: &suiteWireId, count: MemoryLayout<UInt16>.size))
+        kdfInfo.append(Data(suite.kdfCompositionLabel.utf8))
+        kdfInfo.append(transcriptA)
+        kdfInfo.append(transcriptB)
+        kdfInfo.append(clientNonce)
+        kdfInfo.append(serverNonce)
+        
+        var saltInput = Data("SkyBridge-KDF-Salt-v1|".utf8)
+        saltInput.append(kdfInfo)
+        let salt = Data(SHA256.hash(data: saltInput))
+        
+        let i2rInfo = kdfInfo + Data("handshake|initiator_to_responder".utf8)
+        let r2iInfo = kdfInfo + Data("handshake|responder_to_initiator".utf8)
+        
+        let inputKey = SymmetricKey(data: sharedSecret)
+        let sendKey = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: inputKey,
+            salt: salt,
+            info: role == .initiator ? i2rInfo : r2iInfo,
+            outputByteCount: 32
+        )
+        let receiveKey = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: inputKey,
+            salt: salt,
+            info: role == .initiator ? r2iInfo : i2rInfo,
+            outputByteCount: 32
+        )
+        
+        let fullTranscriptHash = Data(SHA256.hash(data: transcriptA + transcriptB))
+        return SessionKeys(
+            sendKey: sendKey.withUnsafeBytes { Data($0) },
+            receiveKey: receiveKey.withUnsafeBytes { Data($0) },
+            negotiatedSuite: suite,
+            role: role,
+            transcriptHash: fullTranscriptHash
+        )
+    }
+    
+    // MARK: - Cleanup
+    
+    public func zeroize() {
+        lifecycleGeneration &+= 1
+        ephemeralPrivateKey?.zeroize()
+        ephemeralPrivateKey = nil
+        ephemeralPublicKey = nil
+        for (_, secret) in kemSharedSecrets {
+            secret.zeroize()
+        }
+        kemSharedSecrets.removeAll()
+        v2InitiatorContributionPrivateKey?.zeroize()
+        v2InitiatorContributionPrivateKey = nil
+        v2PeerInitiatorContribution = nil
+        peerKeyShares.removeAll()
+        sentSupportedSuites.removeAll()
+        sentKeyShares.removeAll()
+        transcriptHashA = nil
+        transcriptHashB = nil
+        localNonce = nil
+        peerNonce = nil
+        negotiatedSuite = nil
+        peerCapabilities = nil
+        authenticatedRemoteAuthority = nil
+        isZeroized = true
+    }
+
+    private nonisolated func emitUnknownSuiteRejected(wireId: UInt16, stage: String) {
+        let wireHex = String(format: "0x%04X", wireId)
+        SecurityEventEmitter.emitDetached(SecurityEvent(
+            type: .handshakeFailed,
+            severity: .warning,
+            message: "suite_rejected_unknown",
+            context: [
+                "reason": "suite_rejected_unknown",
+                "wireId": wireHex,
+                "stage": stage,
+                "fallbackEligible": "0"
+            ]
+        ))
+    }
+}

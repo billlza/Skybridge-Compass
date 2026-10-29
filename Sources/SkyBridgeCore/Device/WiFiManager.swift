@@ -1,3 +1,8 @@
+// macOS-exclusive: this file is built on frameworks that exist only on macOS
+// (AppKit / IOKit / ScreenCaptureKit / CoreWLAN / MetalFX / ServiceManagement /
+// ApplicationServices). It is excluded from other platforms so SkyBridgeCore can be
+// the single shared core for iOS as well. No behaviour changes on macOS.
+#if os(macOS)
 import Foundation
 import CoreWLAN
 import CoreLocation
@@ -72,7 +77,7 @@ public struct WiFiNetwork: Identifiable, Hashable {
 }
 
 /// WiFi安全类型
-public enum WiFiSecurity: String, CaseIterable {
+public enum WiFiSecurity: String, CaseIterable, Sendable {
     case none = "无加密"
     case wep = "WEP"
     case wpa = "WPA"
@@ -111,6 +116,20 @@ public enum WiFiInterfaceState {
 /// 使用 Swift 6.2 的 Actor 隔离和并发安全特性
 @MainActor
 public final class WiFiManager: BaseManager {
+    private final class LocationAuthorizationDelegateProxy: NSObject, CLLocationManagerDelegate {
+        private let notificationName = Notification.Name("WiFiManager.LocationAuthorizationChanged")
+
+        nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+            _ = manager
+            NotificationCenter.default.post(name: notificationName, object: nil)
+        }
+
+        nonisolated func locationManager(_ manager: CLLocationManager, didChangeAuthorization status: CLAuthorizationStatus) {
+            _ = manager
+            _ = status
+            NotificationCenter.default.post(name: notificationName, object: nil)
+        }
+    }
     
  // MARK: - 发布属性
     @Published public var availableNetworks: [WiFiNetwork] = []
@@ -118,20 +137,40 @@ public final class WiFiManager: BaseManager {
     @Published public var interfaceState: WiFiInterfaceState = .unknown
     @Published public var isScanning = false
     @Published public var hasPermission = false
+
+    private static let locationAuthorizationChangedNotification = Notification.Name("WiFiManager.LocationAuthorizationChanged")
     
  // MARK: - 私有属性
-    private let wifiClient: CWWiFiClient
-    private var wifiInterface: CWInterface?
+    private let radio: any WiFiRadioAccess
+    private var scanTask: Task<Void, Never>?
+    private var permissionTask: Task<Bool, Never>?
+    private var connectionTask: Task<Bool, Never>?
+    private var disconnectTask: Task<Void, Never>?
+    private var scanGeneration = UUID()
     private var scanTimer: Timer?
     private var wifiCancellables = Set<AnyCancellable>()
-    
- /// 使用 Swift 6.2 的并发安全队列进行 WiFi 操作
-    private let wifiQueue = DispatchQueue(label: "com.skybridge.wifi-manager", qos: .userInitiated, attributes: .concurrent)
+    private var runtimeScanInterval: TimeInterval?
+    private let locationManager = CLLocationManager()
+    private let locationAuthorizationDelegate = LocationAuthorizationDelegateProxy()
     
  // MARK: - 初始化
-    public init() {
-        self.wifiClient = CWWiFiClient.shared()
+    public convenience init() {
+        self.init(radio: CoreWLANClient.shared)
+    }
+
+    init(radio: any WiFiRadioAccess, observeSystemChanges: Bool = true) {
+        self.radio = radio
         super.init(category: "WiFiManager")
+        if observeSystemChanges {
+            locationManager.delegate = locationAuthorizationDelegate
+            NotificationCenter.default.publisher(for: Self.locationAuthorizationChangedNotification)
+                .sink { [weak self] _ in
+                    Task { @MainActor [weak self] in
+                        self?.handleLocationAuthorizationChange()
+                    }
+                }
+                .store(in: &wifiCancellables)
+        }
         logger.info("📶 WiFi管理器初始化完成")
     }
     
@@ -139,14 +178,20 @@ public final class WiFiManager: BaseManager {
     
     override public func performInitialization() async {
         await super.performInitialization()
-        setupWiFiInterface()
         setupSettingsObservers()
-        updateInterfaceState()
+        do {
+            updateInterfaceState(try await radio.connection())
+        } catch {
+            interfaceState = .unknown
+            logger.error("WiFi 接口初始化失败: \(error.localizedDescription)")
+        }
     }
     
     override public func performStart() async throws {
         try await super.performStart()
-        checkPermissions()
+        let generation = scanGeneration
+        let granted = await refreshPermission()
+        guard granted, scanGeneration == generation else { return }
         await startScanning()
     }
     
@@ -158,6 +203,7 @@ public final class WiFiManager: BaseManager {
     override public func cleanup() {
          super.cleanup()
          stopScanning()
+         connectionTask?.cancel()
          wifiCancellables.removeAll()
      }
     
@@ -165,45 +211,54 @@ public final class WiFiManager: BaseManager {
     
  /// 检查WiFi权限
     public func checkPermissions() {
- // 在macOS中，WiFi访问需要用户授权和位置权限
- // 首先检查位置权限
-        let locationManager = CLLocationManager()
+        let generation = scanGeneration
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let granted = await self.refreshPermission()
+            guard self.scanGeneration == generation, self.status.isActive else { return }
+            if granted {
+                if !self.isScanning { await self.startScanning() }
+            } else {
+                self.stopScanning()
+            }
+        }
+    }
+
+    private func refreshPermission() async -> Bool {
         let locationStatus = locationManager.authorizationStatus
-        
         if locationStatus == .denied || locationStatus == .restricted {
+            permissionTask?.cancel()
             hasPermission = false
             logger.error("位置权限被拒绝，WiFi扫描需要位置权限")
-            return
+            return false
         }
-        
- // 如果位置权限未确定，请求权限
         if locationStatus == .notDetermined {
             locationManager.requestWhenInUseAuthorization()
             hasPermission = false
             logger.info("正在请求位置权限以支持WiFi扫描")
-            return
+            return false
         }
-        
- // 检查WiFi接口权限
-        do {
- // 尝试获取接口信息来检查权限
-            if let interface = wifiInterface {
-                _ = try interface.scanForNetworks(withSSID: nil)
-                hasPermission = true
-                logger.info("WiFi权限已获得")
-            } else {
-                hasPermission = false
-                logger.error("WiFi接口不可用")
+        if let permissionTask { return await permissionTask.value }
+        let generation = scanGeneration
+        let task = Task { [weak self, radio] in
+            defer { self?.permissionTask = nil }
+            do {
+                _ = try await radio.scan()
+                guard let self, !Task.isCancelled, self.scanGeneration == generation else { return false }
+                self.hasPermission = true
+                self.logger.info("WiFi权限已获得")
+                return true
+            } catch is CancellationError {
+                self?.logger.debug("WiFi 权限探测已取消")
+            } catch {
+                guard let self, self.scanGeneration == generation else { return false }
+                self.hasPermission = false
+                self.logger.error("WiFi权限检查失败: \(error.localizedDescription)")
             }
-        } catch {
-            hasPermission = false
-            logger.error("WiFi权限检查失败: \(error.localizedDescription)")
-            
- // 如果是权限错误，提示用户
-            if error.localizedDescription.contains("Operation not permitted") {
-                logger.error("WiFi扫描需要位置权限，请在系统偏好设置中授权")
-            }
+            return false
         }
+        permissionTask = task
+        return await task.value
     }
     
  /// 开始扫描WiFi网络
@@ -213,78 +268,96 @@ public final class WiFiManager: BaseManager {
             logger.warning("没有WiFi权限，无法扫描")
             return
         }
-        
-        guard let interface = wifiInterface else {
-            logger.error("WiFi接口不可用")
-            return
+        let generation = scanGeneration
+        while let scanTask {
+            let wasCancelled = scanTask.isCancelled
+            await scanTask.value
+            guard wasCancelled, !Task.isCancelled, scanGeneration == generation else { return }
         }
-        
-        logger.info("开始扫描WiFi网络")
+        guard !Task.isCancelled, hasPermission else { return }
         isScanning = true
-        updateInterfaceState()
-        
-        do {
- // 直接在主线程上执行扫描，避免数据竞争
-            let networks = try interface.scanForNetworks(withSSID: nil)
-            await processScannedNetworks(networks)
-            
- // 启动定期扫描（使用设置管理器中的间隔）
-            startPeriodicScanning()
-            
-            logger.info("WiFi扫描完成，发现 \(networks.count) 个网络")
-        } catch {
-            logger.error("WiFi扫描失败: \(error.localizedDescription)")
-            isScanning = false
+        let task = Task { [weak self, radio] in
+            defer { self?.scanTask = nil }
+            do {
+                let snapshot = try await radio.scan()
+                guard let self, !Task.isCancelled, self.scanGeneration == generation else { return }
+                self.updateInterfaceState(snapshot.connection)
+                self.processScannedNetworks(snapshot)
+                self.startPeriodicScanning()
+                self.logger.info("WiFi扫描完成，发现 \(snapshot.networks.count) 个网络")
+            } catch is CancellationError {
+                self?.logger.debug("WiFi 扫描已取消，丢弃过期结果")
+            } catch {
+                guard let self, self.scanGeneration == generation else { return }
+                self.logger.error("WiFi扫描失败: \(error.localizedDescription)")
+                self.isScanning = false
+            }
         }
+        scanTask = task
+        await task.value
     }
-    
+
  /// 停止扫描WiFi网络
     public func stopScanning() {
         isScanning = false
         scanTimer?.invalidate()
         scanTimer = nil
+        scanGeneration = UUID()
+        // A CoreWLAN scan cannot be interrupted. Retain its slot until it finishes.
+        scanTask?.cancel()
+        permissionTask?.cancel()
         logger.info("WiFi扫描已停止")
     }
-    
+
  /// 连接到指定WiFi网络
     public func connect(to network: WiFiNetwork, password: String? = nil) async -> Bool {
-        guard let interface = wifiInterface else {
-            logger.error("WiFi接口不可用")
+        guard connectionTask == nil, disconnectTask == nil else {
+            logger.warning("已有 WiFi 连接操作正在进行")
             return false
         }
-        
-        do {
- // 查找对应的CWNetwork对象
-            let networks = try interface.scanForNetworks(withSSID: Data(network.ssid.utf8))
-            guard let targetNetwork = networks.first(where: { $0.ssid == network.ssid }) else {
-                logger.error("未找到目标网络: \(network.ssid)")
-                return false
+        let task = Task { [weak self, radio] in
+            defer { self?.connectionTask = nil }
+            do {
+                let snapshot = try await radio.connect(
+                    ssid: network.ssid, bssid: nil,
+                    password: password?.isEmpty == false ? password : nil
+                )
+                guard let self, !Task.isCancelled else { return false }
+                self.updateInterfaceState(snapshot.connection)
+                if let connected = self.wifiNetworks(from: snapshot).first(where: { $0.isConnected }) {
+                    self.currentNetwork = connected
+                }
+                self.logger.info("成功连接到WiFi网络: \(network.ssid)")
+                return true
+            } catch is CancellationError {
+                self?.logger.debug("WiFi 连接请求已取消")
+            } catch {
+                self?.logger.error("连接WiFi网络失败: \(error.localizedDescription)")
             }
-            
- // 执行连接
-            if let password = password, !password.isEmpty {
-                try interface.associate(to: targetNetwork, password: password)
-            } else {
-                try interface.associate(to: targetNetwork, password: nil)
-            }
-            
- // 更新当前网络状态
-            await updateCurrentNetwork()
-            
-            logger.info("成功连接到WiFi网络: \(network.ssid)")
-            return true
-            
-        } catch {
-            logger.error("连接WiFi网络失败: \(error.localizedDescription)")
             return false
         }
+        connectionTask = task
+        return await task.value
     }
     
  /// 断开当前WiFi连接
     public func disconnect() {
-        wifiInterface?.disassociate()
-        currentNetwork = nil
-        logger.info("已断开WiFi连接")
+        guard disconnectTask == nil else { return }
+        scanGeneration = UUID()
+        scanTask?.cancel()
+        permissionTask?.cancel()
+        connectionTask?.cancel()
+        disconnectTask = Task { [weak self, radio] in
+            defer { self?.disconnectTask = nil }
+            do {
+                try await radio.disconnect()
+                self?.currentNetwork = nil
+                self?.interfaceState = .inactive
+                self?.logger.info("已断开WiFi连接")
+            } catch {
+                self?.logger.error("断开 WiFi 连接失败: \(error.localizedDescription)")
+            }
+        }
     }
     
  /// 刷新网络列表
@@ -294,123 +367,50 @@ public final class WiFiManager: BaseManager {
     
  // MARK: - 私有方法
     
- /// 设置WiFi接口
-    private func setupWiFiInterface() {
- // 获取默认WiFi接口
-        if let interfaceName = wifiClient.interfaceNames()?.first {
-            wifiInterface = wifiClient.interface(withName: interfaceName)
-            logger.info("WiFi接口已设置: \(interfaceName)")
-        } else {
-            logger.error("未找到WiFi接口")
-        }
+ /// 更新接口状态；同步系统属性已由后台 CoreWLAN 客户端读取。
+    private func updateInterfaceState(_ connection: WiFiRadioConnection) {
+        interfaceState = connection.powerOn && connection.ssid != nil ? .running : .inactive
     }
-    
- /// 更新接口状态
-    private func updateInterfaceState() {
-        guard let interface = wifiInterface else {
-            interfaceState = .unknown
-            return
-        }
-        
- // 通过检查接口属性来判断状态
-        if interface.powerOn() {
-            if interface.ssid() != nil {
-                interfaceState = .running
+
+    private func wifiNetworks(from snapshot: WiFiRadioScan) -> [WiFiNetwork] {
+        let includeHiddenNetworks = SettingsManager.shared.showHiddenNetworks
+        return snapshot.networks.compactMap { network -> WiFiNetwork? in
+            let rawSSID = network.ssid?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let isHidden = rawSSID == nil || rawSSID?.isEmpty == true
+            guard includeHiddenNetworks || !isHidden else { return nil }
+            let ssid: String
+            if let rawSSID, !rawSSID.isEmpty {
+                ssid = rawSSID
             } else {
-                interfaceState = .inactive
+                ssid = "Hidden Network (\(network.bssid ?? "unknown"))"
             }
-        } else {
-            interfaceState = .inactive
-        }
-    }
-    
- /// 处理扫描到的网络
-    private func processScannedNetworks(_ networks: Set<CWNetwork>) async {
-        let currentSSID = wifiInterface?.ssid()
-        
-        let wifiNetworks = networks.compactMap { network -> WiFiNetwork? in
-            guard let ssid = network.ssid, !ssid.isEmpty else { return nil }
-            
-            let security = mapSecurityType(network)
-            let isConnected = ssid == currentSSID
-            
             return WiFiNetwork(
-                ssid: ssid,
-                bssid: network.bssid ?? "",
-                rssi: network.rssiValue,
-                channel: network.wlanChannel?.channelNumber ?? 0,
-                security: security,
-                isConnected: isConnected,
-                frequency: Double(network.wlanChannel?.channelBand.rawValue ?? 0)
+                ssid: ssid, bssid: network.bssid ?? "", rssi: network.rssi,
+                channel: network.channel, security: network.security,
+                isConnected: ssid == snapshot.connection.ssid, frequency: network.frequency
             )
-        }
-        
- // 按信号强度排序
-        availableNetworks = wifiNetworks.sorted { $0.rssi > $1.rssi }
-        
- // 更新当前连接的网络
-        if let connectedNetwork = wifiNetworks.first(where: { $0.isConnected }) {
-            currentNetwork = connectedNetwork
-        }
+        }.sorted { $0.rssi > $1.rssi }
     }
-    
- /// 映射安全类型
-    private func mapSecurityType(_ network: CWNetwork) -> WiFiSecurity {
-        if network.supportsSecurity(.none) {
-            return .none
-        } else if network.supportsSecurity(.WEP) {
-            return .wep
-        } else if network.supportsSecurity(.wpaPersonal) || network.supportsSecurity(.wpaPersonalMixed) {
-            return .wpa
-        } else if network.supportsSecurity(.wpa2Personal) {
-            return .wpa2
-        } else if network.supportsSecurity(.wpa3Personal) || network.supportsSecurity(.wpa3Transition) {
-            return .wpa3
-        } else if network.supportsSecurity(.wpaEnterprise) || network.supportsSecurity(.wpa2Enterprise) || network.supportsSecurity(.wpa3Enterprise) || network.supportsSecurity(.wpaEnterpriseMixed) {
-            return .enterprise
-        } else {
-            return .unknown
-        }
+
+    private func processScannedNetworks(_ snapshot: WiFiRadioScan) {
+        availableNetworks = wifiNetworks(from: snapshot)
+        currentNetwork = availableNetworks.first(where: { $0.isConnected })
     }
-    
- /// 更新当前网络信息
-    private func updateCurrentNetwork() async {
-        guard let interface = wifiInterface,
-              let ssid = interface.ssid() else {
-            currentNetwork = nil
-            return
-        }
-        
-        do {
-            let networks = try interface.scanForNetworks(withSSID: Data(ssid.utf8))
-            if let network = networks.first {
-                let security = mapSecurityType(network)
-                currentNetwork = WiFiNetwork(
-                    ssid: ssid,
-                    bssid: network.bssid ?? "",
-                    rssi: network.rssiValue,
-                    channel: network.wlanChannel?.channelNumber ?? 0,
-                    security: security,
-                    isConnected: true,
-                    frequency: Double(network.wlanChannel?.channelBand.rawValue ?? 0)
-                )
-            }
-        } catch {
-            logger.error("更新当前网络信息失败: \(error.localizedDescription)")
-        }
-    }
-    
+
  /// 启动定期扫描
     private func startPeriodicScanning() {
         scanTimer?.invalidate()
         
  // 获取设备管理设置中的扫描间隔
         let deviceSettings = DeviceManagementSettingsManager.shared
-        let scanInterval = deviceSettings.wifiScanInterval
+        let scanInterval = runtimeScanInterval ?? deviceSettings.wifiScanInterval
         
         scanTimer = Timer.scheduledTimer(withTimeInterval: scanInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                await self?.refreshNetworks()
+                // A failed refresh clears isScanning but the existing monitor
+                // still retries on its next tick. stopScanning removes the timer.
+                guard let self, self.scanTimer != nil, self.scanTask == nil else { return }
+                await self.refreshNetworks()
             }
         }
         
@@ -447,13 +447,23 @@ public final class WiFiManager: BaseManager {
         }
         
  // 处理扫描间隔变化
-        if let _ = userInfo["scanInterval"] as? Double {
+        if let scanInterval = userInfo["scanInterval"] as? Double {
+            runtimeScanInterval = max(5.0, scanInterval)
             if isScanning {
  // 重新启动定期扫描以应用新间隔
                 startPeriodicScanning()
                 logger.info("WiFi扫描间隔已更新")
             }
         }
+
+        if userInfo["showHiddenNetworks"] != nil, isScanning {
+            await refreshNetworks()
+            logger.info("WiFi隐藏网络显示设置已更新")
+        }
+    }
+
+    private func handleLocationAuthorizationChange() {
+        checkPermissions()
     }
 }
 
@@ -478,3 +488,4 @@ extension WiFiManager {
         public let interfaceState: WiFiInterfaceState
     }
 }
+#endif

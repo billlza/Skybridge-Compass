@@ -67,11 +67,26 @@ public struct PreNegotiationSignatureSelector: Sendable {
  /// **Property 1: Pre-Negotiation Signature Algorithm Rule**
  /// **Validates: Requirements 1.1, 1.2, 1.4**
     public static func selectForMessageA(offeredSuites: [CryptoSuite]) -> SignatureAlgorithm {
+        selectForMessageA(
+            offeredSuites: offeredSuites,
+            pqcAlgorithm: .mlDSA65
+        )
+    }
+
+    public static func selectForMessageA(
+        offeredSuites: [CryptoSuite],
+        pqcAlgorithm: ProtocolSigningAlgorithm
+    ) -> SignatureAlgorithm {
  // 检查是否包含任何 PQC 或 Hybrid suite
  // isPQCGroup 是唯一分类函数
         let hasPQCOrHybrid = offeredSuites.contains { $0.isPQCGroup }
-        
-        return hasPQCOrHybrid ? .mlDSA65 : .ed25519
+        guard hasPQCOrHybrid else { return .ed25519 }
+        switch pqcAlgorithm {
+        case .mlDSA65, .mlDSA87:
+            return pqcAlgorithm.wire
+        case .ed25519:
+            return .ed25519
+        }
     }
     
  /// 根据 offeredSuites 选择 sigA 的签名算法（返回 SelectionResult）
@@ -84,12 +99,28 @@ public struct PreNegotiationSignatureSelector: Sendable {
  ///
  /// **Requirements: 6.3**
     public static func selectForMessageAResult(offeredSuites: [CryptoSuite]) -> SelectionResult {
+        selectForMessageAResult(
+            offeredSuites: offeredSuites,
+            pqcAlgorithm: .mlDSA65
+        )
+    }
+
+    public static func selectForMessageAResult(
+        offeredSuites: [CryptoSuite],
+        pqcAlgorithm: ProtocolSigningAlgorithm
+    ) -> SelectionResult {
         guard !offeredSuites.isEmpty else {
             return .empty
         }
         
         let hasPQCOrHybrid = offeredSuites.contains { $0.isPQCGroup }
-        let algorithm: ProtocolSigningAlgorithm = hasPQCOrHybrid ? .mlDSA65 : .ed25519
+        let algorithm: ProtocolSigningAlgorithm
+        if hasPQCOrHybrid {
+            guard pqcAlgorithm != .ed25519 else { return .empty }
+            algorithm = pqcAlgorithm
+        } else {
+            algorithm = .ed25519
+        }
         let provider = selectProvider(for: algorithm)
         
         return .success(algorithm: algorithm, provider: provider)
@@ -117,8 +148,8 @@ public struct PreNegotiationSignatureSelector: Sendable {
         let isPQCOrHybrid = selectedSuite.isPQC || selectedSuite.isHybrid
         
         switch sigAAlgorithm {
-        case .mlDSA65:
- // sigA 是 ML-DSA-65，selectedSuite 必须是 PQC 或 Hybrid
+        case .mlDSA65, .mlDSA87:
+ // sigA 是 ML-DSA，selectedSuite 必须是 PQC 或 Hybrid
             return isPQCOrHybrid
             
         case .ed25519:
@@ -138,19 +169,23 @@ public struct PreNegotiationSignatureSelector: Sendable {
  ///
  /// **Property 3: Signature Provider Selection by Algorithm**
  /// **Validates: Requirements 3.1, 3.2, 3.3**
+    @available(*, deprecated, message: "请使用 selectProvider(for: ProtocolSigningAlgorithm)。P-256 ECDSA 不允许用于主协议签名（sigA/sigB）。若需要 P-256（legacy 验证 / Secure Enclave PoP），请使用 P256SignatureProvider。")
     public static func selectProvider(for algorithm: SignatureAlgorithm) -> any ProtocolSignatureProvider {
         switch algorithm {
-        case .mlDSA65:
- // 优先使用 Apple PQC，回退到 OQS
-            return PQCSignatureProvider(backend: .auto)
+        case .mlDSA65, .mlDSA87:
+            guard let protocolAlgorithm = ProtocolSigningAlgorithm(from: algorithm) else {
+                return ClassicSignatureProvider()
+            }
+            return ProtocolSignatureProviderSelector.select(for: protocolAlgorithm)
             
         case .ed25519:
             return ClassicSignatureProvider()
             
         case .p256ECDSA:
  // P-256 ECDSA 不允许用于主协议签名 (sigA/sigB)
- // 使用 Ed25519 作为 fallback，调用方应使用 ProtocolSigningAlgorithm 版本
- // TODO: 2 将废弃此方法，改用 selectProvider(for: ProtocolSigningAlgorithm)
+            // 使用 Ed25519 作为 fallback（避免 Debug 断言导致测试/运行时崩溃）。
+            // 调用方应改用 `ProtocolSigningAlgorithm` 版本；若需要 P-256（legacy 验证 / Secure Enclave PoP），请使用 `P256SignatureProvider`。
+            SkyBridgeLogger.p2p.warning("Deprecated selectProvider(for: SignatureAlgorithm) called with P-256 ECDSA (illegal for sigA/sigB). Falling back to ClassicSignatureProvider. Use ProtocolSigningAlgorithm/P256SignatureProvider instead.")
             return ClassicSignatureProvider()
         }
     }
@@ -163,8 +198,8 @@ public struct PreNegotiationSignatureSelector: Sendable {
  /// **Requirements: 1.1, 1.2, 3.4, 3.5**
     public static func selectProvider(for algorithm: ProtocolSigningAlgorithm) -> any ProtocolSignatureProvider {
         switch algorithm {
-        case .mlDSA65:
-            return PQCSignatureProvider(backend: .auto)
+        case .mlDSA65, .mlDSA87:
+            return ProtocolSignatureProviderSelector.select(for: algorithm)
         case .ed25519:
             return ClassicSignatureProvider()
         }
@@ -180,8 +215,14 @@ public struct PreNegotiationSignatureSelector: Sendable {
         offeredSuites: [CryptoSuite]
     ) -> (algorithm: SignatureAlgorithm, provider: any ProtocolSignatureProvider) {
         let algorithm = selectForMessageA(offeredSuites: offeredSuites)
-        let provider = selectProvider(for: algorithm)
-        return (algorithm, provider)
+        // `selectForMessageA` 的返回值只可能是 ed25519 / mlDSA65，但这里仍使用类型安全的转换，
+        // 避免误用 `.p256ECDSA` 路径（该路径对主协议签名是非法的）。
+        if let protocolAlg = ProtocolSigningAlgorithm(from: algorithm) {
+            let provider = selectProvider(for: protocolAlg)
+            return (algorithm, provider)
+        }
+        SkyBridgeLogger.p2p.error("Unexpected SignatureAlgorithm for protocol signing: \(algorithm.rawValue). Falling back to ClassicSignatureProvider.")
+        return (algorithm, ClassicSignatureProvider())
     }
 }
 
@@ -190,7 +231,7 @@ public struct PreNegotiationSignatureSelector: Sendable {
 extension CryptoSuite {
  /// 所有 PQC suites（用于 Two-Attempt Strategy）
     public static var allPQCSuites: [CryptoSuite] {
-        [.xwingMLDSA, .mlkem768MLDSA65]
+        [.xwingMLDSA, .mlkem768MLDSA65FS, .mlkem768MLDSA65]
     }
     
  /// 所有 Classic suites（用于 Two-Attempt Strategy）
@@ -207,6 +248,12 @@ extension CryptoSuite {
 ///
 /// **Requirements: 9.1**
 public struct HandshakeOfferedSuites: Sendable {
+
+    public enum PQCOfferMode: String, Sendable, Equatable {
+        case allAvailable = "all_available"
+        case preferredSingle = "preferred_single"
+        case compatRetry = "compat_retry"
+    }
     
  /// 构建结果
     public enum BuildResult: Sendable, Equatable {
@@ -238,7 +285,16 @@ public struct HandshakeOfferedSuites: Sendable {
         cryptoProvider: any CryptoProvider
     ) -> BuildResult {
         let availableSuites = cryptoProvider.supportedSuites
-        return build(strategy: strategy, availableSuites: availableSuites)
+        return build(strategy: strategy, availableSuites: availableSuites, pqcOfferMode: .allAvailable)
+    }
+
+    public static func build(
+        strategy: HandshakeAttemptStrategy,
+        cryptoProvider: any CryptoProvider,
+        pqcOfferMode: PQCOfferMode
+    ) -> BuildResult {
+        let availableSuites = cryptoProvider.supportedSuites
+        return build(strategy: strategy, availableSuites: availableSuites, pqcOfferMode: pqcOfferMode)
     }
     
  /// 根据策略构建 offeredSuites（使用提供的 suites 列表）
@@ -256,13 +312,44 @@ public struct HandshakeOfferedSuites: Sendable {
         strategy: HandshakeAttemptStrategy,
         availableSuites: [CryptoSuite]
     ) -> BuildResult {
+        build(strategy: strategy, availableSuites: availableSuites, pqcOfferMode: .allAvailable)
+    }
+
+    public static func build(
+        strategy: HandshakeAttemptStrategy,
+        availableSuites: [CryptoSuite],
+        pqcOfferMode: PQCOfferMode
+    ) -> BuildResult {
         let filtered: [CryptoSuite]
         
         switch strategy {
         case .pqcOnly:
-            filtered = availableSuites.filter { $0.isPQCGroup }
+            let pqcSuites = availableSuites.filter { $0.isPQCGroup && $0.isNegotiable }
+            guard !pqcSuites.isEmpty else {
+                return .empty(strategy)
+            }
+            switch pqcOfferMode {
+            case .allAvailable:
+                filtered = pqcSuites
+            case .preferredSingle:
+                if let suite = pqcSuites.first(where: { $0.requiresV2EphemeralContribution }) {
+                    filtered = [suite]
+                } else if let suite = pqcSuites.first {
+                    filtered = [suite]
+                } else {
+                    filtered = []
+                }
+            case .compatRetry:
+                if let suite = pqcSuites.first(where: { !$0.requiresV2EphemeralContribution }) {
+                    filtered = [suite]
+                } else if let suite = pqcSuites.first {
+                    filtered = [suite]
+                } else {
+                    filtered = []
+                }
+            }
         case .classicOnly:
-            filtered = availableSuites.filter { !$0.isPQCGroup }
+            filtered = availableSuites.filter { !$0.isPQCGroup && $0.isNegotiable }
         }
         
         guard !filtered.isEmpty else {

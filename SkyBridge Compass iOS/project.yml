@@ -1,0 +1,307 @@
+name: SkyBridgeCompass-iOS
+
+options:
+  bundleIdPrefix: com.skybridge
+  deploymentTarget:
+    iOS: "17.0"
+  xcodeVersion: "26.5"
+
+settings:
+  base:
+    # Note: SWIFT_VERSION is the Swift language major (6.0). Minor (6.3+) is provided by the selected stable Xcode 26.5+ toolchain.
+    SWIFT_VERSION: "6.0"
+
+packages:
+  SkyBridgeRoot:
+    path: ..
+  WebRTC:
+    url: https://github.com/stasel/WebRTC
+    exactVersion: 150.0.0
+  SkyBridgeCameraKitLocal:
+    path: ../Packages/SkyBridgeCameraKit
+  SkyBridgeWeatherRenderingLocal:
+    path: ../Packages/SkyBridgeWeatherRendering
+
+targets:
+  SkyBridgeCompass-iOS:
+    type: application
+    platform: iOS
+    info:
+      path: "SkyBridgeCompassiOS/Supporting Files/Info.plist"
+      properties:
+        CFBundleShortVersionString: "1.0.2"
+        CFBundleVersion: "23"
+        CFBundleURLTypes:
+          - CFBundleURLName: com.skybridge.compass.ios
+            CFBundleURLSchemes:
+              - skybridge
+        NEBULA_BASE_URL: "https://auth.nebula-technologies.net"
+        NEBULA_CLIENT_ID: "skybridge_compass_ios"
+        NEBULA_CLIENT_SECRET: ""
+        SKYBRIDGE_ENABLE_APPLE_SIGN_IN: true
+        SkyBridgePackagingBuildConfiguration: "$(SKYBRIDGE_PACKAGING_BUILD_CONFIGURATION)"
+        SkyBridgePackagingGitDirtyState: "$(SKYBRIDGE_PACKAGING_GIT_DIRTY_STATE)"
+        SkyBridgePackagingGitCommit: "$(SKYBRIDGE_PACKAGING_GIT_COMMIT)"
+        SkyBridgePackagingSourceInputDigest: "$(SKYBRIDGE_PACKAGING_SOURCE_INPUT_DIGEST)"
+        SkyBridgePackagingSourceRepository: "$(SKYBRIDGE_PACKAGING_SOURCE_REPOSITORY)"
+        SkyBridgePackagingProductSurface: "$(SKYBRIDGE_PACKAGING_PRODUCT_SURFACE)"
+        SkyBridgePackagingSwiftActiveCompilationConditions: "$(SKYBRIDGE_PACKAGING_SWIFT_ACTIVE_COMPILATION_CONDITIONS)"
+        NSSupportsLiveActivities: true
+        UIBackgroundModes:
+          - screen-capture
+          - processing
+          - bluetooth-central
+        BGTaskSchedulerPermittedIdentifiers:
+          - "$(PRODUCT_BUNDLE_IDENTIFIER).audio-file.*"
+        NSLocalNetworkUsageDescription: "SkyBridge 需要访问本地网络以发现和连接附近设备。"
+        NSBonjourServices:
+          - _skybridge._tcp
+          - _skybridge._udp
+          - _skybridge-xfer._tcp
+          - _skybridge-rd._tcp
+          - _companion-link._tcp
+          - _airdrop._tcp
+          - _sftp-ssh._tcp
+          - _smb._tcp
+          - _http._tcp
+          - _rtsp._tcp
+          - _rdlink._tcp
+          - _androidshare._tcp
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSLocationWhenInUseUsageDescription: "SkyBridge 使用你的位置信息来获取本地天气并优化网络状态展示。"
+        NSCameraUsageDescription: "SkyBridge 需要访问相机以扫描设备配对二维码。"
+        NSMicrophoneUsageDescription: "SkyBridge 需要麦克风权限以建立远程桌面音频会话，并在你启用音频重定向或语音相关能力时安全处理音频。"
+        LSSupportsOpeningDocumentsInPlace: true
+        UIFileSharingEnabled: true
+        UIRequiredDeviceCapabilities:
+          - arm64
+          - iphone-ipad-minimum-performance-a12
+        UILaunchStoryboardName: LaunchScreen
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    sources:
+      - path: SkyBridgeCompassiOS/Sources
+      - path: "SkyBridgeCompassiOS/Supporting Files/LaunchScreen.storyboard"
+        buildPhase: resources
+      - path: SkyBridgeCompassiOS/Resources
+        buildPhase: resources
+    dependencies:
+      - sdk: AppIntents.framework
+      - package: WebRTC
+        product: WebRTC
+      - package: SkyBridgeRoot
+        product: SkyBridgeQPeriaptRuntime
+      - package: SkyBridgeRoot
+        product: SkyBridgeBoundSessionRuntime
+      - package: SkyBridgeRoot
+        product: OQSRAII
+      - package: SkyBridgeRoot
+        product: SkyBridgeRealtimeMedia
+      - package: SkyBridgeRoot
+        product: SkyBridgeBootWitness
+      - package: SkyBridgeRoot
+        product: SkyBridgeWebRTCRuntime
+      - package: SkyBridgeRoot
+        product: SkyBridgeMessagePersistence
+      - package: SkyBridgeCameraKitLocal
+        product: SkyBridgeCameraKit
+      - package: SkyBridgeWeatherRenderingLocal
+        product: SkyBridgeWeatherRendering
+      - target: SkyBridgeCompass-Widgets
+        embed: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.skybridge.compass.ios
+        DEVELOPMENT_TEAM: YKUPL7Z869
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        GCC_TREAT_WARNINGS_AS_ERRORS: YES
+        INFOPLIST_FILE: "SkyBridgeCompassiOS/Supporting Files/Info.plist"
+        SWIFT_STRICT_CONCURRENCY: complete
+        OTHER_CFLAGS: "$(inherited)"
+        OTHER_CPLUSPLUSFLAGS: "$(inherited)"
+        # Custom provenance keys live in the explicit Info.plist and are expanded
+        # before signing. Normal developer builds stay truthfully unbound; release
+        # and physical-smoke producers must override every value explicitly.
+        SKYBRIDGE_PACKAGING_BUILD_CONFIGURATION: unbound
+        SKYBRIDGE_PACKAGING_GIT_DIRTY_STATE: unbound
+        SKYBRIDGE_PACKAGING_GIT_COMMIT: unbound
+        SKYBRIDGE_PACKAGING_SOURCE_INPUT_DIGEST: unbound
+        SKYBRIDGE_PACKAGING_SOURCE_REPOSITORY: unbound
+        SKYBRIDGE_PACKAGING_PRODUCT_SURFACE: unbound
+        SKYBRIDGE_PACKAGING_SWIFT_ACTIVE_COMPILATION_CONDITIONS: HAS_APPLE_PQC_SDK
+        # This Xcode project requires the pinned Xcode 26.5+ toolchain above, whose
+        # iPhoneOS and Simulator SDKs expose the reviewed CryptoKit PQC symbol set.
+        # Keep Apple PQC in ordinary Xcode builds: an incompatible SDK must fail at
+        # compile time instead of silently producing a package that cannot negotiate
+        # PQC. Formal release/device lanes still run Scripts/apple_pqc_sdk_probe.sh
+        # before invoking xcodebuild.
+        SKYBRIDGE_APPLE_PQC_SDK_CONDITION: HAS_APPLE_PQC_SDK
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) $(SKYBRIDGE_APPLE_PQC_SDK_CONDITION)"
+      configs:
+        Debug:
+          CODE_SIGN_ENTITLEMENTS: SkyBridgeCompass-iOSDebug.entitlements
+          "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]": "-"
+          "CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]": YES
+          "CODE_SIGNING_REQUIRED[sdk=iphonesimulator*]": YES
+          "ENABLE_DEBUG_DYLIB[sdk=iphonesimulator*]": NO
+        Release:
+          CODE_SIGN_ENTITLEMENTS: SkyBridgeCompass-iOSRelease.entitlements
+          # Xcode-managed (Automatic) signing: the production archive/export and the
+          # on-device test lane let Xcode manage the distribution/development profile.
+          # Direct testing-surface device builds (real-device smoke lanes) override
+          # CODE_SIGN_STYLE=Manual on the xcodebuild command line and feed the
+          # SKYBRIDGE_IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER env build setting below to
+          # force the resolver-selected distribution profile for their measured proof.
+          # The specifier expands to empty under Automatic paths, which Xcode ignores.
+          CODE_SIGN_STYLE: Automatic
+          "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]": "-"
+          PROVISIONING_PROFILE_SPECIFIER: "$(SKYBRIDGE_IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER)"
+
+  SkyBridgeCompass-Widgets:
+    type: app-extension
+    platform: iOS
+    info:
+      path: "Widgets/Info.plist"
+      properties:
+        CFBundleShortVersionString: "1.0.2"
+        CFBundleVersion: "23"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    sources:
+      - path: Widgets
+      - path: SkyBridgeCompassiOS/Sources/LiveActivities/SkyBridgeActivityAttributes.swift
+        group: SkyBridgeCompassiOS/Sources/LiveActivities
+    dependencies:
+      - sdk: WidgetKit.framework
+      - sdk: ActivityKit.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.skybridge.compass.ios.widgets
+        DEVELOPMENT_TEAM: YKUPL7Z869
+        INFOPLIST_FILE: "Widgets/Info.plist"
+        SWIFT_STRICT_CONCURRENCY: complete
+        # Widgets do not need HAS_APPLE_PQC_SDK; keep build conditions minimal for portability.
+      configs:
+        Debug:
+          "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]": "-"
+          "CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]": YES
+          "CODE_SIGNING_REQUIRED[sdk=iphonesimulator*]": YES
+          "ENABLE_DEBUG_DYLIB[sdk=iphonesimulator*]": NO
+        Release:
+          CODE_SIGN_ENTITLEMENTS: SkyBridgeCompass-WidgetsRelease.entitlements
+          # See the app target note: Automatic by default; smoke lanes force Manual
+          # and feed the widget specifier env build setting below.
+          CODE_SIGN_STYLE: Automatic
+          "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]": "-"
+          PROVISIONING_PROFILE_SPECIFIER: "$(SKYBRIDGE_IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER)"
+
+  SkyBridgeCompassiOSTests:
+    type: bundle.unit-test
+    platform: iOS
+    hostApplication: SkyBridgeCompass-iOS
+    sources:
+      - path: SkyBridgeCompassiOSTests
+      - path: ../Tests/SkyBridgeCoreTests/WebRTCRuntimeLifecycleTests.swift
+        group: SkyBridgeCompassiOSTests
+      - path: ../Tests/SkyBridgeCoreTests/CrossNetworkFileTransferInboundAdmissionPolicyTests.swift
+        group: SkyBridgeCompassiOSTests
+      - path: ../Tests/SkyBridgeCoreTests/Fixtures/QPeriaptABI2/signed-policy-vectors.json
+        group: SkyBridgeCompassiOSTests/Fixtures/QPeriaptABI2
+        buildPhase: resources
+      - path: ../Tests/SkyBridgeCoreTests/Fixtures/QPeriaptABI2/skr2-golden.json
+        group: SkyBridgeCompassiOSTests/Fixtures/QPeriaptABI2
+        buildPhase: resources
+      - path: ../Tests/SkyBridgeCoreTests/AccountDevicePresenceReportTests.swift
+        group: SkyBridgeCompassiOSTests
+      - path: ../Tests/SkyBridgeCoreTests/AccountDevicePresentationPolicyTests.swift
+        group: SkyBridgeCompassiOSTests
+      - path: ../Tests/SkyBridgeCoreTests/AccountDeviceRecordDecodingTests.swift
+        group: SkyBridgeCompassiOSTests
+      - path: ../Tests/SkyBridgeCoreTests/AccountPresenceRefreshEngineTests.swift
+        group: SkyBridgeCompassiOSTests
+      - path: ../Tests/SkyBridgeCoreTests/AccountPresenceRefreshPolicyTests.swift
+        group: SkyBridgeCompassiOSTests
+      - path: ../Tests/SkyBridgeCoreTests/LANAddressRoutabilityPolicyTests.swift
+        group: SkyBridgeCompassiOSTests
+      - path: ../Tests/SkyBridgeCoreTests/SignalServerClientPresenceFailureTests.swift
+        group: SkyBridgeCompassiOSTests
+      - path: ../Tests/SkyBridgeCoreTests/Fixtures/AudioStreaming/alac-decoder-v1/48000-2-s16.m4a
+        group: SkyBridgeCompassiOSTests
+        buildPhase: resources
+      - path: ../Tests/SkyBridgeCoreTests/Fixtures/AudioStreaming/alac-decoder-v1/48000-2-s20.m4a
+        group: SkyBridgeCompassiOSTests
+        buildPhase: resources
+      - path: ../Tests/SkyBridgeCoreTests/Fixtures/AudioStreaming/alac-decoder-v1/48000-2-s24.m4a
+        group: SkyBridgeCompassiOSTests
+        buildPhase: resources
+      - path: ../Tests/SkyBridgeCoreTests/Fixtures/AudioStreaming/alac-decoder-v1/48000-2-s32.m4a
+        group: SkyBridgeCompassiOSTests
+        buildPhase: resources
+    dependencies:
+      - target: SkyBridgeCompass-iOS
+      - package: SkyBridgeRoot
+        product: SkyBridgeWebRTCRuntime
+        link: false
+        embed: false
+      - sdk: AppIntents.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.skybridge.compass.ios.tests
+        DEVELOPMENT_TEAM: YKUPL7Z869
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGNING_ALLOWED: YES
+        SWIFT_STRICT_CONCURRENCY: complete
+        OTHER_CFLAGS: "$(inherited)"
+        OTHER_CPLUSPLUSFLAGS: "$(inherited)"
+        SKYBRIDGE_APPLE_PQC_SDK_CONDITION: HAS_APPLE_PQC_SDK
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) $(SKYBRIDGE_APPLE_PQC_SDK_CONDITION)"
+      configs:
+        Debug:
+          "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]": "-"
+          "CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]": YES
+          "CODE_SIGNING_REQUIRED[sdk=iphonesimulator*]": YES
+          "ENABLE_DEBUG_DYLIB[sdk=iphonesimulator*]": NO
+
+schemes:
+  SkyBridgeCompass-iOS:
+    build:
+      targets:
+        SkyBridgeCompass-iOS: all
+        SkyBridgeCompass-Widgets: all
+        SkyBridgeCompassiOSTests: [test]
+    test:
+      macroExpansion: SkyBridgeCompass-iOS
+      testPlans:
+        - path: SkyBridgeCompass-iOS.xcodeproj/xcshareddata/xctestplans/SkyBridgeCompass-iOS-Shared.xctestplan
+          defaultPlan: true
+      targets:
+        - SkyBridgeCompassiOSTests
+    run:
+      config: Release
+      executable: SkyBridgeCompass-iOS
+      debugEnabled: false
+    profile:
+      config: Release
+      executable: SkyBridgeCompass-iOS
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+
+  SkyBridgeCompassiOSTests:
+    build:
+      targets:
+        SkyBridgeCompass-iOS: [test]
+        SkyBridgeCompassiOSTests: [test]
+    test:
+      targets:
+        - SkyBridgeCompassiOSTests

@@ -2,319 +2,477 @@ import Foundation
 import Network
 import OSLog
 import Combine
+import SkyBridgeProtocolCore
 
 /// 文件传输网络服务 - 负责建立和管理文件传输的网络连接
 @MainActor
 public class FileTransferNetworkService: NSObject, ObservableObject {
-    
+
  // MARK: - 发布的属性
     @Published public var isListening = false
     @Published public var activeConnections: [String: NWConnection] = [:]
     @Published public var connectionRequests: [FileTransferConnectionRequest] = []
-    
+
  // MARK: - 私有属性
     private let logger = Logger(subsystem: "com.skybridge.transfer", category: "Network")
     private var listener: NWListener?
-    private let serviceType = "_skybridge-transfer._tcp"
+    private let serviceType = BonjourInteropContract.fileTransferServiceType
     private let serviceDomain = "local."
-    private var netService: NetService?
     private var cancellables = Set<AnyCancellable>()
-    
+
  // 连接管理
     private let connectionQueue = DispatchQueue(label: "file-transfer-connections", qos: .userInitiated)
     private let maxConcurrentConnections = 5
-    
+
+    private struct PendingConnectionAttempt {
+        let connection: NWConnection
+        let deviceId: String
+        let deviceName: String
+        let continuation: CheckedContinuation<NWConnection, Error>
+    }
+
+    private var pendingConnectionAttempts: [UUID: PendingConnectionAttempt] = [:]
+    private var outboundDeviceIDByConnectionKey: [String: String] = [:]
+
     public override init() {
         logger.info("📡 初始化文件传输网络服务")
     }
-    
+
  // MARK: - 公共方法
-    
+
  /// 启动文件传输服务监听
-    public func startListening() throws {
+    public func startListening() async throws {
         guard !isListening else { return }
-        
+
         logger.info("🚀 启动文件传输服务监听")
-        
+
+        let identity = try await CanonicalBonjourAdvertisementIdentityProvider.current(
+            allowCreateDeviceId: true
+        )
+
  // 创建TCP监听器
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
         parameters.includePeerToPeer = true
-        
-        listener = try NWListener(using: parameters)
-        
+        if let tcp = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+            tcp.enableKeepalive = true
+            tcp.keepaliveIdle = 30
+            tcp.keepaliveInterval = 15
+            tcp.keepaliveCount = 4
+        }
+
+        let activeListener = try NWListener(using: parameters)
+        activeListener.service = NWListener.Service(
+            name: LocalHostName.localizedName ?? "Mac",
+            type: serviceType,
+            domain: serviceDomain,
+            txtRecord: try BonjourInteropContract.makeCanonicalAdvertisementTXT(
+                deviceId: identity.deviceId,
+                pubKeyFingerprint: identity.protocolPublicKeyFingerprint,
+                platform: .macOS,
+                role: .dedicatedService
+            )
+        )
+        listener = activeListener
+
  // 设置新连接处理器
-        listener?.newConnectionHandler = { [weak self] connection in
+        activeListener.newConnectionHandler = { [weak self] connection in
             Task { @MainActor in
                 await self?.handleNewConnection(connection)
             }
         }
-        
+
  // 设置状态更新处理器
-        listener?.stateUpdateHandler = { [weak self] state in
+        activeListener.stateUpdateHandler = { [weak self] state in
             Task { @MainActor in
                 await self?.handleListenerStateChange(state)
             }
         }
-        
+
  // 启动监听器
-        listener?.start(queue: connectionQueue)
-        
- // 注册Bonjour服务
-        try registerBonjourService()
-        
+        activeListener.start(queue: connectionQueue)
+
         isListening = true
         logger.info("✅ 文件传输服务监听已启动")
     }
-    
+
  /// 停止文件传输服务监听
     public func stopListening() {
-        guard isListening else { return }
-        
+        guard isListening else {
+            cancelAllConnections()
+            return
+        }
+
         logger.info("🛑 停止文件传输服务监听")
-        
+
  // 停止监听器
+        listener?.stateUpdateHandler = nil
+        listener?.newConnectionHandler = nil
         listener?.cancel()
         listener = nil
-        
- // 取消Bonjour服务
-        netService?.stop()
-        netService = nil
-        
+
  // 关闭所有活动连接
-        for (_, connection) in activeConnections {
-            connection.cancel()
-        }
-        activeConnections.removeAll()
-        
+        cancelAllConnections()
+
         isListening = false
         logger.info("✅ 文件传输服务监听已停止")
     }
-    
+
  /// 连接到指定设备进行文件传输
     public func connectToDevice(ipAddress: String, port: Int, deviceId: String, deviceName: String) async throws -> NWConnection {
+        guard (1...65535).contains(port) else {
+            throw FileTransferError.invalidPort
+        }
         logger.info("🔗 连接到设备: \(deviceName) (\(ipAddress))")
-        
-        let host = NWEndpoint.Host(ipAddress)
-        let nwPort = NWEndpoint.Port(integerLiteral: UInt16(port))
-        
-        let parameters = NWParameters.tcp
-        parameters.includePeerToPeer = true
-        
-        let connection = NWConnection(host: host, port: nwPort, using: parameters)
-        
-        return try await withCheckedThrowingContinuation { continuation in
-            let resumeState = OSAllocatedUnfairLock(initialState: false)
-            
-            connection.stateUpdateHandler = { (state: NWConnection.State) in
-                switch state {
-                case .ready:
-                    let shouldResume = resumeState.withLock { hasResumed in
-                        if !hasResumed {
-                            hasResumed = true
-                            return true
-                        }
-                        return false
-                    }
-                    
-                    if shouldResume {
-                        Task { @MainActor in
-                            self.activeConnections[deviceId] = connection
-                            self.logger.info("✅ 成功连接到设备: \(deviceName)")
-                        }
-                        continuation.resume(returning: connection)
-                    }
-                    
-                case .failed(let error):
-                    let shouldResume = resumeState.withLock { hasResumed in
-                        if !hasResumed {
-                            hasResumed = true
-                            return true
-                        }
-                        return false
-                    }
-                    
-                    if shouldResume {
-                        self.logger.error("❌ 连接设备失败: \(deviceName) - \(error)")
-                        continuation.resume(throwing: error)
-                    }
-                    
-                case .cancelled:
-                    let shouldResume = resumeState.withLock { hasResumed in
-                        if !hasResumed {
-                            hasResumed = true
-                            return true
-                        }
-                        return false
-                    }
-                    
-                    if shouldResume {
-                        let error = FileTransferNetworkError.connectionCancelled
-                        continuation.resume(throwing: error)
-                    }
-                    
-                default:
-                    break
-                }
+
+        return try await connect(
+            to: .hostPort(
+                host: NWEndpoint.Host(ipAddress),
+                port: NWEndpoint.Port(integerLiteral: UInt16(port))
+            ),
+            deviceId: deviceId,
+            deviceName: deviceName
+        )
+    }
+
+    func connectToDevice(
+        endpoint: NWEndpoint,
+        deviceId: String,
+        deviceName: String
+    ) async throws -> NWConnection {
+        guard case .service(let name, let type, let domain, _) = endpoint,
+              let route = ApplePeerConnectivityPolicy.BonjourRouteIdentity(
+                name: name,
+                type: type,
+                domain: domain
+              ),
+              route.serviceKind == .fileTransfer else {
+            throw FileTransferNetworkError.invalidEndpoint
+        }
+        logger.info(
+            "🔗 通过 authority-bound live Bonjour 文件路由连接设备: \(deviceName)"
+        )
+        return try await connect(
+            to: endpoint,
+            deviceId: deviceId,
+            deviceName: deviceName
+        )
+    }
+
+    #if os(macOS)
+    func connectToUSB(udid: String, port: Int, deviceId: String, deviceName: String) async throws -> NWConnection {
+        guard let port = UInt16(exactly: port), port > 0 else { throw FileTransferNetworkError.invalidEndpoint }
+        let connection = try await USBMultiplexTransport.open(udid: udid, port: port)
+        do {
+            try Task.checkCancellation()
+            let registered: NWConnection = try await withCheckedThrowingContinuation { continuation in
+                let id = UUID()
+                pendingConnectionAttempts[id] = PendingConnectionAttempt(
+                    connection: connection, deviceId: deviceId, deviceName: deviceName, continuation: continuation
+                )
+                completeConnectionAttempt(id, result: .success(()))
             }
-            
-            connection.start(queue: connectionQueue)
-            
- // 设置连接超时
-            connectionQueue.asyncAfter(deadline: .now() + 10.0) {
-                let shouldTimeout = resumeState.withLock { hasResumed in
-                    if !hasResumed && connection.state != .ready && connection.state != .cancelled {
-                        hasResumed = true
-                        return true
-                    }
-                    return false
-                }
-                
-                if shouldTimeout {
-                    connection.cancel()
-                    continuation.resume(throwing: FileTransferNetworkError.connectionTimeout)
-                }
-            }
+            try Task.checkCancellation()
+            return registered
+        } catch {
+            disconnect(connection)
+            throw error
         }
     }
-    
+    #endif
+
+    private func connect(
+        to endpoint: NWEndpoint,
+        deviceId: String,
+        deviceName: String
+    ) async throws -> NWConnection {
+
+        let parameters = NWParameters.tcp
+        parameters.includePeerToPeer = true
+        parameters.allowLocalEndpointReuse = true
+        if case .service(_, _, _, let observedInterface) = endpoint,
+           let observedInterface {
+            parameters.requiredInterface = observedInterface
+        }
+        if let tcp = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+            tcp.enableKeepalive = true
+            tcp.keepaliveIdle = 30
+            tcp.keepaliveInterval = 15
+            tcp.keepaliveCount = 4
+        }
+
+        let connection = NWConnection(to: endpoint, using: parameters)
+        let attemptID = UUID()
+
+        return try await withTaskCancellationHandler(operation: {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                pendingConnectionAttempts[attemptID] = PendingConnectionAttempt(
+                    connection: connection,
+                    deviceId: deviceId,
+                    deviceName: deviceName,
+                    continuation: continuation
+                )
+                connection.stateUpdateHandler = { [weak self] state in
+                    Task { @MainActor [weak self] in
+                        self?.handleConnectionAttemptState(state, attemptID: attemptID)
+                    }
+                }
+                connection.start(queue: connectionQueue)
+
+                connectionQueue.asyncAfter(deadline: .now() + 10.0) { [weak self] in
+                    Task { @MainActor [weak self] in
+                        self?.timeoutConnectionAttempt(attemptID)
+                    }
+                }
+            }
+        }, onCancel: {
+            connection.cancel()
+            Task { @MainActor [weak self] in
+                self?.cancelConnectionAttempt(attemptID)
+            }
+        })
+    }
+
+    private func handleConnectionAttemptState(
+        _ state: NWConnection.State,
+        attemptID: UUID
+    ) {
+        guard let connection = pendingConnectionAttempts[attemptID]?.connection else {
+            return
+        }
+        switch state {
+        case .ready:
+            completeConnectionAttempt(attemptID, result: .success(()))
+        case .waiting(let error):
+            if NetworkFrameworkLocalNetworkPermissionClassifier.isDenied(
+                error: error,
+                path: connection.currentPath
+            ) {
+                connection.cancel()
+                completeConnectionAttempt(
+                    attemptID,
+                    result: .failure(FileTransferNetworkError.localNetworkPermissionDenied)
+                )
+            }
+        case .failed(let error):
+            let failure: Error
+            if NetworkFrameworkLocalNetworkPermissionClassifier.isDenied(
+                error: error,
+                path: connection.currentPath
+            ) {
+                failure = FileTransferNetworkError.localNetworkPermissionDenied
+            } else {
+                failure = error
+            }
+            completeConnectionAttempt(attemptID, result: .failure(failure))
+        case .cancelled:
+            completeConnectionAttempt(
+                attemptID,
+                result: .failure(FileTransferNetworkError.connectionCancelled)
+            )
+        default:
+            break
+        }
+    }
+
+    private func timeoutConnectionAttempt(_ attemptID: UUID) {
+        guard let attempt = pendingConnectionAttempts[attemptID] else { return }
+        let failure: Error
+        if NetworkFrameworkLocalNetworkPermissionClassifier.isDenied(
+            path: attempt.connection.currentPath
+        ) {
+            failure = FileTransferNetworkError.localNetworkPermissionDenied
+        } else {
+            failure = FileTransferNetworkError.connectionTimeout
+        }
+        attempt.connection.cancel()
+        completeConnectionAttempt(
+            attemptID,
+            result: .failure(failure)
+        )
+    }
+
+    private func cancelConnectionAttempt(_ attemptID: UUID) {
+        guard let attempt = pendingConnectionAttempts[attemptID] else { return }
+        attempt.connection.cancel()
+        completeConnectionAttempt(
+            attemptID,
+            result: .failure(FileTransferNetworkError.connectionCancelled)
+        )
+    }
+
+    private func completeConnectionAttempt(
+        _ attemptID: UUID,
+        result: Result<Void, Error>
+    ) {
+        guard let attempt = pendingConnectionAttempts.removeValue(forKey: attemptID) else {
+            return
+        }
+        attempt.connection.stateUpdateHandler = nil
+        switch result {
+        case .success:
+            let connectionKey = "outbound-\(attemptID.uuidString)"
+            activeConnections[connectionKey] = attempt.connection
+            outboundDeviceIDByConnectionKey[connectionKey] = attempt.deviceId
+            logger.info("✅ 成功连接到设备: \(attempt.deviceName)")
+            attempt.continuation.resume(returning: attempt.connection)
+        case .failure(let error):
+            logger.error("❌ 连接设备失败: \(attempt.deviceName) - \(error)")
+            attempt.continuation.resume(throwing: error)
+        }
+    }
+
+    func cancelPendingConnections() {
+        let attemptIDs = Array(pendingConnectionAttempts.keys)
+        for attemptID in attemptIDs {
+            cancelConnectionAttempt(attemptID)
+        }
+    }
+
+    func cancelAllConnections() {
+        cancelPendingConnections()
+        for connection in activeConnections.values {
+            connection.cancel()
+        }
+        activeConnections.removeAll()
+        outboundDeviceIDByConnectionKey.removeAll()
+    }
+
  /// 断开与设备的连接
     public func disconnectFromDevice(_ deviceId: String) {
-        guard let connection = activeConnections[deviceId] else { return }
-        
         logger.info("🔌 断开与设备的连接: \(deviceId)")
-        connection.cancel()
-        activeConnections.removeValue(forKey: deviceId)
+        let connectionKeys = outboundDeviceIDByConnectionKey.compactMap { key, value in
+            value == deviceId ? key : nil
+        }
+        for connectionKey in connectionKeys {
+            activeConnections.removeValue(forKey: connectionKey)?.cancel()
+            outboundDeviceIDByConnectionKey.removeValue(forKey: connectionKey)
+        }
+        let pendingAttemptIDs = pendingConnectionAttempts.compactMap { key, value in
+            value.deviceId == deviceId ? key : nil
+        }
+        for attemptID in pendingAttemptIDs {
+            cancelConnectionAttempt(attemptID)
+        }
     }
-    
+
+    func disconnect(_ connection: NWConnection) {
+        let connectionID = ObjectIdentifier(connection)
+        let connectionKeys = activeConnections.compactMap { key, value in
+            ObjectIdentifier(value) == connectionID ? key : nil
+        }
+        for connectionKey in connectionKeys {
+            activeConnections.removeValue(forKey: connectionKey)
+            outboundDeviceIDByConnectionKey.removeValue(forKey: connectionKey)
+        }
+        connection.cancel()
+    }
+
  /// 发送文件传输请求
     public func sendTransferRequest(to connection: NWConnection, request: FileTransferNetworkRequest) async throws {
         logger.info("📤 发送文件传输请求")
-        
+
         let requestData = try JSONEncoder().encode(request)
         let header = createMessageHeader(type: .transferRequest, length: requestData.count)
-        
+
  // 发送消息头
         try await sendData(header, to: connection)
-        
+
  // 发送请求数据
         try await sendData(requestData, to: connection)
-        
+
         logger.info("✅ 文件传输请求已发送")
     }
-    
+
  /// 接收文件传输请求
     public func receiveTransferRequest(from connection: NWConnection) async throws -> FileTransferNetworkRequest {
         logger.info("📥 接收文件传输请求")
-        
+
  // 接收消息头
         let headerData = try await receiveData(length: 8, from: connection)
         let (type, length) = parseMessageHeader(headerData)
-        
+
         guard type == .transferRequest else {
             throw FileTransferNetworkError.invalidMessageType
         }
-        
+
  // 接收请求数据
         let requestData = try await receiveData(length: length, from: connection)
         let request = try JSONDecoder().decode(FileTransferNetworkRequest.self, from: requestData)
-        
+
         logger.info("✅ 文件传输请求已接收: \(request.fileName)")
         return request
     }
-    
+
  // MARK: - 私有方法
-    
- /// 注册Bonjour服务
-    private func registerBonjourService() throws {
-        guard let port = listener?.port?.rawValue else {
-            throw FileTransferNetworkError.invalidPort
-        }
-        
- // 创建TXT记录
-        let txtRecord: [String: Data] = [
-            "version": "1.0".data(using: .utf8) ?? Data(),
-            "device": (Host.current().localizedName ?? "Unknown").data(using: .utf8) ?? Data(),
-            "capabilities": "file-transfer".data(using: .utf8) ?? Data()
-        ]
-        
-        let txtData = NetService.data(fromTXTRecord: txtRecord)
-        
- // 创建并启动NetService
-        netService = NetService(domain: serviceDomain, type: self.serviceType, name: "", port: Int32(port))
-        netService?.setTXTRecord(txtData)
-        netService?.delegate = self
-        netService?.publish()
-        
-        logger.info("📡 Bonjour服务已注册: \(self.serviceType) 端口: \(port)")
-    }
-    
+
  /// 处理新连接
     private func handleNewConnection(_ connection: NWConnection) async {
         logger.info("📞 收到新的文件传输连接")
-        
+
  // 检查连接数限制
         guard activeConnections.count < maxConcurrentConnections else {
             logger.warning("⚠️ 达到最大连接数限制，拒绝新连接")
             connection.cancel()
             return
         }
-        
+
         let connectionId = UUID().uuidString
         activeConnections[connectionId] = connection
-        
+
  // 设置连接状态监听
         connection.stateUpdateHandler = { [weak self] state in
             Task { @MainActor in
                 await self?.handleConnectionStateChange(connectionId, state: state)
             }
         }
-        
+
  // 启动连接
         connection.start(queue: connectionQueue)
-        
+
  // 开始接收数据
         setupDataReceiving(for: connection, connectionId: connectionId)
     }
-    
+
  /// 处理监听器状态变化
     private func handleListenerStateChange(_ state: NWListener.State) async {
         switch state {
         case .ready:
             logger.info("✅ 文件传输监听器就绪")
-            
+
         case .failed(let error):
             logger.error("❌ 文件传输监听器失败: \(error)")
             isListening = false
-            
+
         case .cancelled:
             logger.info("🛑 文件传输监听器已取消")
             isListening = false
-            
+
         default:
             break
         }
     }
-    
+
  /// 处理连接状态变化
     private func handleConnectionStateChange(_ connectionId: String, state: NWConnection.State) async {
         switch state {
         case .ready:
             logger.info("✅ 连接就绪: \(connectionId)")
-            
+
         case .failed(let error):
             logger.error("❌ 连接失败: \(connectionId) - \(error)")
             activeConnections.removeValue(forKey: connectionId)
-            
+
         case .cancelled:
             logger.info("🔌 连接已断开: \(connectionId)")
             activeConnections.removeValue(forKey: connectionId)
-            
+
         default:
             break
         }
     }
-    
+
  /// 设置数据接收
     private func setupDataReceiving(for connection: NWConnection, connectionId: String) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
@@ -323,7 +481,7 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
             }
         }
     }
-    
+
  /// 处理接收到的数据
     private func handleReceivedData(_ data: Data?, connectionId: String, isComplete: Bool, error: NWError?, connection: NWConnection) async {
         if let error = error {
@@ -331,23 +489,23 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
             activeConnections.removeValue(forKey: connectionId)
             return
         }
-        
+
         if let data = data, !data.isEmpty {
  // 处理接收到的数据
             await processReceivedData(data, from: connectionId)
         }
-        
+
         if !isComplete {
  // 继续接收数据
             setupDataReceiving(for: connection, connectionId: connectionId)
         }
     }
-    
+
  /// 处理接收到的数据
  /// Swift 6.2.1：通过通知中心发布接收到的数据，供上层（如 FileTransferManager）处理
     private func processReceivedData(_ data: Data, from connectionId: String) async {
         logger.info("📨 收到数据: \(data.count) 字节 来自: \(connectionId)")
-        
+
  // 通过通知中心发布数据接收事件，供 FileTransferManager 等上层处理
         NotificationCenter.default.post(
             name: Notification.Name("FileTransferDataReceived"),
@@ -359,7 +517,7 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
             ]
         )
     }
-    
+
  /// 发送数据
     private func sendData(_ data: Data, to connection: NWConnection) async throws {
         return try await withCheckedThrowingContinuation { continuation in
@@ -372,7 +530,7 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
             })
         }
     }
-    
+
  /// 接收数据
     private func receiveData(length: Int, from connection: NWConnection) async throws -> Data {
         return try await withCheckedThrowingContinuation { continuation in
@@ -387,7 +545,7 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
             }
         }
     }
-    
+
  /// 创建消息头
     private func createMessageHeader(type: MessageType, length: Int) -> Data {
         var header = Data()
@@ -395,30 +553,14 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
         header.append(contentsOf: withUnsafeBytes(of: UInt32(length).bigEndian) { Array($0) })
         return header
     }
-    
+
  /// 解析消息头
     private func parseMessageHeader(_ data: Data) -> (type: MessageType, length: Int) {
-        let typeValue = data.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        let lengthValue = data.suffix(4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        
+        let typeValue = data.prefix(4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
+        let lengthValue = data.suffix(4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
+
         let type = MessageType(rawValue: typeValue) ?? .unknown
         return (type: type, length: Int(lengthValue))
-    }
-}
-
-// MARK: - NetService Delegate
-
-extension FileTransferNetworkService: NetServiceDelegate {
-    nonisolated public func netServiceDidPublish(_ sender: NetService) {
-        Task { @MainActor in
-            self.logger.info("✅ Bonjour服务发布成功")
-        }
-    }
-    
-    nonisolated public func netService(_ sender: NetService, didNotPublish errorDict: [String : NSNumber]) {
-        Task { @MainActor in
-            self.logger.error("❌ Bonjour服务发布失败: \(errorDict)")
-        }
     }
 }
 
@@ -453,20 +595,26 @@ private enum MessageType: UInt32 {
 
 // MARK: - 错误类型
 
-public enum FileTransferNetworkError: Error, LocalizedError {
+public enum FileTransferNetworkError: Error, LocalizedError, Sendable {
     case connectionTimeout
     case connectionCancelled
+    case localNetworkPermissionDenied
+    case invalidEndpoint
     case invalidPort
     case invalidMessageType
     case incompleteData
     case maxConnectionsReached
-    
+
     public var errorDescription: String? {
         switch self {
         case .connectionTimeout:
             return "连接超时"
         case .connectionCancelled:
             return "连接已取消"
+        case .localNetworkPermissionDenied:
+            return "本地网络权限被系统拒绝。请在“系统设置 → 隐私与安全性 → 本地网络”中允许 SkyBridge Compass Pro 后重试"
+        case .invalidEndpoint:
+            return "文件传输路由缺少当前 Bonjour 服务证明"
         case .invalidPort:
             return "无效端口"
         case .invalidMessageType:

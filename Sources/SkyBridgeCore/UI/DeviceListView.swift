@@ -1,16 +1,25 @@
+// macOS-exclusive: built on macOS-only APIs (AppKit / IOKit / ScreenCaptureKit / CoreWLAN /
+// MetalFX / ServiceManagement / ApplicationServices / CoreGraphics display services).
+// Excluded from other platforms so SkyBridgeCore can be the single shared core for iOS as
+// well. No behaviour changes on macOS.
+#if os(macOS)
 import SwiftUI
 import Combine
+import OSLog
 
 /// 设备列表视图 - 现代化的设备管理界面
 public struct DeviceListView: View {
+    private static let logger = Logger(subsystem: "com.skybridge.compass", category: "DeviceListView")
     
  // MARK: - 状态管理
     
     @StateObject private var deviceDiscovery = DeviceDiscoveryManagerOptimized() // 高性能设备发现（2025年优化版）
     @StateObject private var connectionManager = ConnectionManager()
     @StateObject private var deviceFilterManager = DeviceFilterManager()
+    @StateObject private var settingsManager = SettingsManager.shared
     @State private var selectedDevice: DiscoveredDevice?
     @State private var showingConnectionOptions = false
+    @State private var connectionErrorMessage: String?
     @State private var isScanning = false
     @State private var showingFilterOptions = false
     
@@ -33,7 +42,14 @@ public struct DeviceListView: View {
                         availableConnections: connectionManager.availableConnections,
                         onConnect: { method in
                             Task {
-                                try await connectionManager.establishConnection(method: method, to: device)
+                                do {
+                                    try await connectionManager.establishConnection(method: method, to: device)
+                                } catch {
+                                    Self.logger.error("设备连接失败: \(error.localizedDescription, privacy: .public)")
+                                    await MainActor.run {
+                                        connectionErrorMessage = error.localizedDescription
+                                    }
+                                }
                             }
                         }
                     )
@@ -41,6 +57,23 @@ public struct DeviceListView: View {
             }
             .sheet(isPresented: $showingFilterOptions) {
                 DeviceFilterOptionsView(filterManager: deviceFilterManager)
+            }
+            .alert(
+                "连接失败",
+                isPresented: Binding(
+                    get: { connectionErrorMessage != nil },
+                    set: { isPresented in
+                        if !isPresented {
+                            connectionErrorMessage = nil
+                        }
+                    }
+                )
+            ) {
+                Button("确定", role: .cancel) {
+                    connectionErrorMessage = nil
+                }
+            } message: {
+                Text(connectionErrorMessage ?? "连接请求未完成。")
             }
         }
         .onAppear {
@@ -167,15 +200,15 @@ public struct DeviceListView: View {
                 .disabled(!isScanning)
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
+        .padding(.horizontal, settingsManager.compactMode ? 14 : 20)
+        .padding(.vertical, settingsManager.compactMode ? 8 : 12)
         .background(Color.clear)
     }
     
  /// 设备分组列表
     private var deviceGroupList: some View {
         ScrollView {
-            LazyVStack(spacing: 16) {
+            LazyVStack(spacing: settingsManager.compactMode ? 12 : 16) {
                 ForEach(deviceFilterManager.deviceGroups, id: \.type) { group in
                     DeviceGroupView(
                         group: group,
@@ -194,8 +227,8 @@ public struct DeviceListView: View {
                     )
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 16)
+            .padding(.horizontal, settingsManager.compactMode ? 14 : 20)
+            .padding(.vertical, settingsManager.compactMode ? 12 : 16)
         }
         .refreshable {
             await refreshDevicesAsync()
@@ -212,20 +245,15 @@ public struct DeviceListView: View {
     
  /// 刷新设备列表（避免 stop→start 风暴）
     private func refreshDevices() {
-        deviceDiscovery.stopScanningIfNeeded()
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5秒
-            deviceDiscovery.startScanningIfNeeded()
-            isScanning = deviceDiscovery.isScanning
-        }
+        // Soft refresh: clear transient list and let active browsers repopulate (no stop/start churn).
+        deviceDiscovery.discoveredDevices.removeAll()
+        isScanning = deviceDiscovery.isScanning
     }
     
  /// 异步刷新设备列表
     private func refreshDevicesAsync() async {
-        deviceDiscovery.stopScanning()
-        try? await Task.sleep(nanoseconds: 500_000_000) // 0.5秒
-        deviceDiscovery.startScanning()
         await MainActor.run {
+            deviceDiscovery.discoveredDevices.removeAll()
             isScanning = deviceDiscovery.isScanning
         }
     }
@@ -278,6 +306,7 @@ struct DeviceCardView: View {
     
  // 设备类型检测器
     @StateObject private var deviceTypeDetector = DeviceTypeDetector()
+    @StateObject private var settingsManager = SettingsManager.shared
     @State private var detailedDeviceInfo: DeviceTypeDetector.DetailedDeviceInfo?
     
     init(device: DiscoveredDevice, connectionStatus: ConnectionStatus, onConnect: @escaping () -> Void, onDisconnect: @escaping () -> Void, showDeviceType: Bool = false) {
@@ -337,20 +366,22 @@ struct DeviceCardView: View {
     }
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: settingsManager.compactMode ? 8 : 12) {
  // 设备信息头部
             HStack {
  // 设备图标 - 使用检测到的设备类型图标
-                Image(systemName: deviceIcon)
-                    .font(.title2)
-                    .foregroundColor(deviceIconColor)
-                    .frame(width: 32, height: 32)
+                if settingsManager.showDeviceIcons {
+                    Image(systemName: deviceIcon)
+                        .font(settingsManager.compactMode ? .body : .title2)
+                        .foregroundColor(deviceIconColor)
+                        .frame(width: settingsManager.compactMode ? 24 : 32, height: settingsManager.compactMode ? 24 : 32)
+                }
                 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
  // 显示设备名称，优先使用检测到的显示名称
                         Text(displayDeviceName)
-                            .font(.headline)
+                            .font(settingsManager.compactMode ? .subheadline : .headline)
                             .foregroundColor(.primary)
                         
  // 设备类型标签（如果启用显示）
@@ -369,21 +400,23 @@ struct DeviceCardView: View {
                         }
                     }
                     
+                    if settingsManager.showDeviceDetails {
  // IP地址和制造商信息
-                    HStack {
-                        Text(device.ipv4 ?? device.ipv6 ?? "未知地址")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        
+                        HStack {
+                            Text(device.ipv4 ?? device.ipv6 ?? "未知地址")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+
  // 显示制造商信息
-                        if let deviceInfo = detailedDeviceInfo, 
-                           deviceInfo.manufacturer != .unknown {
-                            Text("•")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            Text(deviceInfo.manufacturer.displayName)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                            if let deviceInfo = detailedDeviceInfo,
+                               deviceInfo.manufacturer != .unknown {
+                                Text("•")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Text(deviceInfo.manufacturer.displayName)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
                         }
                     }
                 }
@@ -395,7 +428,7 @@ struct DeviceCardView: View {
             }
             
  // 设备详细信息和能力
-            if let deviceInfo = detailedDeviceInfo, !deviceInfo.capabilities.isEmpty {
+            if settingsManager.showDeviceDetails, let deviceInfo = detailedDeviceInfo, !deviceInfo.capabilities.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("设备能力")
                         .font(.caption)
@@ -419,7 +452,7 @@ struct DeviceCardView: View {
             }
             
  // 可用服务（如果有）
-            if !device.services.isEmpty {
+            if settingsManager.showDeviceDetails, !device.services.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("可用服务")
                         .font(.caption)
@@ -456,32 +489,42 @@ struct DeviceCardView: View {
                     Button("断开连接", action: onDisconnect)
                         .buttonStyle(SecondaryButtonStyle())
                 } else {
- // 当设备未公开任何端口时，标记为“不可连接”并禁用按钮，避免徒劳的尝试
+ // Bonjour 服务可直接基于 service name 建连，不要求必须提前暴露端口。
                     let availablePort = device.portMap.values.first ?? 0
-                    Button(availablePort > 0 ? "连接" : "不可连接", action: onConnect)
-                        .disabled(availablePort == 0)
+                    let canConnectViaBonjour = device.services.contains("_skybridge._tcp") || device.services.contains("_skybridge._udp")
+                    let canConnect = availablePort > 0 || canConnectViaBonjour
+                    Button(canConnect ? "连接" : "不可连接", action: onConnect)
+                        .disabled(!canConnect)
                         .buttonStyle(PrimaryButtonStyle())
                 }
                 
                 Spacer()
                 
  // 显示更多统计信息
-                HStack(spacing: 8) {
-                    if !device.services.isEmpty {
-                        Text("服务: \(device.services.count)")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    if let deviceInfo = detailedDeviceInfo, !deviceInfo.capabilities.isEmpty {
-                        Text("能力: \(deviceInfo.capabilities.count)")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
+                if settingsManager.showConnectionStats || (settingsManager.showDeviceRSSI && device.signalStrength != nil) {
+                    HStack(spacing: 8) {
+                        if settingsManager.showConnectionStats, !device.services.isEmpty {
+                            Text("服务: \(device.services.count)")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+
+                        if settingsManager.showConnectionStats, let deviceInfo = detailedDeviceInfo, !deviceInfo.capabilities.isEmpty {
+                            Text("能力: \(deviceInfo.capabilities.count)")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+
+                        if settingsManager.showDeviceRSSI, let strength = device.signalStrength {
+                            Text("RSSI \(Int(strength))%")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
                     }
                 }
             }
         }
-        .padding(16)
+        .padding(settingsManager.compactMode ? 10 : 16)
         .background(Color(NSColor.controlBackgroundColor))
         .cornerRadius(12)
         .shadow(color: Color.black.opacity(0.1), radius: 2, x: 0, y: 1)
@@ -833,3 +876,4 @@ struct DeviceListView_Previews: PreviewProvider {
         DeviceListView()
     }
 }
+#endif

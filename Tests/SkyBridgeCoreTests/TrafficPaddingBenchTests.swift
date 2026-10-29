@@ -39,6 +39,7 @@ final class TrafficPaddingBenchTests: XCTestCase {
             ud.removeObject(forKey: $0)
             group?.removeObject(forKey: $0)
         }
+        TrafficPaddingStats.refreshSubmissionAdmission()
         super.tearDown()
     }
 
@@ -63,6 +64,7 @@ final class TrafficPaddingBenchTests: XCTestCase {
         group?.set(true, forKey: "sb_traffic_padding_enabled")
         group?.set(true, forKey: "sb_traffic_padding_stats_enabled")
         group?.set(false, forKey: "sb_traffic_padding_stats_autoflush")
+        TrafficPaddingStats.refreshSubmissionAdmission()
 
         // === Real trace ===
         // 1) Run an end-to-end HandshakeDriver flow with SBP1+SBP2 enabled.
@@ -135,6 +137,7 @@ final class TrafficPaddingBenchTests: XCTestCase {
         }
 
         // Flush a deterministic snapshot into Artifacts/ (used by Scripts/make_tables.py).
+        await TrafficPaddingStats.waitForPendingSubmissions()
         try await TrafficPaddingStats.shared.flushToArtifactsCSV()
     }
 
@@ -238,7 +241,7 @@ final class TrafficPaddingBenchTests: XCTestCase {
         peer: PeerIdentifier
     ) async throws {
         // SBP2 wraps and records stats using the provided label.
-        let wrapped = TrafficPadding.wrapIfEnabled(payload, label: label)
+        let wrapped = try TrafficPadding.wrapIfEnabled(payload, label: label)
         // Deliver through loopback transport (receiver side unwraps with label=rx via transport hookup).
         try await transport.send(to: peer, data: wrapped)
         // Receiver-side handler runs in transport hookup; we can't intercept it here, so we also validate locally:
@@ -382,5 +385,3 @@ private struct XorShift64Star {
         return out
     }
 }
-
-

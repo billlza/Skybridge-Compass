@@ -2,206 +2,623 @@
 // AudioRedirection.swift
 // SkyBridge Compass Pro
 //
-// 音频重定向功能 - 支持 RDP 和 UltraStream
-// 符合 Swift 6.2.1 和 macOS 26.x 最佳实践
-// 使用 Core Audio 和 AVFoundation
+// 远程桌面音频播放管理器（macOS viewer）
 //
 
 import Foundation
 @preconcurrency import AVFoundation
-import CoreAudio
+import AudioToolbox
 import OSLog
 import Combine
+import SkyBridgeRealtimeMedia
 
-/// 音频重定向管理器
-/// 支持双向音频流：本地音频 <-> 远程音频
+private struct DecodedRemoteAudioBuffer: @unchecked Sendable {
+    let buffer: AVAudioPCMBuffer
+}
+
+private final class OneShotDecodeFeedState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var consumed = false
+
+    func takeIfAvailable() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !consumed else { return false }
+        consumed = true
+        return true
+    }
+}
+
+private actor RemoteAudioDecodeWorker {
+    private let log = Logger(subsystem: "com.skybridge.compass", category: "AudioRedirection")
+    private let playbackFormat = AVAudioFormat(
+        commonFormat: .pcmFormatInt16,
+        sampleRate: 48_000,
+        channels: 2,
+        interleaved: true
+    )!
+
+    private var audioDecodeConverter: AVAudioConverter?
+    private var audioDecodeFormatSignature: String?
+
+    func reset() {
+        audioDecodeConverter = nil
+        audioDecodeFormatSignature = nil
+    }
+
+    func decode(_ chunk: RemoteDesktopAudioChunkPayload) -> DecodedRemoteAudioBuffer? {
+        let buffer: AVAudioPCMBuffer?
+        switch chunk.encoding {
+        case .pcmS16LE:
+            buffer = makePCMBuffer(from: chunk)
+        case .aacLC:
+            buffer = decodeAACChunk(chunk)
+        }
+        guard let buffer else { return nil }
+        return DecodedRemoteAudioBuffer(buffer: buffer)
+    }
+
+    private func makePCMBuffer(from chunk: RemoteDesktopAudioChunkPayload) -> AVAudioPCMBuffer? {
+        guard chunk.sampleRate == Int(playbackFormat.sampleRate.rounded()),
+              chunk.channelCount == Int(playbackFormat.channelCount),
+              chunk.frameCount > 0 else {
+            return nil
+        }
+
+        let bytesPerFrame = Int(playbackFormat.streamDescription.pointee.mBytesPerFrame)
+        let expectedByteCount = chunk.frameCount * bytesPerFrame
+        guard chunk.data.count == expectedByteCount else { return nil }
+
+        guard let buffer = AVAudioPCMBuffer(
+            pcmFormat: playbackFormat,
+            frameCapacity: AVAudioFrameCount(chunk.frameCount)
+        ) else {
+            return nil
+        }
+        buffer.frameLength = AVAudioFrameCount(chunk.frameCount)
+
+        guard let samplePointer = buffer.int16ChannelData?.pointee else { return nil }
+        chunk.data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            memcpy(samplePointer, baseAddress, chunk.data.count)
+        }
+        return buffer
+    }
+
+    private func decodeAACChunk(_ chunk: RemoteDesktopAudioChunkPayload) -> AVAudioPCMBuffer? {
+        guard let packetCount = chunk.packetCount, packetCount > 0 else { return nil }
+        guard let inputFormat = AVAudioFormat(
+            settings: [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: chunk.sampleRate,
+                AVNumberOfChannelsKey: chunk.channelCount
+            ]
+        ) else {
+            return nil
+        }
+
+        let converterSignature = "aac-\(chunk.sampleRate)-\(chunk.channelCount)"
+        if audioDecodeConverter == nil || audioDecodeFormatSignature != converterSignature {
+            audioDecodeConverter = AVAudioConverter(from: inputFormat, to: playbackFormat)
+            audioDecodeConverter?.primeMethod = .none
+            audioDecodeFormatSignature = converterSignature
+        }
+        guard let audioDecodeConverter else { return nil }
+        if let magicCookie = chunk.magicCookie {
+            audioDecodeConverter.magicCookie = magicCookie
+        }
+
+        let maximumPacketSize = max(
+            chunk.packetDescriptions?.map { Int($0.dataByteSize) }.max() ?? 0,
+            chunk.data.count
+        )
+        let compressedBuffer = AVAudioCompressedBuffer(
+            format: inputFormat,
+            packetCapacity: AVAudioPacketCount(packetCount),
+            maximumPacketSize: max(1, maximumPacketSize)
+        )
+        compressedBuffer.packetCount = AVAudioPacketCount(packetCount)
+        compressedBuffer.byteLength = UInt32(chunk.data.count)
+        chunk.data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            memcpy(compressedBuffer.data, baseAddress, chunk.data.count)
+        }
+
+        if let packetDescriptions = chunk.packetDescriptions,
+           let packetDescriptionsPointer = compressedBuffer.packetDescriptions,
+           packetDescriptions.count == packetCount {
+            for (index, packetDescription) in packetDescriptions.enumerated() {
+                packetDescriptionsPointer[index] = AudioStreamPacketDescription(
+                    mStartOffset: Int64(packetDescription.startOffset),
+                    mVariableFramesInPacket: packetDescription.variableFramesInPacket,
+                    mDataByteSize: packetDescription.dataByteSize
+                )
+            }
+        }
+
+        let outputCapacity = AVAudioFrameCount(max(chunk.frameCount + 256, 2048))
+        guard let outputBuffer = AVAudioPCMBuffer(
+            pcmFormat: playbackFormat,
+            frameCapacity: outputCapacity
+        ) else {
+            return nil
+        }
+
+        let inputState = OneShotDecodeFeedState()
+        var decodeError: NSError?
+        let status = audioDecodeConverter.convert(to: outputBuffer, error: &decodeError) { _, outStatus in
+            if !inputState.takeIfAvailable() {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            outStatus.pointee = .haveData
+            return compressedBuffer
+        }
+
+        guard decodeError == nil else {
+            log.debug("AAC 解码失败: \(decodeError?.localizedDescription ?? "unknown", privacy: .public)")
+            return nil
+        }
+        guard status == .haveData || status == .inputRanDry else { return nil }
+        guard outputBuffer.frameLength > 0 else { return nil }
+        return outputBuffer
+    }
+}
+
 @MainActor
 public final class AudioRedirectionManager: ObservableObject, @unchecked Sendable {
-    
     public static let shared = AudioRedirectionManager()
-    
+    public nonisolated static let isFeatureAvailable = true
+
+    private struct BufferedRemoteAudioChunk {
+        let sequenceNumber: UInt64
+        let sentAt: TimeInterval
+        let enqueuedAt: Date
+        let frameLength: AVAudioFrameCount
+        let buffer: AVAudioPCMBuffer
+    }
+
     private let log = Logger(subsystem: "com.skybridge.compass", category: "AudioRedirection")
-    
- /// 是否启用音频重定向
-    @Published public var isEnabled: Bool = false
-    
- /// 当前会话 ID
+    private let decodeWorker = RemoteAudioDecodeWorker()
+    private let playbackFormat = AVAudioFormat(
+        commonFormat: .pcmFormatInt16,
+        sampleRate: 48_000,
+        channels: 2,
+        interleaved: true
+    )!
+    private let maxAdaptiveQueuedFrames: AVAudioFrameCount = 48_000 / 2
+    private let hardResetQueuedFrames: AVAudioFrameCount = 48_000
+
+    @Published public private(set) var isEnabled: Bool = false
+
     private var activeSessionId: UUID?
-    
- /// 音频引擎
+    private let realtimePlaybackOwnership = SkyBridgeRealtimeMediaPlaybackOwnership()
     private var audioEngine: AVAudioEngine?
-    
- /// 音频输入节点（捕获本地音频）
-    private var inputNode: AVAudioInputNode?
-    
- /// 音频播放节点（播放远程音频）
     private var playerNode: AVAudioPlayerNode?
-    
- /// 音频格式
-    private let audioFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48000, channels: 2, interleaved: false)!
-    
- /// 音频数据回调（发送到远程）
-    public var onAudioDataCaptured: ((Data) -> Void)?
-    
- /// 远程音频数据接收回调
-    public var onRemoteAudioDataReceived: ((Data) -> Void)?
-    
- /// 音频队列（处理音频数据）
-    private let audioQueue = DispatchQueue(label: "com.skybridge.audio", attributes: .concurrent)
-    
-    private init() {
- // 请求音频权限
-        requestAudioPermission()
-    }
-    
- /// 请求音频权限
-    private func requestAudioPermission() {
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized:
-            log.info("✅ 音频权限已授予")
-        case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
-                if granted {
-                    self?.log.info("✅ 音频权限已授予")
-                } else {
-                    self?.log.warning("⚠️ 音频权限被拒绝")
-                }
-            }
-        default:
-            log.warning("⚠️ 音频权限未授予")
-        }
-    }
-    
- /// 启用音频重定向
- /// - Parameter sessionId: 会话 ID
+    private var queuedFrameCount: AVAudioFrameCount = 0
+    private var lastRemoteVideoTimestamp: TimeInterval?
+    private var bufferedChunks: [UInt64: BufferedRemoteAudioChunk] = [:]
+    private var bufferedChunkOrder: [UInt64] = []
+    private var bufferedFrameCount: AVAudioFrameCount = 0
+    private var expectedSequenceNumber: UInt64?
+    private var lastArrivalAt: Date?
+    private var lastSentAt: TimeInterval?
+    private var arrivalJitter: TimeInterval = 0
+    private var lastChunkDuration: TimeInterval = 0.02
+    private var audioDecodeGeneration: UInt64 = 0
+    private var pendingDecodeCount = 0
+    private var lastDecodeBackpressureLogAt: Date = .distantPast
+    private var lastPlaybackBackpressureLogAt: Date = .distantPast
+    private let maxPendingDecodeCount = 12
+
+    private init() {}
+
     public func enable(for sessionId: UUID) throws {
-        guard !isEnabled || activeSessionId != sessionId else { return }
-        
- // 停止现有引擎
-        if let engine = audioEngine, engine.isRunning {
-            engine.stop()
-        }
-        
- // 创建新的音频引擎
-        let engine = AVAudioEngine()
-        self.audioEngine = engine
-        
- // 配置输入节点（捕获本地音频）
-        let inputNode = engine.inputNode
-        self.inputNode = inputNode
-        let inputFormat = inputNode.outputFormat(forBus: 0)
-        
- // 安装音频输入 tap
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
-            guard let self, self.isEnabled else { return }
-            self.handleAudioInput(buffer: buffer)
-        }
-        
- // 配置播放节点（播放远程音频）
-        let playerNode = AVAudioPlayerNode()
-        self.playerNode = playerNode
-        engine.attach(playerNode)
-        engine.connect(playerNode, to: engine.mainMixerNode, format: audioFormat)
-        
- // 启动音频引擎
-        try engine.start()
-        
-        isEnabled = true
-        activeSessionId = sessionId
-        
-        log.info("✅ 音频重定向已启用: sessionId=\(sessionId.uuidString)")
-    }
-    
- /// 禁用音频重定向
-    public func disable() {
-        guard isEnabled else { return }
-        
- // 移除输入 tap
-        inputNode?.removeTap(onBus: 0)
-        
- // 停止播放节点
-        playerNode?.stop()
-        
- // 停止音频引擎
-        audioEngine?.stop()
-        audioEngine = nil
-        inputNode = nil
-        playerNode = nil
-        
-        isEnabled = false
-        activeSessionId = nil
-        
-        log.info("🛑 音频重定向已禁用")
-    }
-    
- /// 处理音频输入（捕获本地音频并发送到远程）
-    private func handleAudioInput(buffer: AVAudioPCMBuffer) {
-        guard let channelData = buffer.floatChannelData else { return }
-        
-        let frameLength = Int(buffer.frameLength)
-        let channelCount = Int(buffer.format.channelCount)
-        
- // 转换为 Data（交错格式）
-        var audioData = Data(capacity: frameLength * channelCount * MemoryLayout<Float>.size)
-        for frame in 0..<frameLength {
-            for channel in 0..<channelCount {
-                let sample = channelData[channel][frame]
-                withUnsafeBytes(of: sample) { audioData.append(contentsOf: $0) }
-            }
-        }
-        
- // 发送到远程（在主线程执行回调）
-        Task { @MainActor [weak self] in
-            self?.onAudioDataCaptured?(audioData)
-        }
-    }
-    
- /// 播放远程音频数据
- /// - Parameter audioData: 音频数据（PCM Float32，48kHz，立体声）
-    public func playRemoteAudio(_ audioData: Data) {
-        guard isEnabled, let engine = audioEngine, engine.isRunning else { return }
-        
- // 将 Data 转换为 AVAudioPCMBuffer
-        let frameCount = audioData.count / (MemoryLayout<Float>.size * 2) // 立体声
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: audioFormat, frameCapacity: AVAudioFrameCount(frameCount)) else {
+        if isEnabled, activeSessionId == sessionId, let engine = audioEngine, engine.isRunning {
             return
         }
-        
-        buffer.frameLength = AVAudioFrameCount(frameCount)
-        
- // 解析音频数据（交错格式）
-        audioData.withUnsafeBytes { rawBufferPointer in
-            let samples = rawBufferPointer.bindMemory(to: Float.self)
-            guard let leftChannel = buffer.floatChannelData?[0],
-                  let rightChannel = buffer.floatChannelData?[1] else {
-                return
-            }
-            
-            for i in 0..<frameCount {
-                leftChannel[i] = samples[i * 2]
-                rightChannel[i] = samples[i * 2 + 1]
-            }
+
+        realtimePlaybackOwnership.retireCurrentOwnerAndClear()
+        teardownAudioPipeline()
+
+        try startAudioPipeline(activeSessionId: sessionId)
+
+        log.info("✅ 远控音频播放已启用: sessionId=\(sessionId.uuidString, privacy: .public)")
+    }
+
+    @discardableResult
+    public func enable(
+        for owner: SkyBridgeRealtimeMediaReceiverLifecycle
+    ) throws -> Bool {
+        let claim = realtimePlaybackOwnership.claim(owner)
+        guard claim.isAccepted else { return false }
+        if claim == .alreadyOwned,
+           isEnabled,
+           activeSessionId == nil,
+           let engine = audioEngine,
+           engine.isRunning {
+            return true
         }
-        
- // 播放音频
-        if let playerNode = playerNode {
-            playerNode.scheduleBuffer(buffer) {
- // 播放完成回调
+
+        // A newly acquired owner must never inherit queued PCM/decoder state
+        // from a retired realtime receiver or the legacy playback path.
+        teardownAudioPipeline()
+        guard realtimePlaybackOwnership.isOwned(by: owner) else { return false }
+        do {
+            try startAudioPipeline(activeSessionId: nil)
+            return true
+        } catch {
+            realtimePlaybackOwnership.release(ifOwnedBy: owner)
+            throw error
+        }
+    }
+
+    private func startAudioPipeline(activeSessionId: UUID?) throws {
+
+        let engine = AVAudioEngine()
+        let playerNode = AVAudioPlayerNode()
+        engine.attach(playerNode)
+        engine.connect(playerNode, to: engine.mainMixerNode, format: playbackFormat)
+        try engine.start()
+        playerNode.play()
+
+        audioEngine = engine
+        self.playerNode = playerNode
+        self.activeSessionId = activeSessionId
+        queuedFrameCount = 0
+        audioDecodeGeneration &+= 1
+        pendingDecodeCount = 0
+        Task.detached(priority: .utility) { [decodeWorker] in
+            await decodeWorker.reset()
+        }
+        resetBufferedAudioState()
+        isEnabled = true
+    }
+
+    public func disable() {
+        let retiredRealtimeOwner = realtimePlaybackOwnership.retireCurrentOwnerAndClear()
+        guard isEnabled || audioEngine != nil || playerNode != nil || activeSessionId != nil
+                || retiredRealtimeOwner else {
+            return
+        }
+
+        teardownAudioPipeline()
+        log.info("🛑 远控音频播放已禁用")
+    }
+
+    /// Tears down playback only when the caller still owns the active audio
+    /// session. A delayed close from a superseded realtime-media receiver must
+    /// never stop its replacement.
+    @discardableResult
+    public func disable(for sessionId: UUID) -> Bool {
+        guard activeSessionId == sessionId else { return false }
+        disable()
+        return true
+    }
+
+    @discardableResult
+    public func disable(
+        ifOwnedBy owner: SkyBridgeRealtimeMediaReceiverLifecycle
+    ) -> Bool {
+        guard realtimePlaybackOwnership.release(ifOwnedBy: owner) else { return false }
+        teardownAudioPipeline()
+        return true
+    }
+
+    public func updateRemoteVideoTimestamp(_ timestamp: TimeInterval?) {
+        lastRemoteVideoTimestamp = timestamp
+    }
+
+    @discardableResult
+    public func updateRemoteVideoTimestamp(
+        _ timestamp: TimeInterval?,
+        ifOwnedBy owner: SkyBridgeRealtimeMediaReceiverLifecycle
+    ) -> Bool {
+        guard realtimePlaybackOwnership.isOwned(by: owner) else { return false }
+        lastRemoteVideoTimestamp = timestamp
+        return true
+    }
+
+    public func playRemoteAudioChunk(_ chunk: RemoteDesktopAudioChunkPayload) {
+        enqueueRemoteAudioChunk(chunk, owner: nil)
+    }
+
+    @discardableResult
+    public func playRemoteAudioChunk(
+        _ chunk: RemoteDesktopAudioChunkPayload,
+        ifOwnedBy owner: SkyBridgeRealtimeMediaReceiverLifecycle
+    ) -> Bool {
+        guard realtimePlaybackOwnership.isOwned(by: owner) else { return false }
+        enqueueRemoteAudioChunk(chunk, owner: owner)
+        return true
+    }
+
+    private func enqueueRemoteAudioChunk(
+        _ chunk: RemoteDesktopAudioChunkPayload,
+        owner: SkyBridgeRealtimeMediaReceiverLifecycle?
+    ) {
+        guard isEnabled, let engine = audioEngine, engine.isRunning else { return }
+        guard playerNode != nil else { return }
+
+        let now = Date()
+        if isChunkTooFarBehindVideo(chunk.sentAt) {
+            log.debug("已丢弃落后视频时间轴的远控音频块: seq=\(chunk.sequenceNumber, privacy: .public)")
+            return
+        }
+        noteArrival(of: chunk, at: now)
+        guard pendingDecodeCount < maxPendingDecodeCount else {
+            logDecodeBackpressureIfNeeded()
+            return
+        }
+        pendingDecodeCount += 1
+        let generation = audioDecodeGeneration
+        Task.detached(priority: .utility) { [weak self, decodeWorker, chunk, generation, owner] in
+            let decoded = await decodeWorker.decode(chunk)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.pendingDecodeCount = max(0, self.pendingDecodeCount - 1)
+                if let owner,
+                   !self.realtimePlaybackOwnership.isOwned(by: owner) {
+                    return
+                }
+                guard self.audioDecodeGeneration == generation,
+                      self.isEnabled,
+                      let engine = self.audioEngine,
+                      engine.isRunning,
+                      let playerNode = self.playerNode,
+                      let decoded else {
+                    return
+                }
+                let enqueueTime = Date()
+                guard self.insertBufferedChunk(decoded.buffer, for: chunk, at: enqueueTime) else {
+                    return
+                }
+                self.drainBufferedChunks(on: playerNode, now: enqueueTime)
             }
         }
     }
-    
+
+    private func teardownAudioPipeline() {
+        playerNode?.stop()
+        playerNode?.reset()
+        audioEngine?.stop()
+
+        playerNode = nil
+        audioEngine = nil
+        activeSessionId = nil
+        audioDecodeGeneration &+= 1
+        pendingDecodeCount = 0
+        Task.detached(priority: .utility) { [decodeWorker] in
+            await decodeWorker.reset()
+        }
+        queuedFrameCount = 0
+        lastRemoteVideoTimestamp = nil
+        resetBufferedAudioState()
+        isEnabled = false
+    }
+
+    private func resetBufferedAudioState() {
+        bufferedChunks.removeAll(keepingCapacity: false)
+        bufferedChunkOrder.removeAll(keepingCapacity: false)
+        bufferedFrameCount = 0
+        expectedSequenceNumber = nil
+        lastArrivalAt = nil
+        lastSentAt = nil
+        arrivalJitter = 0
+        lastChunkDuration = 0.02
+        lastPlaybackBackpressureLogAt = .distantPast
+    }
+
+    private func noteArrival(of chunk: RemoteDesktopAudioChunkPayload, at now: Date) {
+        let chunkDuration = TimeInterval(chunk.frameCount) / max(Double(chunk.sampleRate), 1)
+        if let lastArrivalAt, let lastSentAt {
+            let arrivalDelta = now.timeIntervalSince(lastArrivalAt)
+            let sentDelta = max(0, chunk.sentAt - lastSentAt)
+            let transitDelta = arrivalDelta - sentDelta
+            arrivalJitter = (arrivalJitter * 0.875) + (abs(transitDelta) * 0.125)
+        }
+        lastArrivalAt = now
+        self.lastSentAt = chunk.sentAt
+        lastChunkDuration = chunkDuration.isFinite && chunkDuration > 0 ? chunkDuration : 0.02
+    }
+
+    private func insertBufferedChunk(
+        _ buffer: AVAudioPCMBuffer,
+        for chunk: RemoteDesktopAudioChunkPayload,
+        at now: Date
+    ) -> Bool {
+        guard bufferedChunks[chunk.sequenceNumber] == nil else {
+            return false
+        }
+
+        let bufferedChunk = BufferedRemoteAudioChunk(
+            sequenceNumber: chunk.sequenceNumber,
+            sentAt: chunk.sentAt,
+            enqueuedAt: now,
+            frameLength: buffer.frameLength,
+            buffer: buffer
+        )
+        bufferedChunks[chunk.sequenceNumber] = bufferedChunk
+        bufferedChunkOrder.append(chunk.sequenceNumber)
+        bufferedChunkOrder.sort()
+        bufferedFrameCount += buffer.frameLength
+        if expectedSequenceNumber == nil {
+            expectedSequenceNumber = bufferedChunkOrder.first
+        }
+        return true
+    }
+
+    private func drainBufferedChunks(on playerNode: AVAudioPlayerNode, now: Date) {
+        normalizeBufferedStateIfNeeded()
+
+        while let firstSequenceNumber = bufferedChunkOrder.first {
+            if shouldHoldForStartup(firstSequenceNumber: firstSequenceNumber, now: now) {
+                break
+            }
+
+            if expectedSequenceNumber == nil {
+                expectedSequenceNumber = firstSequenceNumber
+            }
+            guard let expectedSequenceNumber else { break }
+
+            if let chunk = bufferedChunks[expectedSequenceNumber] {
+                removeBufferedChunk(sequenceNumber: expectedSequenceNumber)
+
+                if isChunkTooFarBehindVideo(chunk.sentAt) {
+                    continue
+                }
+
+                if queuedFrameCount > currentHardResetQueuedFrames {
+                    resetPlayerQueue(on: playerNode, reason: "queued-audio-runaway")
+                    continue
+                }
+
+                if queuedFrameCount + chunk.frameLength > currentMaxQueuedFrames {
+                    logPlaybackBackpressureIfNeeded(
+                        queuedFrames: queuedFrameCount,
+                        droppedFrames: chunk.frameLength
+                    )
+                    continue
+                }
+
+                scheduleBufferedChunk(chunk, on: playerNode)
+                self.expectedSequenceNumber = expectedSequenceNumber &+ 1
+                continue
+            }
+
+            if firstSequenceNumber < expectedSequenceNumber {
+                removeBufferedChunk(sequenceNumber: firstSequenceNumber)
+                continue
+            }
+
+            let oldestWait = bufferedChunks[firstSequenceNumber].map { now.timeIntervalSince($0.enqueuedAt) } ?? 0
+            if bufferedChunkOrder.count >= 3 || oldestWait >= 0.035 {
+                self.expectedSequenceNumber = firstSequenceNumber
+                continue
+            }
+            break
+        }
+    }
+
+    private func shouldHoldForStartup(firstSequenceNumber: UInt64, now: Date) -> Bool {
+        guard queuedFrameCount == 0 else { return false }
+        guard bufferedFrameCount > 0 else { return false }
+        guard bufferedFrameCount < currentStartupTargetFrames else { return false }
+        guard let firstChunk = bufferedChunks[firstSequenceNumber] else { return false }
+        return now.timeIntervalSince(firstChunk.enqueuedAt) < 0.03
+    }
+
+    private func scheduleBufferedChunk(_ chunk: BufferedRemoteAudioChunk, on playerNode: AVAudioPlayerNode) {
+        let scheduledFrameLength = chunk.frameLength
+        queuedFrameCount += scheduledFrameLength
+        playerNode.scheduleBuffer(chunk.buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.queuedFrameCount = self.queuedFrameCount > scheduledFrameLength
+                    ? self.queuedFrameCount - scheduledFrameLength
+                    : 0
+            }
+        }
+        if !playerNode.isPlaying {
+            playerNode.play()
+        }
+    }
+
+    private func removeBufferedChunk(sequenceNumber: UInt64) {
+        guard let chunk = bufferedChunks.removeValue(forKey: sequenceNumber) else { return }
+        bufferedChunkOrder.removeAll { $0 == sequenceNumber }
+        bufferedFrameCount = bufferedFrameCount > chunk.frameLength
+            ? bufferedFrameCount - chunk.frameLength
+            : 0
+    }
+
+    private func normalizeBufferedStateIfNeeded() {
+        while bufferedChunkOrder.count > 8 {
+            guard let firstSequenceNumber = bufferedChunkOrder.first else { break }
+            removeBufferedChunk(sequenceNumber: firstSequenceNumber)
+            expectedSequenceNumber = bufferedChunkOrder.first
+        }
+    }
+
+    private func resetPlayerQueue(on playerNode: AVAudioPlayerNode, reason: String) {
+        playerNode.stop()
+        playerNode.reset()
+        playerNode.play()
+        queuedFrameCount = 0
+        log.debug("已重置远控音频播放队列: reason=\(reason, privacy: .public)")
+    }
+
+    private func logPlaybackBackpressureIfNeeded(
+        queuedFrames: AVAudioFrameCount,
+        droppedFrames: AVAudioFrameCount
+    ) {
+        let now = Date()
+        guard now.timeIntervalSince(lastPlaybackBackpressureLogAt) >= 2 else { return }
+        lastPlaybackBackpressureLogAt = now
+        log.debug(
+            """
+            已丢弃远控音频块：播放队列背压 queuedFrames=\(queuedFrames, privacy: .public) \
+            droppedFrames=\(droppedFrames, privacy: .public)
+            """
+        )
+    }
+
+    private func logDecodeBackpressureIfNeeded() {
+        let now = Date()
+        guard now.timeIntervalSince(lastDecodeBackpressureLogAt) >= 2 else { return }
+        lastDecodeBackpressureLogAt = now
+        log.debug("已丢弃远控音频块：解码队列繁忙")
+    }
+
+    private func isChunkTooFarBehindVideo(_ sentAt: TimeInterval) -> Bool {
+        guard let lastRemoteVideoTimestamp else { return false }
+        let allowedBehind = max(0.12, currentTargetBufferedDuration + 0.05)
+        return sentAt + allowedBehind < lastRemoteVideoTimestamp
+    }
+
+    private var currentStartupTargetFrames: AVAudioFrameCount {
+        frames(for: min(currentTargetBufferedDuration, 0.08))
+    }
+
+    private var currentMaxQueuedFrames: AVAudioFrameCount {
+        frames(for: min(0.45, currentTargetBufferedDuration + 0.18))
+    }
+
+    private var currentHardResetQueuedFrames: AVAudioFrameCount {
+        hardResetQueuedFrames
+    }
+
+    private var currentTargetBufferedDuration: TimeInterval {
+        let adaptive = min(0.06, max(0, arrivalJitter * 2.5))
+        return min(0.12, max(0.04, (lastChunkDuration * 2.0) + adaptive))
+    }
+
+    private func frames(for duration: TimeInterval) -> AVAudioFrameCount {
+        AVAudioFrameCount(
+            max(
+                1,
+                min(
+                    Double(maxAdaptiveQueuedFrames),
+                    (playbackFormat.sampleRate * max(duration, 0)).rounded()
+                )
+            )
+        )
+    }
+
     deinit {
- // 在 deinit 中直接清理资源
- // 注意：这些操作在 deinit 中是安全的，因为对象正在被销毁
-        if let node = inputNode {
-            node.removeTap(onBus: 0)
-        }
-        if let player = playerNode {
-            player.stop()
-        }
-        if let engine = audioEngine {
-            engine.stop()
+        playerNode?.stop()
+        playerNode?.reset()
+        audioEngine?.stop()
+    }
+}
+
+public enum AudioRedirectionError: LocalizedError, Sendable {
+    case featureUnavailable
+
+    public var errorDescription: String? {
+        switch self {
+        case .featureUnavailable:
+            return "Audio redirection is unavailable in this build."
         }
     }
 }

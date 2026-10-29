@@ -1,3 +1,8 @@
+// macOS-exclusive: built on macOS-only APIs (AppKit / IOKit / ScreenCaptureKit / CoreWLAN /
+// MetalFX / ServiceManagement / ApplicationServices / CoreGraphics display services).
+// Excluded from other platforms so SkyBridgeCore can be the single shared core for iOS as
+// well. No behaviour changes on macOS.
+#if os(macOS)
 import SwiftUI
 import os.log
 
@@ -9,7 +14,7 @@ public struct APIKeyManagementView: View {
     @State private var weatherAPIKey = ""
     @State private var supabaseURL = ""
     @State private var supabaseAnonKey = ""
-    @State private var supabaseServiceKey = ""
+    @State private var nebulaBaseURL = ""
     @State private var nebulaClientID = ""
     @State private var nebulaClientSecret = ""
     @State private var smsAccessKeyID = ""
@@ -41,7 +46,7 @@ public struct APIKeyManagementView: View {
                 }
                 
  // Supabase配置
-                Section("Supabase配置") {
+                Section {
                     APIKeyRow(
                         title: "URL",
                         value: $supabaseURL,
@@ -63,21 +68,25 @@ public struct APIKeyManagementView: View {
                             }
                         }
                     )
-                    
-                    APIKeyRow(
-                        title: "服务密钥",
-                        value: $supabaseServiceKey,
-                        placeholder: "输入服务密钥",
-                        onSave: { key in
-                            Task {
-                                await saveSupabaseConfig()
-                            }
-                        }
-                    )
+                } header: {
+                    Text("Supabase配置")
+                } footer: {
+                    Text("客户端仅保存 Supabase URL 和 anon key。service role key 属于服务端密钥，不再接入本地配置链路。")
                 }
                 
  // Nebula配置
                 Section("Nebula配置") {
+                    APIKeyRow(
+                        title: "服务地址",
+                        value: $nebulaBaseURL,
+                        placeholder: "输入 Nebula Base URL",
+                        onSave: { _ in
+                            Task {
+                                await saveNebulaConfig()
+                            }
+                        }
+                    )
+
                     APIKeyRow(
                         title: "客户端ID",
                         value: $nebulaClientID,
@@ -90,10 +99,10 @@ public struct APIKeyManagementView: View {
                     )
                     
                     APIKeyRow(
-                        title: "客户端密钥",
+                        title: "客户端密钥（可选）",
                         value: $nebulaClientSecret,
-                        placeholder: "输入Nebula客户端密钥",
-                        onSave: { secret in
+                        placeholder: "旧后端兼容用，可留空",
+                        onSave: { _ in
                             Task {
                                 await saveNebulaConfig()
                             }
@@ -103,27 +112,22 @@ public struct APIKeyManagementView: View {
                 
  // SMS服务配置
                 Section("SMS服务配置") {
-                    APIKeyRow(
-                        title: "访问密钥ID",
-                        value: $smsAccessKeyID,
-                        placeholder: "输入SMS访问密钥ID",
-                        onSave: { id in
+                    Text("手机号验证码现已改为服务端发送。请在服务端配置 Supabase send_sms hook 和 Aliyun SMS，避免在客户端存放 AccessKey/Secret。")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+
+                    if !smsAccessKeyID.isEmpty || !smsAccessKeySecret.isEmpty {
+                        Button(role: .destructive) {
                             Task {
-                                await saveSMSConfig()
+                                await clearLegacySMSConfig()
+                            }
+                        } label: {
+                            HStack {
+                                Image(systemName: "trash")
+                                Text("清除本机旧短信凭证")
                             }
                         }
-                    )
-                    
-                    APIKeyRow(
-                        title: "访问密钥Secret",
-                        value: $smsAccessKeySecret,
-                        placeholder: "输入SMS访问密钥Secret",
-                        onSave: { secret in
-                            Task {
-                                await saveSMSConfig()
-                            }
-                        }
-                    )
+                    }
                 }
                 
  // 管理操作
@@ -192,30 +196,25 @@ public struct APIKeyManagementView: View {
                 let supabaseConfig = try keychain.retrieveSupabaseConfig()
                 supabaseURL = supabaseConfig.url.isEmpty ? "" : "••••••••"
                 supabaseAnonKey = supabaseConfig.anonKey.isEmpty ? "" : "••••••••"
-                supabaseServiceKey = supabaseConfig.serviceRoleKey?.isEmpty == false ? "••••••••" : ""
             } catch {
                 supabaseURL = ""
                 supabaseAnonKey = ""
-                supabaseServiceKey = ""
             }
             
             do {
                 let nebulaConfig = try keychain.retrieveNebulaConfig()
+                nebulaBaseURL = nebulaConfig.baseURL.isEmpty ? "" : "••••••••"
                 nebulaClientID = nebulaConfig.clientId.isEmpty ? "" : "••••••••"
-                nebulaClientSecret = nebulaConfig.clientSecret.isEmpty ? "" : "••••••••"
+                nebulaClientSecret = (nebulaConfig.clientSecret?.isEmpty == false) ? "••••••••" : ""
             } catch {
+                nebulaBaseURL = ""
                 nebulaClientID = ""
                 nebulaClientSecret = ""
             }
             
-            do {
-                let smsConfig = try keychain.retrieveSMSConfig()
-                smsAccessKeyID = smsConfig.accessKeyId.isEmpty ? "" : "••••••••"
-                smsAccessKeySecret = smsConfig.accessKeySecret.isEmpty ? "" : "••••••••"
-            } catch {
-                smsAccessKeyID = ""
-                smsAccessKeySecret = ""
-            }
+            let hasLegacySMSConfig = keychain.hasLegacySMSConfig()
+            smsAccessKeyID = hasLegacySMSConfig ? "••••••••" : ""
+            smsAccessKeySecret = hasLegacySMSConfig ? "••••••••" : ""
         }
     }
     
@@ -247,19 +246,16 @@ public struct APIKeyManagementView: View {
  // 获取当前配置用于保留未修改的值
                 var currentURL = ""
                 var currentAnonKey = ""
-                var currentServiceKey: String? = nil
                 
                 if let currentConfig = try? keychain.retrieveSupabaseConfig() {
                     currentURL = currentConfig.url
                     currentAnonKey = currentConfig.anonKey
-                    currentServiceKey = currentConfig.serviceRoleKey
                 }
                 
                 let finalURL = supabaseURL == "••••••••" ? currentURL : supabaseURL
                 let finalAnonKey = supabaseAnonKey == "••••••••" ? currentAnonKey : supabaseAnonKey
-                let finalServiceKey = supabaseServiceKey == "••••••••" ? currentServiceKey : (supabaseServiceKey.isEmpty ? nil : supabaseServiceKey)
                 
-                try keychain.storeSupabaseConfig(url: finalURL, anonKey: finalAnonKey, serviceRoleKey: finalServiceKey)
+                try keychain.storeSupabaseConfig(url: finalURL, anonKey: finalAnonKey)
                 alertMessage = "Supabase配置保存成功"
                 logger.info("Supabase配置已保存到Keychain")
             } catch {
@@ -278,18 +274,32 @@ public struct APIKeyManagementView: View {
         await MainActor.run {
             do {
  // 获取当前配置用于保留未修改的值
+                var currentBaseURL = ""
                 var currentClientId = ""
-                var currentClientSecret = ""
+                var currentClientSecret: String? = nil
                 
                 if let currentConfig = try? keychain.retrieveNebulaConfig() {
+                    currentBaseURL = currentConfig.baseURL
                     currentClientId = currentConfig.clientId
                     currentClientSecret = currentConfig.clientSecret
                 }
                 
+                let finalBaseURL = nebulaBaseURL == "••••••••" ? currentBaseURL : nebulaBaseURL
                 let finalClientId = nebulaClientID == "••••••••" ? currentClientId : nebulaClientID
-                let finalClientSecret = nebulaClientSecret == "••••••••" ? currentClientSecret : nebulaClientSecret
+                let finalClientSecret = nebulaClientSecret == "••••••••" ? currentClientSecret : (nebulaClientSecret.isEmpty ? nil : nebulaClientSecret)
+
+                guard let url = URL(string: finalBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)),
+                      let scheme = url.scheme?.lowercased(),
+                      (scheme == "https" || scheme == "http"),
+                      let host = url.host,
+                      !host.isEmpty else {
+                    throw NSError(domain: "NebulaConfig", code: -10, userInfo: [NSLocalizedDescriptionKey: "Nebula Base URL 无效"])
+                }
+                guard !finalClientId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw NSError(domain: "NebulaConfig", code: -11, userInfo: [NSLocalizedDescriptionKey: "Nebula 客户端ID不能为空"])
+                }
                 
-                try keychain.storeNebulaConfig(clientId: finalClientId, clientSecret: finalClientSecret)
+                try keychain.storeNebulaConfig(baseURL: finalBaseURL, clientId: finalClientId, clientSecret: finalClientSecret)
                 alertMessage = "Nebula配置保存成功"
                 logger.info("Nebula配置已保存到Keychain")
             } catch {
@@ -302,33 +312,22 @@ public struct APIKeyManagementView: View {
         await loadCurrentAPIKeys()
     }
     
-    private func saveSMSConfig() async {
+    private func clearLegacySMSConfig() async {
         let keychain = KeychainManager.shared
-        
-        await MainActor.run {
-            do {
- // 获取当前配置用于保留未修改的值
-                var currentAccessKeyId = ""
-                var currentAccessKeySecret = ""
-                
-                if let currentConfig = try? keychain.retrieveSMSConfig() {
-                    currentAccessKeyId = currentConfig.accessKeyId
-                    currentAccessKeySecret = currentConfig.accessKeySecret
-                }
-                
-                let finalAccessKeyId = smsAccessKeyID == "••••••••" ? currentAccessKeyId : smsAccessKeyID
-                let finalAccessKeySecret = smsAccessKeySecret == "••••••••" ? currentAccessKeySecret : smsAccessKeySecret
-                
-                try keychain.storeSMSConfig(accessKeyId: finalAccessKeyId, accessKeySecret: finalAccessKeySecret)
-                alertMessage = "SMS配置保存成功"
-                logger.info("SMS配置已保存到Keychain")
-            } catch {
-                alertMessage = "SMS配置保存失败: \(error.localizedDescription)"
-                logger.error("SMS配置保存到Keychain失败: \(error.localizedDescription)")
+
+        do {
+            try keychain.clearLegacySMSConfig()
+            await MainActor.run {
+                alertMessage = "已清除本机旧短信凭证"
+                showingAlert = true
             }
-            showingAlert = true
+        } catch {
+            await MainActor.run {
+                alertMessage = "清除短信凭证失败: \(error.localizedDescription)"
+                showingAlert = true
+            }
         }
-        
+
         await loadCurrentAPIKeys()
     }
     
@@ -349,11 +348,11 @@ public struct APIKeyManagementView: View {
  // 迁移Supabase配置
         let supabaseURL = ProcessInfo.processInfo.environment["SUPABASE_URL"] ?? ""
         let supabaseAnonKey = ProcessInfo.processInfo.environment["SUPABASE_ANON_KEY"] ?? ""
-        let supabaseServiceKey = ProcessInfo.processInfo.environment["SUPABASE_SERVICE_ROLE_KEY"] ?? ""
+        let ignoredServiceRoleKey = ProcessInfo.processInfo.environment["SUPABASE_SERVICE_ROLE_KEY"]?.isEmpty == false
         
         if !supabaseURL.isEmpty && !supabaseAnonKey.isEmpty {
             do {
-                try keychain.storeSupabaseConfig(url: supabaseURL, anonKey: supabaseAnonKey, serviceRoleKey: supabaseServiceKey.isEmpty ? nil : supabaseServiceKey)
+                try keychain.storeSupabaseConfig(url: supabaseURL, anonKey: supabaseAnonKey)
                 migratedCount += 1
             } catch {
                 logger.error("迁移Supabase配置失败: \(error.localizedDescription)")
@@ -361,33 +360,27 @@ public struct APIKeyManagementView: View {
         }
         
  // 迁移Nebula配置
+        let nebulaBaseURL = ProcessInfo.processInfo.environment["NEBULA_BASE_URL"] ?? ""
         let nebulaClientID = ProcessInfo.processInfo.environment["NEBULA_CLIENT_ID"] ?? ""
         let nebulaClientSecret = ProcessInfo.processInfo.environment["NEBULA_CLIENT_SECRET"] ?? ""
         
-        if !nebulaClientID.isEmpty && !nebulaClientSecret.isEmpty {
+        if !nebulaBaseURL.isEmpty && !nebulaClientID.isEmpty {
             do {
-                try keychain.storeNebulaConfig(clientId: nebulaClientID, clientSecret: nebulaClientSecret)
+                try keychain.storeNebulaConfig(
+                    baseURL: nebulaBaseURL,
+                    clientId: nebulaClientID,
+                    clientSecret: nebulaClientSecret.isEmpty ? nil : nebulaClientSecret
+                )
                 migratedCount += 1
             } catch {
                 logger.error("迁移Nebula配置失败: \(error.localizedDescription)")
             }
         }
         
- // 迁移SMS配置
-        let smsAccessKeyID = ProcessInfo.processInfo.environment["SMS_ACCESS_KEY_ID"] ?? ""
-        let smsAccessKeySecret = ProcessInfo.processInfo.environment["SMS_ACCESS_KEY_SECRET"] ?? ""
-        
-        if !smsAccessKeyID.isEmpty && !smsAccessKeySecret.isEmpty {
-            do {
-                try keychain.storeSMSConfig(accessKeyId: smsAccessKeyID, accessKeySecret: smsAccessKeySecret)
-                migratedCount += 1
-            } catch {
-                logger.error("迁移SMS配置失败: \(error.localizedDescription)")
-            }
-        }
-        
         await MainActor.run {
-            alertMessage = "成功迁移 \(migratedCount) 个配置项到安全存储"
+            alertMessage = ignoredServiceRoleKey
+                ? "成功迁移 \(migratedCount) 个配置项到安全存储，已忽略客户端不应保存的 SUPABASE_SERVICE_ROLE_KEY"
+                : "成功迁移 \(migratedCount) 个配置项到安全存储。SMS 凭证已改为仅服务端保存，不再迁移到客户端。"
             logger.info("从环境变量迁移了 \(migratedCount) 个配置项到Keychain")
             showingAlert = true
         }
@@ -416,6 +409,7 @@ public struct APIKeyManagementView: View {
         }
         
         do {
+            try keychain.deleteAPIKey(service: "SkyBridge.Nebula", account: "BaseURL")
             try keychain.deleteAPIKey(service: "SkyBridge.Nebula", account: "ClientId")
             try keychain.deleteAPIKey(service: "SkyBridge.Nebula", account: "ClientSecret")
             clearedCount += 1
@@ -424,8 +418,7 @@ public struct APIKeyManagementView: View {
         }
         
         do {
-            try keychain.deleteAPIKey(service: "SkyBridge.SMS", account: "AccessKeyId")
-            try keychain.deleteAPIKey(service: "SkyBridge.SMS", account: "AccessKeySecret")
+            try keychain.clearLegacySMSConfig()
             clearedCount += 1
         } catch {
             logger.warning("删除SMS配置失败: \(error.localizedDescription)")
@@ -439,7 +432,7 @@ public struct APIKeyManagementView: View {
             weatherAPIKey = ""
             supabaseURL = ""
             supabaseAnonKey = ""
-            supabaseServiceKey = ""
+            nebulaBaseURL = ""
             nebulaClientID = ""
             nebulaClientSecret = ""
             smsAccessKeyID = ""
@@ -519,4 +512,5 @@ struct APIKeyManagementView_Previews: PreviewProvider {
         APIKeyManagementView()
     }
 }
+#endif
 #endif

@@ -1,3 +1,6 @@
+// macOS-exclusive: built on macOS-only frameworks (see SkyBridgeCore iOS portability
+// notes). Excluded from other platforms; no behaviour changes on macOS.
+#if os(macOS)
 //
 // RemoteControlManager.swift
 // SkyBridgeCore
@@ -12,112 +15,90 @@ import OSLog
 import Combine
 import Metal
 import CoreGraphics
+import ApplicationServices
 import ImageIO
 import ScreenCaptureKit
-import VideoToolbox
-
-// MARK: - 基础模型：消息/事件/屏幕帧
-
-/// 远程消息“信封”：所有消息都走它，避免裸 Data 粘包
-private struct RemoteMessage: Codable {
-    let type: MessageType
-    let payload: Data
-    
-    enum MessageType: String, Codable {
-        case screenData
-        case mouseEvent
-        case keyboardEvent
-    }
-}
-
-/// 屏幕数据（近距镜像主载体）
-/// imageData 通常为压缩后的视频帧（H.264 / HEVC），或者退化为静态图像字节
-private struct ScreenData: Codable {
-    let width: Int
-    let height: Int
-    let imageData: Data
-    let timestamp: TimeInterval
- /// "hevc" / "h264" / 其他（静态图像）
-    let format: String?
-}
-
-/// 鼠标事件类型
-public enum MouseEventType: String, Codable {
-    case leftMouseDown
-    case leftMouseUp
-    case rightMouseDown
-    case rightMouseUp
-    case mouseMoved
-    case scrollUp
-    case scrollDown
-}
-
-/// 键盘事件类型
-public enum KeyboardEventType: String, Codable {
-    case keyDown
-    case keyUp
-}
-
-/// 远程鼠标事件
-public struct RemoteMouseEvent: Codable {
-    public let type: MouseEventType
-    public let x: Double
-    public let y: Double
-    public let timestamp: TimeInterval
-    
-    public init(type: MouseEventType, x: Double, y: Double, timestamp: TimeInterval) {
-        self.type = type
-        self.x = x
-        self.y = y
-        self.timestamp = timestamp
-    }
-}
-
-/// 远程键盘事件
-public struct RemoteKeyboardEvent: Codable {
-    public let type: KeyboardEventType
-    public let keyCode: Int
-    public let timestamp: TimeInterval
-    
-    public init(type: KeyboardEventType, keyCode: Int, timestamp: TimeInterval) {
-        self.type = type
-        self.keyCode = keyCode
-        self.timestamp = timestamp
-    }
-}
-
-/// 远程控制错误
-public enum RemoteControlError: Error, LocalizedError {
-    case deviceNotConnected
-    case connectionClosed
-    case permissionDenied
-    case screenCaptureFailed
-    
-    public var errorDescription: String? {
-        switch self {
-        case .deviceNotConnected:
-            return "设备未连接"
-        case .connectionClosed:
-            return "连接已关闭"
-        case .permissionDenied:
-            return "权限被拒绝"
-        case .screenCaptureFailed:
-            return "屏幕捕获失败"
-        }
-    }
-}
+import SkyBridgeProtocolCore
+import SkyBridgeRealtimeMedia
 
 // MARK: - 连接状态封装（每个设备一条 NWConnection）
 
 private final class PeerConnection {
     let id: String
+    let role: RemoteControlSessionRole
+    let inputOwner: RemoteControlInputOwner
     let connection: NWConnection
+    var remoteVideoFormats: Set<String>
+    var requestedStreamConfiguration: RemoteDesktopStreamConfiguration?
+    var pendingRequestedStreamConfiguration: RemoteDesktopStreamConfiguration?
+    var lastAcceptedRawStreamConfiguration: RemoteDesktopStreamConfiguration?
+    var streamConfigurationApplicationGeneration: UInt64 = 0
+    var captureCompatibilityOverride: RemoteFrameType?
+    var lastViewerStreamRefreshAt: Date = .distantPast
+    var securityNoticeId: UUID?
+    var securityAdmissionApproved = false
+    var hasNegotiatedControlAccess = false
+    var controlAccessVersion: Int?
+    var terminalError: Error?
+    var sessionTerminationContract: RemoteDesktopSessionTerminationContract?
+    var productEvidenceOwner: ProductReleaseEvidenceSessionOwner?
+    var framePresentationAcknowledgements =
+        RemoteControlFramePresentationAcknowledgementTracker()
+    let videoFrameSequence = RemoteControlFrameSequenceGenerator()
+    let clipboardSessionId: UUID
+    let audioSessionId: UUID
+    let outboundFramePump: RemoteControlOutboundFramePump
  /// 专用收包队列，避免和 UI/MainActor 混在一起
     let queue: DispatchQueue
-    
-    init(id: String, connection: NWConnection) {
+
+    // Optional: P2P v1 handshake over this TCP connection to derive SessionKeys, then AES-GCM app payload.
+    // Backward compatible: if peer never speaks handshake frames, we keep plaintext RemoteMessage JSON.
+    @available(macOS 14.0, *)
+    var handshakeDriver: HandshakeDriver?
+    @available(macOS 14.0, *)
+    var handshakePeer: PeerIdentifier?
+    @available(macOS 14.0, *)
+    var sessionKeys: SessionKeys?
+    @available(macOS 14.0, *)
+    var modePolicy: PQCModePolicySnapshot?
+    @available(macOS 14.0, *)
+    var authenticatedRemoteAuthority: AuthenticatedRemoteAuthority?
+    @available(macOS 14.0, *)
+    var soaPairKey: Data?
+    @available(macOS 14.0, *)
+    var soaEstablishedLease: PeerSessionArbiter.EstablishedLease?
+    @available(macOS 14.0, *)
+    let secureEnvelopeSendSequencer = RemoteControlSecureEnvelopeSendSequencer()
+    @available(macOS 14.0, *)
+    var secureEnvelopeReplayWindow = RemoteControlSecureReplayWindow()
+    @available(macOS 14.0, *)
+    var realtimeAudioSender: RemoteRealtimeMediaAudioSender?
+    @available(macOS 14.0, *)
+    var realtimeAudioSenderOwnership = RemoteControlRealtimeAudioSenderOwnership()
+
+    init(
+        id: String,
+        role: RemoteControlSessionRole,
+        connection: NWConnection,
+        remoteVideoFormats: Set<String> = []
+    ) {
         self.id = id
+        self.role = role
+        self.inputOwner = RemoteControlInputOwner(
+            transport: .p2p,
+            sessionID: id,
+            generation: UUID()
+        )
         self.connection = connection
+        self.remoteVideoFormats = Set(remoteVideoFormats.map { $0.lowercased() })
+        self.clipboardSessionId = UUID()
+        self.audioSessionId = UUID()
+        self.outboundFramePump = RemoteControlOutboundFramePump(
+            peerId: id,
+            connection: connection,
+            maxFramedMessageBytes: 8_000_000,
+            secureEnvelopeSendSequencer: secureEnvelopeSendSequencer
+        )
         self.queue = DispatchQueue(
             label: "com.skybridge.remote.\(id)",
             qos: .userInitiated
@@ -125,413 +106,66 @@ private final class PeerConnection {
     }
 }
 
-// MARK: - 硬件级远程控制 / 近距镜像管理器
+@available(macOS 14.0, *)
+struct RemoteControlRealtimeAudioSenderOwnership: Sendable {
+    struct Lease: Equatable, Sendable {
+        fileprivate let generation: UInt64
+    }
 
-/// 说明：
-/// - 角色1：控制别人的机器（isControlling = true）
-/// - 从连接上接收 .screenData（ScreenData）
-/// - 向对端发送 .mouseEvent / .keyboardEvent
-/// - 角色2：被别人控制（isBeingControlled = true）
-/// - 本机用 ScreenCaptureKit + 硬件编码推送 .screenData
-/// - 从连接上接收 .mouseEvent / .keyboardEvent，再用 CGEvent 注入（当前只留接口位）
-@MainActor
-public final class RemoteControlManager: BaseManager {
-    
- // MARK: 发布给 UI 的状态
-    
-    @Published public private(set) var isControlling: Bool = false
-    @Published public private(set) var isBeingControlled: Bool = false
-    @Published public private(set) var connectedDevices: [String] = []
-    @Published public private(set) var screenSharingActive: Bool = false
-    
- /// 近距镜像纹理（供 SwiftUI / AppKit 直接渲染）
-    public let textureFeed = RemoteTextureFeed()
-    
- /// 实时性能指标
-    @Published public private(set) var bandwidthMbps: Double = 0
-    @Published public private(set) var latencyMs: Double = 0
-    @Published public private(set) var estimatedFPS: Int = 0
-    
- /// 指标历史（UI 折线用）
-    @Published public private(set) var bandwidthHistory: [Double] = []
-    @Published public private(set) var fpsHistory: [Int] = []
-    private let historyCapacity = 120
-    
- // MARK: 内部组件
-    
-    private let renderer = RemoteFrameRenderer()
-    private var captureStreamer: ScreenCaptureKitStreamer?
-    private var peers: [String: PeerConnection] = [:]
-    
- /// Metal 设备，作为静态图像兜底（ImageIO -> CGImage -> MTLTexture）
-    private let metalDevice: MTLDevice? = MTLCreateSystemDefaultDevice()
-    
- // MARK: 初始化
-    
-    public init() {
-        super.init(category: "RemoteControl")
-        
-        logger.info("🖥️ RemoteControlManager 初始化")
-        
- // 将渲染器输出绑定到纹理流
-        renderer.frameHandler = { [weak self] texture in
-            guard let self else { return }
-            Task { @MainActor in
-                self.textureFeed.update(texture: texture)
-            }
-        }
+    private var generation: UInt64 = 0
+    private(set) var currentLease: Lease?
+
+    mutating func reserve() -> Lease {
+        generation &+= 1
+        let lease = Lease(generation: generation)
+        currentLease = lease
+        return lease
     }
-    
-    public override func performInitialization() async {
-        logger.info("🖥️ RemoteControlManager performInitialization 完成")
+
+    mutating func invalidate() {
+        generation &+= 1
+        currentLease = nil
     }
-    
- // MARK: - 公共控制接口
-    
- /// 作为「控制端」连接一个远程设备
- /// - 注意：NWConnection 必须在外部已 start(queue:)，这里不再重复 start
-    public func startControlling(deviceId: String, connection: NWConnection) async {
-        logger.info("🎮 开始控制远程设备: \(deviceId, privacy: .public)")
-        
-        let peer = PeerConnection(id: deviceId, connection: connection)
-        peers[deviceId] = peer
-        
-        if !connectedDevices.contains(deviceId) {
-            connectedDevices.append(deviceId)
-        }
-        isControlling = true
-        
- // 启动屏幕数据接收循环
-        startReceivingScreenData(from: peer)
+
+    func isCurrent(_ lease: Lease) -> Bool {
+        currentLease == lease && lease.generation == generation
     }
-    
- /// 停止控制指定设备
-    public func stopControlling(deviceId: String) {
-        logger.info("⏹️ 停止控制远程设备: \(deviceId, privacy: .public)")
-        guard let peer = peers[deviceId] else { return }
-        
-        peer.connection.cancel()
-        peers.removeValue(forKey: deviceId)
-        connectedDevices.removeAll { $0 == deviceId }
-        
-        if connectedDevices.isEmpty {
-            isControlling = false
-        }
+}
+
+@available(macOS 14.0, *)
+private enum RemoteControlStrictMediaFailureOwner {
+    case screenSharingAttempt(UInt64)
+    case realtimeAudioSender(RemoteControlRealtimeAudioSenderOwnership.Lease)
+}
+
+@available(macOS 14.0, *)
+struct RemoteControlRealtimeAudioReceiverReuseKey: Equatable, Sendable {
+    let peerId: String
+    let peerIdentity: ObjectIdentifier
+    let secureSessionId: String
+    let sendKey: Data
+    let receiveKey: Data
+    let role: HandshakeRole
+    let transcriptHash: Data
+    let mode: SkyBridgeMediaAudioMode
+    let interfaceBindingIdentity: SkyBridgeRealtimeMediaInterfaceBinding.Identity
+    let authenticatedRemoteHost: String
+}
+
+@available(macOS 14.0, *)
+private final class RemoteControlHandshakeTransport: DiscoveryTransport, @unchecked Sendable {
+    private let connection: NWConnection
+
+    init(connection: NWConnection) {
+        self.connection = connection
     }
-    
- /// 作为「被控制端」开放远程控制
-    public func allowRemoteControl(from deviceId: String, connection: NWConnection) async {
-        logger.info("🖥️ 允许远程控制来自设备: \(deviceId, privacy: .public)")
-        
-        let peer = PeerConnection(id: deviceId, connection: connection)
-        peers[deviceId] = peer
-        
-        if !connectedDevices.contains(deviceId) {
-            connectedDevices.append(deviceId)
-        }
-        
-        isBeingControlled = true
-        
- // 1) 开始推送本机屏幕数据
-        await startScreenSharing(to: peer)
-        
- // 2) 开始接收对端发来的输入事件
-        startReceivingRemoteEvents(from: peer)
-    }
-    
- /// 作为被控制端，关闭来自某设备的远程控制
-    public func stopRemoteControl(from deviceId: String) {
-        logger.info("⏹️ 停止被远程控制来自设备: \(deviceId, privacy: .public)")
-        guard let peer = peers[deviceId] else { return }
-        
-        peer.connection.cancel()
-        peers.removeValue(forKey: deviceId)
-        connectedDevices.removeAll { $0 == deviceId }
-        
-        if connectedDevices.isEmpty {
-            isBeingControlled = false
-            screenSharingActive = false
-        }
-    }
-    
- // MARK: - 输入事件发送（控制端 -> 被控制端）
-    
-    public func sendMouseEvent(_ event: RemoteMouseEvent, to deviceId: String) async throws {
-        guard let peer = peers[deviceId] else {
-            throw RemoteControlError.deviceNotConnected
-        }
-        let eventData = try JSONEncoder().encode(event)
-        let message = RemoteMessage(type: .mouseEvent, payload: eventData)
-        let payload = try JSONEncoder().encode(message)
-        try await sendFramed(payload, over: peer.connection)
-        logger.debug("🖱️ 发送鼠标事件 \(event.type.rawValue, privacy: .public) -> \(deviceId, privacy: .public)")
-    }
-    
-    public func sendKeyboardEvent(_ event: RemoteKeyboardEvent, to deviceId: String) async throws {
-        guard let peer = peers[deviceId] else {
-            throw RemoteControlError.deviceNotConnected
-        }
-        let eventData = try JSONEncoder().encode(event)
-        let message = RemoteMessage(type: .keyboardEvent, payload: eventData)
-        let payload = try JSONEncoder().encode(message)
-        try await sendFramed(payload, over: peer.connection)
-        logger.debug("⌨️ 发送键盘事件 keyCode=\(event.keyCode) -> \(deviceId, privacy: .public)")
-    }
-    
- // MARK: - 屏幕共享（被控制端 -> 控制端）
-    
- /// 启动本机屏幕捕获 + 硬件编码 + 推流
-    private func startScreenSharing(to peer: PeerConnection) async {
-        logger.info("📺 开始屏幕共享（ScreenCaptureKit + 硬件编码） -> \(peer.id, privacy: .public)")
-        screenSharingActive = true
-        
-        let streamer = ScreenCaptureKitStreamer()
-        captureStreamer = streamer
-        
-        streamer.onEncodedFrame = { [weak self] data, width, height, frameType in
-            guard let self else { return }
- // 在主线程捕获必要的值
-                    let fmt: String
-                    switch frameType {
-                    case .hevc: fmt = "hevc"
-                    case .h264: fmt = "h264"
-                    case .bgra: fmt = "bgra"
-                    }
-            Task { [weak self] in
-                guard let self else { return }
-                do {
-                    let screen = ScreenData(
-                        width: width,
-                        height: height,
-                        imageData: data,
-                        timestamp: Date().timeIntervalSince1970,
-                        format: fmt
-                    )
-                    let encodedScreen = try JSONEncoder().encode(screen)
-                    let message = RemoteMessage(type: .screenData, payload: encodedScreen)
-                    let payload = try JSONEncoder().encode(message)
-                    
-                    try await self.sendFramed(payload, over: peer.connection)
-                } catch {
-                    self.logger.error("❌ 发送屏幕数据失败: \(error.localizedDescription, privacy: .public)")
-                }
-            }
-        }
-        
- // 读取当前显示设置（码率/GOP/FPS 等从你的 Settings 管理器中拿）
-        let settings = RemoteDesktopSettingsManager.shared.settings
-        let codec: RemoteFrameType = (settings.displaySettings.preferredCodec == .h264) ? .h264 : .hevc
-        let fps = settings.displaySettings.targetFrameRate
-        let gop = settings.displaySettings.keyFrameInterval
-        
-        do {
-            try await streamer.start(
-                preferredCodec: codec,
-                preferredSize: nil,
-                targetFPS: fps,
-                keyFrameInterval: gop
-            )
-        } catch {
-            logger.error("❌ 启动 ScreenCaptureKitStreamer 失败: \(error.localizedDescription, privacy: .public)")
-            screenSharingActive = false
-        }
-    }
-    
- /// 控制端：从对端接收屏幕数据并渲染
-    private func startReceivingScreenData(from peer: PeerConnection) {
-        logger.info("📺 开始接收屏幕数据 <- \(peer.id, privacy: .public)")
-        
-        Task { [weak self, weak peer] in
-            guard let self, let peer else { return }
-            
-            var buffer = Data()
-            
-            while true {
-                do {
-                    let chunk = try await self.receiveChunk(from: peer.connection)
-                    if chunk.isEmpty {
-                        throw RemoteControlError.connectionClosed
-                    }
-                    buffer.append(chunk)
-                    
-                    while buffer.count >= 4 {
-                        let length = buffer.prefix(4).withUnsafeBytes { ptr -> Int in
-                            let raw = ptr.load(as: UInt32.self)
-                            return Int(UInt32(bigEndian: raw))
-                        }
-                        guard buffer.count >= 4 + length else { break }
-                        
-                        let messageData = buffer.subdata(in: 4 ..< 4 + length)
-                        buffer.removeFirst(4 + length)
-                        
-                        try await self.handleScreenMessagePayload(messageData)
-                    }
-                } catch {
-                    await self.handleConnectionClosed(peerId: peer.id, error: error)
-                    break
-                }
-            }
-        }
-    }
-    
- /// 处理收到的 .screenData 消息
-    private func handleScreenMessagePayload(_ messageData: Data) async throws {
-        let message = try JSONDecoder().decode(RemoteMessage.self, from: messageData)
-        guard message.type == .screenData else {
-            logger.debug("📺 收到非 screenData 消息，丢弃: \(message.type.rawValue, privacy: .public)")
-            return
-        }
-        
-        let screenData = try JSONDecoder().decode(ScreenData.self, from: message.payload)
-        logger.debug("📺 接收到屏幕数据: \(screenData.width)x\(screenData.height)")
-        
-        guard !screenData.imageData.isEmpty else { return }
-        
-        if let fmt = screenData.format?.lowercased(), fmt == "hevc" || fmt == "h264" || fmt == "bgra" {
-            let frameType: RemoteFrameType
-            switch fmt {
-            case "hevc": frameType = .hevc
-            case "h264": frameType = .h264
-            default: frameType = .bgra
-            }
-            
-            let metrics = renderer.processFrame(
-                data: screenData.imageData,
-                width: screenData.width,
-                height: screenData.height,
-                stride: 0,
-                type: frameType
-            )
-            await MainActor.run {
-                self.updateMetrics(metrics)
-            }
-        } else {
- // 兜底：当成静态图像用 ImageIO 解码
-            await handleStaticImageFallback(screenData)
-        }
-    }
-    
- /// 静态图像兜底路径：ImageIO -> CGImage -> MTLTexture -> 纹理流
-    private func handleStaticImageFallback(_ screenData: ScreenData) async {
-        guard let device = metalDevice else { return }
-        
-        let cfData = screenData.imageData as CFData
-        guard
-            let source = CGImageSourceCreateWithData(cfData, nil),
-            let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil)
-        else {
-            logger.error("❌ 图像数据解析失败（静态兜底）")
-            return
-        }
-        
-        do {
-            let texture = try createTexture(from: cgImage, device: device)
-            await MainActor.run {
-                self.textureFeed.update(texture: texture)
-                self.bandwidthMbps = 0
-                self.latencyMs = 0
-                self.estimatedFPS = 0
-            }
-        } catch {
-            logger.error("❌ 静态图像转纹理失败: \(error.localizedDescription, privacy: .public)")
-        }
-    }
-    
- // MARK: - 被控制端：接收远程事件
-    
-    private func startReceivingRemoteEvents(from peer: PeerConnection) {
-        logger.info("🎮 开始接收远程事件 <- \(peer.id, privacy: .public)")
-        
-        Task { [weak self, weak peer] in
-            guard let self, let peer else { return }
-            var buffer = Data()
-            
-            while true {
-                do {
-                    let chunk = try await self.receiveChunk(from: peer.connection)
-                    if chunk.isEmpty {
-                        throw RemoteControlError.connectionClosed
-                    }
-                    buffer.append(chunk)
-                    
-                    while buffer.count >= 4 {
-                        let length = buffer.prefix(4).withUnsafeBytes { ptr -> Int in
-                            let raw = ptr.load(as: UInt32.self)
-                            return Int(UInt32(bigEndian: raw))
-                        }
-                        guard buffer.count >= 4 + length else { break }
-                        
-                        let messageData = buffer.subdata(in: 4 ..< 4 + length)
-                        buffer.removeFirst(4 + length)
-                        
-                        try await self.handleControlMessagePayload(messageData)
-                    }
-                } catch {
-                    await self.handleConnectionClosed(peerId: peer.id, error: error)
-                    break
-                }
-            }
-        }
-    }
-    
-    private func handleControlMessagePayload(_ messageData: Data) async throws {
-        let message = try JSONDecoder().decode(RemoteMessage.self, from: messageData)
-        
-        switch message.type {
-        case .mouseEvent:
-            let evt = try JSONDecoder().decode(RemoteMouseEvent.self, from: message.payload)
-            await handleRemoteMouseEvent(evt)
-        case .keyboardEvent:
-            let evt = try JSONDecoder().decode(RemoteKeyboardEvent.self, from: message.payload)
-            await handleRemoteKeyboardEvent(evt)
-        case .screenData:
- // 正常情况下，被控制端不会收到 screenData；有就丢掉
-            logger.debug("🎮 被控制端收到 screenData，忽略")
-        }
-    }
-    
-    private func handleRemoteMouseEvent(_ event: RemoteMouseEvent) async {
-        logger.debug("🖱️ 处理远程鼠标事件: \(event.type.rawValue, privacy: .public)")
- // 这里保留 CGEvent 注入接口位，防止在沙箱/权限环境下直接崩
- // 后续你可以按权限情况，用 CGEventCreateMouseEvent + CGEventPost 实现真实注入
-    }
-    
-    private func handleRemoteKeyboardEvent(_ event: RemoteKeyboardEvent) async {
-        logger.debug("⌨️ 处理远程键盘事件: keyCode=\(event.keyCode)")
- // 同上，保留 CGEvent 键盘注入接口位
-    }
-    
- // MARK: - 性能指标更新
-    
-    private func updateMetrics(_ metrics: RenderMetrics) {
-        bandwidthMbps = metrics.bandwidthMbps
-        latencyMs = metrics.latencyMilliseconds
-        
-        if metrics.latencyMilliseconds > 0 {
-            estimatedFPS = max(1, Int(1000.0 / metrics.latencyMilliseconds))
-        } else {
-            estimatedFPS = 0
-        }
-        
-        bandwidthHistory.append(bandwidthMbps)
-        if bandwidthHistory.count > historyCapacity {
-            bandwidthHistory.removeFirst(bandwidthHistory.count - historyCapacity)
-        }
-        
-        fpsHistory.append(estimatedFPS)
-        if fpsHistory.count > historyCapacity {
-            fpsHistory.removeFirst(fpsHistory.count - historyCapacity)
-        }
-    }
-    
- // MARK: - NWConnection 长度前缀封装
-    
- /// 发送一条「带 4 字节长度前缀」的数据帧
-    private func sendFramed(_ data: Data, over connection: NWConnection) async throws {
+
+    func send(to peer: PeerIdentifier, data: Data) async throws {
+        _ = peer
         var length = UInt32(data.count).bigEndian
         var frame = Data(bytes: &length, count: 4)
         frame.append(data)
-        
+
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             connection.send(content: frame, completion: .contentProcessed { error in
                 if let error {
@@ -542,51 +176,5070 @@ public final class RemoteControlManager: BaseManager {
             })
         }
     }
-    
- /// 读取一块原始数据，交由上层做粘包处理
-    private func receiveChunk(from connection: NWConnection) async throws -> Data {
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
-                if let error {
-                    cont.resume(throwing: error)
-                } else if let data {
-                    cont.resume(returning: data)
+}
+
+// MARK: - 硬件级远程控制 / 近距镜像管理器
+
+/// Failures at the boundary between a controlled-host workspace and one host.
+public enum ControlledHostSessionError: Error, LocalizedError, Equatable {
+    case managerAlreadyControlsHost
+    case streamConfigurationInProgress
+    case streamConfigurationAcknowledgementTimedOut
+    case invalidStreamConfigurationAcknowledgement
+    case invalidStreamConfigurationRejection
+    case streamConfigurationRejected(code: String, message: String)
+    case inputRequiresFocusedHost
+    case inputControlNotGranted
+    case inputReleaseFailed
+    case inputControlDeliveryTimedOut
+
+    public var errorDescription: String? {
+        switch self {
+        case .managerAlreadyControlsHost:
+            return "此会话已连接一台主机，请在工作区中切换或添加主机。"
+        case .streamConfigurationInProgress:
+            return "上一项主机流配置仍在等待确认。"
+        case .streamConfigurationAcknowledgementTimedOut:
+            return "主机未在限定时间内确认流配置，请检查连接或主机上的控制授权。"
+        case .invalidStreamConfigurationAcknowledgement:
+            return "主机返回的流配置确认与当前请求不一致。"
+        case .invalidStreamConfigurationRejection:
+            return "主机返回的流配置拒绝与当前请求不一致。"
+        case .streamConfigurationRejected(let code, let message):
+            if code == "audio-device-unavailable" {
+                return "受控设备没有可用的声音播放设备。请在远程控制设置中关闭声音后重新连接。"
+            }
+            return "主机无法应用流配置：\(message)"
+        case .inputRequiresFocusedHost:
+            return "请先切换到此主机，再发送键盘或鼠标操作。"
+        case .inputControlNotGranted:
+            return "当前为仅观看状态，请由被控端授予输入权。"
+        case .inputReleaseFailed:
+            return "无法确认上一控制端的按键已释放，输入权交接已停止。"
+        case .inputControlDeliveryTimedOut:
+            return "输入权交接通知发送超时，会话已停止。"
+        }
+    }
+}
+
+/// 说明：
+/// - 角色1：控制别人的机器（isControlling = true）
+/// - 从连接上接收 .screenData（ScreenData）
+/// - 向对端发送 .mouseEvent / .keyboardEvent
+/// - 角色2：被别人控制（isBeingControlled = true）
+/// - 本机用 ScreenCaptureKit + 硬件编码推送 .screenData
+/// - 从连接上接收 .mouseEvent / .keyboardEvent / .clipboard / .streamConfiguration，并在本机应用
+@MainActor
+public final class RemoteControlManager: BaseManager {
+
+    private static func streamRefreshTokenLogState(_ token: UInt64?) -> String {
+        token == nil ? "missing" : "present"
+    }
+
+    enum HandshakeSyncResult: Equatable {
+        case pending
+        case established
+        case retryableFailure(String)
+    }
+
+    enum SecureChannelWaitResult: Equatable {
+        case established
+        case aborted(String)
+        case timedOut
+    }
+
+    static func shouldKeepTransportAliveAfterHandshakeFailure(
+        for _: RemoteControlSessionRole
+    ) -> Bool {
+        false
+    }
+
+ // MARK: 发布给 UI 的状态
+
+    @Published public private(set) var isControlling: Bool = false
+    @Published public private(set) var isBeingControlled: Bool = false
+    @Published public private(set) var connectedDevices: [String] = []
+    @Published public private(set) var screenSharingActive: Bool = false
+    @Published public private(set) var currentRenderingMode: RenderingMode = .stable
+    @Published public private(set) var controllingSessionError: String?
+    @Published public private(set) var viewerInputAccess = RemoteControlAccessTracker()
+    var onInboundSessionEnded: (@MainActor (NWConnection) -> Void)?
+    public private(set) var controlledHostStreamTier: ControlledHostSessionPolicy.StreamTier
+    public var preferredRenderingMode: RenderingMode = .stable {
+        didSet {
+            guard preferredRenderingMode != oldValue else { return }
+            applyPreferredRenderingModeToActiveViewingSession()
+        }
+    }
+
+ /// 近距镜像纹理（供 SwiftUI / AppKit 直接渲染）
+    public let textureFeed = RemoteTextureFeed()
+
+ /// 实时性能指标
+    @Published public private(set) var bandwidthMbps: Double = 0
+    @Published public private(set) var latencyMs: Double = 0
+    @Published public private(set) var estimatedFPS: Int = 0
+
+ /// 指标历史（UI 折线用）
+    @Published public private(set) var bandwidthHistory: [Double] = []
+    @Published public private(set) var fpsHistory: [Int] = []
+    private let historyCapacity = 120
+
+    private func emitSmokeTrace(_ message: String) {
+        RemoteControlSmokeStatusWriter.append(message)
+    }
+
+ // MARK: 内部组件
+
+    /// 三层渲染模式控制器
+    public let renderingModeController = RenderingModeController()
+    /// 稳定渲染器（Phase 1 正式产品化）
+    private lazy var stableRenderer: StableRenderer = {
+        StableRenderer(healthMonitor: renderingModeController.healthMonitor)
+    }()
+    /// 高性能渲染器（Phase 2 显示驱动拉帧）
+    private lazy var fluidRenderer: FluidRenderer = {
+        FluidRenderer(healthMonitor: renderingModeController.healthMonitor)
+    }()
+    /// 高保真渲染器（Phase 3 HDR/色彩管线）
+    private lazy var referenceRenderer = makeReferenceRenderer()
+
+    private func makeReferenceRenderer() -> ReferenceRenderer {
+        let r = ReferenceRenderer(healthMonitor: renderingModeController.healthMonitor)
+        r.onDegradationNeeded = { [weak self] reason in
+            self?.renderingModeController.triggerAutoDegradation(reason: reason)
+        }
+        return r
+    }
+    private var viewingRenderersConfigured = false
+    private var configuredRenderingMode: RenderingMode = .stable
+    private var latestViewingRenderMetrics: RenderMetrics?
+    private lazy var textureFeedDeliveryGate = LatestTextureDeliveryGate(feed: textureFeed)
+    // Reuse the existing rate window at the actual drawable-presentation boundary.
+    // RendererHealthMonitor on each mode continues to own decode timing and byte totals.
+    private let displayedFrameMonitor = RendererHealthMonitor()
+    private var captureStreamer: ScreenCaptureKitStreamer?
+    private var realtimeAudioCaptureStreamer: ScreenCaptureKitStreamer?
+    private var realtimeAudioCaptureStrictMediaFallbacks: Bool?
+    private var screenCaptureWatchdogTask: Task<Void, Never>?
+    private var screenCaptureRestartInProgress = false
+    private var screenCaptureStartupRetryCountByPeerId: [String: Int] = [:]
+    private var screenSharingAttemptGate = RemoteControlScreenSharingAttemptGate()
+#if os(macOS)
+    private var realtimeStreamingActivity: NSObjectProtocol?
+    private var realtimeStreamingActivityPeerId: String?
+#endif
+    private var controllingPeers: [String: PeerConnection] = [:]
+    private var beingControlledPeers: [String: PeerConnection] = [:]
+    private var controllingDeviceIds: Set<String> = []
+    private var beingControlledDeviceIds: Set<String> = []
+    private var trustInvalidationCancellables = Set<AnyCancellable>()
+    private let maxFramedMessageBytes = 8_000_000
+    private var interactionTelemetryTasksByPeerId: [String: Task<Void, Never>] = [:]
+    private var activeClipboardPeerId: String?
+    private var activeClipboardSessionId: UUID?
+    private let viewingAudioSessionId = UUID()
+    private var lastViewingInboundScreenTimestamp: TimeInterval?
+    private var lastSentViewerStreamConfiguration: RemoteDesktopStreamConfiguration?
+    private var pendingViewerStreamConfiguration: RemoteDesktopStreamConfiguration?
+    private var acknowledgedViewerStreamTransaction: RemoteDesktopStreamConfigurationTransaction?
+    private var viewerStreamConfigurationOperation: UUID?
+    // Retained through socket teardown until the exact waiting operation sees
+    // the authenticated cause, so a following EOF cannot replace it.
+    private var viewerStreamConfigurationFailure: (operation: UUID, error: ControlledHostSessionError)?
+    private struct ViewingProductFrameEvidenceContext {
+        let peerObjectIdentifier: ObjectIdentifier
+        let owner: ProductReleaseEvidenceSessionOwner
+        let bytes: Int
+        let width: Int
+        let height: Int
+    }
+    private var viewingProductFrameEvidenceContext: ViewingProductFrameEvidenceContext?
+    private var outboundMouseClickClassifier = RemoteMouseClickClassifier()
+    private var decoderSyncRefreshOperation: (id: UUID, task: Task<Void, Never>)?
+    private var decoderSyncRefreshNeeded = false
+    private var lastDecoderSyncRefreshAt: ContinuousClock.Instant?
+    @available(macOS 14.0, *)
+    private var p2pRealtimeAudioReceiver: SkyBridgeUDPRealtimeMediaReceiver?
+    @available(macOS 14.0, *)
+    private var p2pRealtimeAudioRenderer: RemoteRealtimeMediaAudioReceiver?
+    @available(macOS 14.0, *)
+    private var p2pRealtimeAudioReceiverReuseKey: RemoteControlRealtimeAudioReceiverReuseKey?
+    private var p2pRealtimeAudioReceiverEndpoint: SkyBridgeMediaEndpoint?
+    private var p2pRealtimeAudioReceiverStartGeneration: UInt64 = 0
+    private var p2pRealtimeAudioReceiverPendingPeerId: String?
+
+ /// Metal 设备，作为静态图像兜底（ImageIO -> CGImage -> MTLTexture）
+    private let metalDevice: MTLDevice? = MTLCreateSystemDefaultDevice()
+
+ // MARK: 初始化
+
+    public init(controlledHostStreamTier: ControlledHostSessionPolicy.StreamTier = .focused) {
+        self.controlledHostStreamTier = controlledHostStreamTier
+        super.init(category: "RemoteControl")
+
+        logger.info("🖥️ RemoteControlManager 初始化")
+
+        renderingModeController.onModeChanged = { [weak self] _, to, _ in
+            guard let self else { return }
+            Task { @MainActor in
+                guard self.renderingModeController.currentMode == to else { return }
+                self.currentRenderingMode = to
+                self.synchronizeRendererResources(for: to)
+            }
+        }
+
+        TrustSyncService.shared.trustInvalidationPublisher
+            .sink { [weak self] event in
+                MainActor.assumeIsolated { [weak self] in
+                    self?.handleTrustInvalidation(event)
+                }
+            }
+            .store(in: &trustInvalidationCancellables)
+    }
+
+    private func handleTrustInvalidation(_ event: TrustInvalidationEvent) {
+        var seen = Set<ObjectIdentifier>()
+        let peers = Array(controllingPeers.values) + Array(beingControlledPeers.values)
+        for peer in peers where seen.insert(ObjectIdentifier(peer)).inserted {
+            guard #available(macOS 14.0, *),
+                  let authority = peer.authenticatedRemoteAuthority,
+                  event.matches(authority: authority),
+                  currentPeer(for: peer.role, deviceId: peer.id) === peer else {
+                continue
+            }
+
+            // Remove admission and exact ownership synchronously with the
+            // tombstone event before cancelling queued network callbacks.
+            peer.securityAdmissionApproved = false
+            guard let resources = retireConnectionClosedResources(
+                peer: peer,
+                error: RemoteControlError.untrustedPeer(peer.id)
+            ) else {
+                continue
+            }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.closeRetiredConnectionResources(resources)
+            }
+        }
+    }
+
+    private func configureViewingRenderersIfNeeded() {
+        guard !viewingRenderersConfigured else { return }
+        viewingRenderersConfigured = true
+        let gate = textureFeedDeliveryGate
+        let generation = gate.currentGeneration
+        textureFeed.setPresentationCompletionHandler { [weak self] in self?.didPresentRenderedTexture() }
+        // VT/Metal callbacks only touch the bounded delivery gate. UI/session state is
+        // evaluated by its MainActor drain, after the exact stream epoch is checked.
+        let publish: @Sendable (MTLTexture, AnyObject?) -> Void = { texture, backing in
+            gate.submit(texture: texture, backing: backing, expectedGeneration: generation)
+        }
+        stableRenderer.frameHandler = publish
+        fluidRenderer.frameHandler = publish
+        referenceRenderer.frameHandler = publish
+        let fail: @Sendable (RemoteFrameRenderError) -> Void = { [weak self] error in
+            Task { @MainActor [weak self] in
+                guard let self, gate.currentGeneration == generation else { return }
+                self.controllingSessionError = error.localizedDescription
+                if let peer = self.controllingPeers.values.first {
+                    await self.handleConnectionClosed(peer: peer, error: error)
+                }
+            }
+        }
+        stableRenderer.failureHandler = fail
+        fluidRenderer.failureHandler = fail
+        referenceRenderer.failureHandler = fail
+        let requestSync: @Sendable () -> Void = { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, gate.currentGeneration == generation else { return }
+                self.requestDecoderSyncFrame()
+            }
+        }
+        stableRenderer.syncFrameHandler = requestSync
+        fluidRenderer.syncFrameHandler = requestSync
+        referenceRenderer.syncFrameHandler = requestSync
+    }
+
+    private func requestDecoderSyncFrame() {
+        guard viewerInputAccess.hasAcknowledgement,
+              let peer = controllingPeers.values.first, peer.sessionKeys != nil else { return }
+        decoderSyncRefreshNeeded = true
+        guard decoderSyncRefreshOperation == nil else { return }
+        let operation = UUID()
+        let task = Task { @MainActor [weak self, weak peer] in
+            guard let self, let peer else { return }
+            defer {
+                if self.decoderSyncRefreshOperation?.id == operation {
+                    self.decoderSyncRefreshOperation = nil
+                }
+            }
+            do {
+                while self.decoderSyncRefreshNeeded, self.isCurrentPeer(peer) {
+                    self.decoderSyncRefreshNeeded = false
+                    if let last = self.lastDecoderSyncRefreshAt {
+                        try await Task.sleep(until: last.advanced(by: .seconds(2)), clock: .continuous)
+                    }
+                    let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+                    while self.viewerStreamConfigurationOperation != nil {
+                        guard self.isCurrentPeer(peer) else { return }
+                        guard ContinuousClock.now < deadline else {
+                            throw ControlledHostSessionError.streamConfigurationAcknowledgementTimedOut
+                        }
+                        try await Task.sleep(for: .milliseconds(25))
+                    }
+                    guard self.isCurrentPeer(peer) else { return }
+                    try Task.checkCancellation()
+                    self.lastDecoderSyncRefreshAt = .now
+                    self.logger.info("📺 请求恢复解码关键帧：已排空背压队列")
+                    try await self.sendViewerStreamConfiguration(
+                        to: peer, syncRefreshToken: DispatchTime.now().uptimeNanoseconds
+                    )
+                }
+            } catch is CancellationError where Task.isCancelled {
+                // Only session teardown cancels this one pending recovery owner.
+            } catch {
+                if self.isCurrentPeer(peer) {
+                    await self.handleConnectionClosed(peer: peer, error: error)
+                }
+            }
+        }
+        decoderSyncRefreshOperation = (operation, task)
+    }
+
+    private func resetViewingRenderers() {
+        // Retire callback authority before waiting for old VT/GPU work. New renderers
+        // own fresh texture caches; teardown instances are never reused for a stream.
+        textureFeedDeliveryGate.clear()
+        textureFeed.update(texture: nil)
+        textureFeed.setPresentationCompletionHandler(nil)
+        displayedFrameMonitor.reset()
+        if viewingRenderersConfigured {
+            stableRenderer.teardown()
+            fluidRenderer.teardown()
+            referenceRenderer.teardown()
+        }
+        stableRenderer = StableRenderer(healthMonitor: renderingModeController.healthMonitor)
+        fluidRenderer = FluidRenderer(healthMonitor: renderingModeController.healthMonitor)
+        referenceRenderer = makeReferenceRenderer()
+        viewingRenderersConfigured = false
+        configuredRenderingMode = renderingModeController.currentMode
+        latestViewingRenderMetrics = nil
+        configureViewingRenderersIfNeeded()
+        requestDecoderSyncFrame()
+    }
+
+    public override func performInitialization() async {
+        logger.info("🖥️ RemoteControlManager performInitialization 完成")
+    }
+
+    private func currentPeer(
+        for role: RemoteControlSessionRole,
+        deviceId: String
+    ) -> PeerConnection? {
+        switch role {
+        case .controlling:
+            return controllingPeers[deviceId]
+        case .beingControlled:
+            return beingControlledPeers[deviceId]
+        }
+    }
+
+    private func registerPeer(_ peer: PeerConnection) {
+        switch peer.role {
+        case .controlling:
+            controllingPeers[peer.id] = peer
+        case .beingControlled:
+            beingControlledPeers[peer.id] = peer
+        }
+        registerConnectedDevice(peer.id, for: peer.role)
+    }
+
+    @discardableResult
+    private func removePeer(
+        deviceId: String,
+        role: RemoteControlSessionRole
+    ) -> PeerConnection? {
+        let removedPeer: PeerConnection?
+        switch role {
+        case .controlling:
+            removedPeer = controllingPeers.removeValue(forKey: deviceId)
+        case .beingControlled:
+            removedPeer = beingControlledPeers.removeValue(forKey: deviceId)
+        }
+        if let removedPeer {
+            removedPeer.framePresentationAcknowledgements.reset()
+            releaseRemoteInput(for: removedPeer, reason: "peer_removed")
+            endProductEvidenceSession(for: removedPeer, reason: .peer)
+        }
+        unregisterConnectedDevice(deviceId, for: role)
+        if let removedPeer, role == .beingControlled {
+            onInboundSessionEnded?(removedPeer.connection)
+        }
+        return removedPeer
+    }
+
+    @discardableResult
+    private func releaseRemoteInput(for peer: PeerConnection, reason: String) -> RemoteControlInputReleaseResult {
+        let result = RemoteControlInputLifecycleCoordinator.shared.releaseAll(
+            for: peer.inputOwner
+        )
+        guard result.hadTrackedInput else { return result }
+        logger.info(
+            """
+            remote-input-release transport=p2p reason=\(reason, privacy: .public) \
+            mouseButtons=\(result.trackedMouseButtonCount, privacy: .public) \
+            keys=\(result.trackedKeyCount, privacy: .public) \
+            released=\(result.releasedControlCount, privacy: .public) \
+            failed=\(result.failedReleaseCount, privacy: .public) \
+            permissionSkipped=\(result.skippedForMissingPermission, privacy: .public)
+            """
+        )
+        return result
+    }
+
+    private func registerConnectedDevice(_ deviceId: String, for role: RemoteControlSessionRole) {
+        switch role {
+        case .controlling:
+            controllingDeviceIds.insert(deviceId)
+        case .beingControlled:
+            beingControlledDeviceIds.insert(deviceId)
+        }
+        refreshPublishedConnectionState()
+    }
+
+    private func unregisterConnectedDevice(_ deviceId: String, for role: RemoteControlSessionRole) {
+        switch role {
+        case .controlling:
+            controllingDeviceIds.remove(deviceId)
+        case .beingControlled:
+            beingControlledDeviceIds.remove(deviceId)
+        }
+        refreshPublishedConnectionState()
+    }
+
+    private func refreshPublishedConnectionState() {
+        let activeDeviceIds = controllingDeviceIds.union(beingControlledDeviceIds)
+        var mergedDeviceIds = connectedDevices.filter { activeDeviceIds.contains($0) }
+
+        for deviceId in controllingDeviceIds.sorted() where !mergedDeviceIds.contains(deviceId) {
+            mergedDeviceIds.append(deviceId)
+        }
+        for deviceId in beingControlledDeviceIds.sorted() where !mergedDeviceIds.contains(deviceId) {
+            mergedDeviceIds.append(deviceId)
+        }
+
+        connectedDevices = mergedDeviceIds
+        isControlling = !controllingDeviceIds.isEmpty
+        isBeingControlled = !beingControlledDeviceIds.isEmpty
+    }
+
+    private func finishRoleTeardownIfNeeded(for role: RemoteControlSessionRole) {
+        switch role {
+        case .controlling:
+            guard controllingDeviceIds.isEmpty else { return }
+            tearDownViewingRenderPipeline()
+        case .beingControlled:
+            guard beingControlledDeviceIds.isEmpty else { return }
+            clearBeingControlledResources()
+        }
+    }
+
+    private func clearBeingControlledResources() {
+        disableActiveClipboardSync()
+
+        screenSharingActive = false
+        screenCaptureWatchdogTask?.cancel()
+        screenCaptureWatchdogTask = nil
+        screenCaptureRestartInProgress = false
+        captureStreamer?.stop()
+        captureStreamer = nil
+        realtimeAudioCaptureStreamer?.stop()
+        realtimeAudioCaptureStreamer = nil
+        realtimeAudioCaptureStrictMediaFallbacks = nil
+        endRealtimeStreamingActivity(reason: "being-controlled-resources-cleared")
+
+        screenCaptureStartupRetryCountByPeerId.removeAll()
+
+        interactionTelemetryTasksByPeerId.values.forEach { $0.cancel() }
+        interactionTelemetryTasksByPeerId.removeAll()
+    }
+
+    private func stopScreenSharingForViewerStop(peer: PeerConnection, reason: String) async {
+        logger.info(
+            "⏹️ viewer 请求停止 LAN 远控推流: peer=\(peer.id, privacy: .public) reason=\(reason, privacy: .public)"
+        )
+        screenCaptureWatchdogTask?.cancel()
+        screenCaptureWatchdogTask = nil
+        screenCaptureRestartInProgress = false
+        captureStreamer?.stop(inputOwner: peer.inputOwner)
+        captureStreamer = nil
+        realtimeAudioCaptureStreamer?.stop()
+        realtimeAudioCaptureStreamer = nil
+        realtimeAudioCaptureStrictMediaFallbacks = nil
+        screenSharingActive = false
+        endRealtimeStreamingActivity(reason: "viewer-stop-\(reason)")
+        stopInteractionTelemetry(for: peer.id)
+        screenCaptureStartupRetryCountByPeerId.removeValue(forKey: peer.id)
+        invalidateScreenSharingStartupState(for: peer.id)
+        let realtimeAudioSender: RemoteRealtimeMediaAudioSender?
+        if #available(macOS 14.0, *) {
+            realtimeAudioSender = detachRealtimeAudioSender(from: peer)
+        } else {
+            realtimeAudioSender = nil
+        }
+        await peer.outboundFramePump.updateTransportState(
+            requestedStreamConfiguration: peer.requestedStreamConfiguration,
+            sessionKeys: peer.sessionKeys,
+            allowsInsecureLegacy: Self.allowsInsecureLegacyRemoteControl
+        )
+        if #available(macOS 14.0, *), let realtimeAudioSender {
+            await realtimeAudioSender.close(reason: "viewer-stream-stop")
+        }
+    }
+
+    private func failStrictMediaCapture(
+        for peer: PeerConnection,
+        reason: String,
+        component: String,
+        owner: RemoteControlStrictMediaFailureOwner
+    ) async {
+        switch owner {
+        case .screenSharingAttempt(let attemptGeneration):
+            guard isCurrentScreenSharingAttempt(attemptGeneration, for: peer) else {
+                logger.info(
+                    "ℹ️ 忽略过期屏幕共享 attempt 的严格媒体失败: \(peer.id, privacy: .public)"
+                )
+                return
+            }
+        case .realtimeAudioSender(let senderLease):
+            guard isCurrentPeer(peer),
+                  peer.realtimeAudioSenderOwnership.isCurrent(senderLease) else {
+                logger.info(
+                    "ℹ️ 忽略过期 realtime audio sender 的严格媒体失败: \(peer.id, privacy: .public)"
+                )
+                return
+            }
+        }
+        let sanitizedReason = Self.sanitizeTelemetryToken(reason)
+        logger.error(
+            """
+            ⛔️ 严格媒体策略禁止远控采集/编码降级或静默重启: peer=\(peer.id, privacy: .public) \
+            component=\(component, privacy: .public) reason=\(reason, privacy: .public)
+            """
+        )
+        RemoteControlSmokeStatusWriter.append(
+            "strict-media-failed session=\(peer.id) component=\(component) reason=\(sanitizedReason)"
+        )
+
+        screenCaptureWatchdogTask?.cancel()
+        screenCaptureWatchdogTask = nil
+        screenCaptureRestartInProgress = false
+        captureStreamer?.stop(inputOwner: peer.inputOwner)
+        captureStreamer = nil
+        realtimeAudioCaptureStreamer?.stop()
+        realtimeAudioCaptureStreamer = nil
+        realtimeAudioCaptureStrictMediaFallbacks = nil
+        screenSharingActive = false
+        endRealtimeStreamingActivity(reason: "strict-media-\(component)-\(sanitizedReason)")
+        invalidateScreenSharingStartupState(for: peer.id)
+
+        if peer.role == .beingControlled, peer.sessionTerminationContract != nil {
+            stopHostedSession(from: peer.id, reason: .captureFailed)
+            return
+        }
+        guard let retiredResources = retireConnectionClosedResources(
+            peer: peer,
+            error: RemoteControlError.screenCaptureFailed
+        ) else {
+            return
+        }
+        await closeRetiredConnectionResources(retiredResources)
+    }
+
+    private func resolvedPreferredRenderingMode() -> RenderingMode {
+        switch preferredRenderingMode {
+        case .stable:
+            return .stable
+        case .fluid:
+            return MTLCreateSystemDefaultDevice() == nil ? .stable : .fluid
+        case .reference:
+            let report = HardwareCapabilityProbe.probe(requireExternalPower: true)
+            if report.isReferenceCapable {
+                return .reference
+            }
+            return MTLCreateSystemDefaultDevice() == nil ? .stable : .fluid
+        }
+    }
+
+    private func prepareViewingRenderPipelineForNewStream() {
+        // 应用用户在设置中选择的首选渲染层级（Stable/Fluid/Reference）。
+        // RemoteControlManager 不是单例，因此从共享设置读取，保证所有实例都遵循同一选择；
+        // resolvedPreferredRenderingMode() 会按硬件能力把不可达的层级单向降级。
+        preferredRenderingMode = RemoteDesktopSettingsManager.shared.settings.displaySettings.renderingMode
+        if #available(macOS 14.0, *) {
+            stopP2PRealtimeAudioReceiverIfNeeded(peerId: nil)
+        }
+        AudioRedirectionManager.shared.disable(for: viewingAudioSessionId)
+        renderingModeController.resetForNewStream()
+        let requestedMode = resolvedPreferredRenderingMode()
+        currentRenderingMode = renderingModeController.requestMode(requestedMode)
+        resetViewingRenderers()
+        bandwidthMbps = 0
+        latencyMs = 0
+        estimatedFPS = 0
+    }
+
+    private func tearDownViewingRenderPipeline() {
+        decoderSyncRefreshOperation?.task.cancel()
+        decoderSyncRefreshOperation = nil
+        decoderSyncRefreshNeeded = false
+        lastDecoderSyncRefreshAt = nil
+        AudioRedirectionManager.shared.disable(for: viewingAudioSessionId)
+        lastViewingInboundScreenTimestamp = nil
+        lastSentViewerStreamConfiguration = nil
+        pendingViewerStreamConfiguration = nil
+        acknowledgedViewerStreamTransaction = nil
+        textureFeedDeliveryGate.clear()
+        textureFeed.update(texture: nil)
+        textureFeed.setPresentationCompletionHandler(nil)
+        displayedFrameMonitor.reset()
+        if viewingRenderersConfigured {
+            stableRenderer.teardown()
+            fluidRenderer.teardown()
+            referenceRenderer.teardown()
+        }
+        viewingRenderersConfigured = false
+        latestViewingRenderMetrics = nil
+        estimatedFPS = 0
+        renderingModeController.resetForNewStream()
+        currentRenderingMode = .stable
+    }
+
+    private func applyPreferredRenderingModeToActiveViewingSession() {
+        guard !controllingDeviceIds.isEmpty else { return }
+        currentRenderingMode = renderingModeController.requestMode(resolvedPreferredRenderingMode())
+    }
+
+    private func didPresentRenderedTexture() {
+        displayedFrameMonitor.recordPresentedFrame(latencyNs: 0, recvBytes: 0)
+        if latestViewingRenderMetrics != nil {
+            let telemetry = renderingModeController.healthMonitor.snapshot(currentMode: currentRenderingMode.rawValue)
+            let bandwidth = telemetry.uptimeSeconds > 0
+                ? Double(telemetry.totalRecvBytes) * 8 / (telemetry.uptimeSeconds * 1_000_000) : 0
+            updateMetrics(RenderMetrics(bandwidthMbps: bandwidth,
+                latencyMilliseconds: Double(telemetry.latencyP50Ns) / 1_000_000))
+        }
+        recordViewingProductFrameEvidenceIfCurrent()
+        if renderingModeController.isProbationActive {
+            renderingModeController.reportProbationFrameSuccess()
+        }
+    }
+
+    private func synchronizeRendererResources(for activeMode: RenderingMode) {
+        guard viewingRenderersConfigured,
+              renderingModeController.currentMode == activeMode,
+              configuredRenderingMode != activeMode else { return }
+        resetViewingRenderers()
+    }
+
+    private func evaluateHighPerformanceRenderHealth(afterPullFor mode: RenderingMode, rendered: Bool) {
+        guard renderingModeController.currentMode == mode else { return }
+        guard !rendered else { return }
+        guard renderingModeController.isProbationActive else { return }
+        if renderingModeController.healthMonitor.isFrozen {
+            renderingModeController.reportProbationFrameFailure()
+        }
+    }
+
+ // MARK: - 公共控制接口
+
+ /// 作为「控制端」连接一个远程设备
+ /// - 注意：NWConnection 必须在外部已 start(queue:)，这里不再重复 start
+    public func startControlling(deviceId: String, connection: NWConnection) async {
+        do {
+            try await startControlling(
+                deviceId: deviceId,
+                connection: connection,
+                remoteVideoFormats: []
+            )
+        } catch {
+            controllingSessionError = error.localizedDescription
+        }
+    }
+
+    public func startControlling(device: DiscoveredDevice, connection: NWConnection) async {
+        do {
+            _ = try await startControlledHostSession(device: device, connection: connection)
+        } catch {
+            controllingSessionError = error.localizedDescription
+        }
+    }
+
+    /// Starts one authenticated host session and waits for its exact stream
+    /// configuration acknowledgement. First-frame presentation remains observable
+    /// through `textureFeed`; a connected transport alone is not startup success.
+    @discardableResult
+    public func startControlledHostSession(
+        device: DiscoveredDevice,
+        connection: NWConnection
+    ) async throws -> String {
+        let deviceId = Self.controlPeerIdentifier(for: device)
+        try await startControlling(
+            deviceId: deviceId,
+            connection: connection,
+            remoteVideoFormats: device.remoteVideoFormats
+        )
+        return deviceId
+    }
+
+    /// The workspace releases held input before demotion and serializes demotion
+    /// of the previous host before promotion of the next host.
+    public func setControlledHostStreamTier(
+        _ tier: ControlledHostSessionPolicy.StreamTier,
+        deviceId: String
+    ) async throws {
+        guard let peer = currentPeer(for: .controlling, deviceId: deviceId) else {
+            throw RemoteControlError.deviceNotConnected
+        }
+        guard viewerStreamConfigurationOperation == nil else {
+            throw ControlledHostSessionError.streamConfigurationInProgress
+        }
+        guard tier != controlledHostStreamTier || lastSentViewerStreamConfiguration == nil else {
+            return
+        }
+        controlledHostStreamTier = tier
+        if tier == .background {
+            stopP2PRealtimeAudioReceiverIfNeeded(peerId: peer.id)
+            AudioRedirectionManager.shared.disable(for: viewingAudioSessionId)
+        }
+        do {
+            try await sendViewerStreamConfiguration(to: peer)
+        } catch {
+            await handleConnectionClosed(peer: peer, error: error)
+            if let terminalError = peer.terminalError { throw terminalError }
+            throw error
+        }
+    }
+
+    public static func controlPeerIdentifier(for device: DiscoveredDevice) -> String {
+        if let deviceId = device.deviceId?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !deviceId.isEmpty {
+            return deviceId
+        }
+        if let uniqueIdentifier = device.uniqueIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !uniqueIdentifier.isEmpty {
+            if #available(macOS 14.0, *) {
+                return PeerTrustLookup.persistentDeviceId(from: uniqueIdentifier) ?? uniqueIdentifier
+            }
+            return uniqueIdentifier
+        }
+        return device.id.uuidString
+    }
+
+    private func startControlling(
+        deviceId: String,
+        connection: NWConnection,
+        remoteVideoFormats: Set<String>
+    ) async throws {
+        // Each manager owns one independent decoder/feed/audio receiver. The
+        // workspace composes these engines and owns admission and focus.
+        guard controllingPeers.isEmpty else {
+            if !controllingPeers.values.contains(where: { $0.connection === connection }) {
+                connection.cancel()
+            }
+            throw ControlledHostSessionError.managerAlreadyControlsHost
+        }
+        guard !Task.isCancelled else {
+            connection.cancel()
+            throw CancellationError()
+        }
+        controllingSessionError = nil
+        viewerInputAccess = RemoteControlAccessTracker()
+        logger.info("🎮 开始控制远程设备: \(deviceId, privacy: .public)")
+        if !remoteVideoFormats.isEmpty {
+            logger.info(
+                "🎥 对端声明可接收视频格式: \(remoteVideoFormats.sorted().joined(separator: ","), privacy: .public)"
+            )
+        }
+
+        let peer = PeerConnection(
+            id: deviceId,
+            role: .controlling,
+            connection: connection,
+            remoteVideoFormats: remoteVideoFormats
+        )
+        replacePeerSessionIfNeeded(with: peer, resetCapturePipeline: false)
+        prepareViewingRenderPipelineForNewStream()
+
+        if #available(macOS 14.0, *) {
+            peer.handshakePeer = PeerIdentifier(deviceId: deviceId, displayName: nil, address: nil)
+        }
+
+ // 启动屏幕数据接收循环
+        startReceivingScreenData(from: peer)
+
+        do {
+            try await establishOutboundSecureChannel(for: peer)
+            guard isCurrentPeer(peer), peer.sessionKeys != nil,
+                  peer.authenticatedRemoteAuthority != nil else {
+                throw RemoteControlError.connectionClosed
+            }
+            try Task.checkCancellation()
+            beginRemoteControlTerminalNotificationTracking(for: peer)
+            try await sendViewerStreamConfiguration(to: peer)
+        } catch {
+            await handleConnectionClosed(peer: peer, error: error)
+            if let terminalError = peer.terminalError { throw terminalError }
+            throw error
+        }
+    }
+
+ /// 停止控制指定设备
+    public func stopControlling(deviceId: String) {
+        logger.info("⏹️ 停止控制远程设备: \(deviceId, privacy: .public)")
+        guard let peer = currentPeer(for: .controlling, deviceId: deviceId) else {
+            _ = removePeer(deviceId: deviceId, role: .controlling)
+            finishRoleTeardownIfNeeded(for: .controlling)
+            return
+        }
+
+        notifyRemoteControlTerminalSessionIfNeeded(
+            peer: peer,
+            kind: .normal,
+            reason: "p2p_user_stop"
+        )
+        endProductEvidenceSession(for: peer, reason: .user)
+        peer.connection.cancel()
+        _ = removePeer(deviceId: deviceId, role: .controlling)
+        if #available(macOS 14.0, *) {
+            releaseSOAState(for: peer)
+        }
+        lastSentViewerStreamConfiguration = nil
+        stopP2PRealtimeAudioReceiverIfNeeded(peerId: deviceId)
+        Task {
+            await peer.outboundFramePump.close()
+        }
+        finishRoleTeardownIfNeeded(for: .controlling)
+    }
+
+ /// 作为「被控制端」开放远程控制
+    public func allowRemoteControl(
+        from deviceId: String,
+        connection: NWConnection,
+        initialData: Data? = nil
+    ) async {
+        logger.info("🖥️ 允许远程控制来自设备: \(deviceId, privacy: .public)")
+
+        let peer = PeerConnection(id: deviceId, role: .beingControlled, connection: connection)
+        replacePeerSessionIfNeeded(with: peer, resetCapturePipeline: true)
+
+        if #available(macOS 14.0, *) {
+            peer.handshakePeer = PeerIdentifier(deviceId: deviceId, displayName: nil, address: nil)
+            logger.info("🔐 RemoteControl P2P handshake armed for \(deviceId, privacy: .public); waiting for MessageA")
+        }
+
+        // 1) 先开始接收对端发来的输入事件 / 流配置
+        startReceivingRemoteEvents(from: peer, initialData: initialData)
+        if #available(macOS 14.0, *), peer.handshakePeer != nil {
+            logger.info("🔐 RemoteControl waiting for secure channel: peer=\(peer.id, privacy: .public)")
+            switch await waitForSecureChannelIfNeeded(for: peer) {
+            case .established:
+                break
+            case .aborted(let reason):
+                logger.warning("⚠️ RemoteControl secure channel aborted for \(peer.id, privacy: .public): \(reason, privacy: .public)")
+                await handleConnectionClosed(
+                    peer: peer,
+                    error: RemoteControlError.handshakeInitializationFailed(reason)
+                )
+                return
+            case .timedOut:
+                logger.warning("⚠️ RemoteControl secure channel was not established in time for \(peer.id, privacy: .public)")
+                await handleConnectionClosed(
+                    peer: peer,
+                    error: RemoteControlError.handshakeInitializationFailed("secure channel timeout")
+                )
+                return
+            }
+        }
+
+        do {
+            guard try await requestRemoteControlSecurityApproval(for: peer) else {
+                await handleConnectionClosed(peer: peer, error: RemoteControlError.permissionDenied)
+                return
+            }
+        } catch {
+            await handleConnectionClosed(peer: peer, error: error)
+            return
+        }
+
+        beginRemoteControlTerminalNotificationTracking(for: peer)
+        let hasInitialStreamConfiguration = await waitForInitialStreamConfigurationIfAvailable(for: peer)
+        guard isCurrentPeer(peer), isBeingControlled else { return }
+        if peer.requestedStreamConfiguration?.isStopRequest == true {
+            logger.info("⏸️ viewer 初始配置要求停止推流，保持被控会话待机: peer=\(peer.id, privacy: .public)")
+            return
+        }
+
+        switch RemoteControlScreenSharingStartupPolicy.decision(
+            hasInitialStreamConfiguration: hasInitialStreamConfiguration
+        ) {
+        case .startImmediately:
+            if screenSharingActive || captureStreamer != nil {
+                logger.info(
+                    "ℹ️ viewer 配置已先行启动推流，跳过 secure-channel 后的重复启动: peer=\(peer.id, privacy: .public)"
+                )
+            } else {
+                await startScreenSharing(to: peer)
+            }
+        case .awaitViewerConfiguration:
+            logger.info(
+                "📺 viewer 首个流配置尚未就绪，保持待机并继续等待已认证配置: peer=\(peer.id, privacy: .public)"
+            )
+        }
+    }
+
+ /// 作为被控制端，关闭来自某设备的远程控制
+    public func stopRemoteControl(from deviceId: String) {
+        stopHostedSession(from: deviceId, reason: .userStopped)
+    }
+
+    private func stopHostedSession(from deviceId: String, reason: RemoteDesktopSessionTermination.Reason) {
+        logger.info("⏹️ 停止被远程控制来自设备: \(deviceId, privacy: .public)")
+        guard let peer = currentPeer(for: .beingControlled, deviceId: deviceId) else {
+            _ = removePeer(deviceId: deviceId, role: .beingControlled)
+            finishRoleTeardownIfNeeded(for: .beingControlled)
+            return
+        }
+
+        let terminationDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        let hasSecurePump = peer.sessionKeys != nil
+        peer.outboundFramePump.stopAcceptingMedia()
+        notifyRemoteControlTerminalSessionIfNeeded(
+            peer: peer,
+            kind: reason.isFailure ? .interrupted : .normal,
+            reason: reason.rawValue
+        )
+        endSecurityNotice(for: peer)
+        endProductEvidenceSession(for: peer, reason: reason.isFailure ? Self.productEvidenceDisconnectReason(for: RemoteControlError.screenCaptureFailed) : .user)
+
+        if activeClipboardPeerId == deviceId {
+            disableActiveClipboardSync()
+        }
+
+        releaseRemoteInput(for: peer, reason: reason.rawValue)
+        if !hasSecurePump { peer.connection.cancel() }
+        _ = removePeer(deviceId: deviceId, role: .beingControlled)
+        if #available(macOS 14.0, *) {
+            releaseSOAState(for: peer)
+        }
+        Task {
+            if hasSecurePump {
+                do { try await RemoteControlSessionTerminationSender.send(reason: reason, over: peer.connection, pump: peer.outboundFramePump, deadlineAt: terminationDeadline) }
+                catch { logger.error("Authenticated host end notice could not be delivered: \(error.localizedDescription, privacy: .private)") }
+            }
+            peer.connection.cancel()
+            await peer.outboundFramePump.close()
+        }
+        if #available(macOS 14.0, *),
+           let sender = detachRealtimeAudioSender(from: peer) {
+            Task { await sender.close(reason: "remote-control-stopped") }
+        }
+        stopInteractionTelemetry(for: deviceId)
+        screenCaptureStartupRetryCountByPeerId.removeValue(forKey: deviceId)
+        invalidateScreenSharingStartupState(for: deviceId)
+
+        finishRoleTeardownIfNeeded(for: .beingControlled)
+    }
+
+    private func terminationMessage(_ reason: RemoteDesktopSessionTermination.Reason) -> String {
+        let key: String
+        switch reason {
+        case .userStopped: key = "remote.session.hostStopped"
+        case .permissionRevoked: key = "remote.session.permissionRevoked"
+        case .captureFailed: key = "remote.session.captureFailed"
+        }
+        return LocalizationManager.shared.localizedString(key)
+    }
+
+    private func isCurrentPeer(_ peer: PeerConnection) -> Bool {
+        guard let current = currentPeer(for: peer.role, deviceId: peer.id) else { return false }
+        return current === peer
+    }
+
+    private func replacePeerSessionIfNeeded(
+        with peer: PeerConnection,
+        resetCapturePipeline: Bool
+    ) {
+        let previousPeer = currentPeer(for: peer.role, deviceId: peer.id)
+        if let previousPeer, previousPeer !== peer {
+            releaseRemoteInput(for: previousPeer, reason: "p2p_session_replaced")
+        }
+        registerPeer(peer)
+
+        guard let previousPeer, previousPeer !== peer else { return }
+
+        if previousPeer.role == .controlling {
+            stopP2PRealtimeAudioReceiverIfNeeded(peerId: previousPeer.id)
+        }
+
+        logger.warning(
+            "🔁 RemoteControl superseding existing session for \(peer.id, privacy: .public)"
+        )
+
+        notifyRemoteControlTerminalSessionIfNeeded(
+            peer: previousPeer,
+            kind: .normal,
+            reason: "p2p_superseded_by_new_session"
+        )
+        if previousPeer.role == .beingControlled {
+            endSecurityNotice(for: previousPeer)
+        }
+        endProductEvidenceSession(for: previousPeer, reason: .sessionReplaced)
+
+        if activeClipboardPeerId == previousPeer.id {
+            disableActiveClipboardSync()
+        }
+
+        stopInteractionTelemetry(for: previousPeer.id)
+        Task {
+            await previousPeer.outboundFramePump.close()
+        }
+        if #available(macOS 14.0, *),
+           let sender = detachRealtimeAudioSender(from: previousPeer) {
+            Task { await sender.close(reason: "session-superseded") }
+        }
+        if #available(macOS 14.0, *) {
+            releaseSOAState(for: previousPeer)
+        }
+
+        if resetCapturePipeline {
+            screenCaptureWatchdogTask?.cancel()
+            screenCaptureWatchdogTask = nil
+            screenCaptureRestartInProgress = false
+            captureStreamer?.stop(inputOwner: previousPeer.inputOwner)
+            captureStreamer = nil
+            realtimeAudioCaptureStreamer?.stop()
+            realtimeAudioCaptureStreamer = nil
+            realtimeAudioCaptureStrictMediaFallbacks = nil
+            screenSharingActive = false
+            screenCaptureStartupRetryCountByPeerId.removeValue(forKey: previousPeer.id)
+            invalidateScreenSharingStartupState(for: previousPeer.id)
+        } else {
+            tearDownViewingRenderPipeline()
+        }
+
+        previousPeer.connection.cancel()
+    }
+
+    @available(macOS 14.0, *)
+    private func recordSOAState(_ pairKey: Data, for peer: PeerConnection) {
+        peer.soaPairKey = pairKey
+    }
+
+    @available(macOS 14.0, *)
+    private func releaseStaleSOAStateBeforeHandshake(for peer: PeerConnection) async throws {
+        if let staleDriver = peer.handshakeDriver {
+            peer.handshakeDriver = nil
+            switch await staleDriver.getCurrentState() {
+            case .idle, .established, .failed:
+                break
+            default:
+                await staleDriver.cancel()
+            }
+        }
+        if let staleLease = peer.soaEstablishedLease {
+            guard await PeerSessionArbiter.shared.clearEstablished(staleLease) else {
+                logger.error(
+                    "⛔️ RemoteControl could not release its exact stale SOA lease for \(peer.id, privacy: .public)"
+                )
+                throw RemoteControlError.handshakeInitializationFailed(
+                    "could not release exact stale remote-control SOA lease"
+                )
+            }
+            peer.soaEstablishedLease = nil
+        }
+    }
+
+    @available(macOS 14.0, *)
+    private func releaseSOAState(for peer: PeerConnection) {
+        let driverToCancel = peer.handshakeDriver
+        let establishedLease = peer.soaEstablishedLease
+        guard peer.soaPairKey != nil || driverToCancel != nil || establishedLease != nil else {
+            return
+        }
+        peer.soaPairKey = nil
+        peer.handshakeDriver = nil
+        peer.soaEstablishedLease = nil
+        Task {
+            if let driverToCancel {
+                switch await driverToCancel.getCurrentState() {
+                case .idle, .established, .failed:
+                    break
+                default:
+                    await driverToCancel.cancel()
+                }
+            }
+            if let establishedLease {
+                _ = await PeerSessionArbiter.shared.clearEstablished(establishedLease)
+            }
+        }
+    }
+
+ // MARK: - 输入事件发送（控制端 -> 被控制端）
+
+    public func sendMouseEvent(_ event: RemoteMouseEvent, to deviceId: String) async throws {
+        try await sendMouseEvent(event, to: deviceId, inputControlLease: viewerInputAccess.access?.lease)
+    }
+
+    func sendMouseEvent(_ event: RemoteMouseEvent, to deviceId: String, inputControlLease: UUID?) async throws {
+        try Task.checkCancellation()
+        guard controlledHostStreamTier == .focused else {
+            throw ControlledHostSessionError.inputRequiresFocusedHost
+        }
+        guard let peer = currentPeer(for: .controlling, deviceId: deviceId) else {
+            throw RemoteControlError.deviceNotConnected
+        }
+        try ensureSecureChannelEstablished(for: peer)
+        guard viewerInputAccess.canSendInput, viewerInputAccess.access?.lease == inputControlLease else {
+            throw ControlledHostSessionError.inputControlNotGranted
+        }
+        let doubleClickInterval = RemoteDesktopSettingsManager.shared.settings
+            .interactionSettings
+            .boundedDoubleClickIntervalMilliseconds
+        let classifiedEvent = outboundMouseClickClassifier.classify(
+            event,
+            peerKey: deviceId,
+            doubleClickIntervalMilliseconds: doubleClickInterval
+        )
+        try await peer.outboundFramePump.sendControlPayload(
+            classifiedEvent, type: .mouseEvent, inputControlLease: inputControlLease
+        )
+    }
+
+    public func sendKeyboardEvent(_ event: RemoteKeyboardEvent, to deviceId: String) async throws {
+        try await sendKeyboardEvent(event, to: deviceId, inputControlLease: viewerInputAccess.access?.lease)
+    }
+
+    func sendKeyboardEvent(_ event: RemoteKeyboardEvent, to deviceId: String, inputControlLease: UUID?) async throws {
+        try Task.checkCancellation()
+        guard controlledHostStreamTier == .focused else {
+            throw ControlledHostSessionError.inputRequiresFocusedHost
+        }
+        guard let peer = currentPeer(for: .controlling, deviceId: deviceId) else {
+            throw RemoteControlError.deviceNotConnected
+        }
+        try ensureSecureChannelEstablished(for: peer)
+        guard viewerInputAccess.canSendInput, viewerInputAccess.access?.lease == inputControlLease else {
+            throw ControlledHostSessionError.inputControlNotGranted
+        }
+        try await peer.outboundFramePump.sendControlPayload(
+            event, type: .keyboardEvent, inputControlLease: inputControlLease
+        )
+    }
+
+ // MARK: - 屏幕共享（被控制端 -> 控制端）
+
+    @available(macOS 14.0, *)
+    private func makeP2PRealtimeAudioSenderIfNeeded(
+        for peer: PeerConnection
+    ) async throws -> RemoteRealtimeMediaAudioSender? {
+        guard let config = peer.requestedStreamConfiguration,
+              config.requestsRealtimeMediaAudio,
+              config.allowsLegacyAudioChunkFallback == false else {
+            return nil
+        }
+        guard let keys = peer.sessionKeys else {
+            throw RemoteControlRealtimeMediaStartupError
+                .missingAuthenticatedMediaSessionKeys
+        }
+        guard let advertisedEndpoint = config.mediaAudioEndpoint else {
+            throw RemoteControlRealtimeMediaStartupError
+                .missingAuthenticatedMediaAudioEndpoint
+        }
+        let interfaceBinding = try SkyBridgeRealtimeMediaInterfaceBinding
+            .resolveAuthenticatedControlPath(
+                connection: peer.connection,
+                advertisedHost: advertisedEndpoint.host,
+                authenticatedSessionEstablished: peer.securityAdmissionApproved
+            )
+        let endpoint = SkyBridgeMediaEndpoint(
+            host: interfaceBinding.authenticatedRemoteHost,
+            port: advertisedEndpoint.port,
+            relayToken: advertisedEndpoint.relayToken,
+            expiresAt: advertisedEndpoint.expiresAt
+        )
+        let mediaSessionId = config.mediaSessionId ?? keys.sessionId
+        var senderToClose: RemoteRealtimeMediaAudioSender?
+        if let existingSender = peer.realtimeAudioSender {
+            let matchesExistingSender = await existingSender.matches(
+                sessionId: mediaSessionId,
+                endpoint: endpoint,
+                mode: config.requestedMediaAudioMode,
+                interfaceBindingIdentity: interfaceBinding.identity
+            )
+            guard isCurrentPeer(peer),
+                  peer.realtimeAudioSender === existingSender else {
+                throw CancellationError()
+            }
+            if matchesExistingSender,
+               let existingLease = peer.realtimeAudioSenderOwnership.currentLease,
+               peer.realtimeAudioSenderOwnership.isCurrent(existingLease) {
+                logger.info(
+                    "🎧 P2P PQC media audio sender reused across video refresh: peer=\(peer.id, privacy: .public) interfaceBound=true"
+                )
+                return existingSender
+            }
+            guard let detachedSender = detachRealtimeAudioSender(
+                from: peer,
+                ifOwnedBy: existingSender
+            ) else {
+                throw CancellationError()
+            }
+            senderToClose = detachedSender
+        }
+
+        // Reserve and publish the pending lease before the first suspension.
+        // Teardown can therefore invalidate an in-flight sender start even
+        // though the concrete sender has not been installed yet.
+        let senderLease = peer.realtimeAudioSenderOwnership.reserve()
+        if let senderToClose {
+            await senderToClose.close(reason: "stream-config-endpoint-or-mode-changed")
+            guard isCurrentPeer(peer),
+                  peer.realtimeAudioSenderOwnership.isCurrent(senderLease) else {
+                throw CancellationError()
+            }
+        }
+
+        let keyMaterial = SkyBridgeMediaKeyMaterial.derive(
+            sendSecret: keys.sendKey,
+            receiveSecret: keys.receiveKey,
+            sessionId: mediaSessionId,
+            transcriptHash: keys.transcriptHash,
+            localRole: keys.role == .initiator ? .initiator : .responder
+        )
+        let terminalPeerId = peer.id
+        let terminalPeerRole = peer.role
+        let terminalPeerIdentity = ObjectIdentifier(peer)
+        let sender = try RemoteRealtimeMediaAudioSender(
+            sessionId: mediaSessionId,
+            endpoint: endpoint,
+            keys: keyMaterial.send,
+            mode: config.requestedMediaAudioMode,
+            interfaceBinding: interfaceBinding,
+            transportTerminalFailureHandler: { [weak self, terminalPeerId, terminalPeerRole, terminalPeerIdentity, senderLease] error in
+                Task { @MainActor [weak self] in
+                    guard let self,
+                          let peer = self.currentPeer(
+                            for: terminalPeerRole,
+                            deviceId: terminalPeerId
+                          ),
+                          ObjectIdentifier(peer) == terminalPeerIdentity,
+                          peer.realtimeAudioSenderOwnership.isCurrent(senderLease) else {
+                        return
+                    }
+                    await self.failStrictMediaCapture(
+                        for: peer,
+                        reason: Self.realtimeAudioStartupFailureReason(error),
+                        component: "audio-transport-runtime",
+                        owner: .realtimeAudioSender(senderLease)
+                    )
+                }
+            }
+        )
+        do {
+            try await sender.start()
+        } catch {
+            if peer.realtimeAudioSenderOwnership.isCurrent(senderLease) {
+                peer.realtimeAudioSenderOwnership.invalidate()
+            }
+            await sender.close(reason: "sender-start-failed")
+            throw error
+        }
+        guard isCurrentPeer(peer),
+              peer.realtimeAudioSenderOwnership.isCurrent(senderLease) else {
+            await sender.close(reason: "stale-sender-start")
+            throw CancellationError()
+        }
+        peer.realtimeAudioSender = sender
+        RemoteControlSmokeStatusWriter.append(
+            "audio-route-binding-derived session=\(peer.id) source=authenticated-control-path interfaceBound=1 interfaceClass=infrastructure scopeMatch=1"
+        )
+        return sender
+    }
+
+    @available(macOS 14.0, *)
+    private func detachRealtimeAudioSender(
+        from peer: PeerConnection,
+        ifOwnedBy expectedSender: RemoteRealtimeMediaAudioSender? = nil
+    ) -> RemoteRealtimeMediaAudioSender? {
+        let sender = peer.realtimeAudioSender
+        if let expectedSender {
+            guard let sender, sender === expectedSender else {
+                return nil
+            }
+        }
+        peer.realtimeAudioSender = nil
+        peer.realtimeAudioSenderOwnership.invalidate()
+        return sender
+    }
+
+    private static func remoteHost(from endpoint: NWEndpoint) -> String? {
+        guard case .hostPort(let host, _) = endpoint else { return nil }
+        return "\(host)"
+    }
+
+    private func beginProductEvidenceSessionIfPossible(
+        for peer: PeerConnection,
+        keys: SessionKeys
+    ) {
+        guard isCurrentPeer(peer), peer.productEvidenceOwner == nil,
+              let sessionReference = P2PEvidenceReference.sessionIncarnation(
+                sessionID: keys.sessionId,
+                transcriptHash: keys.transcriptHash
+              ),
+              let routeClass = ProductReleaseEvidenceRouteClass.current(
+                for: peer.connection
+              ) else {
+            return
+        }
+        guard let owner = ProductReleaseEvidenceRecorder.shared.beginSession(
+            product: .macOSApp,
+            transport: .p2p,
+            sessionReference: sessionReference,
+            routeClass: routeClass
+        ) else { return }
+        guard ProductReleaseEvidenceRecorder.shared.recordP2PSessionAuthenticated(
+            owner: owner,
+            role: keys.role == .initiator ? .initiator : .responder,
+            negotiatedSuite: keys.negotiatedSuite
+        ) else {
+            _ = ProductReleaseEvidenceRecorder.shared.endSession(
+                owner: owner,
+                reason: .protocolFailure
+            )
+            return
+        }
+        peer.productEvidenceOwner = owner
+    }
+
+    private func endProductEvidenceSession(
+        for peer: PeerConnection,
+        reason: ProductReleaseEvidenceDisconnectReason
+    ) {
+        guard let owner = peer.productEvidenceOwner else { return }
+        peer.productEvidenceOwner = nil
+        _ = ProductReleaseEvidenceRecorder.shared.endSession(owner: owner, reason: reason)
+    }
+
+    private static func productEvidenceDisconnectReason(
+        for error: Error
+    ) -> ProductReleaseEvidenceDisconnectReason {
+        if error is NWError { return .peer }
+        guard let remoteControlError = error as? RemoteControlError else {
+            return .protocolFailure
+        }
+        switch remoteControlError {
+        case .untrustedPeer:
+            return .trustInvalidated
+        case .connectionClosed:
+            return .peer
+        case .deviceNotConnected, .invalidMessageLength, .permissionDenied,
+             .screenCaptureFailed, .handshakeInitializationFailed:
+            return .protocolFailure
+        }
+    }
+
+    private func recordViewingProductFrameEvidenceIfCurrent() {
+        guard let context = viewingProductFrameEvidenceContext,
+              let peer = controllingPeers.values.first(where: {
+                ObjectIdentifier($0) == context.peerObjectIdentifier
+              }),
+              peer.productEvidenceOwner == context.owner,
+              isCurrentPeer(peer) else {
+            viewingProductFrameEvidenceContext = nil
+            return
+        }
+        _ = ProductReleaseEvidenceRecorder.shared.recordLocalFramePresented(
+            owner: context.owner,
+            bytes: context.bytes,
+            width: context.width,
+            height: context.height
+        )
+        viewingProductFrameEvidenceContext = nil
+    }
+
+    private func remoteControlSecurityIdentityAliases(for peer: PeerConnection) -> [String] {
+        var aliases: [String] = [
+            peer.id,
+            Self.remoteHost(from: peer.connection.endpoint),
+            peer.connection.currentPath?.remoteEndpoint.flatMap(Self.remoteHost(from:))
+        ].compactMap { $0 }
+
+        if #available(macOS 14.0, *), let handshakePeer = peer.handshakePeer {
+            aliases.append(contentsOf: [
+                handshakePeer.deviceId,
+                handshakePeer.displayName,
+                handshakePeer.address
+            ].compactMap { $0 })
+        }
+
+        var deduped: [String] = []
+        var seen = Set<String>()
+        for alias in aliases {
+            let trimmed = alias.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            guard seen.insert(trimmed.lowercased()).inserted else { continue }
+            deduped.append(trimmed)
+        }
+        return deduped
+    }
+
+    private func recordRemoteControlSecurityIdentity(
+        _ identity: RemoteControlSecurityIdentity?,
+        from source: String,
+        for peer: PeerConnection
+    ) {
+        guard let identity, !identity.isEmpty else { return }
+
+        let aliases = remoteControlSecurityIdentityAliases(for: peer)
+            + [identity.deviceId, identity.deviceName].compactMap { $0 }
+        RemoteControlSecurityPeerIdentityStore.record(identity: identity, aliases: aliases)
+        RemoteControlSmokeStatusWriter.append(
+            """
+            remoteControlSecurityIdentityRecorded session=\(peer.id) source=\(source) \
+            account=\(Self.noticeMetadataPresent(identity.accountDisplayName) ? "present" : "missing") \
+            nebula=\(Self.noticeMetadataPresent(identity.nebulaId) ? "present" : "missing") \
+            device=\(Self.noticeMetadataPresent(identity.deviceId) || Self.noticeMetadataPresent(identity.deviceName) ? "present" : "missing")
+            """
+        )
+    }
+
+    private func waitForRemoteControlSecurityIdentityMetadata(
+        for peer: PeerConnection,
+        aliases: [String],
+        timeout: Duration = RemoteControlStartupTiming.noticeIdentityTimeout
+    ) async -> RemoteControlSecurityIdentity? {
+        let clock = ContinuousClock()
+        let deadline = clock.now + timeout
+        var identity = RemoteControlSecurityPeerIdentityStore.identity(forAliases: aliases)
+
+        while clock.now < deadline {
+            guard isCurrentPeer(peer) else { return nil }
+            if Self.noticeMetadataPresent(identity?.accountDisplayName),
+               Self.noticeMetadataPresent(identity?.nebulaId) {
+                return identity
+            }
+            do {
+                try await Task.sleep(for: .milliseconds(100))
+            } catch {
+                return nil
+            }
+            identity = RemoteControlSecurityPeerIdentityStore.identity(forAliases: aliases)
+        }
+
+        return identity
+    }
+
+    private static func noticeMetadataPresent(_ value: String?) -> Bool {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            return false
+        }
+        return !trimmed.isEmpty && trimmed != "missing" && trimmed != "-"
+    }
+
+    private func hasUserVisibleRemoteControlSession(_ peer: PeerConnection) -> Bool {
+        if peer.securityAdmissionApproved {
+            return true
+        }
+        if #available(macOS 14.0, *), peer.sessionKeys != nil {
+            return true
+        }
+        return false
+    }
+
+    private func remoteControlNotificationDeviceName(for peer: PeerConnection) -> String? {
+        if let identity = RemoteControlSecurityPeerIdentityStore.identity(
+            forAliases: remoteControlSecurityIdentityAliases(for: peer)
+        ) {
+            if Self.noticeMetadataPresent(identity.deviceName) {
+                return identity.deviceName
+            }
+            if Self.noticeMetadataPresent(identity.deviceId) {
+                return identity.deviceId
+            }
+        }
+
+        if #available(macOS 14.0, *), let handshakePeer = peer.handshakePeer {
+            if Self.noticeMetadataPresent(handshakePeer.displayName) {
+                return handshakePeer.displayName
+            }
+            if Self.noticeMetadataPresent(handshakePeer.deviceId) {
+                return handshakePeer.deviceId
+            }
+        }
+
+        return Self.noticeMetadataPresent(peer.id) ? peer.id : nil
+    }
+
+    private func beginRemoteControlTerminalNotificationTracking(for peer: PeerConnection) {
+        RemoteDesktopSessionNotificationService.shared.beginSession(
+            sessionID: peer.id,
+            transport: "p2p",
+            role: peer.role.rawValue
+        )
+    }
+
+    private func notifyRemoteControlTerminalSessionIfNeeded(
+        peer: PeerConnection,
+        kind: RemoteDesktopSessionTerminationKind,
+        reason: String
+    ) {
+        guard hasUserVisibleRemoteControlSession(peer) else { return }
+        RemoteDesktopSessionNotificationService.shared.sendTerminalNotificationIfNeeded(
+            sessionID: peer.id,
+            deviceName: remoteControlNotificationDeviceName(for: peer),
+            transport: "p2p",
+            role: peer.role.rawValue,
+            kind: kind,
+            reason: reason
+        )
+    }
+
+    private func requestRemoteControlSecurityApproval(for peer: PeerConnection) async throws -> Bool {
+        guard isCurrentPeer(peer) else { return false }
+        guard let authenticatedKeys = peer.sessionKeys else {
+            throw RemoteControlError.handshakeInitializationFailed("host approval requires an authenticated session")
+        }
+
+        // The first authenticated request fixes legacy versus managed input
+        // semantics before the user approves this exact connection.
+        let configurationDeadline = ContinuousClock.now + .seconds(30)
+        while peer.pendingRequestedStreamConfiguration == nil {
+            guard isCurrentPeer(peer) else { throw RemoteControlError.connectionClosed }
+            guard ContinuousClock.now < configurationDeadline else {
+                throw ControlledHostSessionError.streamConfigurationAcknowledgementTimedOut
+            }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+
+        if let keys = peer.sessionKeys {
+            beginProductEvidenceSessionIfPossible(for: peer, keys: keys)
+        }
+
+        let noticeCenter = RemoteControlSecurityNoticeCenter.shared
+        let localIdentity = noticeCenter.localIdentitySnapshot()
+        let remoteIdentity = await waitForRemoteControlSecurityIdentityMetadata(
+            for: peer,
+            aliases: remoteControlSecurityIdentityAliases(for: peer)
+        )
+        let handshakePeer: PeerIdentifier? = {
+            if #available(macOS 14.0, *) {
+                return peer.handshakePeer
+            }
+            return nil
+        }()
+        let cryptoSuite = remoteControlSecurityCryptoSuite(for: peer)
+        let descriptor = RemoteControlSecurityDescriptor(
+            sessionId: authenticatedKeys.sessionId,
+            sessionEvidenceReference: peer.sessionKeys.flatMap {
+                P2PEvidenceReference.sessionIncarnation(
+                    sessionID: $0.sessionId,
+                    transcriptHash: $0.transcriptHash
+                )
+            },
+            transportKind: .p2p,
+            remoteIPAddress: Self.remoteHost(from: peer.connection.endpoint),
+            remoteDeviceId: remoteIdentity?.deviceId ?? handshakePeer?.deviceId ?? peer.id,
+            remoteDeviceName: remoteIdentity?.deviceName ?? handshakePeer?.displayName,
+            remoteAccountDisplayName: remoteIdentity?.accountDisplayName,
+            remoteNebulaId: remoteIdentity?.nebulaId,
+            localAccountDisplayName: localIdentity?.accountDisplayName,
+            localNebulaId: localIdentity?.nebulaId,
+            cryptoSuite: cryptoSuite ?? ""
+        )
+        peer.securityNoticeId = descriptor.id
+        noticeCenter.setDisconnectHandler(for: descriptor.id) { [weak self, weak peer] in
+            guard let self, let peer, self.isCurrentPeer(peer) else { return }
+            self.stopRemoteControl(from: peer.id)
+        }
+        if peer.pendingRequestedStreamConfiguration?.remoteControlAccessVersion == RemoteControlAccess.currentVersion {
+            try noticeCenter.registerSharedControl(
+                for: descriptor.id,
+                releaseInput: { [weak self, weak peer] in
+                    guard let self, let peer, self.isCurrentPeer(peer) else {
+                        throw RemoteControlError.connectionClosed
+                    }
+                    self.disableClipboardSyncIfActive(for: peer.id)
+                    let release = self.releaseRemoteInput(for: peer, reason: "input_control_transfer")
+                    guard release.failedReleaseCount == 0, !release.skippedForMissingPermission else {
+                        throw ControlledHostSessionError.inputReleaseFailed
+                    }
+                },
+                publishAccess: { [weak self, weak peer] access in
+                    guard let self, let peer, self.isCurrentPeer(peer) else {
+                        throw RemoteControlError.connectionClosed
+                    }
+                    try await self.publishInputControlAccess(access, for: peer)
+                }
+            )
+        }
+
+        let decision = await noticeCenter.requestApproval(descriptor)
+        guard decision == .approved, isCurrentPeer(peer) else {
+            peer.securityAdmissionApproved = false
+            return false
+        }
+        peer.securityAdmissionApproved = true
+        if let pendingConfiguration = peer.pendingRequestedStreamConfiguration {
+            peer.pendingRequestedStreamConfiguration = nil
+            do {
+                try await applyViewerStreamConfiguration(pendingConfiguration, for: peer)
+            } catch {
+                peer.securityAdmissionApproved = false
+                logger.error(
+                    "⛔️ 已批准会话的暂存流配置事务无效: peer=\(peer.id, privacy: .public)"
+                )
+                return false
+            }
+        }
+        return true
+    }
+
+    private func publishInputControlAccess(_ access: RemoteControlAccess, for peer: PeerConnection) async throws {
+        guard isCurrentPeer(peer), peer.requestedStreamConfiguration != nil,
+              let noticeID = peer.securityNoticeId,
+              RemoteControlSecurityNoticeCenter.shared.controlAccess(for: noticeID) == access else {
+            throw RemoteControlError.connectionClosed
+        }
+        let deadline = Task { @MainActor [weak self, weak peer] in
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            guard let self, let peer, self.isCurrentPeer(peer) else { return }
+            await self.handleConnectionClosed(peer: peer, error: ControlledHostSessionError.inputControlDeliveryTimedOut)
+        }
+        defer { deadline.cancel() }
+        try await sendRemoteControlPayload(access, type: .controlAccess, to: peer)
+        guard isCurrentPeer(peer) else { throw RemoteControlError.connectionClosed }
+        configureClipboardSync(for: peer)
+    }
+
+    private func remoteControlSecurityCryptoSuite(for peer: PeerConnection) -> String? {
+        if #available(macOS 14.0, *), let keys = peer.sessionKeys {
+            guard keys.negotiatedSuite.isKnown else { return nil }
+            let rawValue = keys.negotiatedSuite.rawValue
+            return keys.negotiatedSuite.isPQCGroup ? "\(rawValue) PQC" : "\(rawValue) secure channel"
+        }
+        return nil
+    }
+
+ /// 启动本机屏幕捕获 + 硬件编码 + 推流
+    private func startScreenSharing(to peer: PeerConnection) async {
+        guard isCurrentPeer(peer) else {
+            logger.info("ℹ️ 忽略过期远控会话的推流启动: \(peer.id, privacy: .public)")
+            return
+        }
+        guard peer.role != .beingControlled || peer.securityAdmissionApproved else {
+            logger.warning("⛔️ 未经批准的远控推流启动被阻断: peer=\(peer.id, privacy: .public)")
+            RemoteControlSmokeStatusWriter.append(
+                "remoteControlStartBlocked session=\(peer.id) transport=p2p reason=awaiting_security_notice"
+            )
+            return
+        }
+        guard let acknowledgedConfiguration = peer.requestedStreamConfiguration else {
+            logger.info("⏳ 忽略尚无已确认 viewer 配置的推流启动: peer=\(peer.id, privacy: .public)")
+            return
+        }
+        if acknowledgedConfiguration.isStopRequest {
+            logger.info("⏸️ 忽略 viewer 已停止会话的推流启动: peer=\(peer.id, privacy: .public)")
+            return
+        }
+        guard let attemptGeneration = screenSharingAttemptGate.beginAttemptIfIdle(for: peer.id) else {
+            logger.info(
+                "ℹ️ 忽略重复的远控推流启动：peer=\(peer.id, privacy: .public) reason=start-already-in-progress"
+            )
+            return
+        }
+        defer {
+            let shouldRestartLatest = screenSharingAttemptGate.finishAttempt(
+                attemptGeneration,
+                for: peer.id
+            )
+            if shouldRestartLatest {
+                Task { @MainActor [weak self, weak peer] in
+                    guard let self, let peer,
+                          self.isCurrentPeer(peer),
+                          peer.requestedStreamConfiguration?.isStopRequest != true else {
+                        return
+                    }
+                    await self.startScreenSharing(to: peer)
+                }
+            }
+        }
+        logger.info("📺 开始屏幕共享（ScreenCaptureKit + 硬件编码） -> \(peer.id, privacy: .public)")
+
+        if !(await ensureScreenCapturePermission()) {
+            logger.warning(
+                "⚠️ 屏幕录制权限预检未通过；若你刚授权，请先完整退出并重新打开 App。仍将继续尝试启动采集。"
+            )
+        }
+        guard isCurrentScreenSharingAttempt(attemptGeneration, for: peer) else {
+            logger.info("ℹ️ 推流启动在权限预检后已过期，取消: peer=\(peer.id, privacy: .public)")
+            return
+        }
+
+        screenCaptureWatchdogTask?.cancel()
+        screenCaptureWatchdogTask = nil
+        captureStreamer?.stop(inputOwner: peer.inputOwner)
+        captureStreamer = nil
+        screenSharingActive = false
+
+        let streamer = ScreenCaptureKitStreamer()
+        let request = effectiveStreamRequest(for: peer)
+        let streamConfiguration = peer.requestedStreamConfiguration
+        let strictMediaFallbacks = streamConfiguration?.allowsDegradedMediaFallbacks == false
+            || streamConfiguration?.requiresExtremePerformanceValidation == true
+        let audioRedirectionEnabled = streamConfiguration?.audioRedirectionEnabled == true
+        let realtimeMediaAudioRequested = streamConfiguration?.requestsRealtimeMediaAudio == true
+        let legacyAudioFallbackEnabled = streamConfiguration?.allowsLegacyAudioChunkFallback == true
+        let existingRealtimeAudioSender: RemoteRealtimeMediaAudioSender?
+        if #available(macOS 14.0, *) {
+            existingRealtimeAudioSender = peer.realtimeAudioSender
+        } else {
+            existingRealtimeAudioSender = nil
+        }
+        let realtimeAudioSender: RemoteRealtimeMediaAudioSender?
+        if #available(macOS 14.0, *) {
+            do {
+                realtimeAudioSender = try await makeP2PRealtimeAudioSenderIfNeeded(for: peer)
+            } catch {
+                guard isCurrentScreenSharingAttempt(attemptGeneration, for: peer) else {
+                    logger.info(
+                        "ℹ️ 忽略过期屏幕共享 attempt 的 audio sender 启动结果: peer=\(peer.id, privacy: .public)"
+                    )
+                    return
+                }
+                let reason = Self.realtimeAudioStartupFailureReason(error)
+                let failureAction = RemoteControlRealtimeMediaStartupPolicy
+                    .failureAction(
+                        strictMediaFallbacks: strictMediaFallbacks,
+                        audioRedirectionEnabled: audioRedirectionEnabled,
+                        realtimeMediaAudioRequested: realtimeMediaAudioRequested,
+                        legacyAudioFallbackEnabled: legacyAudioFallbackEnabled
+                    )
+                let strictAudioRequired = failureAction == .failSession
+                RemoteControlSmokeStatusWriter.append(
+                    "audioTxSenderStartFailed session=\(peer.id) reason=\(reason) strict=\(strictAudioRequired ? 1 : 0) action=\(strictAudioRequired ? "strict-fail-closed" : "video-preserved")"
+                )
+                if failureAction == .failSession {
+                    await failStrictMediaCapture(
+                        for: peer,
+                        reason: "audio-sender-start-\(reason)",
+                        component: "audio",
+                        owner: .screenSharingAttempt(attemptGeneration)
+                    )
+                    return
+                }
+                logger.warning(
+                    "⚠️ P2P PQC media audio sender unavailable; explicit non-strict video-only policy applied: peer=\(peer.id, privacy: .public) reason=\(reason, privacy: .public)"
+                )
+                realtimeAudioSender = nil
+            }
+        } else {
+            realtimeAudioSender = nil
+        }
+        guard isCurrentScreenSharingAttempt(attemptGeneration, for: peer) else {
+            if let realtimeAudioSender,
+               let detachedSender = detachRealtimeAudioSender(
+                from: peer,
+                ifOwnedBy: realtimeAudioSender
+               ) {
+                await detachedSender.close(reason: "stale-screen-sharing-audio-sender-start")
+            }
+            logger.info(
+                "ℹ️ 推流启动在 audio sender 准备后已过期，取消: peer=\(peer.id, privacy: .public)"
+            )
+            return
+        }
+        let didReuseRealtimeAudioSender = existingRealtimeAudioSender != nil
+            && realtimeAudioSender != nil
+            && existingRealtimeAudioSender === realtimeAudioSender
+        let shouldPreserveRealtimeAudioCaptureStreamer = didReuseRealtimeAudioSender
+            && realtimeAudioCaptureStrictMediaFallbacks == strictMediaFallbacks
+        let preservedRealtimeAudioCaptureStreamer = shouldPreserveRealtimeAudioCaptureStreamer
+            ? realtimeAudioCaptureStreamer
+            : nil
+        if !shouldPreserveRealtimeAudioCaptureStreamer {
+            realtimeAudioCaptureStreamer?.stop()
+            realtimeAudioCaptureStreamer = nil
+            realtimeAudioCaptureStrictMediaFallbacks = nil
+        }
+        let preferredAudioEncoding = RemoteDesktopAudioChunkPayload.Encoding(
+            rawValue: peer.requestedStreamConfiguration?.preferredAudioEncoding ?? ""
+        ) ?? .pcmS16LE
+        let activeAudioPath: String
+        if realtimeAudioSender != nil {
+            activeAudioPath = "pqc-opus"
+        } else if legacyAudioFallbackEnabled {
+            activeAudioPath = "legacy-\(preferredAudioEncoding.rawValue)"
+        } else if audioRedirectionEnabled {
+            activeAudioPath = "requested-no-media-endpoint"
+        } else {
+            activeAudioPath = "disabled"
+        }
+        var policy = RemoteControlStreamPolicySelector.select(
+            request: request,
+            peerFormats: effectiveRemoteVideoFormats(for: peer),
+            thermalState: ProcessInfo.processInfo.thermalState,
+            isAppleSilicon: RemoteControlStreamRequestPolicy.isAppleSiliconRuntime
+        )
+        policy = effectiveCapturePolicy(policy, for: peer)
+        if legacyAudioFallbackEnabled {
+            policy = policy.protectingRealtimeAudio()
+        }
+        streamer.onCaptureIssue = { [weak self, weak peer, strictMediaFallbacks, attemptGeneration] reason in
+            guard let self, let peer else { return }
+            Task { @MainActor [weak self, weak peer] in
+                guard let self, let peer,
+                      self.isCurrentScreenSharingAttempt(attemptGeneration, for: peer) else {
+                    return
+                }
+                if strictMediaFallbacks,
+                   reason.hasPrefix("strict-") || self.captureEncodeStatus(from: reason) != nil {
+                    await self.failStrictMediaCapture(
+                        for: peer,
+                        reason: reason,
+                        component: "video",
+                        owner: .screenSharingAttempt(attemptGeneration)
+                    )
+                    return
+                }
+                if !strictMediaFallbacks {
+                    self.applyCaptureCompatibilityOverrideIfNeeded(
+                        for: peer,
+                        reason: reason,
+                        activePolicy: policy
+                    )
+                }
+                await self.restartScreenSharingIfNeeded(
+                    for: peer,
+                    reason: reason,
+                    expectedAttemptGeneration: attemptGeneration
+                )
+            }
+        }
+
+        let outboundFramePump = peer.outboundFramePump
+        let videoFrameSequence = peer.videoFrameSequence
+        let videoFrameSubmissionPipe = RemoteControlEncodedFrameSubmissionPipe(
+            outboundFramePump: outboundFramePump
+        )
+        streamer.onEncodedFrame = { data, width, height, frameType, isSyncFrame in
+            let fmt: String
+            switch frameType {
+            case .hevc: fmt = "hevc"
+            case .h264: fmt = "h264"
+            case .bgra:
+                // 兼容 iOS：当 ScreenCaptureKitStreamer 运行在“JPEG 模式”时仍会用 .bgra 标记
+                if data.count >= 2, data[0] == 0xFF, data[1] == 0xD8 {
+                    fmt = "jpeg"
                 } else {
- // data == nil 且无 error，一般视为连接关闭
-                    cont.resume(returning: Data())
+                    fmt = "bgra"
+                }
+            }
+            let encodedAt = Date().timeIntervalSince1970
+            let frame = ScreenData(
+                width: width,
+                height: height,
+                imageData: data,
+                timestamp: encodedAt,
+                format: fmt,
+                isSyncFrame: isSyncFrame,
+                sequenceNumber: videoFrameSequence.next()
+            )
+            videoFrameSubmissionPipe.submit(frame)
+        }
+        await outboundFramePump.setSyncRefreshHandler { [weak streamer] in
+            Task { @MainActor [weak streamer] in
+                streamer?.requestKeyFrameRefresh(reason: "outbound-frame-drop", count: 1)
+            }
+        }
+        streamer.onDamageReport = { report in
+            Task.detached(priority: .utility) {
+                await outboundFramePump.submitDamageReport(report)
+            }
+        }
+        if legacyAudioFallbackEnabled {
+            streamer.onCapturedAudioChunk = { [outboundFramePump] chunk in
+                let wirePayload = RemoteDesktopAudioChunkWire.encode(chunk)
+                Task.detached(priority: .userInitiated) {
+                    await outboundFramePump.submitAudioPayload(wirePayload)
+                }
+            }
+        } else {
+            streamer.onCapturedAudioChunk = nil
+        }
+        let realtimeAudioCaptureStreamerForAttempt: ScreenCaptureKitStreamer?
+        if let realtimeAudioSender {
+            peer.realtimeAudioSender = realtimeAudioSender
+            if preservedRealtimeAudioCaptureStreamer != nil {
+                realtimeAudioCaptureStreamerForAttempt = nil
+            } else {
+                let realtimePCMSubmissionPipe = RemoteRealtimePCM16SubmissionPipe(sender: realtimeAudioSender)
+                let audioStreamer = ScreenCaptureKitStreamer()
+                audioStreamer.onCapturedPCM16AudioChunk = { [realtimePCMSubmissionPipe] chunk in
+                    realtimePCMSubmissionPipe.submit(chunk)
+                }
+                audioStreamer.onCaptureIssue = { [weak self, weak peer, strictMediaFallbacks, attemptGeneration] reason in
+                    guard let self, let peer else { return }
+                    Task { @MainActor [weak self, weak peer] in
+                        guard let self, let peer,
+                              self.isCurrentScreenSharingAttempt(attemptGeneration, for: peer) else {
+                            return
+                        }
+                        if strictMediaFallbacks {
+                            await self.failStrictMediaCapture(
+                                for: peer,
+                                reason: reason,
+                                component: "audio",
+                                owner: .screenSharingAttempt(attemptGeneration)
+                            )
+                            return
+                        }
+                        await self.restartScreenSharingIfNeeded(
+                            for: peer,
+                            reason: "p2p-realtime-audio-\(reason)",
+                            expectedAttemptGeneration: attemptGeneration
+                        )
+                    }
+                }
+                realtimeAudioCaptureStreamerForAttempt = audioStreamer
+            }
+            streamer.onCapturedPCM16AudioChunk = nil
+        } else {
+            realtimeAudioCaptureStreamerForAttempt = nil
+            streamer.onCapturedPCM16AudioChunk = nil
+        }
+        if audioRedirectionEnabled && realtimeMediaAudioRequested && !legacyAudioFallbackEnabled && realtimeAudioSender == nil {
+            logger.info(
+                "🎧 P2P 音频请求 PQC media plane，但媒体端点不可用；保持视频优先并禁用 legacy 音频: peer=\(peer.id, privacy: .public)"
+            )
+        } else if realtimeAudioSender != nil {
+            logger.info(
+                "🎧 P2P 音频已接入 PQC media plane，禁止回退共享远控通道: peer=\(peer.id, privacy: .public)"
+            )
+        }
+        logger.info(
+            """
+            📺 推流参数: \(Int(policy.preferredSize.width))x\(Int(policy.preferredSize.height)) \
+            @\(policy.targetFrameRate)fps gop=\(policy.keyFrameInterval) \
+            codec=\(Self.codecName(policy.codec), privacy: .public) \
+            reason=\(policy.reason, privacy: .public) \
+            audio=\(audioRedirectionEnabled, privacy: .public) \
+            audioTransport=\(peer.requestedStreamConfiguration?.audioTransport ?? "legacy-default", privacy: .public) \
+            legacyAudioFallback=\(legacyAudioFallbackEnabled, privacy: .public) \
+            audioCodec=\(preferredAudioEncoding.rawValue, privacy: .public) \
+            activeAudioPath=\(activeAudioPath, privacy: .public) \
+            videoCapturesAudio=\(legacyAudioFallbackEnabled, privacy: .public) \
+            realtimeAudioCapture=\(preservedRealtimeAudioCaptureStreamer != nil ? "preserved-sck" : (realtimeAudioCaptureStreamerForAttempt == nil ? "none" : "separate-sck"), privacy: .public) \
+            mediaFallbackPolicy=\(streamConfiguration?.mediaFallbackPolicy ?? "default", privacy: .public) \
+            strictMediaFallbacks=\(strictMediaFallbacks, privacy: .public) \
+            preserveExactVisibleSize=\(policy.preserveExactVisibleSize, privacy: .public) \
+            build=\(Self.remoteControlBuildFingerprint, privacy: .public)
+            """
+        )
+
+        var startedRealtimeAudioCaptureStreamer: ScreenCaptureKitStreamer?
+        var didCloseRealtimeAudioSenderForAudioStartFailure = false
+
+        do {
+            beginRealtimeStreamingActivity(for: peer, strictMediaFallbacks: strictMediaFallbacks)
+            await syncOutboundFramePump(for: peer)
+            guard isCurrentScreenSharingAttempt(attemptGeneration, for: peer) else {
+                throw CancellationError()
+            }
+            try await streamer.start(
+                preferredCodec: policy.codec,
+                preferredSize: policy.preferredSize,
+                targetFPS: policy.targetFrameRate,
+                keyFrameInterval: policy.keyFrameInterval,
+                captureCursorInVideo: !(peer.requestedStreamConfiguration?.separateCursorChannelEnabled ?? false),
+                captureSystemAudio: legacyAudioFallbackEnabled,
+                audioEncoding: preferredAudioEncoding,
+                failFastOnMediaFallbacks: strictMediaFallbacks,
+                preserveExactVisibleSize: policy.preserveExactVisibleSize,
+                lowLatencyMode: peer.requestedStreamConfiguration?.lowLatencyMode
+                    ?? RemoteDesktopSettingsManager.shared.settings.displaySettings.lowLatencyMode,
+                videoCompressionLevelPercent: streamConfiguration?.videoCompressionLevel
+                    ?? RemoteDesktopSettingsManager.shared.settings.displaySettings.boundedCompressionLevelPercent,
+                bitstreamFormat: .annexB,
+                // 采集哪块显示器：优先控制端选择，其次本机设置；nil = 主屏。
+                preferredDisplayID: (peer.requestedStreamConfiguration?.captureDisplayID).map { CGDirectDisplayID($0) }
+                    ?? RemoteDesktopSettingsManager.shared.settings.displaySettings.captureDisplayID.map { CGDirectDisplayID($0) },
+                inputOwner: peer.inputOwner
+            )
+            guard isCurrentScreenSharingAttempt(attemptGeneration, for: peer) else {
+                throw CancellationError()
+            }
+            if let realtimeAudioCaptureStreamerForAttempt {
+                logger.info(
+                    "🎧 启动独立 P2P realtime 音频采集流，主视频流保持 capturesAudio=false: peer=\(peer.id, privacy: .public)"
+                )
+                do {
+                    try await realtimeAudioCaptureStreamerForAttempt.start(
+                        preferredCodec: .h264,
+                        preferredSize: CGSize(width: 16, height: 16),
+                        targetFPS: 1,
+                        keyFrameInterval: 10,
+                        captureCursorInVideo: false,
+                        captureVideoOutput: false,
+                        captureSystemAudio: true,
+                        audioEncoding: .pcmS16LE,
+                        failFastOnMediaFallbacks: strictMediaFallbacks,
+                        lowLatencyMode: true,
+                        bitstreamFormat: .annexB
+                    )
+                    startedRealtimeAudioCaptureStreamer = realtimeAudioCaptureStreamerForAttempt
+                } catch {
+                    guard isCurrentScreenSharingAttempt(attemptGeneration, for: peer) else {
+                        throw CancellationError()
+                    }
+                    if strictMediaFallbacks {
+                        logger.error(
+                            "⛔️ 严格媒体策略要求远控音频成功启动，已终止远控推流: peer=\(peer.id, privacy: .public) reason=p2p-realtime-audio-start-failed err=\(error.localizedDescription, privacy: .public)"
+                        )
+                        RemoteControlSmokeStatusWriter.append(
+                            "audioTxCaptureStartFailed peer=\(peer.id) reason=p2p-realtime-audio-start-failed action=strict-fail-closed error=\(Self.sanitizeTelemetryToken(error.localizedDescription))"
+                        )
+                        streamer.stop(inputOwner: peer.inputOwner)
+                        realtimeAudioCaptureStreamerForAttempt.stop()
+                        await failStrictMediaCapture(
+                            for: peer,
+                            reason: "p2p-realtime-audio-start-failed",
+                            component: "audio",
+                            owner: .screenSharingAttempt(attemptGeneration)
+                        )
+                        return
+                    }
+                    logger.error(
+                        "❌ 启动独立 P2P realtime 音频采集流失败，保留视频远控主路径: peer=\(peer.id, privacy: .public) reason=p2p-realtime-audio-start-failed err=\(error.localizedDescription, privacy: .public)"
+                    )
+                    RemoteControlSmokeStatusWriter.append(
+                        "audioTxCaptureStartFailed peer=\(peer.id) reason=p2p-realtime-audio-start-failed action=video-preserved error=\(Self.sanitizeTelemetryToken(error.localizedDescription))"
+                    )
+                    realtimeAudioCaptureStreamerForAttempt.stop()
+                    if #available(macOS 14.0, *), let realtimeAudioSender {
+                        _ = detachRealtimeAudioSender(
+                            from: peer,
+                            ifOwnedBy: realtimeAudioSender
+                        )
+                        await realtimeAudioSender.close(reason: "p2p-realtime-audio-start-failed")
+                        didCloseRealtimeAudioSenderForAudioStartFailure = true
+                    }
+                }
+            }
+            guard isCurrentScreenSharingAttempt(attemptGeneration, for: peer) else {
+                logger.info("ℹ️ 已忽略过期的屏幕采集启动完成: peer=\(peer.id, privacy: .public)")
+                streamer.stop(inputOwner: peer.inputOwner)
+                startedRealtimeAudioCaptureStreamer?.stop()
+                if #available(macOS 14.0, *),
+                   let realtimeAudioSender,
+                   !didReuseRealtimeAudioSender,
+                   !didCloseRealtimeAudioSenderForAudioStartFailure {
+                    _ = detachRealtimeAudioSender(
+                        from: peer,
+                        ifOwnedBy: realtimeAudioSender
+                    )
+                    await realtimeAudioSender.close(reason: "stale-screen-sharing-attempt")
+                }
+                return
+            }
+            captureStreamer = streamer
+            if let startedRealtimeAudioCaptureStreamer {
+                preservedRealtimeAudioCaptureStreamer?.stop()
+                realtimeAudioCaptureStreamer = startedRealtimeAudioCaptureStreamer
+                realtimeAudioCaptureStrictMediaFallbacks = strictMediaFallbacks
+            } else {
+                realtimeAudioCaptureStreamer = preservedRealtimeAudioCaptureStreamer
+                realtimeAudioCaptureStrictMediaFallbacks = preservedRealtimeAudioCaptureStreamer == nil
+                    ? nil
+                    : strictMediaFallbacks
+            }
+            screenSharingActive = true
+            screenCaptureStartupRetryCountByPeerId[peer.id] = 0
+            configureClipboardSync(for: peer)
+            startInteractionTelemetryIfNeeded(for: peer)
+            screenCaptureWatchdogTask = Task { [weak self, weak streamer] in
+                guard let self, let streamer else { return }
+                while !Task.isCancelled {
+                    do {
+                        try await Task.sleep(for: .seconds(2))
+                    } catch {
+                        return
+                    }
+                    guard !Task.isCancelled else { break }
+                    guard self.captureStreamer === streamer,
+                          self.isBeingControlled else { break }
+
+                    let health = streamer.healthSnapshot()
+                    let framePumpHealth = await outboundFramePump.healthSnapshot()
+                    guard self.captureStreamer === streamer,
+                          self.isCurrentScreenSharingAttempt(attemptGeneration, for: peer) else {
+                        break
+                    }
+                    let now = Date()
+                    let sampleAge = now.timeIntervalSince(health.lastSampleBufferAt)
+                    let meaningfulSampleAge = now.timeIntervalSince(health.lastMeaningfulSampleAt)
+                    let encodedAge = now.timeIntervalSince(health.lastEncodedFrameAt)
+                    let sentAge = now.timeIntervalSince(framePumpHealth.lastSentFrameAt)
+                    let hasSampleFlow = health.lastSampleBufferAt != .distantPast
+                    let hasMeaningfulSampleFlow = health.lastMeaningfulSampleAt != .distantPast
+
+                    if hasMeaningfulSampleFlow && meaningfulSampleAge < 1.5 && encodedAge > 2.0 {
+                        // This watchdog is ending. Recovery must not cancel its own
+                        // task before awaiting the capture replacement.
+                        self.screenCaptureWatchdogTask = nil
+                        self.logger.warning(
+                            """
+                            ⚠️ 检测到录屏编码停滞：peer=\(peer.id, privacy: .public) \
+                            sampleAge=\(sampleAge, privacy: .public) \
+                            meaningfulSampleAge=\(meaningfulSampleAge, privacy: .public) \
+                            encodedAge=\(encodedAge, privacy: .public)
+                            """
+                        )
+                        if strictMediaFallbacks {
+                            await self.failStrictMediaCapture(
+                                for: peer,
+                                reason: "strict-encoded-stall",
+                                component: "video",
+                                owner: .screenSharingAttempt(attemptGeneration)
+                            )
+                        } else {
+                            await self.restartScreenSharingIfNeeded(
+                                for: peer,
+                                reason: "encoded-stall",
+                                expectedAttemptGeneration: attemptGeneration
+                            )
+                        }
+                        break
+                    } else if hasMeaningfulSampleFlow,
+                              encodedAge < 1.0,
+                              sentAge > 2.0 {
+                        self.screenCaptureWatchdogTask = nil
+                        self.logger.warning(
+                            """
+                            ⚠️ 检测到录屏发送停滞：peer=\(peer.id, privacy: .public) \
+                            encodedAge=\(encodedAge, privacy: .public) \
+                            sentAge=\(sentAge, privacy: .public) \
+                            waitingForSync=\(framePumpHealth.waitingForSyncFrame, privacy: .public)
+                            """
+                        )
+                        if strictMediaFallbacks {
+                            await self.failStrictMediaCapture(
+                                for: peer,
+                                reason: "strict-frame-send-stall",
+                                component: "video",
+                                owner: .screenSharingAttempt(attemptGeneration)
+                            )
+                        } else {
+                            streamer.requestKeyFrameRefresh(reason: "frame-send-stall")
+                            await self.restartScreenSharingIfNeeded(
+                                for: peer,
+                                reason: "frame-send-stall",
+                                expectedAttemptGeneration: attemptGeneration
+                            )
+                        }
+                        break
+                    } else if hasSampleFlow,
+                              !hasMeaningfulSampleFlow,
+                              encodedAge > 2.0 {
+                        self.logger.debug(
+                            """
+                            ℹ️ 录屏流处于 idle 状态，暂不将未编码判定为故障：peer=\(peer.id, privacy: .public) \
+                            sampleAge=\(sampleAge, privacy: .public) \
+                            encodedAge=\(encodedAge, privacy: .public)
+                            """
+                        )
+                    }
+                }
+            }
+        } catch {
+            guard isCurrentScreenSharingAttempt(attemptGeneration, for: peer) else {
+                logger.info("ℹ️ 已忽略过期的屏幕采集启动错误: peer=\(peer.id, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+                streamer.stop(inputOwner: peer.inputOwner)
+                startedRealtimeAudioCaptureStreamer?.stop()
+                if startedRealtimeAudioCaptureStreamer == nil {
+                    realtimeAudioCaptureStreamerForAttempt?.stop()
+                }
+                if #available(macOS 14.0, *),
+                   let realtimeAudioSender,
+                   !didReuseRealtimeAudioSender,
+                   !didCloseRealtimeAudioSenderForAudioStartFailure {
+                    _ = detachRealtimeAudioSender(
+                        from: peer,
+                        ifOwnedBy: realtimeAudioSender
+                    )
+                    await realtimeAudioSender.close(reason: "stale-screen-sharing-start-error")
+                }
+                return
+            }
+            logger.error(
+                "❌ 启动 ScreenCaptureKitStreamer 失败: \(error.localizedDescription, privacy: .public). 请确认已在“系统设置 > 隐私与安全 > 录屏与系统录音”中为当前运行的 App 条目授权，必要时完全退出后重开。"
+            )
+            streamer.stop(inputOwner: peer.inputOwner)
+            startedRealtimeAudioCaptureStreamer?.stop()
+            if startedRealtimeAudioCaptureStreamer == nil {
+                realtimeAudioCaptureStreamerForAttempt?.stop()
+            }
+            if #available(macOS 14.0, *),
+               let realtimeAudioSender,
+               !didReuseRealtimeAudioSender,
+               !didCloseRealtimeAudioSenderForAudioStartFailure {
+                _ = detachRealtimeAudioSender(
+                    from: peer,
+                    ifOwnedBy: realtimeAudioSender
+                )
+                await realtimeAudioSender.close(reason: "screen-sharing-start-failed")
+            }
+            guard isCurrentScreenSharingAttempt(attemptGeneration, for: peer) else {
+                logger.info(
+                    "ℹ️ 已忽略关闭过期音频 sender 后的屏幕采集启动错误: peer=\(peer.id, privacy: .public)"
+                )
+                return
+            }
+            if !scheduleScreenSharingStartupRetry(
+                for: peer,
+                error: error,
+                replacing: streamer,
+                strictMediaFallbacks: strictMediaFallbacks
+            ) {
+                screenSharingActive = false
+                endRealtimeStreamingActivity(reason: "screen-sharing-start-failed")
+            }
+        }
+    }
+
+    private func beginRealtimeStreamingActivity(
+        for peer: PeerConnection,
+        strictMediaFallbacks: Bool
+    ) {
+#if os(macOS)
+        if realtimeStreamingActivity != nil {
+            realtimeStreamingActivityPeerId = peer.id
+            return
+        }
+
+        realtimeStreamingActivity = ProcessInfo.processInfo.beginActivity(
+            options: [
+                .userInitiatedAllowingIdleSystemSleep,
+                .latencyCritical,
+                .suddenTerminationDisabled,
+                .automaticTerminationDisabled
+            ],
+            reason: "SkyBridge remote desktop realtime stream"
+        )
+        realtimeStreamingActivityPeerId = peer.id
+        logger.info(
+            """
+            📺 远控 realtime activity 已启用: peer=\(peer.id, privacy: .public) \
+            appNapDisabled=1 idleSleepAllowed=0 strictMediaFallbacks=\(strictMediaFallbacks, privacy: .public)
+            """
+        )
+        RemoteControlSmokeStatusWriter.append(
+            "mac-remote-realtime-activity active=1 appNapDisabled=1 idleSleepAllowed=0 peer=\(peer.id) strictMediaFallbacks=\(strictMediaFallbacks)"
+        )
+#else
+        _ = peer
+        _ = strictMediaFallbacks
+#endif
+    }
+
+    private func endRealtimeStreamingActivity(reason: String) {
+#if os(macOS)
+        guard let activity = realtimeStreamingActivity else { return }
+        ProcessInfo.processInfo.endActivity(activity)
+        let peerId = realtimeStreamingActivityPeerId ?? "unknown"
+        realtimeStreamingActivity = nil
+        realtimeStreamingActivityPeerId = nil
+        logger.info(
+            "📺 远控 realtime activity 已释放: peer=\(peerId, privacy: .public) reason=\(reason, privacy: .public)"
+        )
+        RemoteControlSmokeStatusWriter.append(
+            "mac-remote-realtime-activity active=0 appNapDisabled=0 peer=\(peerId) reason=\(Self.sanitizeTelemetryToken(reason))"
+        )
+#else
+        _ = reason
+#endif
+    }
+
+    private func invalidateScreenSharingStartupState(for peerId: String) {
+        screenSharingAttemptGate.invalidateAttempts(for: peerId)
+    }
+
+    private func isCurrentScreenSharingAttempt(
+        _ attemptGeneration: UInt64,
+        for peer: PeerConnection
+    ) -> Bool {
+        isCurrentPeer(peer)
+            && isBeingControlled
+            && screenSharingAttemptGate.isCurrentAttempt(attemptGeneration, for: peer.id)
+    }
+
+    private func scheduleScreenSharingStartupRetry(
+        for peer: PeerConnection,
+        error: Error,
+        replacing streamer: ScreenCaptureKitStreamer,
+        strictMediaFallbacks: Bool
+    ) -> Bool {
+        let nextAttempt = (screenCaptureStartupRetryCountByPeerId[peer.id] ?? 0) + 1
+        screenCaptureStartupRetryCountByPeerId[peer.id] = nextAttempt
+
+        let nsError = error as NSError
+        logger.error(
+            """
+            ❌ 屏幕采集启动失败: peer=\(peer.id, privacy: .public) \
+            attempt=\(nextAttempt, privacy: .public) \
+            domain=\(nsError.domain, privacy: .public) \
+            code=\(nsError.code, privacy: .public)
+            """
+        )
+
+        screenCaptureWatchdogTask?.cancel()
+        screenCaptureWatchdogTask = nil
+        streamer.stop(inputOwner: peer.inputOwner)
+        if captureStreamer === streamer {
+            captureStreamer = nil
+        }
+        screenSharingActive = false
+
+        guard !strictMediaFallbacks else {
+            logger.error(
+                "⛔️ 严格媒体策略禁止屏幕采集启动失败后自动重试: peer=\(peer.id, privacy: .public)"
+            )
+            RemoteControlSmokeStatusWriter.append(
+                "mac-sck-start result=failed-closed reason=strict-startup-retry-forbidden peer=\(peer.id) domain=\(Self.sanitizeTelemetryToken(nsError.domain)) code=\(nsError.code)"
+            )
+            return false
+        }
+
+        guard nextAttempt <= 2 else {
+            logger.error(
+                "❌ 屏幕采集启动已连续失败，保留远控会话等待人工重试: peer=\(peer.id, privacy: .public)"
+            )
+            return false
+        }
+
+        let delay: Duration = nextAttempt == 1 ? .milliseconds(250) : .seconds(1)
+        logger.warning(
+            "⚠️ 屏幕采集启动失败，保留远控会话并准备自动重试: peer=\(peer.id, privacy: .public) delay=\(String(describing: delay), privacy: .public)"
+        )
+
+        Task { @MainActor [weak self, weak peer] in
+            guard let self, let peer else { return }
+            do {
+                try await Task.sleep(for: delay)
+            } catch {
+                return
+            }
+            guard self.isCurrentPeer(peer), self.isBeingControlled else { return }
+            guard self.captureStreamer == nil else { return }
+            await self.startScreenSharing(to: peer)
+        }
+        return true
+    }
+
+    private func restartScreenSharingIfNeeded(
+        for peer: PeerConnection,
+        reason: String,
+        expectedAttemptGeneration: UInt64
+    ) async {
+        guard !screenCaptureRestartInProgress else { return }
+        guard isCurrentScreenSharingAttempt(expectedAttemptGeneration, for: peer),
+              isBeingControlled else { return }
+        guard peer.requestedStreamConfiguration?.isStopRequest != true else { return }
+        guard captureStreamer != nil else { return }
+
+        screenCaptureRestartInProgress = true
+        defer { screenCaptureRestartInProgress = false }
+
+        logger.info("🔁 重新启动屏幕采集：peer=\(peer.id, privacy: .public) reason=\(reason, privacy: .public)")
+        screenCaptureWatchdogTask?.cancel()
+        screenCaptureWatchdogTask = nil
+        captureStreamer?.stop(inputOwner: peer.inputOwner)
+        captureStreamer = nil
+        if reason.hasPrefix("p2p-realtime-audio-") {
+            realtimeAudioCaptureStreamer?.stop()
+            realtimeAudioCaptureStreamer = nil
+            realtimeAudioCaptureStrictMediaFallbacks = nil
+        }
+
+        do {
+            try await Task.sleep(for: .milliseconds(150))
+        } catch {
+            return
+        }
+        guard isCurrentScreenSharingAttempt(expectedAttemptGeneration, for: peer),
+              isBeingControlled,
+              peer.requestedStreamConfiguration?.isStopRequest != true else {
+            return
+        }
+        await startScreenSharing(to: peer)
+    }
+
+    private func effectiveCapturePolicy(
+        _ selectedPolicy: RemoteControlStreamPolicy,
+        for peer: PeerConnection
+    ) -> RemoteControlStreamPolicy {
+        guard let override = peer.captureCompatibilityOverride,
+              override != selectedPolicy.codec else {
+            return selectedPolicy
+        }
+
+        let normalizedSize = RemoteControlCaptureCompatibility.normalizedCaptureSize(
+            selectedPolicy.preferredSize,
+            for: override,
+            preserveExactVisibleSize: selectedPolicy.preserveExactVisibleSize
+        )
+        return RemoteControlStreamPolicy(
+            codec: override,
+            targetFrameRate: selectedPolicy.targetFrameRate,
+            keyFrameInterval: selectedPolicy.keyFrameInterval,
+            preferredSize: normalizedSize,
+            preserveExactVisibleSize: selectedPolicy.preserveExactVisibleSize,
+            reason: "\(selectedPolicy.reason)+compat-\(Self.codecName(override))"
+        )
+    }
+
+    private func applyCaptureCompatibilityOverrideIfNeeded(
+        for peer: PeerConnection,
+        reason: String,
+        activePolicy: RemoteControlStreamPolicy
+    ) {
+        guard let status = captureEncodeStatus(from: reason),
+              let override = RemoteControlCaptureCompatibility.fallbackCodec(
+                  afterEncodeFailure: status,
+                  activeCodec: activePolicy.codec
+              ),
+              override != peer.captureCompatibilityOverride else {
+            return
+        }
+
+        peer.captureCompatibilityOverride = override
+        logger.warning(
+            """
+            ⚠️ 检测到远控编码器兼容性故障，已对当前会话降级: \
+            peer=\(peer.id, privacy: .public) \
+            status=\(status, privacy: .public) \
+            from=\(Self.codecName(activePolicy.codec), privacy: .public) \
+            to=\(Self.codecName(override), privacy: .public)
+            """
+        )
+    }
+
+    private func captureEncodeStatus(from reason: String) -> OSStatus? {
+        let prefix = "encode-status-"
+        guard reason.hasPrefix(prefix) else { return nil }
+        guard let value = Int32(reason.dropFirst(prefix.count)) else { return nil }
+        return OSStatus(value)
+    }
+
+    private func startInteractionTelemetryIfNeeded(for peer: PeerConnection) {
+        guard isCurrentPeer(peer) else { return }
+        guard interactionTelemetryTasksByPeerId[peer.id] == nil else { return }
+
+        interactionTelemetryTasksByPeerId[peer.id] = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+#if os(macOS)
+            let sampler = RemoteDesktopInteractionTelemetrySampler()
+            let overlaySampleStride = 6
+            var loopIndex = 0
+            var cursorChannelWasEnabled = false
+            var overlayChannelWasEnabled = false
+
+            defer {
+                self.interactionTelemetryTasksByPeerId.removeValue(forKey: peer.id)
+            }
+
+            while !Task.isCancelled {
+                guard self.isCurrentPeer(peer), self.isBeingControlled else { break }
+
+                let wantsCursorChannel = peer.requestedStreamConfiguration?.separateCursorChannelEnabled ?? false
+                let wantsOverlayChannel = peer.requestedStreamConfiguration?.interactionOverlayChannelEnabled ?? false
+
+                if !wantsCursorChannel && cursorChannelWasEnabled {
+                    sampler.resetCursorState()
+                    do {
+                        try await self.sendRemoteControlPayload(
+                            RemoteDesktopCursorPayload(
+                                x: 0,
+                                y: 0,
+                                width: 1,
+                                height: 1,
+                                hidden: true
+                            ),
+                            type: .cursorUpdate,
+                            to: peer
+                        )
+                    } catch {
+                        self.logger.debug("ℹ️ 光标通道停用清空失败: \(error.localizedDescription, privacy: .public)")
+                    }
+                }
+
+                if !wantsOverlayChannel && overlayChannelWasEnabled {
+                    sampler.resetOverlayState()
+                    do {
+                        try await self.sendRemoteControlPayload(
+                            RemoteDesktopOverlayPayload(),
+                            type: .overlayUpdate,
+                            to: peer
+                        )
+                    } catch {
+                        self.logger.debug("ℹ️ overlay 通道停用清空失败: \(error.localizedDescription, privacy: .public)")
+                    }
+                }
+
+                cursorChannelWasEnabled = wantsCursorChannel
+                overlayChannelWasEnabled = wantsOverlayChannel
+
+                guard wantsCursorChannel || wantsOverlayChannel else {
+                    do {
+                        try await Task.sleep(for: .milliseconds(250))
+                    } catch {
+                        return
+                    }
+                    continue
+                }
+
+                guard let captureContext = captureStreamer?.captureContextSnapshot() else {
+                    do {
+                        try await Task.sleep(for: .milliseconds(50))
+                    } catch {
+                        return
+                    }
+                    continue
+                }
+
+                let context = RemoteDesktopInteractionTelemetrySampler.CaptureContext(
+                    displayID: captureContext.displayID,
+                    displayPixelSize: captureContext.displayPixelSize,
+                    streamSize: captureContext.streamSize
+                )
+
+                if wantsCursorChannel,
+                   let cursorPayload = sampler.sampleCursor(context: context) {
+                    do {
+                        try await self.sendRemoteControlPayload(
+                            cursorPayload,
+                            type: .cursorUpdate,
+                            to: peer
+                        )
+                    } catch {
+                        self.logger.debug("ℹ️ cursorUpdate 发送失败: \(error.localizedDescription, privacy: .public)")
+                    }
+                }
+
+                loopIndex = (loopIndex + 1) % overlaySampleStride
+                if wantsOverlayChannel,
+                   loopIndex == 0,
+                   let overlayPayload = sampler.sampleOverlay(context: context) {
+                    do {
+                        try await self.sendRemoteControlPayload(
+                            overlayPayload,
+                            type: .overlayUpdate,
+                            to: peer
+                        )
+                    } catch {
+                        self.logger.debug("ℹ️ overlayUpdate 发送失败: \(error.localizedDescription, privacy: .public)")
+                    }
+                }
+
+                do {
+                    try await Task.sleep(for: .milliseconds(16))
+                } catch {
+                    return
+                }
+            }
+#endif
+        }
+    }
+
+    private func stopInteractionTelemetry(for deviceId: String) {
+        if let task = interactionTelemetryTasksByPeerId.removeValue(forKey: deviceId) {
+            task.cancel()
+        }
+    }
+
+    private static var allowsInsecureLegacyRemoteControl: Bool {
+        RemoteControlSOABindingPolicy.allowsInsecureLegacyRemoteControl
+    }
+
+    @available(macOS 14.0, *)
+    typealias RemoteControlSOABinding = RemoteControlSOABindingPolicy.Binding
+
+    @available(macOS 14.0, *)
+    nonisolated static func remoteControlSOABinding(
+        localDeviceId: String?,
+        remoteDeviceId: String?
+    ) -> RemoteControlSOABinding? {
+        RemoteControlSOABindingPolicy.binding(
+            localDeviceId: localDeviceId,
+            remoteDeviceId: remoteDeviceId
+        )
+    }
+
+    @available(macOS 14.0, *)
+    private nonisolated static func randomRemoteControlAttemptId() -> Data {
+        RemoteControlSOABindingPolicy.randomAttemptId()
+    }
+
+    private func ensureSecureChannelEstablished(for peer: PeerConnection) throws {
+        if #available(macOS 14.0, *) {
+            guard peer.sessionKeys != nil || Self.allowsInsecureLegacyRemoteControl else {
+                throw RemoteControlError.handshakeInitializationFailed("secure channel not established")
+            }
+        }
+    }
+
+    @available(macOS 14.0, *)
+    private func makeRemoteControlTrustProvider(for deviceId: String) async throws -> DefaultHandshakeTrustProvider {
+        let trustProvider = DefaultHandshakeTrustProvider(
+            trustRecordsSnapshot: TrustSyncService.shared.activeTrustRecords
+        )
+        let trustedFingerprints = await trustProvider.trustedFingerprintSet(for: deviceId)
+        guard !trustedFingerprints.isEmpty else {
+            throw RemoteControlError.untrustedPeer(deviceId)
+        }
+        return trustProvider
+    }
+
+    @available(macOS 14.0, *)
+    private func syncSecureChannelState(
+        after driver: HandshakeDriver,
+        for peer: PeerConnection
+    ) async throws -> HandshakeSyncResult {
+        switch await driver.getCurrentState() {
+        case .established(let keys):
+            guard let authenticatedAuthority = await driver.getAuthenticatedRemoteAuthority() else {
+                throw RemoteControlError.handshakeInitializationFailed(
+                    "established remote-control session missing authenticated authority"
+                )
+            }
+            try await bindEstablishedSOALease(
+                from: driver,
+                sessionKeys: keys,
+                for: peer
+            )
+            let installed = try await installSecureSessionKeys(
+                keys,
+                authenticatedAuthority: authenticatedAuthority,
+                for: peer,
+                source: "handshake-driver-established"
+            )
+            if installed {
+                logger.info("🔐 RemoteControl handshake established for \(peer.id, privacy: .public)")
+                let remoteDeviceId = DiagnosticFieldSanitizer.fieldValue(
+                    peer.handshakePeer?.deviceId
+                )
+                emitSmokeTrace(
+                    "mac remote established peer=\(peer.id) remoteDeviceId=\(remoteDeviceId) suite=\(keys.negotiatedSuite.rawValue)"
+                )
+            }
+            return .established
+        case .failed(let reason):
+            let renderedReason = String(describing: reason)
+            if Self.shouldKeepTransportAliveAfterHandshakeFailure(for: peer.role) {
+                logger.warning(
+                    "⚠️ RemoteControl inbound handshake failed but keeping transport for retry: peer=\(peer.id, privacy: .public) reason=\(renderedReason, privacy: .public)"
+                )
+                emitSmokeTrace("mac remote inbound-handshake-retry peer=\(peer.id) reason=\(renderedReason)")
+                peer.handshakeDriver = nil
+                return .retryableFailure(renderedReason)
+            }
+            throw RemoteControlError.handshakeInitializationFailed(renderedReason)
+        default:
+            return .pending
+        }
+    }
+
+    @available(macOS 14.0, *)
+    private func bindEstablishedSOALease(
+        from driver: HandshakeDriver?,
+        sessionKeys: SessionKeys,
+        for peer: PeerConnection
+    ) async throws {
+        let lease = if let driver {
+            await driver.getEstablishedArbiterLease()
+        } else {
+            peer.soaEstablishedLease
+        }
+        guard let pairKey = peer.soaPairKey,
+              let lease,
+              lease.pairKey == pairKey,
+              lease.sessionId == sessionKeys.sessionId else {
+            throw RemoteControlError.handshakeInitializationFailed(
+                "established remote-control session missing exact SOA lease"
+            )
+        }
+
+        if let previousLease = peer.soaEstablishedLease,
+           previousLease != lease {
+            _ = await PeerSessionArbiter.shared.clearEstablished(previousLease)
+        }
+        peer.soaEstablishedLease = lease
+    }
+
+    @available(macOS 14.0, *)
+    private func installSecureSessionKeys(
+        _ keys: SessionKeys,
+        authenticatedAuthority: AuthenticatedRemoteAuthority,
+        for peer: PeerConnection,
+        source: String
+    ) async throws -> Bool {
+        if let existing = peer.sessionKeys {
+            if Self.isSameRemoteControlSecureSession(existing, keys) {
+                guard peer.authenticatedRemoteAuthority == authenticatedAuthority else {
+                    throw RemoteControlError.handshakeInitializationFailed(
+                        "duplicate remote-control session authority mismatch"
+                    )
+                }
+                peer.handshakeDriver = nil
+                logger.debug(
+                    "ℹ️ RemoteControl duplicate secure session install ignored for \(peer.id, privacy: .public) source=\(source, privacy: .public)"
+                )
+                return false
+            }
+
+            let reason = "RemoteControl secure channel attempted to replace active session for \(peer.id): existing=\(existing.sessionId) incoming=\(keys.sessionId) source=\(source)"
+            logger.error("⛔️ \(reason, privacy: .public)")
+            throw RemoteControlError.handshakeInitializationFailed(reason)
+        }
+
+        guard let mode = peer.modePolicy else { throw PQCModeSelectionError.invalidStoredPolicy }
+        try PQCModePolicyStore.standard.withCurrent(mode) {
+            peer.sessionKeys = keys
+            peer.framePresentationAcknowledgements.reset()
+            peer.authenticatedRemoteAuthority = authenticatedAuthority
+            peer.secureEnvelopeSendSequencer.resetIfSessionChanged(sessionId: keys.sessionId)
+            peer.secureEnvelopeReplayWindow = RemoteControlSecureReplayWindow()
+            peer.handshakeDriver = nil
+        }
+        await syncOutboundFramePump(for: peer)
+        beginProductEvidenceSessionIfPossible(for: peer, keys: keys)
+        return true
+    }
+
+    @available(macOS 14.0, *)
+    private static func isSameRemoteControlSecureSession(_ lhs: SessionKeys, _ rhs: SessionKeys) -> Bool {
+        lhs.sessionId == rhs.sessionId
+            && lhs.negotiatedSuite.rawValue == rhs.negotiatedSuite.rawValue
+            && lhs.role.rawValue == rhs.role.rawValue
+            && lhs.transcriptHash == rhs.transcriptHash
+            && lhs.sendKey == rhs.sendKey
+            && lhs.receiveKey == rhs.receiveKey
+    }
+
+    @available(macOS 14.0, *)
+    private func establishOutboundSecureChannel(for peer: PeerConnection) async throws {
+        guard isCurrentPeer(peer),
+              let handshakePeer = peer.handshakePeer else {
+            throw RemoteControlError.connectionClosed
+        }
+        let peerID = peer.id
+        let peerRole = peer.role
+        let peerIdentity = ObjectIdentifier(peer)
+
+        let localDeviceId: String
+        do {
+            localDeviceId = try await SelfIdentityProvider.shared
+                .protocolIdentityDeviceId(allowCreate: true)
+        } catch {
+            logger.error(
+                "❌ RemoteControl outbound identity unavailable: \(error.localizedDescription, privacy: .public)"
+            )
+            throw RemoteControlError.handshakeInitializationFailed(
+                "local identity authority unavailable: \(error.localizedDescription)"
+            )
+        }
+        guard isCurrentPeer(peer) else { throw RemoteControlError.connectionClosed }
+        try Task.checkCancellation()
+        guard let soaBinding = Self.remoteControlSOABinding(
+            localDeviceId: localDeviceId,
+            remoteDeviceId: handshakePeer.deviceId
+        ) else {
+            logger.error("❌ RemoteControl outbound handshake missing stable SOA identity for \(handshakePeer.deviceId, privacy: .public)")
+            throw RemoteControlError.untrustedPeer(handshakePeer.deviceId)
+        }
+        let soaPairKey = PeerSessionArbiter.pairKey(
+            localPeerId: soaBinding.localPeerId,
+            remotePeerId: soaBinding.expectedRemotePeerId,
+            scope: .remoteControl
+        )
+        recordSOAState(soaPairKey, for: peer)
+
+        let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
+        let policy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
+
+        do {
+            try await releaseStaleSOAStateBeforeHandshake(for: peer)
+            let trustProvider = try await makeRemoteControlTrustProvider(for: handshakePeer.deviceId)
+            let pins = await trustProvider.trustedFingerprintSet(for: handshakePeer.deviceId)
+            let plan = try await P2PDiscoveryService.shared.prepareLANPQCHandshakePlan(
+                deviceId: handshakePeer.deviceId, pinnedFingerprints: pins)
+            peer.modePolicy = plan.inventory.policy
+            let baseProvider = plan.provider
+            let transport = RemoteControlHandshakeTransport(connection: peer.connection)
+            let configuration = try await SettingsManager.shared
+                .committedProtocolIdentityConfiguration()
+            let peerAlgorithm = TrustSyncService.shared.outboundPQCSignatureAlgorithm(
+                deviceId: handshakePeer.deviceId,
+                requestedAlgorithm: configuration.algorithm
+            )
+            let outboundProtocolIdentity = (
+                requestedAlgorithm: configuration.algorithm,
+                requestedProtection: configuration.protection,
+                selectedAlgorithm: peerAlgorithm
+            )
+            let keys = try await TwoAttemptHandshakeManager.performHandshakeWithPreparation(
+                deviceId: handshakePeer.deviceId,
+                preferPQC: true,
+                policy: policy,
+                cryptoProvider: baseProvider,
+                executor: { [weak self] preparation in
+                    let isStillCurrent = await MainActor.run { [weak self] in
+                        guard let self,
+                              let current = self.currentPeer(for: peerRole, deviceId: peerID) else { return false }
+                        return ObjectIdentifier(current) == peerIdentity
+                    }
+                    guard isStillCurrent else {
+                        throw RemoteControlError.connectionClosed
+                    }
+
+                    let cryptoProvider: any CryptoProvider = {
+                        switch preparation.strategy {
+                        case .pqcOnly:
+                            return baseProvider
+                        case .classicOnly:
+                            return CryptoProviderFactory.make(policy: .classicOnly)
+                        }
+                    }()
+
+                    let identityProvider = DeviceIdentityHandshakeProvider(
+                        sigAAlgorithm: preparation.sigAAlgorithm,
+                        protocolSigningKeyProtection: preparation.sigAAlgorithm
+                            == outboundProtocolIdentity.requestedAlgorithm
+                            ? outboundProtocolIdentity.requestedProtection
+                            : .softwareKeychain,
+                        includeSecureEnclavePoP: policy.requireSecureEnclavePoP
+                    )
+                    let cryptoPolicy = HandshakeCryptoPolicyResolver.policy(for: preparation.offeredSuites)
+                    let soaMetadata = try HandshakeSOAMetadata(
+                        initiatorPeerId: soaBinding.localPeerId,
+                        targetPeerId: soaBinding.expectedRemotePeerId,
+                        attemptId: Self.randomRemoteControlAttemptId()
+                    )
+                    let driver = try HandshakeDriver(
+                        transport: transport,
+                        cryptoProvider: cryptoProvider,
+                        protocolSignatureProvider: ProtocolSignatureProviderSelector.select(for: preparation.sigAAlgorithm),
+                        identityProvider: identityProvider,
+                        sigAAlgorithm: preparation.sigAAlgorithm,
+                        offeredSuites: preparation.offeredSuites,
+                        policy: policy,
+                        cryptoPolicy: cryptoPolicy,
+                        trustProvider: trustProvider,
+                        soaMetadata: soaMetadata,
+                        localSOAPeerId: soaBinding.localPeerId,
+                        expectedRemoteSOAPeerId: soaBinding.expectedRemotePeerId,
+                        soaSessionScope: .remoteControl
+                    )
+                    let installed = await MainActor.run { [weak self] in
+                        self?.installOutboundHandshakeDriver(
+                            driver,
+                            peerId: peerID,
+                            role: peerRole,
+                            expectedPeerIdentity: peerIdentity
+                        ) == true
+                    }
+                    guard installed else {
+                        await driver.cancel()
+                        throw CancellationError()
+                    }
+                    try Task.checkCancellation()
+                    return try await driver.initiateHandshake(with: handshakePeer)
+                },
+                pqcSignatureAlgorithm: outboundProtocolIdentity.selectedAlgorithm,
+                selectedPQCSuite: plan.suiteWireId
+            )
+
+            guard isCurrentPeer(peer) else { throw RemoteControlError.connectionClosed }
+            try await bindEstablishedSOALease(
+                from: peer.handshakeDriver,
+                sessionKeys: keys,
+                for: peer
+            )
+            let authenticatedAuthority = try await outboundHandshakeAuthority(for: peer, completedKeys: keys)
+            guard isCurrentPeer(peer) else { throw RemoteControlError.connectionClosed }
+            let installed = try await installSecureSessionKeys(
+                keys,
+                authenticatedAuthority: authenticatedAuthority,
+                for: peer,
+                source: "performHandshake-return"
+            )
+            if installed {
+                logger.info("🔐 RemoteControl outbound handshake established for \(peer.id, privacy: .public)")
+                emitSmokeTrace("mac remote outbound-established peer=\(peer.id) suite=\(keys.negotiatedSuite.rawValue)")
+            }
+        } catch {
+            logger.error("❌ RemoteControl outbound handshake failed for \(peer.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            throw error
+        }
+    }
+
+    private func installOutboundHandshakeDriver(
+        _ driver: HandshakeDriver,
+        peerId: String,
+        role: RemoteControlSessionRole,
+        expectedPeerIdentity: ObjectIdentifier
+    ) -> Bool {
+        guard !Task.isCancelled,
+              let current = currentPeer(for: role, deviceId: peerId),
+              ObjectIdentifier(current) == expectedPeerIdentity else { return false }
+        current.handshakeDriver = driver
+        return true
+    }
+
+    private func outboundHandshakeAuthority(
+        for peer: PeerConnection,
+        completedKeys: SessionKeys
+    ) async throws -> AuthenticatedRemoteAuthority {
+        guard isCurrentPeer(peer) else { throw RemoteControlError.connectionClosed }
+        if let installedKeys = peer.sessionKeys {
+            // The receive loop can finish the same handshake before its
+            // initiating task resumes. Reuse only the exact installed session.
+            guard Self.isSameRemoteControlSecureSession(installedKeys, completedKeys),
+                  let installedAuthority = peer.authenticatedRemoteAuthority else {
+                throw RemoteControlError.handshakeInitializationFailed(
+                    "outbound handshake does not match installed authenticated session"
+                )
+            }
+            return installedAuthority
+        }
+        guard let handshakeDriver = peer.handshakeDriver,
+              let authority = await handshakeDriver.getAuthenticatedRemoteAuthority() else {
+            throw RemoteControlError.handshakeInitializationFailed(
+                "established outbound remote-control session missing authenticated authority"
+            )
+        }
+        guard isCurrentPeer(peer) else { throw RemoteControlError.connectionClosed }
+        return authority
+    }
+
+    private func waitForInitialStreamConfigurationIfAvailable(
+        for peer: PeerConnection,
+        timeout: Duration = RemoteControlScreenSharingStartupPolicy.initialConfigurationGrace
+    ) async -> Bool {
+        guard isCurrentPeer(peer) else { return false }
+        if peer.requestedStreamConfiguration != nil {
+            return true
+        }
+
+        let deadline = ContinuousClock.now + timeout
+        while isCurrentPeer(peer),
+              peer.requestedStreamConfiguration == nil,
+              ContinuousClock.now < deadline {
+            do {
+                try await Task.sleep(for: .milliseconds(50))
+            } catch {
+                return false
+            }
+        }
+
+        guard isCurrentPeer(peer) else { return false }
+
+        if let config = peer.requestedStreamConfiguration {
+            logger.info(
+                """
+                📺 已收到 viewer 流配置: preferred=\(config.preferredCodec ?? "auto", privacy: .public) \
+                formats=\(config.supportedVideoFormats.joined(separator: ","), privacy: .public) \
+                fps=\(config.targetFrameRate, privacy: .public)
+                """
+            )
+            return true
+        } else {
+            logger.info("📺 未在配置等待窗口内收到 viewer 流配置，继续等待已认证 viewer 配置")
+            return false
+        }
+    }
+
+    private func ensureScreenCapturePermission() async -> Bool {
+        let authorized = await ScreenCaptureAuthorizationProbe.shared.requestAuthorizationIfNeeded {
+            ScreenCapturePermissionSettingsOpener.open()
+        }
+        if !authorized {
+            logger.warning("⚠️ 屏幕录制权限预检失败：系统仍未确认授权")
+        }
+        return authorized
+    }
+
+    private func syncOutboundFramePump(for peer: PeerConnection) async {
+        guard isCurrentPeer(peer) else { return }
+        if #available(macOS 14.0, *) {
+            await peer.outboundFramePump.updateTransportState(
+                requestedStreamConfiguration: peer.requestedStreamConfiguration,
+                sessionKeys: peer.sessionKeys,
+                allowsInsecureLegacy: Self.allowsInsecureLegacyRemoteControl
+            )
+        } else {
+            await peer.outboundFramePump.updateTransportState(
+                requestedStreamConfiguration: peer.requestedStreamConfiguration,
+                sessionKeys: nil,
+                allowsInsecureLegacy: true
+            )
+        }
+    }
+
+    private func usesBinaryScreenFrameTransport(for peer: PeerConnection) -> Bool {
+        peer.requestedStreamConfiguration?.screenFrameTransport == "sbrf-v1"
+    }
+
+    private func sendRemoteControlPayload<T: Encodable & Sendable>(
+        _ payload: T,
+        type: RemoteMessage.MessageType,
+        to peer: PeerConnection
+    ) async throws {
+        try ensureSecureChannelEstablished(for: peer)
+        try await peer.outboundFramePump.sendControlPayload(payload, type: type)
+    }
+
+    private func sendRemoteControlWirePayload(_ payload: Data, to peer: PeerConnection) async throws {
+        try ensureSecureChannelEstablished(for: peer)
+        try await peer.outboundFramePump.sendRawPayload(payload)
+    }
+
+    @available(macOS 14.0, *)
+    private func prepareP2PRealtimeAudioReceiverIfNeeded(
+        for peer: PeerConnection,
+        audioEnabled: Bool,
+        mode: SkyBridgeMediaAudioMode
+    ) async throws -> SkyBridgeMediaEndpoint? {
+        guard isCurrentPeer(peer) else { throw CancellationError() }
+        guard audioEnabled else {
+            stopP2PRealtimeAudioReceiverIfNeeded(peerId: peer.id)
+            return nil
+        }
+        guard let keys = peer.sessionKeys else {
+            throw RemoteControlRealtimeMediaStartupError
+                .missingAuthenticatedMediaSessionKeys
+        }
+        let interfaceBinding = try SkyBridgeRealtimeMediaInterfaceBinding
+            .resolveAuthenticatedControlPath(
+                connection: peer.connection,
+                advertisedHost: nil,
+                authenticatedSessionEstablished: true
+            )
+
+        let reuseKey = RemoteControlRealtimeAudioReceiverReuseKey(
+            peerId: peer.id,
+            peerIdentity: ObjectIdentifier(peer),
+            secureSessionId: keys.sessionId,
+            sendKey: keys.sendKey,
+            receiveKey: keys.receiveKey,
+            role: keys.role,
+            transcriptHash: keys.transcriptHash,
+            mode: mode,
+            interfaceBindingIdentity: interfaceBinding.identity,
+            authenticatedRemoteHost: interfaceBinding.authenticatedRemoteHost
+        )
+        if p2pRealtimeAudioReceiver != nil,
+           p2pRealtimeAudioRenderer != nil,
+           p2pRealtimeAudioReceiverReuseKey == reuseKey {
+            return p2pRealtimeAudioReceiverEndpoint
+        }
+
+        stopP2PRealtimeAudioReceiverIfNeeded(
+            peerId: p2pRealtimeAudioReceiverReuseKey?.peerId
+        )
+        p2pRealtimeAudioReceiverStartGeneration &+= 1
+        let startGeneration = p2pRealtimeAudioReceiverStartGeneration
+        p2pRealtimeAudioReceiverPendingPeerId = peer.id
+        defer {
+            if p2pRealtimeAudioReceiverStartGeneration == startGeneration {
+                p2pRealtimeAudioReceiverPendingPeerId = nil
+            }
+        }
+
+        let keyMaterial = SkyBridgeMediaKeyMaterial.derive(
+            sendSecret: keys.sendKey,
+            receiveSecret: keys.receiveKey,
+            sessionId: keys.sessionId,
+            transcriptHash: keys.transcriptHash,
+            localRole: keys.role == .initiator ? .initiator : .responder
+        )
+        let renderer = try RemoteRealtimeMediaAudioReceiver(
+            sessionId: keys.sessionId,
+            keys: keyMaterial.receive,
+            mode: mode
+        )
+        let terminalPeerId = peer.id
+        let terminalPeerIdentity = ObjectIdentifier(peer)
+        let receiver = SkyBridgeUDPRealtimeMediaReceiver(
+            interfaceBinding: interfaceBinding,
+            terminalFailureHandler: { [weak self, terminalPeerId, terminalPeerIdentity] error in
+                Task { @MainActor [weak self] in
+                    guard let self,
+                          let peer = self.controllingPeers[terminalPeerId],
+                          ObjectIdentifier(peer) == terminalPeerIdentity else {
+                        return
+                    }
+                    await self.handleP2PRealtimeAudioReceiverTerminalFailure(
+                        error,
+                        peer: peer,
+                        peerIdentity: terminalPeerIdentity,
+                        startGeneration: startGeneration
+                    )
+                }
+            }
+        )
+        let endpoint: SkyBridgeMediaEndpoint
+        do {
+            endpoint = try await receiver.start { [weak self, renderer] datagram in
+                Task(priority: .userInitiated) { [weak self, renderer] in
+                    let latestVideoTimestamp = await MainActor.run { [weak self] in
+                        self?.lastViewingInboundScreenTimestamp
+                    }
+                    await renderer.handle(
+                        datagram: datagram,
+                        latestVideoTimestamp: latestVideoTimestamp
+                    )
+                }
+            }
+        } catch {
+            renderer.retire()
+            receiver.stop()
+            await renderer.close(
+                reason: "p2p-realtime-audio-receiver-start-failed-before-install"
+            )
+            throw error
+        }
+
+        guard isCurrentPeer(peer) else {
+            renderer.retire()
+            receiver.stop()
+            await renderer.close(
+                reason: "p2p-realtime-audio-receiver-start-stale-before-install"
+            )
+            throw CancellationError()
+        }
+        guard p2pRealtimeAudioReceiverStartGeneration == startGeneration,
+              p2pRealtimeAudioReceiverPendingPeerId == peer.id,
+              let currentKeys = peer.sessionKeys,
+              Self.isSameRemoteControlSecureSession(currentKeys, keys),
+              interfaceBinding.validatesReadyPath(peer.connection.currentPath) else {
+            renderer.retire()
+            receiver.stop()
+            await renderer.close(
+                reason: "p2p-realtime-audio-receiver-session-changed-before-install"
+            )
+            throw RemoteControlRealtimeMediaStartupError.transportUnavailable
+        }
+
+        p2pRealtimeAudioReceiver = receiver
+        p2pRealtimeAudioRenderer = renderer
+        p2pRealtimeAudioReceiverReuseKey = reuseKey
+        p2pRealtimeAudioReceiverEndpoint = endpoint
+        logger.info(
+            "🎧 P2P PQC media audio receiver ready: peer=\(peer.id, privacy: .public) port=\(endpoint.port, privacy: .public) mode=\(mode.rawValue, privacy: .public)"
+        )
+        return endpoint
+    }
+
+    private func handleP2PRealtimeAudioReceiverTerminalFailure(
+        _ error: Error,
+        peer: PeerConnection,
+        peerIdentity: ObjectIdentifier,
+        startGeneration: UInt64
+    ) async {
+        guard isCurrentPeer(peer) else { return }
+        let ownsGeneration = p2pRealtimeAudioReceiverStartGeneration == startGeneration
+        let ownsPending = ownsGeneration
+            && p2pRealtimeAudioReceiverPendingPeerId == peer.id
+        let ownsInstalled = ownsGeneration
+            && p2pRealtimeAudioReceiverReuseKey?.peerId == peer.id
+            && p2pRealtimeAudioReceiverReuseKey?.peerIdentity == peerIdentity
+        guard ownsPending || ownsInstalled else { return }
+        if ownsPending {
+            p2pRealtimeAudioReceiverStartGeneration &+= 1
+            p2pRealtimeAudioReceiverPendingPeerId = nil
+        }
+        stopP2PRealtimeAudioReceiverIfNeeded(peerId: peer.id)
+        let reason = Self.realtimeAudioStartupFailureReason(error)
+        RemoteControlSmokeStatusWriter.append(
+            "audioRxReceiverTerminalFailure reason=\(reason) strict=1 action=strict-fail-closed"
+        )
+        await handleConnectionClosed(peer: peer, error: error)
+    }
+
+    private func stopP2PRealtimeAudioReceiverIfNeeded(peerId: String?) {
+        if let peerId {
+            let ownsInstalled = p2pRealtimeAudioReceiverReuseKey?.peerId == peerId
+            let ownsPending = p2pRealtimeAudioReceiverPendingPeerId == peerId
+            guard ownsInstalled || ownsPending else { return }
+        }
+        p2pRealtimeAudioReceiverStartGeneration &+= 1
+        p2pRealtimeAudioReceiverPendingPeerId = nil
+        guard p2pRealtimeAudioReceiver != nil || p2pRealtimeAudioRenderer != nil else { return }
+        if #available(macOS 14.0, *) {
+            let renderer = p2pRealtimeAudioRenderer
+            renderer?.retire()
+            p2pRealtimeAudioReceiver?.stop()
+            if let renderer {
+                Task(priority: .utility) {
+                    await renderer.close(reason: "p2p-realtime-audio-stop")
+                }
+            }
+            p2pRealtimeAudioReceiver = nil
+            p2pRealtimeAudioRenderer = nil
+            p2pRealtimeAudioReceiverReuseKey = nil
+            p2pRealtimeAudioReceiverEndpoint = nil
+        }
+    }
+
+    private func sendViewerStreamConfiguration(to peer: PeerConnection, syncRefreshToken: UInt64? = nil) async throws {
+        guard isCurrentPeer(peer) else { throw RemoteControlError.connectionClosed }
+        guard viewerStreamConfigurationOperation == nil else {
+            throw ControlledHostSessionError.streamConfigurationInProgress
+        }
+        let operation = UUID()
+        let timeout = RemoteControlStartupTiming.acknowledgementTimeout(
+            hasApprovedSession: viewerInputAccess.hasAcknowledgement,
+            configurationTimeout: .seconds(30)
+        )
+        viewerStreamConfigurationOperation = operation
+        viewerStreamConfigurationFailure = nil
+        // A contentProcessed callback can be back-pressured before ACK waiting
+        // starts. Bound the entire operation and cancel only its exact transport.
+        let timeoutTask = Task { @MainActor [weak self, weak peer] in
+            do {
+                try await Task.sleep(for: timeout)
+            } catch {
+                if error is CancellationError { return }
+                guard let self, let peer,
+                      self.viewerStreamConfigurationOperation == operation else { return }
+                await self.handleConnectionClosed(peer: peer, error: error)
+                return
+            }
+            guard let self, let peer,
+                  self.viewerStreamConfigurationOperation == operation else { return }
+            await self.handleConnectionClosed(
+                peer: peer,
+                error: ControlledHostSessionError.streamConfigurationAcknowledgementTimedOut
+            )
+        }
+        defer {
+            timeoutTask.cancel()
+            if viewerStreamConfigurationOperation == operation {
+                viewerStreamConfigurationOperation = nil
+                pendingViewerStreamConfiguration = nil
+                viewerStreamConfigurationFailure = nil
+            }
+        }
+        try Task.checkCancellation()
+        let settings = RemoteDesktopSettingsManager.shared.settings
+        let dimensions = settings.displaySettings.resolution.dimensions
+        let budget = ControlledHostSessionPolicy.budget(
+            for: controlledHostStreamTier,
+            requestedFrameRate: settings.displaySettings.targetFrameRate,
+            requestedAudio: settings.interactionSettings.enableAudioRedirection,
+            requestedAdaptiveResolution: settings.displaySettings.resolution == .auto
+        )
+        let requestedSize = dimensions.map { CGSize(width: $0.width, height: $0.height) }
+        let viewerSize = RemoteControlStreamRequestPolicy.viewerCaptureSize(
+            for: controlledHostStreamTier,
+            requestedSize: requestedSize
+        )
+        let supportedVideoFormats = RemoteControlStreamRequestPolicy.supportedViewerVideoFormats()
+        let mediaAudioMode = settings.displaySettings.lowLatencyMode
+            ? SkyBridgeMediaAudioMode.lowLatency
+            : SkyBridgeMediaAudioMode.highFidelity
+        let audioRedirectionEnabled = budget.audioEnabled
+        let mediaAudioEndpoint: SkyBridgeMediaEndpoint?
+        do {
+            mediaAudioEndpoint = try await prepareP2PRealtimeAudioReceiverIfNeeded(
+                for: peer,
+                audioEnabled: audioRedirectionEnabled,
+                mode: mediaAudioMode
+            )
+        } catch {
+            let reason = Self.realtimeAudioStartupFailureReason(error)
+            RemoteControlSmokeStatusWriter.append(
+                "audioRxReceiverStartFailed reason=\(reason) strict=1 action=strict-fail-closed"
+            )
+            throw error
+        }
+        guard isCurrentPeer(peer) else { throw RemoteControlError.connectionClosed }
+        try Task.checkCancellation()
+        let mediaSessionId: String?
+        if #available(macOS 14.0, *) {
+            mediaSessionId = peer.sessionKeys?.sessionId
+        } else {
+            mediaSessionId = nil
+        }
+        let realtimeMediaAudioReady = audioRedirectionEnabled
+            && mediaAudioEndpoint != nil
+            && mediaSessionId != nil
+        let payload = RemoteDesktopStreamConfiguration(
+            width: viewerSize.map { Int($0.width) },
+            height: viewerSize.map { Int($0.height) },
+            preferredCodec: settings.displaySettings.preferredCodec.rawValue,
+            supportedVideoFormats: supportedVideoFormats,
+            qualityPreset: settings.displaySettings.videoQuality.rawValue,
+            videoCompressionLevel: settings.displaySettings.boundedCompressionLevelPercent,
+            // Background dimensions are an explicit cap; auto sizing would let
+            // the host raise the stream back to its native display resolution.
+            adaptiveResolutionEnabled: controlledHostStreamTier == .focused
+                && budget.allowsAdaptiveResolution,
+            targetFrameRate: budget.targetFrameRate,
+            keyFrameInterval: settings.displaySettings.keyFrameInterval,
+            lowLatencyMode: settings.displaySettings.lowLatencyMode,
+            enableHardwareAcceleration: settings.displaySettings.enableHardwareAcceleration,
+            enableAppleSiliconOptimization: settings.displaySettings.enableAppleSiliconOptimization,
+            // The LAN viewer has no session-owned clipboard receiver/sender.
+            // Do not advertise a shared-pasteboard capability across hosts.
+            clipboardSyncEnabled: false,
+            damageTrackingEnabled: true,
+            // RemoteDisplayView presents video textures without a separate
+            // cursor/overlay consumer, so the host includes its cursor in video.
+            separateCursorChannelEnabled: false,
+            interactionOverlayChannelEnabled: false,
+            refreshStrategy: settings.displaySettings.lowLatencyMode ? "instant" : "balanced",
+            jitterBufferFrames: settings.displaySettings.lowLatencyMode ? 1 : 2,
+            lossRecoveryMode: settings.displaySettings.lowLatencyMode ? "fast-retransmit" : "balanced",
+            screenFrameTransport: "sbrf-v1",
+            screenDataChannelEnabled: true,
+            screenChannelWireFormat: nil,
+            nativeVideoTrackReady: false,
+            nativeAudioTrackEnabled: false,
+            audioRedirectionEnabled: realtimeMediaAudioReady,
+            audioTransport: realtimeMediaAudioReady
+                ? SkyBridgeRealtimeMediaConstants.audioTransportPQCv1
+                : SkyBridgeRealtimeMediaConstants.audioTransportDisabled,
+            audioMode: realtimeMediaAudioReady ? mediaAudioMode.rawValue : nil,
+            mediaSessionId: realtimeMediaAudioReady ? mediaSessionId : nil,
+            mediaAudioEndpoint: realtimeMediaAudioReady ? mediaAudioEndpoint : nil,
+            compatibilityAudioFallbackEnabled: false,
+            preferredAudioEncoding: nil,
+            audioSampleRate: 48_000,
+            audioChannelCount: 2,
+            mediaFallbackPolicy: "fail-fast",
+            streamRefreshToken: syncRefreshToken,
+            remoteControlSecurityIdentity: RemoteControlSecurityNoticeCenter.cachedLocalIdentitySnapshot(),
+            remoteControlAccessVersion: RemoteControlAccess.currentVersion,
+            sessionTerminationVersion: 1,
+            streamConfigurationTransaction: RemoteDesktopStreamConfigurationTransaction(),
+            // 多显示器开启时携带所选显示器（控制端选屏）；否则 nil = 主屏。
+            captureDisplayID: settings.displaySettings.multiMonitorSupport
+                ? settings.displaySettings.captureDisplayID : nil
+        )
+
+        pendingViewerStreamConfiguration = payload
+        let connection = peer.connection
+        do {
+            try await withTaskCancellationHandler {
+                try await sendRemoteControlPayload(payload, type: .streamConfiguration, to: peer)
+            } onCancel: {
+                connection.cancel()
+            }
+        } catch {
+            try throwViewerStreamConfigurationRejection(for: operation)
+            throw error
+        }
+        try await waitForViewerStreamConfiguration(payload, peer: peer, operation: operation)
+        guard isCurrentPeer(peer) else { throw RemoteControlError.connectionClosed }
+        try Task.checkCancellation()
+        lastSentViewerStreamConfiguration = payload
+        logger.info(
+            """
+            📤 macOS viewer 流配置已确认: peer=\(peer.id, privacy: .public) \
+            preferred=\(payload.preferredCodec ?? "auto", privacy: .public) \
+            formats=\(supportedVideoFormats.joined(separator: ","), privacy: .public) \
+            fps=\(payload.targetFrameRate, privacy: .public) \
+            audio=\(payload.audioRedirectionEnabled == true, privacy: .public)
+            """
+        )
+    }
+
+    private func throwViewerStreamConfigurationRejection(for operation: UUID) throws {
+        if let failure = viewerStreamConfigurationFailure, failure.operation == operation { throw failure.error }
+    }
+
+    private func waitForViewerStreamConfiguration(
+        _ configuration: RemoteDesktopStreamConfiguration, peer: PeerConnection, operation: UUID
+    ) async throws {
+        let deadline = ContinuousClock.now + RemoteControlStartupTiming.acknowledgementTimeout(
+            hasApprovedSession: viewerInputAccess.hasAcknowledgement,
+            configurationTimeout: .seconds(30)
+        )
+        while acknowledgedViewerStreamTransaction != configuration.streamConfigurationTransaction {
+            try throwViewerStreamConfigurationRejection(for: operation)
+            guard isCurrentPeer(peer) else { throw RemoteControlError.connectionClosed }
+            guard ContinuousClock.now < deadline else {
+                throw ControlledHostSessionError.streamConfigurationAcknowledgementTimedOut
+            }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        try throwViewerStreamConfigurationRejection(for: operation)
+    }
+
+    private func effectiveRemoteVideoFormats(for peer: PeerConnection) -> Set<String> {
+        if let config = peer.requestedStreamConfiguration,
+           config.preferredCodec?.lowercased() == "jpeg" {
+            return ["jpeg"]
+        }
+
+        var formats = peer.remoteVideoFormats
+        if let config = peer.requestedStreamConfiguration {
+            formats.formUnion(config.supportedVideoFormats.map { $0.lowercased() })
+            if let preferred = config.preferredCodec?.lowercased(),
+               preferred == "h264" || preferred == "hevc" || preferred == "jpeg" {
+                formats.insert(preferred)
+            }
+        }
+        return formats
+    }
+
+    private func effectiveStreamRequest(for peer: PeerConnection) -> RemoteControlStreamRequest {
+        RemoteControlStreamRequestPolicy.request(
+            streamConfiguration: peer.requestedStreamConfiguration,
+            settings: RemoteDesktopSettingsManager.shared.settings.displaySettings
+        )
+    }
+
+    private func configureClipboardSync(for peer: PeerConnection) {
+        guard isCurrentPeer(peer) else { return }
+        let noticeCenter = RemoteControlSecurityNoticeCenter.shared
+        let lease = peer.securityNoticeId.flatMap { noticeCenter.controlAccess(for: $0)?.lease }
+        guard peer.securityAdmissionApproved,
+              noticeCenter.permitsInput(noticeID: peer.securityNoticeId, lease: lease) else {
+            disableClipboardSyncIfActive(for: peer.id)
+            RemoteControlSmokeStatusWriter.append(
+                "remoteControlClipboardSyncBlocked session=\(peer.id) transport=p2p reason=awaiting_security_notice"
+            )
+            return
+        }
+        let shouldEnable = peer.requestedStreamConfiguration?.clipboardSyncEnabled
+            ?? RemoteDesktopSettingsManager.shared.settings.interactionSettings.enableClipboardSync
+
+        if shouldEnable {
+            activeClipboardPeerId = peer.id
+            activeClipboardSessionId = peer.clipboardSessionId
+            let clipboard = ClipboardRedirectionManager.shared
+            clipboard.enable(for: peer.clipboardSessionId) { [weak self, weak peer] data, mimeType in
+                Task { @MainActor [weak self, weak peer] in
+                    guard let self, let peer,
+                          self.isCurrentPeer(peer),
+                          self.activeClipboardSessionId == peer.clipboardSessionId else { return }
+                    await self.sendClipboardPayload(data: data, mimeType: mimeType, to: peer, inputControlLease: lease)
+                }
+            }
+        } else if activeClipboardPeerId == peer.id {
+            disableActiveClipboardSync()
+        }
+    }
+
+    private func disableClipboardSyncIfActive(for deviceId: String) {
+        guard activeClipboardPeerId == deviceId else { return }
+        disableActiveClipboardSync()
+    }
+
+    private func disableActiveClipboardSync() {
+        if let activeClipboardSessionId {
+            ClipboardRedirectionManager.shared.disable(for: activeClipboardSessionId)
+        }
+        activeClipboardSessionId = nil
+        activeClipboardPeerId = nil
+    }
+
+    private func sendClipboardPayload(data: Data, mimeType: String, to peer: PeerConnection, inputControlLease: UUID?) async {
+        guard isCurrentPeer(peer) else { return }
+        guard peer.securityAdmissionApproved,
+              RemoteControlSecurityNoticeCenter.shared.permitsInput(
+                noticeID: peer.securityNoticeId, lease: inputControlLease
+              ) else {
+            RemoteControlSmokeStatusWriter.append(
+                "remoteControlClipboardSendBlocked session=\(peer.id) transport=p2p reason=awaiting_security_notice"
+            )
+            return
+        }
+        do {
+            try await sendRemoteControlPayload(
+                RemoteClipboardPayload(mimeType: mimeType, data: data),
+                type: .clipboard,
+                to: peer
+            )
+        } catch {
+            logger.error("❌ 会话剪贴板发送失败: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private static var remoteControlBuildFingerprint: String {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let version = (info["CFBundleShortVersionString"] as? String) ?? "-"
+        let build = (info["CFBundleVersion"] as? String) ?? "-"
+        let bundleId = Bundle.main.bundleIdentifier ?? "-"
+        let osVersion = ProcessInfo.processInfo.operatingSystemVersionString
+        return "bundle=\(bundleId) version=\(version) build=\(build) os=\(osVersion)"
+    }
+
+    private static func codecName(_ codec: RemoteFrameType) -> String {
+        switch codec {
+        case .bgra: return "jpeg"
+        case .h264: return "h264"
+        case .hevc: return "hevc"
+        }
+    }
+
+ /// 控制端：从对端接收屏幕数据并渲染
+    private func startReceivingScreenData(from peer: PeerConnection) {
+        logger.info("📺 开始接收屏幕数据 <- \(peer.id, privacy: .public)")
+
+        Task { [weak self, weak peer] in
+            guard let self, let peer else { return }
+            var buffer = Data()
+
+            while true {
+                do {
+                    let chunk = try await self.receiveChunk(from: peer.connection)
+                    let shouldContinue = try await self.processInboundViewerChunk(
+                        chunk.data, isComplete: chunk.isComplete, from: peer, buffer: &buffer
+                    )
+                    if !shouldContinue { break }
+                } catch {
+                    await self.handleConnectionClosed(peer: peer, error: error)
+                    break
                 }
             }
         }
     }
-    
- /// 统一处理连接关闭 / 错误
-    private func handleConnectionClosed(peerId: String, error: Error) async {
-        logger.error("🔌 连接 \(peerId, privacy: .public) 关闭或出错: \(error.localizedDescription, privacy: .public)")
-        
-        peers[peerId]?.connection.cancel()
-        peers.removeValue(forKey: peerId)
-        connectedDevices.removeAll { $0 == peerId }
-        
-        if connectedDevices.isEmpty {
-            isControlling = false
-            isBeingControlled = false
-            screenSharingActive = false
+
+    private func processInboundViewerChunk(
+        _ chunk: Data, isComplete: Bool, from peer: PeerConnection, buffer: inout Data
+    ) async throws -> Bool {
+        if chunk.isEmpty { throw RemoteControlError.connectionClosed }
+        buffer.append(chunk)
+        if buffer.count > RemoteControlWireLimits.maxWireMessageBytes(for: maxFramedMessageBytes) * 2 {
+            throw RemoteControlError.invalidMessageLength(buffer.count)
+        }
+        guard isCurrentPeer(peer) else { return false }
+        while let messageData = try nextFramedMessage(from: &buffer, maxMessageBytes: maxFramedMessageBytes) {
+            try await handleInboundViewerFrame(messageData, from: peer)
+        }
+        // Network.framework may deliver the final bytes and EOF together.
+        // Process those bytes once, then retire without issuing another receive.
+        if isComplete { throw RemoteControlError.connectionClosed }
+        return true
+    }
+
+    private func handleInboundViewerFrame(_ messageData: Data, from peer: PeerConnection) async throws {
+        guard isCurrentPeer(peer) else { throw RemoteControlError.connectionClosed }
+        if peer.sessionKeys == nil,
+           let driver = peer.handshakeDriver,
+           let handshakePeer = peer.handshakePeer {
+            await driver.handleMessage(messageData, from: handshakePeer)
+            guard isCurrentPeer(peer) else { throw RemoteControlError.connectionClosed }
+            _ = try await syncSecureChannelState(after: driver, for: peer)
+            // The frame that completes the handshake is still a handshake frame,
+            // not the first encrypted application payload.
+            return
+        } else if peer.sessionKeys == nil, !Self.allowsInsecureLegacyRemoteControl {
+            throw RemoteControlError.handshakeInitializationFailed("rejected pre-auth screen payload")
+        }
+
+        let plain: Data
+        let authenticatedPacketType: RemoteControlSecurePacketType?
+        if let keys = peer.sessionKeys {
+            let decryptResult = try decryptRemotePayload(
+                messageData,
+                with: keys,
+                replayWindow: &peer.secureEnvelopeReplayWindow,
+                allowedPacketTypes: [.screen, .audio, .control]
+            )
+            switch decryptResult {
+            case .payload(let payload, let packetType):
+                plain = payload
+                authenticatedPacketType = packetType
+            case .replayDrop(let drop):
+                logRemoteSecureReplayDrop(drop, peer: peer)
+                return
+            }
+        } else {
+            plain = messageData
+            authenticatedPacketType = nil
+        }
+        try await handleScreenMessagePayload(plain, from: peer, authenticatedPacketType: authenticatedPacketType)
+    }
+
+ /// 处理收到的 .screenData 消息
+    private func handleScreenMessagePayload(
+        _ messageData: Data,
+        from peer: PeerConnection,
+        authenticatedPacketType: RemoteControlSecurePacketType? = nil
+    ) async throws {
+        guard isCurrentPeer(peer) else { throw RemoteControlError.connectionClosed }
+        if let audioChunk = RemoteDesktopAudioChunkWire.decodeIfPresent(messageData) {
+            handleInboundRemoteAudioChunk(audioChunk)
+            return
+        }
+
+        if let screenData = RemoteDesktopScreenFrameWire.decodeIfPresent(messageData) {
+            try await handleInboundScreenData(
+                ScreenData(
+                    width: screenData.width,
+                    height: screenData.height,
+                    imageData: screenData.imageData,
+                    timestamp: screenData.timestamp,
+                    format: screenData.format,
+                    isSyncFrame: screenData.isSyncFrame,
+                    sequenceNumber: screenData.sequenceNumber
+                ),
+                from: peer
+            )
+            return
+        }
+
+        let message = try JSONDecoder().decode(RemoteMessage.self, from: messageData)
+        switch message.type {
+        case .screenData:
+            let screenData = try JSONDecoder().decode(ScreenData.self, from: message.payload)
+            try await handleInboundScreenData(screenData, from: peer)
+        case .damageReport:
+            let report = try JSONDecoder().decode(RemoteDesktopDamageReport.self, from: message.payload)
+            stableRenderer.setDamageReport(report)
+        case .streamConfigurationAck:
+            let acknowledgement = try JSONDecoder().decode(
+                RemoteDesktopStreamConfigurationAcknowledgement.self,
+                from: message.payload
+            )
+            try acceptViewerStreamConfigurationAcknowledgement(acknowledgement)
+            peer.sessionTerminationContract = RemoteDesktopSessionTerminationContract(acknowledgement: acknowledgement)
+        case .sessionEnded:
+            let termination = try JSONDecoder().decode(RemoteDesktopSessionTermination.self, from: message.payload)
+            guard authenticatedPacketType == .control, peer.role == .controlling,
+                  let contract = peer.sessionTerminationContract, peer.sessionKeys != nil else {
+                throw RemoteDesktopSessionTermination.ValidationError.notNegotiated
+            }
+            try contract.validate(termination)
+            let error = RemoteControlError.handshakeInitializationFailed(terminationMessage(termination.reason))
+            if let resources = retireConnectionClosedResources(peer: peer, error: error, hostTerminationReason: termination.reason) {
+                await closeRetiredConnectionResources(resources)
+            }
+        case .streamConfigurationRejected:
+            let rejection = try JSONDecoder().decode(RemoteDesktopStreamConfigurationRejection.self, from: message.payload)
+            try rejectViewerStreamConfiguration(rejection)
+        case .controlAccess:
+            guard viewerInputAccess.hasAcknowledgement, viewerInputAccess.access != nil else {
+                throw RemoteControlAccess.ValidationError.negotiationChanged
+            }
+            let access = try JSONDecoder().decode(RemoteControlAccess.self, from: message.payload)
+            try viewerInputAccess.accept(access)
+        case .cursorUpdate:
+            _ = try JSONDecoder().decode(RemoteDesktopCursorPayload.self, from: message.payload)
+        case .overlayUpdate:
+            _ = try JSONDecoder().decode(RemoteDesktopOverlayPayload.self, from: message.payload)
+        default:
+            throw RemoteControlError.handshakeInitializationFailed(
+                "unsupported host-to-viewer message: \(message.type.rawValue)"
+            )
         }
     }
-    
+
+    private func acceptViewerStreamConfigurationAcknowledgement(
+        _ acknowledgement: RemoteDesktopStreamConfigurationAcknowledgement
+    ) throws {
+        if let pendingViewerStreamConfiguration,
+           RemoteControlStreamRequestPolicy.acknowledgement(
+                acknowledgement,
+                matches: pendingViewerStreamConfiguration
+           ) {
+            try viewerInputAccess.accept(acknowledgement.controlAccess)
+            acknowledgedViewerStreamTransaction = acknowledgement.transaction
+            return
+        }
+        if let lastSentViewerStreamConfiguration,
+           RemoteControlStreamRequestPolicy.acknowledgement(
+                acknowledgement,
+                matches: lastSentViewerStreamConfiguration
+           ) {
+            try viewerInputAccess.accept(acknowledgement.controlAccess)
+            // A duplicate receipt for the last committed operation cannot
+            // acknowledge a newer operation that is still pending.
+            return
+        }
+        throw ControlledHostSessionError.invalidStreamConfigurationAcknowledgement
+    }
+
+    private func rejectViewerStreamConfiguration(_ rejection: RemoteDesktopStreamConfigurationRejection) throws {
+        guard let operation = viewerStreamConfigurationOperation,
+              pendingViewerStreamConfiguration?.streamConfigurationTransaction == rejection.transaction else {
+            throw ControlledHostSessionError.invalidStreamConfigurationRejection
+        }
+        let failure = ControlledHostSessionError.streamConfigurationRejected(code: rejection.code, message: rejection.message)
+        viewerStreamConfigurationFailure = (operation, failure)
+        throw failure
+    }
+
+    private func handleInboundRemoteAudioChunk(_ payload: RemoteDesktopAudioChunkPayload) {
+        guard controlledHostStreamTier == .focused,
+              RemoteDesktopSettingsManager.shared.settings.interactionSettings.enableAudioRedirection else {
+            return
+        }
+        guard lastSentViewerStreamConfiguration?.allowsLegacyAudioChunkFallback == true else {
+            logger.debug("ℹ️ 已丢弃 legacy P2P 远控音频块：当前会话要求 PQC media plane")
+            return
+        }
+        if let lastViewingInboundScreenTimestamp,
+           payload.sentAt + 0.45 < lastViewingInboundScreenTimestamp {
+            return
+        }
+
+        do {
+            try AudioRedirectionManager.shared.enable(for: viewingAudioSessionId)
+            AudioRedirectionManager.shared.updateRemoteVideoTimestamp(lastViewingInboundScreenTimestamp)
+            AudioRedirectionManager.shared.playRemoteAudioChunk(payload)
+        } catch {
+            logger.error("❌ 播放远控音频失败: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func handleInboundScreenData(
+        _ screenData: ScreenData,
+        from peer: PeerConnection
+    ) async throws {
+        logger.debug("📺 接收到屏幕数据: \(screenData.width)x\(screenData.height)")
+        lastViewingInboundScreenTimestamp = screenData.timestamp
+        if controlledHostStreamTier == .focused,
+           lastSentViewerStreamConfiguration?.allowsLegacyAudioChunkFallback == true {
+            AudioRedirectionManager.shared.updateRemoteVideoTimestamp(screenData.timestamp)
+        }
+
+        guard !screenData.imageData.isEmpty else { return }
+        if let owner = peer.productEvidenceOwner, isCurrentPeer(peer) {
+            viewingProductFrameEvidenceContext = ViewingProductFrameEvidenceContext(
+                peerObjectIdentifier: ObjectIdentifier(peer),
+                owner: owner,
+                bytes: screenData.imageData.count,
+                width: screenData.width,
+                height: screenData.height
+            )
+        }
+        configureViewingRenderersIfNeeded()
+
+        if let fmt = screenData.format?.lowercased(), fmt == "hevc" || fmt == "h264" || fmt == "bgra" {
+            let frameType: RemoteFrameType
+            switch fmt {
+            case "hevc": frameType = .hevc
+            case "h264": frameType = .h264
+            default: frameType = .bgra
+            }
+
+            let metrics: RenderMetrics
+            switch renderingModeController.currentMode {
+            case .stable:
+                metrics = stableRenderer.processFrame(
+                    data: screenData.imageData,
+                    width: screenData.width,
+                    height: screenData.height,
+                    stride: 0,
+                    type: frameType
+                )
+            case .fluid:
+                metrics = fluidRenderer.processFrame(
+                    data: screenData.imageData,
+                    width: screenData.width,
+                    height: screenData.height,
+                    stride: 0,
+                    type: frameType
+                )
+                // Fluid 模式下也触发拉帧，保证 texture 输出到 textureFeed
+                if frameType != .h264 {
+                    let fluidRendered = fluidRenderer.pullAndRender()
+                    evaluateHighPerformanceRenderHealth(afterPullFor: .fluid, rendered: fluidRendered)
+                }
+            case .reference:
+                metrics = referenceRenderer.processFrame(
+                    data: screenData.imageData,
+                    width: screenData.width,
+                    height: screenData.height,
+                    stride: 0,
+                    type: frameType
+                )
+                if frameType != .h264 {
+                    let refRendered = referenceRenderer.pullAndRender()
+                    evaluateHighPerformanceRenderHealth(afterPullFor: .reference, rendered: refRendered)
+                }
+            }
+            latestViewingRenderMetrics = metrics
+        } else {
+ // 兜底：静态图像通过 StableRenderer 处理
+            switch renderingModeController.currentMode {
+            case .stable:
+                let metrics = stableRenderer.processStaticImage(data: screenData.imageData)
+                latestViewingRenderMetrics = metrics
+            case .fluid, .reference:
+                await handleStaticImageFallback(screenData)
+            }
+        }
+    }
+
+ /// 静态图像兜底路径：ImageIO -> CGImage -> MTLTexture -> 纹理流
+    private func handleStaticImageFallback(_ screenData: ScreenData) async {
+        guard let device = metalDevice else { return }
+
+        let cfData = screenData.imageData as CFData
+        guard
+            let source = CGImageSourceCreateWithData(cfData, nil),
+            let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil)
+        else {
+            logger.error("❌ 图像数据解析失败（静态兜底）")
+            return
+        }
+
+        do {
+            let texture = try createTexture(from: cgImage, device: device)
+            await MainActor.run {
+                self.textureFeed.update(texture: texture)
+                self.bandwidthMbps = 0
+                self.latencyMs = 0
+                self.estimatedFPS = 0
+            }
+            recordViewingProductFrameEvidenceIfCurrent()
+        } catch {
+            logger.error("❌ 静态图像转纹理失败: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+ // MARK: - 被控制端：接收远程事件
+
+    private func startReceivingRemoteEvents(from peer: PeerConnection, initialData: Data? = nil) {
+        logger.info("🎮 开始接收远程事件 <- \(peer.id, privacy: .public)")
+
+        Task { [weak self, weak peer] in
+            guard let self, let peer else { return }
+            var buffer = Data()
+            var pendingInitialData = initialData
+
+            while true {
+                do {
+                    if let initialData = pendingInitialData {
+                        pendingInitialData = nil
+                        let shouldContinue = try await self.processInboundRemoteEventChunk(
+                            initialData,
+                            from: peer,
+                            buffer: &buffer
+                        )
+                        if !shouldContinue { break }
+                    }
+
+                    let chunk = try await self.receiveChunk(from: peer.connection)
+                    let shouldContinue = try await self.processInboundRemoteEventChunk(
+                        chunk.data,
+                        from: peer,
+                        buffer: &buffer
+                    )
+                    if !shouldContinue { break }
+                    if chunk.isComplete { throw RemoteControlError.connectionClosed }
+                } catch {
+                    await self.handleConnectionClosed(peer: peer, error: error)
+                    break
+                }
+            }
+        }
+    }
+
+    private func processInboundRemoteEventChunk(
+        _ chunk: Data,
+        from peer: PeerConnection,
+        buffer: inout Data
+    ) async throws -> Bool {
+        if chunk.isEmpty {
+            throw RemoteControlError.connectionClosed
+        }
+        buffer.append(chunk)
+        emitSmokeTrace("mac remote chunk peer=\(peer.id) bytes=\(chunk.count) buffered=\(buffer.count)")
+        if buffer.count > RemoteControlWireLimits.maxWireMessageBytes(for: maxFramedMessageBytes) * 2 {
+            throw RemoteControlError.invalidMessageLength(buffer.count)
+        }
+
+        guard isCurrentPeer(peer) else { return false }
+
+        while let messageData = try nextFramedMessage(
+            from: &buffer,
+            maxMessageBytes: maxFramedMessageBytes
+        ) {
+            emitSmokeTrace("mac remote framed peer=\(peer.id) bytes=\(messageData.count)")
+            try await handleInboundRemoteFrame(from: peer, frame: messageData)
+        }
+        return true
+    }
+
+    private func handleInboundRemoteFrame(from peer: PeerConnection, frame: Data) async throws {
+        guard isCurrentPeer(peer) else { return }
+        if #available(macOS 14.0, *) {
+            let secure = peer.sessionKeys != nil
+            let hasDriver = peer.handshakeDriver != nil
+            logger.info(
+                "🔐 RemoteControl frame: peer=\(peer.id, privacy: .public) bytes=\(frame.count, privacy: .public) secure=\(secure, privacy: .public) driver=\(hasDriver, privacy: .public)"
+            )
+            emitSmokeTrace("mac remote frame peer=\(peer.id) bytes=\(frame.count) secure=\(secure) driver=\(hasDriver)")
+        }
+        // If handshake established, frames become AES-GCM ciphertext of RemoteMessage JSON.
+        if #available(macOS 14.0, *), let keys = peer.sessionKeys {
+            let decryptResult = try decryptRemotePayload(
+                frame,
+                with: keys,
+                replayWindow: &peer.secureEnvelopeReplayWindow,
+                allowedPacketTypes: [.control]
+            )
+            let plain: Data
+            switch decryptResult {
+            case .payload(let payload, _):
+                plain = payload
+            case .replayDrop(let drop):
+                logRemoteSecureReplayDrop(drop, peer: peer)
+                return
+            }
+            do {
+                try await handleControlMessagePayload(plain, from: peer)
+            } catch let error as DecodingError {
+                logDroppedMalformedControlPayload(error, from: peer, secure: true, bytes: plain.count)
+            }
+            return
+        }
+
+        if #available(macOS 14.0, *), peer.handshakeDriver == nil {
+            if let messageA = try? HandshakeMessageA.decode(from: frame) {
+                let suiteSummary = messageA.supportedSuites.map(\.rawValue).joined(separator: ",")
+                logger.info("🔐 RemoteControl received MessageA: peer=\(peer.id, privacy: .public) suites=\(suiteSummary, privacy: .public)")
+                emitSmokeTrace("mac remote rx MessageA peer=\(peer.id) suites=\(suiteSummary)")
+                do {
+                    peer.handshakeDriver = try await makeInboundHandshakeDriver(
+                        for: peer,
+                        messageA: messageA
+                    )
+                    logger.info("🔐 RemoteControl inbound handshake driver ready for \(peer.id, privacy: .public)")
+                } catch {
+                    emitSmokeTrace("mac remote inbound-init-failed peer=\(peer.id) reason=\(error.localizedDescription)")
+                    logger.error("❌ RemoteControl inbound handshake init failed for \(peer.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    if Self.shouldKeepTransportAliveAfterHandshakeFailure(for: peer.role) {
+                        emitSmokeTrace("mac remote inbound-init-retry peer=\(peer.id) reason=\(error.localizedDescription)")
+                        peer.handshakeDriver = nil
+                        return
+                    }
+                    throw error
+                }
+            } else if Self.allowsInsecureLegacyRemoteControl,
+                      let _ = try? JSONDecoder().decode(RemoteMessage.self, from: frame) {
+                do {
+                    try await handleControlMessagePayload(frame, from: peer)
+                } catch let error as DecodingError {
+                    logDroppedMalformedControlPayload(error, from: peer, secure: false, bytes: frame.count)
+                }
+                return
+            } else {
+                throw RemoteControlError.handshakeInitializationFailed("rejected pre-auth control payload")
+            }
+        }
+
+        if #available(macOS 14.0, *), let driver = peer.handshakeDriver, let hPeer = peer.handshakePeer {
+            await driver.handleMessage(frame, from: hPeer)
+            let syncResult = try await syncSecureChannelState(after: driver, for: peer)
+            if case .retryableFailure = syncResult {
+                return
+            }
+            return
+        }
+    }
+
+    private func logDroppedMalformedControlPayload(
+        _ error: DecodingError,
+        from peer: PeerConnection,
+        secure: Bool,
+        bytes: Int
+    ) {
+        logger.warning(
+            """
+            ⚠️ 已丢弃无法解析的远控消息: peer=\(peer.id, privacy: .public) \
+            secure=\(secure, privacy: .public) \
+            bytes=\(bytes, privacy: .public) \
+            error=\(String(reflecting: error), privacy: .public)
+            """
+        )
+    }
+
+    private func waitForSecureChannelIfNeeded(
+        for peer: PeerConnection,
+        timeoutSeconds: TimeInterval = 30.0
+    ) async -> SecureChannelWaitResult {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if !isCurrentPeer(peer) {
+                logger.info("ℹ️ RemoteControl secure-channel wait aborted for stale peer \(peer.id, privacy: .public)")
+                return .aborted("secure channel aborted: stale peer")
+            }
+            if peer.sessionKeys != nil {
+                logger.info("🔐 RemoteControl secure channel ready: peer=\(peer.id, privacy: .public)")
+                emitSmokeTrace("mac remote secure-ready peer=\(peer.id)")
+                return .established
+            }
+            if Self.allowsInsecureLegacyRemoteControl {
+                logger.notice("🔓 RemoteControl legacy plaintext mode enabled for \(peer.id, privacy: .public)")
+                return .established
+            }
+            if currentPeer(for: peer.role, deviceId: peer.id) == nil {
+                return .aborted("secure channel aborted: peer closed before establishment")
+            }
+            do {
+                try await Task.sleep(for: .milliseconds(100))
+            } catch {
+                return .aborted("secure channel establishment cancelled")
+            }
+        }
+        emitSmokeTrace("mac remote secure-timeout peer=\(peer.id)")
+        return peer.sessionKeys != nil ? .established : .timedOut
+    }
+
+    @available(macOS 14.0, *)
+    private func makeInboundHandshakeDriver(
+        for peer: PeerConnection,
+        messageA: HandshakeMessageA
+    ) async throws -> HandshakeDriver {
+        let trustedPeerId: String
+        switch RemoteControlInboundTrustResolver.resolve(
+            remoteSOAPeerId: messageA.soaExtension?.initiatorPeerId,
+            records: TrustSyncService.shared.activeTrustRecords
+        ) {
+        case .resolved(let deviceId, _):
+            trustedPeerId = deviceId
+        case .missing:
+            throw RemoteControlError.untrustedPeer(peer.id)
+        case .ambiguous(let deviceIds, let fingerprints):
+            let summary = [
+                "deviceIds=\(deviceIds.joined(separator: ","))",
+                "fingerprints=\(fingerprints.joined(separator: ","))"
+            ].joined(separator: " ")
+            throw RemoteControlError.handshakeInitializationFailed(
+                "ambiguous trusted inbound remote-control identity: \(summary)"
+            )
+        }
+        let localDeviceId = try await SelfIdentityProvider.shared
+            .existingProtocolIdentityDeviceIdReadOnly()
+        guard let soaBinding = Self.remoteControlSOABinding(
+            localDeviceId: localDeviceId,
+            remoteDeviceId: trustedPeerId
+        ) else {
+            throw RemoteControlError.handshakeInitializationFailed(
+                "inbound remote control handshake missing stable SOA identities"
+            )
+        }
+        let soaPairKey = PeerSessionArbiter.pairKey(
+            localPeerId: soaBinding.localPeerId,
+            remotePeerId: soaBinding.expectedRemotePeerId,
+            scope: .remoteControl
+        )
+        recordSOAState(soaPairKey, for: peer)
+        try await releaseStaleSOAStateBeforeHandshake(for: peer)
+        peer.handshakePeer = PeerIdentifier(deviceId: trustedPeerId, displayName: nil, address: nil)
+        let trustProvider = try await makeRemoteControlTrustProvider(for: trustedPeerId)
+        #if !os(macOS)
+        let peerHasClassicGroup = messageA.supportedSuites.contains { !$0.isPQCGroup }
+        #endif
+        let configuration = try await SettingsManager.shared
+            .committedProtocolIdentityConfiguration()
+        let inboundProtocolIdentity = try InboundProtocolIdentitySelectionPolicy.resolve(
+            messageA: messageA,
+            candidateDeviceIds: [trustedPeerId],
+            activeLocalAlgorithm: configuration.algorithm,
+            activeLocalProtection: configuration.protection
+        )
+        let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
+        let requestedPolicy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
+        let capability = CryptoProviderFactory.detectCapability()
+        let localPQCAvailable = capability.hasApplePQC || capability.hasLiboqs
+
+        var effectivePolicy = requestedPolicy
+        var cryptoProvider: any CryptoProvider = CryptoProviderFactory.make(policy: .classicOnly)
+        var sigAAlgorithm: ProtocolSigningAlgorithm = .ed25519
+        var offeredSuites: [CryptoSuite] = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+
+        if let rejection = StrictPQCAdmissionGate.inboundRejection(
+            policy: requestedPolicy,
+            peerSupportedSuites: messageA.supportedSuites,
+            localPQCSuitesAvailable: localPQCAvailable
+        ), rejection == .peerOfferedClassicOnly {
+            throw RemoteControlError.handshakeInitializationFailed(rejection.diagnosticMessage)
+        }
+
+        if inboundProtocolIdentity.algorithm != .ed25519 {
+            let inventory = try CryptoProviderFactory.captureLANInventory(
+                identityAlgorithm: inboundProtocolIdentity.algorithm, policy: PQCModePolicyStore.standard.snapshot())
+            let plan = try inventory.selecting(messageA.supportedSuites.map(\.wireId))
+            peer.modePolicy = plan.inventory.policy
+            cryptoProvider = plan.provider
+            let localPQCSuites = CryptoProviderFactory.handshakeOfferedPQCSuites(using: cryptoProvider)
+
+            if let rejection = StrictPQCAdmissionGate.inboundRejection(
+                policy: requestedPolicy,
+                peerSupportedSuites: messageA.supportedSuites,
+                localPQCSuitesAvailable: !localPQCSuites.isEmpty
+            ) {
+                throw RemoteControlError.handshakeInitializationFailed(rejection.diagnosticMessage)
+            }
+
+            if localPQCSuites.isEmpty {
+                #if os(macOS)
+                throw InboundProtocolIdentitySelectionError.noCompatibleResponderSuite(
+                    inboundProtocolIdentity.algorithm
+                )
+                #else
+                if requestedPolicy.requirePQC {
+                    throw RemoteControlError.handshakeInitializationFailed(
+                        "strictPQC enabled but local PQC provider is unavailable"
+                    )
+                }
+                guard peerHasClassicGroup else {
+                    throw RemoteControlError.handshakeInitializationFailed(
+                        "peer offered PQC-only suites but local PQC provider is unavailable"
+                    )
+                }
+                cryptoProvider = CryptoProviderFactory.make(policy: .classicOnly)
+                sigAAlgorithm = .ed25519
+                offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                effectivePolicy = HandshakePolicy(
+                    requirePQC: false,
+                    allowClassicFallback: false,
+                    minimumTier: .classic,
+                    requireSecureEnclavePoP: requestedPolicy.requireSecureEnclavePoP
+                )
+                logger.info("🧩 RemoteControl inbound fallback(classic): local PQC unavailable for \(peer.id, privacy: .public)")
+                #endif
+            } else {
+                let compatibleSuites = InboundProtocolIdentitySelectionPolicy
+                    .compatibleResponderPQCSuites(
+                        localPQCSuites,
+                        algorithm: inboundProtocolIdentity.algorithm
+                    )
+                guard !compatibleSuites.isEmpty else {
+                    throw InboundProtocolIdentitySelectionError.noCompatibleResponderSuite(
+                        inboundProtocolIdentity.algorithm
+                    )
+                }
+                sigAAlgorithm = inboundProtocolIdentity.algorithm
+                offeredSuites = compatibleSuites
+            }
+        } else {
+            if requestedPolicy.requirePQC {
+                throw RemoteControlError.handshakeInitializationFailed(
+                    "strictPQC enabled but peer offered classic-only suites"
+                )
+            }
+            cryptoProvider = CryptoProviderFactory.make(policy: .classicOnly)
+            sigAAlgorithm = .ed25519
+            offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+            effectivePolicy = HandshakePolicy(
+                requirePQC: false,
+                allowClassicFallback: false,
+                minimumTier: .classic,
+                requireSecureEnclavePoP: requestedPolicy.requireSecureEnclavePoP
+            )
+        }
+
+        let identityProvider = DeviceIdentityHandshakeProvider(
+            sigAAlgorithm: sigAAlgorithm,
+            protocolSigningKeyProtection: inboundProtocolIdentity.protection,
+            includeSecureEnclavePoP: effectivePolicy.requireSecureEnclavePoP
+        )
+        let peerSuitesSummary = messageA.supportedSuites.map(\.rawValue).joined(separator: ",")
+        let localSuitesSummary = offeredSuites.map(\.rawValue).joined(separator: ",")
+        let providerName = String(describing: type(of: cryptoProvider))
+        let cryptoPolicy = HandshakeCryptoPolicyResolver.policy(for: offeredSuites)
+        logger.info(
+            "🔐 RemoteControl driver selection: peer=\(peer.id, privacy: .public) peerSuites=\(peerSuitesSummary, privacy: .public) localSuites=\(localSuitesSummary, privacy: .public) provider=\(providerName, privacy: .public) sigA=\(sigAAlgorithm.rawValue, privacy: .public) requirePQC=\(effectivePolicy.requirePQC, privacy: .public)"
+        )
+        emitSmokeTrace("mac remote driver peer=\(peer.id) peerSuites=\(peerSuitesSummary) localSuites=\(localSuitesSummary) provider=\(providerName) sigA=\(sigAAlgorithm.rawValue) requirePQC=\(effectivePolicy.requirePQC)")
+        let transport = RemoteControlHandshakeTransport(connection: peer.connection)
+        return try HandshakeDriver(
+            transport: transport,
+            cryptoProvider: cryptoProvider,
+            protocolSignatureProvider: ProtocolSignatureProviderSelector.select(for: sigAAlgorithm),
+            identityProvider: identityProvider,
+            sigAAlgorithm: sigAAlgorithm,
+            offeredSuites: offeredSuites,
+            policy: effectivePolicy,
+            cryptoPolicy: cryptoPolicy,
+            trustProvider: trustProvider,
+            localSOAPeerId: soaBinding.localPeerId,
+            expectedRemoteSOAPeerId: soaBinding.expectedRemotePeerId,
+            soaSessionScope: .remoteControl
+        )
+    }
+
+    private func handleControlMessagePayload(_ messageData: Data, from peer: PeerConnection) async throws {
+        guard isCurrentPeer(peer) else { return }
+        let message = try JSONDecoder().decode(RemoteMessage.self, from: messageData)
+        let isPreApprovalStreamConfiguration = message.type == .streamConfiguration
+            && peer.role == .beingControlled
+            && !peer.securityAdmissionApproved
+        guard isPreApprovalStreamConfiguration || RemoteControlSecurityAdmissionPolicy.allowsInboundPayload(
+            message.type,
+            isApproved: peer.role != .beingControlled || peer.securityAdmissionApproved
+        ) else {
+            logger.warning(
+                "⛔️ 未经批准的远控控制消息被阻断: peer=\(peer.id, privacy: .public) type=\(message.type.rawValue, privacy: .public)"
+            )
+            RemoteControlSmokeStatusWriter.append(
+                "remoteControlPayloadBlocked session=\(peer.id) transport=p2p type=\(message.type.rawValue)"
+            )
+            return
+        }
+
+        switch message.type {
+        case .mouseEvent:
+            guard peer.requestedStreamConfiguration?.isStopRequest == false else {
+                throw RemoteControlError.handshakeInitializationFailed(
+                    "mouse input arrived before acknowledged stream configuration"
+                )
+            }
+            let evt = try JSONDecoder().decode(RemoteMouseEvent.self, from: message.payload)
+            handleRemoteMouseEvent(evt, from: peer, inputControlLease: message.inputControlLease)
+        case .keyboardEvent:
+            guard peer.requestedStreamConfiguration?.isStopRequest == false else {
+                throw RemoteControlError.handshakeInitializationFailed(
+                    "keyboard input arrived before acknowledged stream configuration"
+                )
+            }
+            let evt = try JSONDecoder().decode(RemoteKeyboardEvent.self, from: message.payload)
+            handleRemoteKeyboardEvent(evt, from: peer, inputControlLease: message.inputControlLease)
+        case .screenData:
+ // 正常情况下，被控制端不会收到 screenData；有就丢掉
+            logger.debug("🎮 被控制端收到 screenData，忽略")
+        case .clipboard:
+            guard let acceptedConfiguration = peer.requestedStreamConfiguration,
+                  !acceptedConfiguration.isStopRequest else {
+                throw RemoteControlError.handshakeInitializationFailed(
+                    "clipboard arrived before acknowledged stream configuration"
+                )
+            }
+            let shouldAcceptClipboard = acceptedConfiguration.clipboardSyncEnabled
+            logger.debug(
+                "📋 收到远控剪贴板消息: peer=\(peer.id, privacy: .public) enabled=\(shouldAcceptClipboard, privacy: .public) bytes=\(message.payload.count, privacy: .public)"
+            )
+            guard shouldAcceptClipboard else { break }
+            guard RemoteControlSecurityNoticeCenter.shared.permitsInput(
+                noticeID: peer.securityNoticeId, lease: message.inputControlLease
+            ) else { break }
+            let payload = try JSONDecoder().decode(RemoteClipboardPayload.self, from: message.payload)
+            let clipboard = ClipboardRedirectionManager.shared
+            try clipboard.setRemoteClipboard(data: payload.data, mimeType: payload.mimeType, for: peer.clipboardSessionId)
+        case .streamConfiguration:
+            let config = try JSONDecoder().decode(RemoteDesktopStreamConfiguration.self, from: message.payload)
+            _ = try RemoteDesktopSessionTerminationContract.negotiatedVersion(requested: config.sessionTerminationVersion)
+            try validateControlAccessNegotiation(config, for: peer)
+            if peer.role == .beingControlled {
+                recordRemoteControlSecurityIdentity(
+                    config.remoteControlSecurityIdentity,
+                    from: "streamConfiguration",
+                    for: peer
+                )
+            }
+            guard peer.role != .beingControlled || peer.securityAdmissionApproved else {
+                let decision = RemoteDesktopStreamConfigurationTransactionPolicy
+                    .ingressDecision(
+                        incoming: config.streamConfigurationTransaction,
+                        lastAccepted: peer.pendingRequestedStreamConfiguration?
+                            .streamConfigurationTransaction,
+                        payloadMatchesLastAccepted:
+                            peer.pendingRequestedStreamConfiguration == config
+                    )
+                switch decision {
+                case .apply:
+                    peer.pendingRequestedStreamConfiguration = config
+                case .acknowledgeDuplicate:
+                    break
+                case .rejectMissingTransaction, .rejectConflictingDuplicate:
+                    throw RemoteControlError.handshakeInitializationFailed(
+                        "invalid stream configuration transaction: \(String(describing: decision))"
+                    )
+                }
+                logger.info(
+                    "⏳ viewer 流配置已暂存，等待远控安全提示批准后再应用: peer=\(peer.id, privacy: .public)"
+                )
+                RemoteControlSmokeStatusWriter.append(
+                    "remoteControlStreamConfigDeferred session=\(peer.id) transport=p2p reason=awaiting_security_notice"
+                )
+                break
+            }
+            try await applyViewerStreamConfiguration(config, for: peer)
+        case .streamConfigurationAck:
+            _ = try JSONDecoder().decode(
+                RemoteDesktopStreamConfigurationAcknowledgement.self,
+                from: message.payload
+            )
+        case .streamConfigurationRejected:
+            throw RemoteControlError.handshakeInitializationFailed("unexpected viewer-to-host stream configuration rejection")
+        case .sessionEnded:
+            throw RemoteControlError.handshakeInitializationFailed("sessionEnded is a host-to-viewer message")
+        case .controlAccess:
+            throw RemoteControlError.handshakeInitializationFailed("a viewer cannot issue input grants")
+        case .framePresentationAck:
+            let acknowledgement = try JSONDecoder().decode(
+                RemoteDesktopFramePresentationAcknowledgement.self,
+                from: message.payload
+            )
+            recordFramePresentationAcknowledgement(
+                acknowledgement,
+                from: peer
+            )
+        case .damageReport, .cursorUpdate, .overlayUpdate:
+            guard peer.requestedStreamConfiguration?.isStopRequest == false else {
+                throw RemoteControlError.handshakeInitializationFailed(
+                    "remote media metadata arrived before acknowledged stream configuration"
+                )
+            }
+        }
+    }
+
+    private func applyViewerStreamConfiguration(
+        _ config: RemoteDesktopStreamConfiguration,
+        for peer: PeerConnection
+    ) async throws {
+        guard isCurrentPeer(peer) else { return }
+        try validateControlAccessNegotiation(config, for: peer)
+        let decision = RemoteDesktopStreamConfigurationTransactionPolicy
+            .ingressDecision(
+                incoming: config.streamConfigurationTransaction,
+                lastAccepted: peer.lastAcceptedRawStreamConfiguration?
+                    .streamConfigurationTransaction,
+                payloadMatchesLastAccepted:
+                    peer.lastAcceptedRawStreamConfiguration == config
+            )
+        switch decision {
+        case .acknowledgeDuplicate:
+            guard let effectiveConfig = peer.requestedStreamConfiguration else {
+                throw RemoteControlError.handshakeInitializationFailed(
+                    "duplicate stream configuration has no accepted state"
+                )
+            }
+            guard try await sendStreamConfigurationAcknowledgement(
+                for: effectiveConfig,
+                transaction: config.streamConfigurationTransaction,
+                to: peer
+            ) else { return }
+            return
+        case .rejectMissingTransaction, .rejectConflictingDuplicate:
+            throw RemoteControlError.handshakeInitializationFailed(
+                "invalid stream configuration transaction: \(String(describing: decision))"
+            )
+        case .apply:
+            break
+        }
+
+        let previousConfig = peer.requestedStreamConfiguration
+        let previousRawConfig = peer.lastAcceptedRawStreamConfiguration
+        let effectiveConfig = RemoteControlStreamRequestPolicy
+            .streamConfigurationByPreservingAudioEndpointForVideoRefresh(
+                config,
+                previous: previousConfig
+            )
+        peer.streamConfigurationApplicationGeneration &+= 1
+        let applicationGeneration = peer.streamConfigurationApplicationGeneration
+
+        if effectiveConfig.isStopRequest {
+            // The authenticated stop intent ends HID ownership immediately. Do
+            // not make synthetic release depend on an outbound ACK that may be
+            // back-pressured indefinitely; media/config state is still committed
+            // only after the ACK below.
+            releaseRemoteInput(for: peer, reason: "p2p_stream_stop")
+        }
+
+        // ACK is the commit receipt for this stream operation. Do not detach senders, publish the
+        // configuration, enable the pump, or start capture until the exact ACK was sent.
+        guard try await sendStreamConfigurationAcknowledgement(
+            for: effectiveConfig,
+            transaction: config.streamConfigurationTransaction,
+            to: peer
+        ) else { return }
+        guard isCurrentPeer(peer),
+              peer.streamConfigurationApplicationGeneration == applicationGeneration,
+              peer.lastAcceptedRawStreamConfiguration == previousRawConfig,
+              peer.requestedStreamConfiguration == previousConfig else {
+            return
+        }
+
+        let supersededInFlightStart = screenSharingAttemptGate
+            .supersedeInFlightAttemptAndRequestRestart(for: peer.id)
+        let supersededSender = supersededInFlightStart
+            ? detachRealtimeAudioSender(from: peer)
+            : nil
+        peer.lastAcceptedRawStreamConfiguration = config
+        if config.mediaAudioEndpoint == nil,
+           effectiveConfig.mediaAudioEndpoint != nil,
+           config.streamRefreshToken != nil {
+            RemoteControlSmokeStatusWriter.append(
+                "audioEndpointPreservedForVideoRefresh peer=\(peer.id) refreshTokenState=\(Self.streamRefreshTokenLogState(config.streamRefreshToken))"
+            )
+        }
+        peer.requestedStreamConfiguration = effectiveConfig
+        peer.sessionTerminationContract = RemoteDesktopSessionTerminationContract(version: effectiveConfig.sessionTerminationVersion, transaction: effectiveConfig.streamConfigurationTransaction)
+        if let noticeID = peer.securityNoticeId {
+            RemoteControlSecurityNoticeCenter.shared.markControlReady(for: noticeID)
+        }
+        if effectiveConfig.isStopRequest {
+            peer.framePresentationAcknowledgements.reset()
+        } else if let transaction = effectiveConfig.streamConfigurationTransaction {
+            let negotiatedVersion = effectiveConfig.framePresentationAckVersion
+                == RemoteDesktopFramePresentationAcknowledgement.currentVersion
+                ? RemoteDesktopFramePresentationAcknowledgement.currentVersion
+                : nil
+            peer.framePresentationAcknowledgements.begin(
+                transaction: transaction,
+                negotiatedVersion: negotiatedVersion
+            )
+        } else {
+            peer.framePresentationAcknowledgements.reset()
+        }
+        peer.remoteVideoFormats = effectiveRemoteVideoFormats(for: peer)
+        if let supersededSender {
+            await supersededSender.close(
+                reason: "stream-configuration-superseded-in-flight-start"
+            )
+            guard isCurrentPeer(peer),
+                  peer.streamConfigurationApplicationGeneration == applicationGeneration,
+                  peer.lastAcceptedRawStreamConfiguration?.streamConfigurationTransaction
+                    == config.streamConfigurationTransaction else {
+                return
+            }
+        }
+        await syncOutboundFramePump(for: peer)
+        let frameAcknowledgementPeerID = peer.id
+        let frameAcknowledgementPeerRole = peer.role
+        let frameAcknowledgementPeerIdentity = ObjectIdentifier(peer)
+        await peer.outboundFramePump.setFrameSentHandler { [weak self] metadata in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      let currentPeer = self.currentPeer(
+                        for: frameAcknowledgementPeerRole,
+                        deviceId: frameAcknowledgementPeerID
+                      ),
+                      ObjectIdentifier(currentPeer) == frameAcknowledgementPeerIdentity else {
+                    return
+                }
+                let earlyAcknowledgement = currentPeer.framePresentationAcknowledgements
+                    .recordSentFrame(metadata)
+                if let earlyAcknowledgement {
+                    self.recordFramePresentationEvidence(
+                        acknowledgement: earlyAcknowledgement,
+                        metadata: metadata,
+                        for: currentPeer
+                    )
+                }
+            }
+        }
+        guard isCurrentPeer(peer),
+              peer.streamConfigurationApplicationGeneration == applicationGeneration,
+              peer.lastAcceptedRawStreamConfiguration?.streamConfigurationTransaction
+                == config.streamConfigurationTransaction else {
+            return
+        }
+            if effectiveConfig.isStopRequest {
+                configureClipboardSync(for: peer)
+                await stopScreenSharingForViewerStop(peer: peer, reason: "viewer-stream-configuration")
+                logger.info(
+                    "🎛️ 应用 viewer 停止流配置: peer=\(peer.id, privacy: .public) previousTransport=\(previousConfig?.screenFrameTransport ?? "none", privacy: .public)"
+                )
+                return
+            }
+            logger.info(
+                "🎛️ 应用 viewer 流配置: peer=\(peer.id, privacy: .public) first=\(previousConfig == nil, privacy: .public) screenSharingActive=\(self.screenSharingActive, privacy: .public) transport=\(effectiveConfig.screenFrameTransport ?? "legacy", privacy: .public)"
+            )
+            logger.info(
+                """
+                🎛️ 收到远控流策略: preset=\(effectiveConfig.qualityPreset ?? "unknown", privacy: .public) \
+                damage=\(effectiveConfig.damageTrackingEnabled ?? false, privacy: .public) \
+                cursor=\(effectiveConfig.separateCursorChannelEnabled ?? false, privacy: .public) \
+                overlay=\(effectiveConfig.interactionOverlayChannelEnabled ?? false, privacy: .public) \
+                jitter=\(effectiveConfig.jitterBufferFrames ?? 0, privacy: .public) \
+                recovery=\(effectiveConfig.lossRecoveryMode ?? "unknown", privacy: .public)
+                """
+            )
+            RemoteControlSmokeStatusWriter.append(
+                """
+                mac-stream-config peer=\(peer.id) \
+                session_ref=\(peer.sessionKeys.flatMap { P2PEvidenceReference.sessionIncarnation(sessionID: $0.sessionId, transcriptHash: $0.transcriptHash) } ?? "-") \
+                stream_ref=\(effectiveConfig.streamConfigurationTransaction.map { P2PEvidenceReference.transaction($0.id) } ?? "-") \
+                transport=\(effectiveConfig.screenFrameTransport ?? "legacy") \
+                codec=\(effectiveConfig.preferredCodec ?? "auto") fps=\(effectiveConfig.targetFrameRate) \
+                damage=\(effectiveConfig.damageTrackingEnabled ?? false) \
+                perf=\(effectiveConfig.performanceValidationMode ?? "normal") \
+                fallback=\(effectiveConfig.mediaFallbackPolicy ?? "default") \
+                audioEndpoint=\(effectiveConfig.mediaAudioEndpoint == nil ? "missing" : "present") \
+                refreshTokenState=\(Self.streamRefreshTokenLogState(effectiveConfig.streamRefreshToken))
+                """
+            )
+            configureClipboardSync(for: peer)
+            if !screenSharingActive {
+                await startScreenSharing(to: peer)
+            } else {
+                let requiresRestart = RemoteControlStreamRequestPolicy.shouldRestartCapture(
+                    previous: previousConfig,
+                    current: effectiveConfig
+                )
+                let requestedRefresh = effectiveConfig.streamRefreshToken != previousConfig?.streamRefreshToken
+                if requiresRestart {
+                    if previousConfig != nil, peer.captureCompatibilityOverride != nil {
+                        logger.info(
+                            "ℹ️ viewer 流配置已变化，清除当前会话的编码兼容性降级: peer=\(peer.id, privacy: .public)"
+                        )
+                        peer.captureCompatibilityOverride = nil
+                    }
+                    captureStreamer?.stop(inputOwner: peer.inputOwner)
+                    captureStreamer = nil
+                    await startScreenSharing(to: peer)
+                } else if requestedRefresh {
+                    let now = Date()
+                    if now.timeIntervalSince(peer.lastViewerStreamRefreshAt) >= 2.0 {
+                        peer.lastViewerStreamRefreshAt = now
+                        captureStreamer?.requestKeyFrameRefresh(reason: "viewer-stream-refresh", count: 1)
+                    } else {
+                        logger.debug(
+                            "ℹ️ 已抑制过密 viewer 关键帧刷新请求: peer=\(peer.id, privacy: .public)"
+                        )
+                    }
+                }
+                startInteractionTelemetryIfNeeded(for: peer)
+            }
+    }
+
+    private func validateControlAccessNegotiation(
+        _ configuration: RemoteDesktopStreamConfiguration,
+        for peer: PeerConnection
+    ) throws {
+        let version = configuration.remoteControlAccessVersion
+        guard version == nil || version == RemoteControlAccess.currentVersion else {
+            throw RemoteControlAccess.ValidationError.unsupportedVersion
+        }
+        guard !peer.hasNegotiatedControlAccess || peer.controlAccessVersion == version else {
+            throw RemoteControlAccess.ValidationError.negotiationChanged
+        }
+        peer.hasNegotiatedControlAccess = true
+        peer.controlAccessVersion = version
+    }
+
+    private func endSecurityNotice(for peer: PeerConnection) {
+        guard let noticeID = peer.securityNoticeId else { return }
+        RemoteControlSecurityNoticeCenter.shared.endNotice(id: noticeID)
+        peer.securityNoticeId = nil
+    }
+
+    private func sendStreamConfigurationAcknowledgement(
+        for effectiveConfig: RemoteDesktopStreamConfiguration,
+        transaction: RemoteDesktopStreamConfigurationTransaction?,
+        to peer: PeerConnection
+    ) async throws -> Bool {
+        guard isCurrentPeer(peer),
+              peer.securityAdmissionApproved,
+              let sessionKeys = peer.sessionKeys,
+              let expectedSessionReference = P2PEvidenceReference.sessionIncarnation(
+                sessionID: sessionKeys.sessionId,
+                transcriptHash: sessionKeys.transcriptHash
+              ),
+              let transaction else {
+            throw RemoteControlError.handshakeInitializationFailed(
+                "stream configuration acknowledgement has no current authenticated owner"
+            )
+        }
+        let access = peer.securityNoticeId.flatMap { RemoteControlSecurityNoticeCenter.shared.controlAccess(for: $0) }
+        guard effectiveConfig.remoteControlAccessVersion == nil || access != nil else {
+            throw RemoteControlError.handshakeInitializationFailed("managed input has no approved host grant")
+        }
+        let acknowledgement = RemoteDesktopStreamConfigurationAcknowledgement(
+            acceptedAt: Date().timeIntervalSince1970,
+            transaction: transaction,
+            streamRefreshToken: effectiveConfig.streamRefreshToken,
+            audioEndpointPresent: effectiveConfig.mediaAudioEndpoint != nil,
+            screenFrameTransport: effectiveConfig.screenFrameTransport,
+            framePresentationAckVersion: effectiveConfig.framePresentationAckVersion
+                == RemoteDesktopFramePresentationAcknowledgement.currentVersion
+                ? RemoteDesktopFramePresentationAcknowledgement.currentVersion
+                : nil,
+            controlAccess: access,
+            sessionTerminationVersion: try RemoteDesktopSessionTerminationContract.negotiatedVersion(requested: effectiveConfig.sessionTerminationVersion)
+        )
+        do {
+            try await peer.outboundFramePump.sendStreamAcknowledgement(acknowledgement)
+        } catch {
+            guard isCurrentPeer(peer),
+                  peer.sessionKeys.flatMap({
+                    P2PEvidenceReference.sessionIncarnation(
+                        sessionID: $0.sessionId,
+                        transcriptHash: $0.transcriptHash
+                    )
+                  }) == expectedSessionReference else {
+                return false
+            }
+            throw error
+        }
+        guard isCurrentPeer(peer),
+              peer.sessionKeys.flatMap({
+                P2PEvidenceReference.sessionIncarnation(
+                    sessionID: $0.sessionId,
+                    transcriptHash: $0.transcriptHash
+                )
+              }) == expectedSessionReference else {
+            return false
+        }
+        RemoteControlSmokeStatusWriter.append(
+            "mac-stream-config-ack session_ref=\(expectedSessionReference) stream_ref=\(P2PEvidenceReference.transaction(transaction.id)) transport=\(effectiveConfig.screenFrameTransport ?? "legacy")"
+        )
+        return true
+    }
+
+    private func recordFramePresentationAcknowledgement(
+        _ acknowledgement: RemoteDesktopFramePresentationAcknowledgement,
+        from peer: PeerConnection
+    ) {
+        guard isCurrentPeer(peer),
+              peer.role == .beingControlled,
+              peer.securityAdmissionApproved,
+              peer.sessionKeys != nil,
+              peer.requestedStreamConfiguration?.streamConfigurationTransaction
+                == acknowledgement.streamTransaction,
+              peer.requestedStreamConfiguration?.framePresentationAckVersion
+                == RemoteDesktopFramePresentationAcknowledgement.currentVersion,
+              let evidenceOwner = peer.productEvidenceOwner else {
+            return
+        }
+        guard let metadata = peer.framePresentationAcknowledgements.recordAcknowledgement(
+            for: acknowledgement
+        ) else { return }
+        recordFramePresentationEvidence(
+            acknowledgement: acknowledgement,
+            metadata: metadata,
+            evidenceOwner: evidenceOwner,
+            for: peer
+        )
+    }
+
+    private func recordFramePresentationEvidence(
+        acknowledgement: RemoteDesktopFramePresentationAcknowledgement,
+        metadata: RemoteControlSentFrameMetadata,
+        evidenceOwner: ProductReleaseEvidenceSessionOwner? = nil,
+        for peer: PeerConnection
+    ) {
+        guard isCurrentPeer(peer),
+              peer.role == .beingControlled,
+              peer.securityAdmissionApproved,
+              peer.sessionKeys != nil,
+              peer.requestedStreamConfiguration?.streamConfigurationTransaction
+                == acknowledgement.streamTransaction,
+              peer.requestedStreamConfiguration?.framePresentationAckVersion
+                == RemoteDesktopFramePresentationAcknowledgement.currentVersion,
+              metadata.sequenceNumber == acknowledgement.sequenceNumber,
+              metadata.streamTransaction == acknowledgement.streamTransaction,
+              let evidenceOwner = evidenceOwner ?? peer.productEvidenceOwner,
+              ProductReleaseEvidenceRecorder.shared.recordPeerFramePresented(
+                owner: evidenceOwner,
+                proof: .p2pRendererAcknowledgement,
+                bytes: metadata.bytes,
+                width: metadata.width,
+                height: metadata.height
+              ) else {
+            return
+        }
+        _ = peer.framePresentationAcknowledgements.complete(
+            acknowledgement: acknowledgement
+        )
+        RemoteControlSmokeStatusWriter.append(
+            "mac-frame-presented-ack session_ref=\(evidenceOwner.sessionReference) stream_ref=\(P2PEvidenceReference.transaction(acknowledgement.streamTransaction.id)) frameSequence=\(acknowledgement.sequenceNumber)"
+        )
+    }
+
+    private func sendRemoteFrame(_ plaintext: Data, to peer: PeerConnection) async throws {
+        if #available(macOS 14.0, *), let keys = peer.sessionKeys {
+            let counter = try peer.secureEnvelopeSendSequencer.nextCounter(for: keys)
+            let enc = try encryptRemotePayload(
+                plaintext,
+                with: keys,
+                packetType: .control,
+                counter: counter
+            )
+            try await sendFramed(enc, over: peer.connection)
+        } else {
+            try await sendFramed(plaintext, over: peer.connection)
+        }
+    }
+
+    private func encryptRemotePayload(
+        _ plaintext: Data,
+        with keys: SessionKeys,
+        packetType: RemoteControlSecurePacketType,
+        counter: UInt64
+    ) throws -> Data {
+        try RemoteControlSecureEnvelope.seal(
+            plaintext,
+            keys: keys,
+            packetType: packetType,
+            counter: counter
+        )
+    }
+
+    private struct RemoteControlSecureReplayDrop {
+        let packetType: RemoteControlSecurePacketType
+        let counter: UInt64
+        let highestCounter: UInt64
+        let reason: RemoteControlSecureReplayRejectionReason
+    }
+
+    private enum RemoteControlSecureDecryptResult {
+        case payload(Data, RemoteControlSecurePacketType)
+        case replayDrop(RemoteControlSecureReplayDrop)
+    }
+
+    private func decryptRemotePayload(
+        _ ciphertext: Data,
+        with keys: SessionKeys,
+        replayWindow: inout RemoteControlSecureReplayWindow,
+        allowedPacketTypes: Set<RemoteControlSecurePacketType>
+    ) throws -> RemoteControlSecureDecryptResult {
+        let openedPayload = try RemoteControlSecureEnvelope.open(
+            ciphertext,
+            keys: keys,
+            allowedPacketTypes: allowedPacketTypes
+        )
+        do {
+            try replayWindow.validateAndRecord(openedPayload)
+            return .payload(openedPayload.payload, openedPayload.packetType)
+        } catch let replayError as RemoteControlSecureEnvelopeError {
+            guard case .replayDetected(let packetType, let counter, let highestCounter, let reason) = replayError else {
+                throw replayError
+            }
+            return .replayDrop(
+                .init(
+                    packetType: packetType,
+                    counter: counter,
+                    highestCounter: highestCounter,
+                    reason: reason
+                )
+            )
+        }
+    }
+
+    private func logRemoteSecureReplayDrop(
+        _ drop: RemoteControlSecureReplayDrop,
+        peer: PeerConnection
+    ) {
+        let message = """
+        mac-remote-secure-replay-drop peer=\(peer.id) packetType=\(drop.packetType.rawValue) \
+        counter=\(drop.counter) highestCounter=\(drop.highestCounter) reason=\(drop.reason.rawValue) \
+        action=drop-authenticated-replay
+        """
+        logger.info("\(message, privacy: .public)")
+        emitSmokeTrace(message)
+    }
+
+    private func handleRemoteMouseEvent(_ event: RemoteMouseEvent, from peer: PeerConnection, inputControlLease: UUID?) {
+        guard isCurrentPeer(peer),
+              peer.role == .beingControlled,
+              peer.securityAdmissionApproved,
+              peer.requestedStreamConfiguration?.isStopRequest == false,
+              RemoteControlSecurityNoticeCenter.shared.permitsInput(
+                noticeID: peer.securityNoticeId, lease: inputControlLease
+              ) else {
+            return
+        }
+        let result = RemoteControlInputLifecycleCoordinator.shared.postMouseEvent(
+            event,
+            owner: peer.inputOwner
+        )
+        if result != .posted {
+            logger.warning(
+                "remote-input-rejected transport=p2p kind=mouse reason=\(String(describing: result), privacy: .public)"
+            )
+        } else if let owner = peer.productEvidenceOwner {
+            let effect: ProductReleaseEvidenceInputEffect = switch event.type {
+            case .scrollUp, .scrollDown: .scroll
+            case .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp, .mouseMoved: .pointer
+            }
+            _ = ProductReleaseEvidenceRecorder.shared.recordRemoteInputApplied(
+                owner: owner,
+                effect: effect
+            )
+        }
+    }
+
+    nonisolated static func mouseInjectionPoint(
+        for event: RemoteMouseEvent,
+        visibleSize: CGSize,
+        displayBounds: CGRect
+    ) -> CGPoint {
+        RemoteControlInputEventInjector.mouseInjectionPoint(
+            for: event,
+            mapping: ResolvedRemoteControlInjectionMapping(
+                visibleSize: visibleSize,
+                displayBounds: displayBounds
+            )
+        )
+    }
+
+    private func handleRemoteKeyboardEvent(_ event: RemoteKeyboardEvent, from peer: PeerConnection, inputControlLease: UUID?) {
+        guard isCurrentPeer(peer),
+              peer.role == .beingControlled,
+              peer.securityAdmissionApproved,
+              peer.requestedStreamConfiguration?.isStopRequest == false,
+              RemoteControlSecurityNoticeCenter.shared.permitsInput(
+                noticeID: peer.securityNoticeId, lease: inputControlLease
+              ) else {
+            return
+        }
+        let result = RemoteControlInputLifecycleCoordinator.shared.postKeyboardEvent(
+            event,
+            owner: peer.inputOwner
+        )
+        if result != .posted {
+            logger.warning(
+                "remote-input-rejected transport=p2p kind=keyboard reason=\(String(describing: result), privacy: .public)"
+            )
+        } else if let owner = peer.productEvidenceOwner {
+            _ = ProductReleaseEvidenceRecorder.shared.recordRemoteInputApplied(
+                owner: owner,
+                effect: .keyboard
+            )
+        }
+    }
+
+ // MARK: - 性能指标更新
+
+    private func updateMetrics(_ metrics: RenderMetrics) {
+        bandwidthMbps = metrics.bandwidthMbps
+        latencyMs = metrics.latencyMilliseconds
+
+        estimatedFPS = Int(displayedFrameMonitor.currentFPS.rounded())
+
+        bandwidthHistory.append(bandwidthMbps)
+        if bandwidthHistory.count > historyCapacity {
+            bandwidthHistory.removeFirst(bandwidthHistory.count - historyCapacity)
+        }
+
+        fpsHistory.append(estimatedFPS)
+        if fpsHistory.count > historyCapacity {
+            fpsHistory.removeFirst(fpsHistory.count - historyCapacity)
+        }
+    }
+
+ // MARK: - NWConnection 长度前缀封装
+
+ /// 发送一条「带 4 字节长度前缀」的数据帧
+    private func sendFramed(_ data: Data, over connection: NWConnection) async throws {
+        var length = UInt32(data.count).bigEndian
+        var frame = Data(bytes: &length, count: 4)
+        frame.append(data)
+
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            connection.send(content: frame, completion: .contentProcessed { error in
+                if let error {
+                    cont.resume(throwing: error)
+                } else {
+                    cont.resume()
+                }
+            })
+        }
+    }
+
+    /// 尝试从缓冲区提取下一条完整的长度前缀帧
+    /// - Returns: 完整 payload；若数据还不完整返回 nil
+    private func nextFramedMessage(
+        from buffer: inout Data,
+        maxMessageBytes: Int
+    ) throws -> Data? {
+        guard buffer.count >= 4 else { return nil }
+        let length = parseFrameLength(from: buffer)
+        let maxWireMessageBytes = RemoteControlWireLimits.maxWireMessageBytes(for: maxMessageBytes)
+        guard length > 0, length <= maxWireMessageBytes else {
+            throw RemoteControlError.invalidMessageLength(length)
+        }
+
+        let headerSize = 4
+        let totalSize = headerSize + length
+        guard totalSize <= buffer.count else { return nil }
+
+        let payloadStart = buffer.index(buffer.startIndex, offsetBy: headerSize)
+        let payloadEnd = buffer.index(payloadStart, offsetBy: length)
+        let payload = Data(buffer[payloadStart..<payloadEnd])
+        buffer.removeSubrange(buffer.startIndex..<payloadEnd)
+        return payload
+    }
+
+    private func parseFrameLength(from buffer: Data) -> Int {
+        buffer.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return 0 }
+            let rawLength = base.loadUnaligned(as: UInt32.self)
+            return Int(UInt32(bigEndian: rawLength))
+        }
+    }
+
+ /// 读取一块原始数据，交由上层做粘包处理
+    private func receiveChunk(from connection: NWConnection) async throws -> (data: Data, isComplete: Bool) {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<(data: Data, isComplete: Bool), Error>) in
+            final class EmptyReadLimiter: @unchecked Sendable {
+                private let lock = NSLock()
+                private var count = 0
+                private let limit: Int
+
+                init(limit: Int) {
+                    self.limit = limit
+                }
+
+                func recordAndShouldFail() -> Bool {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    count += 1
+                    return count > limit
+                }
+            }
+
+            let emptyReadLimiter = EmptyReadLimiter(limit: 8)
+
+            @Sendable func receiveNextChunk() {
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
+                    if let error {
+                        cont.resume(throwing: error)
+                    } else if let data, data.isEmpty == false {
+                        cont.resume(returning: (data, isComplete))
+                    } else if isComplete {
+ // 仅在 Network 明确报告 EOF 时才视为连接关闭，避免把建立期的空回调误判为断链。
+                        cont.resume(returning: (Data(), true))
+                    } else {
+                        guard !emptyReadLimiter.recordAndShouldFail() else {
+                            cont.resume(
+                                throwing: RemoteControlError.handshakeInitializationFailed("remote-control receive returned repeated empty reads")
+                            )
+                            return
+                        }
+                        self.logger.debug("ℹ️ RemoteControl receive returned no payload before completion; awaiting next chunk")
+                        receiveNextChunk()
+                    }
+                }
+            }
+
+            receiveNextChunk()
+        }
+    }
+
+    private struct RetiredConnectionResources {
+        let outboundFramePump: RemoteControlOutboundFramePump
+        let realtimeAudioSender: RemoteRealtimeMediaAudioSender?
+    }
+
+    /// Atomically retires every manager-owned handle for one exact peer before
+    /// any suspension. This is shared by transport callbacks and strict media
+    /// failures so a same-ID replacement cannot appear between owner
+    /// validation and teardown commitment.
+    private func retireConnectionClosedResources(
+        peer: PeerConnection,
+        error: Error,
+        hostTerminationReason: RemoteDesktopSessionTermination.Reason? = nil
+    ) -> RetiredConnectionResources? {
+        let normalHostEnd = hostTerminationReason.map { !$0.isFailure } ?? false
+        guard isCurrentPeer(peer) else {
+            logger.info("ℹ️ 忽略过期远控会话的关闭回调: \(peer.id, privacy: .public)")
+            return nil
+        }
+
+        peer.terminalError = normalHostEnd ? nil : error
+
+        if normalHostEnd { logger.info("Remote host ended its authenticated session") }
+        else { logger.error(
+            "🔌 连接 \(peer.id, privacy: .public) 关闭或出错: \(error.localizedDescription, privacy: .public) screenSharingActive=\(self.screenSharingActive, privacy: .public) hasCaptureStreamer=\(self.captureStreamer != nil, privacy: .public)"
+        ) }
+
+        notifyRemoteControlTerminalSessionIfNeeded(
+            peer: peer,
+            kind: normalHostEnd ? .normal : .interrupted,
+            reason: error.localizedDescription
+        )
+        releaseRemoteInput(for: peer, reason: "p2p_transport_retired")
+        peer.connection.cancel()
+        if peer.role == .beingControlled {
+            endSecurityNotice(for: peer)
+        }
+        endProductEvidenceSession(
+            for: peer,
+            reason: normalHostEnd ? .user : Self.productEvidenceDisconnectReason(for: error)
+        )
+        _ = removePeer(deviceId: peer.id, role: peer.role)
+        if #available(macOS 14.0, *) {
+            releaseSOAState(for: peer)
+        }
+        let realtimeAudioSender = detachRealtimeAudioSender(from: peer)
+        if peer.role == .controlling {
+            stopP2PRealtimeAudioReceiverIfNeeded(peerId: peer.id)
+        }
+        stopInteractionTelemetry(for: peer.id)
+        screenCaptureStartupRetryCountByPeerId.removeValue(forKey: peer.id)
+        invalidateScreenSharingStartupState(for: peer.id)
+
+        if activeClipboardPeerId == peer.id {
+            disableActiveClipboardSync()
+        }
+
+        finishRoleTeardownIfNeeded(for: peer.role)
+        if peer.role == .controlling {
+            controllingSessionError = normalHostEnd ? nil : error.localizedDescription
+        }
+
+        return RetiredConnectionResources(
+            outboundFramePump: peer.outboundFramePump,
+            realtimeAudioSender: realtimeAudioSender
+        )
+    }
+
+    private func closeRetiredConnectionResources(
+        _ resources: RetiredConnectionResources
+    ) async {
+        await resources.outboundFramePump.close()
+        if let realtimeAudioSender = resources.realtimeAudioSender {
+            await realtimeAudioSender.close(reason: "peer-connection-closed")
+        }
+    }
+
+    /// 统一处理连接关闭 / 错误
+    private func handleConnectionClosed(peer: PeerConnection, error: Error) async {
+        guard let resources = retireConnectionClosedResources(
+            peer: peer,
+            error: error
+        ) else {
+            return
+        }
+
+        // From this point onward, only resources captured from the retired
+        // peer may be awaited. No manager-global or peer-id keyed state is
+        // mutated after suspension, so a same-id replacement cannot be torn
+        // down by this callback when it resumes.
+        await closeRetiredConnectionResources(resources)
+    }
+
  // MARK: - 静态图像 -> Metal 纹理
-    
+
     private func createTexture(from image: CGImage, device: MTLDevice) throws -> MTLTexture {
         let width = image.width
         let height = image.height
         let bytesPerPixel = 4
         let bytesPerRow = width * bytesPerPixel
         let bitsPerComponent = 8
-        
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
+
+        let colorSpace = ColorPipelineConfiguration.sdr.makeSourceColorSpace() ?? CGColorSpaceCreateDeviceRGB()
         let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue |
         CGBitmapInfo.byteOrder32Little.rawValue
-        
+
         guard let context = CGContext(
             data: nil,
             width: width,
@@ -598,13 +5251,13 @@ public final class RemoteControlManager: BaseManager {
         ) else {
             throw RemoteControlError.screenCaptureFailed
         }
-        
+
         let rect = CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height))
         context.draw(image, in: rect)
         guard let data = context.data else {
             throw RemoteControlError.screenCaptureFailed
         }
-        
+
         let desc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm,
             width: width,
@@ -612,11 +5265,11 @@ public final class RemoteControlManager: BaseManager {
             mipmapped: false
         )
         desc.usage = [.shaderRead]
-        
+
         guard let texture = device.makeTexture(descriptor: desc) else {
             throw RemoteControlError.screenCaptureFailed
         }
-        
+
         let region = MTLRegionMake2D(0, 0, width, height)
         texture.replace(
             region: region,
@@ -626,4 +5279,197 @@ public final class RemoteControlManager: BaseManager {
         )
         return texture
     }
+
+    private static func sanitizeTelemetryToken(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\n", with: "_")
+            .replacingOccurrences(of: "\r", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
+    }
+
+    private static func realtimeAudioStartupFailureReason(_ error: Error) -> String {
+        if let transportError = error as? SkyBridgeRealtimeMediaTransportError {
+            return transportError.stableCode
+        }
+        if let startupError = error as? RemoteControlRealtimeMediaStartupError {
+            return startupError.stableCode
+        }
+        return sanitizeTelemetryToken(error.localizedDescription)
+    }
 }
+
+#if DEBUG || SKYBRIDGE_TESTING
+struct RemoteControlManagerRoleSnapshot: Equatable {
+    let controllingDeviceIds: [String]
+    let beingControlledDeviceIds: [String]
+    let connectedDevices: [String]
+    let isControlling: Bool
+    let isBeingControlled: Bool
+    let currentRenderingMode: RenderingMode
+    let screenSharingActive: Bool
+    let activeClipboardPeerId: String?
+    let hasScreenCaptureWatchdogTask: Bool
+    let screenCaptureRestartInProgress: Bool
+    let interactionTelemetryPeerIds: [String]
+    let screenCaptureRetryPeerIds: [String]
+}
+
+extension RemoteControlManager {
+    func testingViewerPeerIdentity(deviceId: String) -> ObjectIdentifier? {
+        currentPeer(for: .controlling, deviceId: deviceId).map(ObjectIdentifier.init)
+    }
+
+    func testingInstallOutboundHandshakeDriver(
+        _ driver: HandshakeDriver,
+        deviceId: String,
+        expectedPeerIdentity: ObjectIdentifier
+    ) -> Bool {
+        installOutboundHandshakeDriver(
+            driver,
+            peerId: deviceId,
+            role: .controlling,
+            expectedPeerIdentity: expectedPeerIdentity
+        )
+    }
+
+    var testingPresentedViewerFrameCount: UInt64 { displayedFrameMonitor.presentedFrameCount }
+
+    func testingPrepareViewerStream(mode: RenderingMode) {
+        prepareViewingRenderPipelineForNewStream()
+        renderingModeController.resetForNewStream()
+        currentRenderingMode = renderingModeController.requestMode(mode)
+        synchronizeRendererResources(for: currentRenderingMode)
+    }
+
+    func testingInstallViewerPeer(
+        deviceId: String,
+        keys: SessionKeys?,
+        authority: AuthenticatedRemoteAuthority? = nil
+    ) {
+        let peer = PeerConnection(
+            id: deviceId,
+            role: .controlling,
+            connection: NWConnection(host: "127.0.0.1", port: 9, using: .tcp)
+        )
+        peer.sessionKeys = keys
+        peer.authenticatedRemoteAuthority = authority
+        registerPeer(peer)
+    }
+
+    func testingCompletedOutboundHandshakeAuthority(
+        deviceId: String,
+        keys: SessionKeys
+    ) async throws -> AuthenticatedRemoteAuthority {
+        guard let peer = currentPeer(for: .controlling, deviceId: deviceId) else {
+            throw RemoteControlError.deviceNotConnected
+        }
+        return try await outboundHandshakeAuthority(for: peer, completedKeys: keys)
+    }
+
+    func testingReceiveViewerFrame(_ frame: Data, from deviceId: String) async throws {
+        guard let peer = currentPeer(for: .controlling, deviceId: deviceId) else {
+            throw RemoteControlError.deviceNotConnected
+        }
+        try await handleInboundViewerFrame(frame, from: peer)
+    }
+
+    func testingReceiveViewerChunks(_ chunks: [(Data, Bool)], from deviceId: String) async throws {
+        guard let peer = currentPeer(for: .controlling, deviceId: deviceId) else {
+            throw RemoteControlError.deviceNotConnected
+        }
+        var buffer = Data()
+        for (data, isComplete) in chunks {
+            if try await !processInboundViewerChunk(data, isComplete: isComplete, from: peer, buffer: &buffer) {
+                return
+            }
+        }
+    }
+
+    func testingSetViewerStreamConfigurations(
+        pending: RemoteDesktopStreamConfiguration,
+        committed: RemoteDesktopStreamConfiguration? = nil
+    ) {
+        pendingViewerStreamConfiguration = pending
+        lastSentViewerStreamConfiguration = committed
+        acknowledgedViewerStreamTransaction = nil
+        viewerStreamConfigurationOperation = UUID()
+        viewerStreamConfigurationFailure = nil
+    }
+
+    func testingBeginWaitingForViewerStreamConfiguration(deviceId: String) throws -> Task<Void, any Error> {
+        guard let peer = controllingPeers[deviceId], let configuration = pendingViewerStreamConfiguration,
+              let operation = viewerStreamConfigurationOperation else { throw RemoteControlError.deviceNotConnected }
+        return Task { @MainActor in
+            try await waitForViewerStreamConfiguration(configuration, peer: peer, operation: operation)
+        }
+    }
+
+    func testingAcceptViewerStreamAcknowledgement(
+        _ acknowledgement: RemoteDesktopStreamConfigurationAcknowledgement
+    ) throws {
+        try acceptViewerStreamConfigurationAcknowledgement(acknowledgement)
+    }
+
+    var testingAcknowledgedViewerStreamTransaction: RemoteDesktopStreamConfigurationTransaction? {
+        acknowledgedViewerStreamTransaction
+    }
+
+    func testingRegisterRole(_ role: RemoteControlSessionRole, deviceId: String) {
+        registerConnectedDevice(deviceId, for: role)
+    }
+
+    func testingRemoveRole(_ role: RemoteControlSessionRole, deviceId: String) {
+        unregisterConnectedDevice(deviceId, for: role)
+        finishRoleTeardownIfNeeded(for: role)
+    }
+
+    func testingSetViewingRenderPipelineMode(_ mode: RenderingMode) {
+        currentRenderingMode = mode
+    }
+
+    func testingSeedBeingControlledResources(
+        activeClipboardPeerId: String? = nil,
+        screenSharingActive: Bool = true,
+        screenCaptureRestartInProgress: Bool = true,
+        interactionTelemetryPeerIds: [String] = [],
+        screenCaptureRetryPeerIds: [String] = []
+    ) {
+        self.activeClipboardPeerId = activeClipboardPeerId
+        self.screenSharingActive = screenSharingActive
+        self.screenCaptureRestartInProgress = screenCaptureRestartInProgress
+
+        screenCaptureWatchdogTask?.cancel()
+        screenCaptureWatchdogTask = Task {}
+
+        interactionTelemetryTasksByPeerId.values.forEach { $0.cancel() }
+        interactionTelemetryTasksByPeerId = Dictionary(
+            uniqueKeysWithValues: interactionTelemetryPeerIds.map { deviceId in
+                (deviceId, Task {})
+            }
+        )
+
+        screenCaptureStartupRetryCountByPeerId = Dictionary(
+            uniqueKeysWithValues: screenCaptureRetryPeerIds.map { ($0, 1) }
+        )
+    }
+
+    var testingRoleSnapshot: RemoteControlManagerRoleSnapshot {
+        RemoteControlManagerRoleSnapshot(
+            controllingDeviceIds: controllingDeviceIds.sorted(),
+            beingControlledDeviceIds: beingControlledDeviceIds.sorted(),
+            connectedDevices: connectedDevices,
+            isControlling: isControlling,
+            isBeingControlled: isBeingControlled,
+            currentRenderingMode: currentRenderingMode,
+            screenSharingActive: screenSharingActive,
+            activeClipboardPeerId: activeClipboardPeerId,
+            hasScreenCaptureWatchdogTask: screenCaptureWatchdogTask != nil,
+            screenCaptureRestartInProgress: screenCaptureRestartInProgress,
+            interactionTelemetryPeerIds: interactionTelemetryTasksByPeerId.keys.sorted(),
+            screenCaptureRetryPeerIds: screenCaptureStartupRetryCountByPeerId.keys.sorted()
+        )
+    }
+}
+#endif
+#endif

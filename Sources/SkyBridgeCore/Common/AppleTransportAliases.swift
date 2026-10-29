@@ -1,0 +1,5 @@
+@_exported import SkyBridgeAppleTransport
+
+public typealias NativeWebSocketCallbacks = SkyBridgeAppleTransport.NativeWebSocketCallbacks
+public typealias NativeWebSocketClient = SkyBridgeAppleTransport.NativeWebSocketClient
+public typealias WebSocketSignalingClient = SkyBridgeAppleTransport.WebSocketSignalingClient

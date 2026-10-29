@@ -302,7 +302,8 @@ public final class WeatherDataService: ObservableObject {
     }
     
  // MARK: - 调试方法
-    
+
+#if DEBUG || SKYBRIDGE_TESTING
  /// 设置模拟天气数据（仅用于测试）
     public func setSimulatedWeather(
         weatherType: WeatherType,
@@ -350,6 +351,7 @@ public final class WeatherDataService: ObservableObject {
             timeOfDay: getTimeOfDay()
         )
     }
+#endif
     
  // MARK: - 私有方法
     

@@ -11,4 +11,109 @@ final class USBInterfaceDescriptorTests: XCTestCase {
         let cls = USBCConnectionManager.parseInterfaceClass(from: cfg)
         XCTAssertEqual(cls, 1)
     }
+
+    func testExternalAccessoryGateIsClosedUnderUnitTests() {
+        XCTAssertFalse(USBCConnectionManager.canUseExternalAccessory)
+    }
+
+    func testGenericDiscoveryDoesNotTriggerMFiScan() throws {
+        let source = try readSource("Sources/SkyBridgeCore/DeviceDiscovery/DeviceDiscoveryManagerOptimized.swift")
+        XCTAssertFalse(source.contains("scanForMFiDevices()"))
+    }
+
+    func testUSBManagementRefreshDoesNotTriggerMFiScan() throws {
+        let source = try readSource("Sources/SkyBridgeCompassApp/Views/USBDeviceManagementView.swift")
+        XCTAssertFalse(source.contains("scanForMFiDevices()"))
+    }
+
+    func testExternalAccessoryManagerIsLazyOnly() throws {
+        let source = try readSource("Sources/SkyBridgeCore/Connection/USBCConnectionManager.swift")
+        let occurrences = source.components(separatedBy: "EAAccessoryManager.shared()").count - 1
+        XCTAssertEqual(occurrences, 1)
+        XCTAssertTrue(source.contains("private func ensureAccessoryManager() -> EAAccessoryManager?"))
+    }
+
+    func testUSBCManagerInitializerDoesNotImplicitlyScanUSB() throws {
+        let source = try readSource("Sources/SkyBridgeCore/Connection/USBCConnectionManager.swift")
+        for signature in ["public convenience init()", "init(androidPreparationFactory:"] {
+            let initializer = try extractBody(named: signature, from: source)
+            XCTAssertFalse(
+                initializer.contains("scanForUSBDevices"),
+                "USBCConnectionManager construction must stay cheap; USB enumeration is only allowed from explicit scan call sites."
+            )
+        }
+        let scan = try extractBody(named: "public func scanForUSBDevices() async", from: source)
+        XCTAssertTrue(scan.contains("try await readUSBInventory(hostOnly: false)"))
+        let read = try extractBody(named: "private func readUSBInventory(hostOnly:", from: source)
+        let queued = try XCTUnwrap(read.range(of: "connectionQueue.async {"))
+        let enumeration = try XCTUnwrap(read.range(of: "try Self.enumerateUSBDevicesSnapshot()"))
+        XCTAssertLessThan(queued.lowerBound, enumeration.lowerBound,
+            "USB enumeration must stay on the dedicated queue before MainActor publication.")
+        XCTAssertTrue(read.contains("continuation.resume(with: Result {"),
+            "Enumeration failures must reach the caller, not masquerade as an empty scan.")
+    }
+
+    func testUSBDiscoveryMonitoringOwnsExactlyOneInitialScan() throws {
+        let usbSource = try readSource("Sources/SkyBridgeCore/DeviceDiscovery/USBDeviceDiscoveryManager.swift")
+        let startBody = try extractBody(named: "public func start() async", from: usbSource)
+        let startMonitoringBody = try extractBody(named: "public func startMonitoring()", from: usbSource)
+
+        XCTAssertFalse(
+            startBody.contains("scanUSBDevices"),
+            "USBDeviceDiscoveryManager.start() must not stack an explicit scan on top of startMonitoring()'s initial scan."
+        )
+        XCTAssertTrue(
+            startMonitoringBody.contains("guard notificationPort == nil"),
+            "USB monitoring should be idempotent so repeated discovery starts cannot install duplicate IOKit notifications."
+        )
+        XCTAssertEqual(
+            startMonitoringBody.components(separatedBy: "scanUSBDevices()").count - 1,
+            1,
+            "startMonitoring() should own a single initial scan after notification registration."
+        )
+
+        let unifiedOnlineSource = try readSource("Sources/SkyBridgeCore/DeviceDiscovery/UnifiedOnlineDeviceManager.swift")
+        let unifiedStart = try extractBody(named: "public func startDiscovery()", from: unifiedOnlineSource)
+        XCTAssertFalse(
+            unifiedStart.contains("usbDiscovery.scanUSBDevices()"),
+            "UnifiedOnlineDeviceManager.startDiscovery() should delegate the initial USB scan to startMonitoring()."
+        )
+
+        let unifiedDiscoverySource = try readSource("Sources/SkyBridgeCore/DeviceDiscovery/UnifiedDeviceDiscoveryManager.swift")
+        XCTAssertFalse(
+            unifiedDiscoverySource.contains("self?.usbDiscovery.scanUSBDevices()"),
+            "Legacy unified discovery integration should not double-trigger USB initial scans."
+        )
+    }
+
+    private func readSource(_ relativePath: String) throws -> String {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let url = root.appendingPathComponent(relativePath)
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    private func extractBody(named signature: String, from source: String) throws -> String {
+        guard let signatureRange = source.range(of: signature),
+              let openingBrace = source[signatureRange.upperBound...].firstIndex(of: "{") else {
+            XCTFail("Signature not found: \(signature)")
+            throw NSError(domain: "USBInterfaceDescriptorTests", code: 1)
+        }
+
+        var depth = 0
+        var index = openingBrace
+        while index < source.endIndex {
+            let character = source[index]
+            if character == "{" {
+                depth += 1
+            } else if character == "}" {
+                depth -= 1
+                if depth == 0 {
+                    return String(source[openingBrace...index])
+                }
+            }
+            index = source.index(after: index)
+        }
+
+        throw XCTSkip("Unbalanced body for signature: \(signature)")
+    }
 }

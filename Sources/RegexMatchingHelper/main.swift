@@ -26,8 +26,8 @@ let delegate = RegexMatchingServiceDelegate(
 let listener = NSXPCListener.anonymous()
 listener.delegate = delegate
 
-// Resume the listener
-listener.resume()
+// Activate the listener after its delegate is fully configured.
+listener.activate()
 
 // Run the run loop to keep the service alive
 RunLoop.current.run()

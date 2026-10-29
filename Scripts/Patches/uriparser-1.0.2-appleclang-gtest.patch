@@ -1,0 +1,36 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c7d2591..2f5865d 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -354,9 +354,9 @@ if(URIPARSER_BUILD_TESTS)
+         ${CMAKE_CURRENT_BINARY_DIR}  # for UriConfig.h
+     )
+ 
+-    target_link_libraries(testrunner PUBLIC
+-        ${GTEST_BOTH_LIBRARIES}
+-    )
++    # The test suite defines its own main(), so linking gtest_main would add a
++    # redundant archive and duplicate GTest::gtest on modern CMake packages.
++    target_link_libraries(testrunner PRIVATE ${GTEST_LIBRARIES})
+ 
+     # NOTE: uriparser does not use pthreads itself but gtest does
+     find_package(Threads REQUIRED)
+diff --git a/test/VersionSuite.cpp b/test/VersionSuite.cpp
+index 9936db5..5ce6532 100644
+--- a/test/VersionSuite.cpp
++++ b/test/VersionSuite.cpp
+@@ -28,9 +28,11 @@
+ TEST(VersionSuite, EnsureVersionDefinesInSync) {
+     char INSIDE_VERSION[256];
+     const int bytes_printed =
+-        sprintf(INSIDE_VERSION, "%d.%d.%d%s", URI_VER_MAJOR, URI_VER_MINOR,
+-                URI_VER_RELEASE, URI_VER_SUFFIX_ANSI);
+-    ASSERT_NE(bytes_printed, -1);
++        std::snprintf(INSIDE_VERSION, sizeof(INSIDE_VERSION), "%d.%d.%d%s",
++                      URI_VER_MAJOR, URI_VER_MINOR, URI_VER_RELEASE,
++                      URI_VER_SUFFIX_ANSI);
++    ASSERT_GE(bytes_printed, 0);
++    ASSERT_LT(bytes_printed, static_cast<int>(sizeof(INSIDE_VERSION)));
+     EXPECT_STREQ(INSIDE_VERSION, PACKAGE_VERSION);
+ }
+ 

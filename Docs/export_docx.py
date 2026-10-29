@@ -21,6 +21,7 @@ import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 
 NEWLABEL_RE = re.compile(r"\\newlabel\{(?P<label>[^}]+)\}\{\{(?P<num>[^}]*)\}\{")
@@ -77,13 +78,446 @@ def strip_latex_softbreaks(tex: str) -> str:
     return tex
 
 
-def expand_simple_macros(tex: str) -> str:
+def style_id_by_name(styles_xml: str, wanted_name: str) -> str | None:
     """
-    Expand a small set of simple macros that are safe to inline for DOCX conversion.
+    Return w:styleId for a given human-readable style name (w:name w:val="...").
+    """
+    # Best-effort regex (avoid full XML parsing for speed/robustness).
+    # Pattern: <w:style ... w:styleId="X"> ... <w:name w:val="Wanted"/>
+    pat = re.compile(
+        r'<w:style[^>]*w:styleId="(?P<id>[^"]+)"[^>]*>[\s\S]*?<w:name[^>]*w:val="(?P<name>[^"]+)"',
+        re.IGNORECASE,
+    )
+    for m in pat.finditer(styles_xml):
+        if m.group("name").strip().lower() == wanted_name.strip().lower():
+            return m.group("id")
+    return None
 
-    IMPORTANT: Never do a raw string replace on macro names, otherwise replacing
-    \artifactdate would corrupt \artifactdateSystemImpact (prefix match).
+def style_id_by_name_xml(styles_xml_bytes: bytes, wanted_name: str) -> str | None:
     """
+    Parse styles.xml and return styleId for a given human-readable style name.
+    More robust than regex (handles localized templates cleanly).
+    """
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    try:
+        root = ET.fromstring(styles_xml_bytes)
+    except Exception:
+        return None
+    wanted = wanted_name.strip().lower()
+    for st in root.findall("w:style", ns):
+        sid = st.attrib.get(f"{{{ns['w']}}}styleId")
+        name_el = st.find("w:name", ns)
+        name = name_el.attrib.get(f"{{{ns['w']}}}val") if name_el is not None else None
+        if sid and name and name.strip().lower() == wanted:
+            return sid
+    return None
+
+
+def extract_labeled_tables_as_placeholders(
+    tex: str,
+    ref_map: dict[str, str],
+    cite_map: dict[str, str],
+) -> tuple[str, dict[str, dict]]:
+    """
+    Replace each labeled table environment with:
+      - a caption paragraph (already prefixed by prefix_table_and_figure_captions_in_envs)
+      - a placeholder paragraph: DOCX_TABLE_PLACEHOLDER::<tab:...>
+
+    And return a mapping label -> matrix(rows x cols) for later DOCX XML injection.
+    """
+    table_pat = re.compile(r"(\\begin\{table\*?\}[\s\S]*?\\end\{table\*?\})", re.DOTALL)
+    tab_pat = re.compile(r"(\\begin\{tabular\}[\s\S]*?\\end\{tabular\})", re.DOTALL)
+
+    def simplify_tabular_for_matrix(tab: str) -> str:
+        # Remove wrappers and noise; keep plain \hline and rows.
+        tab = _strip_minipage_wrappers(tab)
+        tab = re.sub(r"\\noalign\{[^}]*\}", "", tab)
+        tab = tab.replace("\\toprule", "\\hline").replace("\\midrule", "\\hline").replace("\\bottomrule", "\\hline")
+        tab = re.sub(r"\\cmidrule\([^)]*\)\{[^}]*\}\s*", "", tab)
+        tab = re.sub(r"\\cmidrule\{[^}]*\}\s*", "", tab)
+        # Normalize multirow -> content only.
+        tab = re.sub(r"\\multirow\{\d+\}\{[^}]*\}\{([\s\S]*?)\}", r"\1", tab)
+
+        # Expand multicolumn inside each row.
+        mc_re = re.compile(r"\\multicolumn\{(\d+)\}\{[^}]*\}\{([\s\S]*?)\}")
+
+        def expand_row(line: str) -> str:
+            if "\\\\" not in line:
+                return line
+            cells = [c.strip() for c in line.split("&")]
+            out: list[str] = []
+            for cell in cells:
+                m = mc_re.search(cell)
+                if not m:
+                    out.append(cell)
+                    continue
+                try:
+                    span = int(m.group(1))
+                except Exception:
+                    span = 1
+                content = m.group(2).strip()
+                # Replace the entire cell with the content
+                cell2 = mc_re.sub(content, cell).strip()
+                out.append(cell2)
+                for _ in range(max(0, span - 1)):
+                    out.append("")
+            return " & ".join(out)
+
+        tab = "\n".join(expand_row(ln) for ln in tab.splitlines())
+        return tab
+
+    def tabular_to_matrix(tab: str) -> list[list[str]]:
+        tab = simplify_tabular_for_matrix(tab)
+        # Remove begin/end
+        tab = re.sub(r"^\\begin\{tabular\}\{[^}]*\}\s*", "", tab, flags=re.DOTALL)
+        tab = re.sub(r"\\end\{tabular\}\s*$", "", tab, flags=re.DOTALL)
+        # Resolve citations/refs so captions and table content are stable.
+        tab = replace_cites(tab, cite_map)
+        tab = replace_refs(tab, ref_map)
+        # Drop hlines and empty lines.
+        lines = [ln.strip() for ln in tab.splitlines() if ln.strip() and ln.strip() != "\\hline"]
+        rows: list[list[str]] = []
+        for ln in lines:
+            if not ln.endswith("\\\\"):
+                continue
+            ln = ln[:-2].strip()
+            cells = [strip_latex_commands(c.strip(), cite_map=cite_map) for c in ln.split("&")]
+            # Clean up braces and repeated spaces.
+            cells = [re.sub(r"\s+", " ", c.replace("{", "").replace("}", "")).strip() for c in cells]
+            rows.append(cells)
+        # Normalize to rectangular matrix
+        max_cols = max((len(r) for r in rows), default=0)
+        return [r + [""] * (max_cols - len(r)) for r in rows]
+
+    tables: dict[str, dict] = {}
+
+    def repl(m: re.Match) -> str:
+        block = m.group(1)
+        lm = re.search(r"\\label\{(tab:[^}]+)\}", block)
+        if not lm:
+            return block
+        label = lm.group(1)
+        # Balanced caption extraction is critical because captions often contain nested braces
+        # (e.g., \cite{...}, \texttt{...}), and a naive regex will truncate.
+        caption = (extract_braced_command_content(block, "caption") or "").strip()
+        is_star = block.lstrip().startswith("\\begin{table*}")
+        # Grab first tabular in the table env
+        tm = tab_pat.search(block)
+        if tm:
+            tables[label] = {
+                "matrix": tabular_to_matrix(tm.group(1)),
+                "span2": bool(is_star),
+            }
+        else:
+            tables[label] = {"matrix": [], "span2": bool(is_star)}
+
+        # Build a caption paragraph (italic) and a placeholder paragraph.
+        # NOTE: caption has already been prefixed to "TABLE X." earlier.
+        cap_txt = strip_latex_commands(caption, cite_map=cite_map)
+        cap_txt = cap_txt.replace("\\pm", "±")
+        cap_txt = re.sub(r"\$([^$]*)\$", r"\1", cap_txt).replace("$", "")
+        cap_txt = cap_txt.replace("{", "").replace("}", "")
+        span_tag = "SPAN2" if is_star else "SPAN1"
+        return (
+            f"\n\\noindent\\textit{{{cap_txt}}}\\par\n"
+            f"\\noindent DOCX_TABLE_PLACEHOLDER::{label}::{span_tag}\\par\n"
+        )
+
+    return table_pat.sub(repl, tex), tables
+
+
+
+def inject_tables_into_docx(
+    docx_path: Path,
+    table_matrices: dict[str, dict],
+    table_style_id: str | None,
+) -> None:
+    """
+    Replace DOCX_TABLE_PLACEHOLDER::<tab:...> paragraphs with real Word tables (w:tbl).
+    """
+    # IMPORTANT:
+    # Word is *surprisingly* sensitive to namespace prefix churn. If ElementTree serializes
+    # document.xml with arbitrary prefixes like `ns4:id` (instead of the conventional `r:id`),
+    # some Word builds will show "found unreadable content" even when XML is well-formed.
+    # We therefore pin the common OpenXML prefixes before serializing.
+    ns_w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    ns_r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    ns_wp = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+    ns_a = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    ns_pic = "http://schemas.openxmlformats.org/drawingml/2006/picture"
+    ns_m = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+    ET.register_namespace("w", ns_w)
+    ET.register_namespace("r", ns_r)
+    ET.register_namespace("wp", ns_wp)
+    ET.register_namespace("a", ns_a)
+    ET.register_namespace("pic", ns_pic)
+    ET.register_namespace("m", ns_m)
+
+    with zipfile.ZipFile(docx_path) as z:
+        doc_xml = z.read("word/document.xml")
+        styles_xml = z.read("word/styles.xml")
+        other_files = {name: z.read(name) for name in z.namelist() if name not in ("word/document.xml",)}
+
+    root = ET.fromstring(doc_xml)
+    body = root.find(f".//{{{ns_w}}}body")
+    if body is None:
+        return
+
+    def paragraph_text(p: ET.Element) -> str:
+        ts = p.findall(f".//{{{ns_w}}}t")
+        return "".join([t.text or "" for t in ts])
+
+    def make_text_run(text: str, bold: bool = False, size_half_points: int = 16) -> ET.Element:
+        r = ET.Element(f"{{{ns_w}}}r")
+        rpr = ET.SubElement(r, f"{{{ns_w}}}rPr")
+        if bold:
+            ET.SubElement(rpr, f"{{{ns_w}}}b")
+        # Tables in IEEE/TDSC are typically slightly smaller and strictly Latin-wrapped.
+        # Set explicit font/size/lang to avoid Word template/theme or East Asian wrapping quirks
+        # that can break Latin words mid-token.
+        rFonts = ET.SubElement(rpr, f"{{{ns_w}}}rFonts")
+        rFonts.set(f"{{{ns_w}}}ascii", "Times New Roman")
+        rFonts.set(f"{{{ns_w}}}hAnsi", "Times New Roman")
+        rFonts.set(f"{{{ns_w}}}cs", "Times New Roman")
+        rFonts.set(f"{{{ns_w}}}eastAsia", "Times New Roman")
+        ET.SubElement(rpr, f"{{{ns_w}}}sz").set(f"{{{ns_w}}}val", str(size_half_points))
+        ET.SubElement(rpr, f"{{{ns_w}}}szCs").set(f"{{{ns_w}}}val", str(size_half_points))
+        lang = ET.SubElement(rpr, f"{{{ns_w}}}lang")
+        lang.set(f"{{{ns_w}}}val", "en-US")
+        lang.set(f"{{{ns_w}}}eastAsia", "en-US")
+        lang.set(f"{{{ns_w}}}bidi", "en-US")
+        t = ET.SubElement(r, f"{{{ns_w}}}t")
+        # Preserve leading/trailing spaces
+        if text.startswith(" ") or text.endswith(" "):
+            t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        t.text = text
+        return r
+
+    def make_cell(text: str, bold: bool = False, width_twips: int | None = None, center: bool = False) -> ET.Element:
+        tc = ET.Element(f"{{{ns_w}}}tc")
+        tcpr = ET.SubElement(tc, f"{{{ns_w}}}tcPr")
+        if width_twips is not None:
+            tcW = ET.SubElement(tcpr, f"{{{ns_w}}}tcW")
+            tcW.set(f"{{{ns_w}}}type", "dxa")
+            tcW.set(f"{{{ns_w}}}w", str(max(1, int(width_twips))))
+        p = ET.SubElement(tc, f"{{{ns_w}}}p")
+        # Tighten paragraph spacing inside table cells (IEEE-like compactness).
+        pPr = ET.SubElement(p, f"{{{ns_w}}}pPr")
+        spacing = ET.SubElement(pPr, f"{{{ns_w}}}spacing")
+        spacing.set(f"{{{ns_w}}}before", "0")
+        spacing.set(f"{{{ns_w}}}after", "0")
+        spacing.set(f"{{{ns_w}}}line", "240")
+        spacing.set(f"{{{ns_w}}}lineRule", "auto")
+        if center:
+            ET.SubElement(pPr, f"{{{ns_w}}}jc").set(f"{{{ns_w}}}val", "center")
+
+        r = make_text_run(text, bold=bold, size_half_points=16)
+        p.append(r)
+        return tc
+
+    def _set_cell_bottom_border(tc: ET.Element, sz: str = "6") -> None:
+        """
+        Apply a bottom border to a table cell (used for the header midrule).
+        Word border sizes are in eighths of a point.
+        """
+        tcpr = tc.find(f"{{{ns_w}}}tcPr")
+        if tcpr is None:
+            tcpr = ET.SubElement(tc, f"{{{ns_w}}}tcPr")
+        borders = tcpr.find(f"{{{ns_w}}}tcBorders")
+        if borders is None:
+            borders = ET.SubElement(tcpr, f"{{{ns_w}}}tcBorders")
+        bottom = borders.find(f"{{{ns_w}}}bottom")
+        if bottom is None:
+            bottom = ET.SubElement(borders, f"{{{ns_w}}}bottom")
+        bottom.set(f"{{{ns_w}}}val", "single")
+        bottom.set(f"{{{ns_w}}}sz", sz)
+        bottom.set(f"{{{ns_w}}}space", "0")
+        bottom.set(f"{{{ns_w}}}color", "000000")
+
+    def _compute_column_widths_twips(matrix: list[list[str]], total_width_twips: int) -> list[int]:
+        cols = max((len(r) for r in matrix), default=0)
+        if cols <= 0:
+            return []
+
+        max_lens = [0] * cols
+        for r in matrix:
+            for i in range(cols):
+                s = (r[i] if i < len(r) else "") or ""
+                # Normalize whitespace (length heuristics depend on visible chars).
+                s = re.sub(r"\s+", " ", s).strip()
+                max_lens[i] = max(max_lens[i], len(s))
+
+        # Heuristic weights: give more width to columns with longer content.
+        # Cap to prevent a single long cell from starving other columns.
+        weights = [max(3, min(40, l)) for l in max_lens]
+        # Slightly prefer the first column (often "Protocol"/"Suite") to reduce ugly wraps.
+        if weights:
+            weights[0] = int(round(weights[0] * 1.2))
+
+        min_w = 240  # 1/6 inch; prevents ultra-thin columns that trigger mid-word breaks
+        total = max(1, sum(weights))
+        raw = [int(round((w / total) * total_width_twips)) for w in weights]
+        widths = [max(min_w, w) for w in raw]
+
+        # Normalize sum exactly to total_width_twips.
+        cur = sum(widths)
+        if cur != total_width_twips and widths:
+            widths[-1] += (total_width_twips - cur)
+            if widths[-1] < min_w:
+                # If we underflow, steal from earlier columns.
+                deficit = min_w - widths[-1]
+                widths[-1] = min_w
+                for j in range(len(widths) - 1):
+                    take = min(deficit, max(0, widths[j] - min_w))
+                    widths[j] -= take
+                    deficit -= take
+                    if deficit <= 0:
+                        break
+        return widths
+
+    def make_table(matrix: list[list[str]], total_width_twips: int, span2: bool) -> ET.Element:
+        tbl = ET.Element(f"{{{ns_w}}}tbl")
+        tblpr = ET.SubElement(tbl, f"{{{ns_w}}}tblPr")
+        if table_style_id:
+            ts = ET.SubElement(tblpr, f"{{{ns_w}}}tblStyle")
+            ts.set(f"{{{ns_w}}}val", table_style_id)
+        # Critical for IEEE/TDSC readability:
+        # - Fixed total width (so Word doesn't "micro-fit" columns and break words mid-token)
+        # - Explicit grid/column widths + cell widths
+        tblW = ET.SubElement(tblpr, f"{{{ns_w}}}tblW")
+        tblW.set(f"{{{ns_w}}}type", "dxa")
+        tblW.set(f"{{{ns_w}}}w", str(max(1, int(total_width_twips))))
+        ET.SubElement(tblpr, f"{{{ns_w}}}tblLayout").set(f"{{{ns_w}}}type", "fixed")
+
+        # Booktabs-like three-line table borders:
+        # - top rule
+        # - header bottom rule (applied per-cell on first row)
+        # - bottom rule
+        # No vertical lines; no inner horizontal rules for body rows.
+        borders = ET.SubElement(tblpr, f"{{{ns_w}}}tblBorders")
+        for side in ("left", "right", "insideH", "insideV"):
+            ET.SubElement(borders, f"{{{ns_w}}}{side}").set(f"{{{ns_w}}}val", "nil")
+        for side in ("top", "bottom"):
+            el = ET.SubElement(borders, f"{{{ns_w}}}{side}")
+            el.set(f"{{{ns_w}}}val", "single")
+            el.set(f"{{{ns_w}}}sz", "8")  # ~1pt
+            el.set(f"{{{ns_w}}}space", "0")
+            el.set(f"{{{ns_w}}}color", "000000")
+
+        # Cell margins: tighten slightly (IEEE-like).
+        cell_mar = ET.SubElement(tblpr, f"{{{ns_w}}}tblCellMar")
+        for side in ("top", "bottom", "left", "right"):
+            el = ET.SubElement(cell_mar, f"{{{ns_w}}}{side}")
+            el.set(f"{{{ns_w}}}w", "60")  # twips
+            el.set(f"{{{ns_w}}}type", "dxa")
+
+        col_widths = _compute_column_widths_twips(matrix, total_width_twips=total_width_twips)
+        if col_widths:
+            tblGrid = ET.SubElement(tbl, f"{{{ns_w}}}tblGrid")
+            for w in col_widths:
+                ET.SubElement(tblGrid, f"{{{ns_w}}}gridCol").set(f"{{{ns_w}}}w", str(max(1, int(w))))
+
+        for ri, row in enumerate(matrix):
+            tr = ET.SubElement(tbl, f"{{{ns_w}}}tr")
+            for ci, cell in enumerate(row):
+                is_header = (ri == 0)
+                width = col_widths[ci] if ci < len(col_widths) else None
+                tc = make_cell(cell, bold=is_header, width_twips=width, center=is_header)
+                # Midrule: underline the header row.
+                if is_header:
+                    _set_cell_bottom_border(tc, sz="6")
+                tr.append(tc)
+        return tbl
+
+    def _ensure_ppr(p: ET.Element) -> ET.Element:
+        pPr = p.find(f"{{{ns_w}}}pPr")
+        if pPr is None:
+            pPr = ET.Element(f"{{{ns_w}}}pPr")
+            p.insert(0, pPr)
+        return pPr
+
+    def _attach_continuous_sectpr(p: ET.Element, cols: int) -> None:
+        """
+        Attach a continuous section break to an existing paragraph.
+        Word's section breaks are represented as <w:sectPr> within the paragraph properties
+        of the last paragraph of the previous section. Attaching here is more reliable than
+        inserting standalone empty paragraphs (which can collapse layout).
+        """
+        pPr = _ensure_ppr(p)
+        # Avoid double-applying.
+        existing = pPr.find(f"{{{ns_w}}}sectPr")
+        if existing is not None:
+            pPr.remove(existing)
+        sectPr = ET.SubElement(pPr, f"{{{ns_w}}}sectPr")
+        ET.SubElement(sectPr, f"{{{ns_w}}}type").set(f"{{{ns_w}}}val", "continuous")
+        cols_el = ET.SubElement(sectPr, f"{{{ns_w}}}cols")
+        cols_el.set(f"{{{ns_w}}}num", str(cols))
+        cols_el.set(f"{{{ns_w}}}space", "360")
+
+    def _make_sect_break_para(cols: int) -> ET.Element:
+        # Paragraph that carries a continuous section break (used for the "after table" switch-back).
+        p = ET.Element(f"{{{ns_w}}}p")
+        _attach_continuous_sectpr(p, cols=cols)
+        return p
+
+    # Iterate body children and replace placeholder paragraphs.
+    children = list(body)
+    for child in children:
+        if child.tag != f"{{{ns_w}}}p":
+            continue
+        txt = paragraph_text(child)
+        if "DOCX_TABLE_PLACEHOLDER::" not in txt:
+            continue
+        payload = txt.split("DOCX_TABLE_PLACEHOLDER::", 1)[1].strip()
+        # Format: <label>::SPAN1|SPAN2
+        parts = payload.split("::")
+        label = parts[0].strip()
+        span2 = (len(parts) >= 2 and parts[1].strip().upper() == "SPAN2")
+        info = table_matrices.get(label) or {}
+        matrix = info.get("matrix") if isinstance(info, dict) else info
+        if matrix is None:
+            matrix = []
+        idx = list(body).index(child)
+        body.remove(child)
+
+        # If this table came from LaTeX table*, make it span both columns in Word by
+        # attaching a continuous 1-col section break to the caption paragraph immediately
+        # preceding the placeholder, then inserting a continuous 2-col break after the table.
+        if span2:
+            # Full-width table* section: 1 column section width ~= 6.5" (Letter - 1" margins both sides)
+            total_twips = 9360
+            tbl = make_table(matrix, total_width_twips=total_twips, span2=True)
+            # Attach 1-col section break to previous paragraph (caption) if possible.
+            prev = None
+            if idx - 1 >= 0:
+                prev = list(body)[idx - 1]
+                if prev.tag == f"{{{ns_w}}}p":
+                    _attach_continuous_sectpr(prev, cols=1)
+
+            # Insert the table at the placeholder position.
+            body.insert(idx, tbl)
+            idx += 1
+            # Switch back to 2 columns immediately after the table.
+            body.insert(idx, _make_sect_break_para(cols=2))
+        else:
+            # Single-column tables inside a 2-column section: limit to one column width.
+            # 6.5" text width -> (6.5" - 0.25" gap) / 2 ~= 3.125" => ~4500 twips.
+            total_twips = 4500
+            tbl = make_table(matrix, total_width_twips=total_twips, span2=False)
+            body.insert(idx, tbl)
+
+    # Write back into docx zip.
+    tmp_out = docx_path.with_suffix(".tmp.docx")
+    with zipfile.ZipFile(tmp_out, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        z.writestr("word/document.xml", ET.tostring(root, encoding="utf-8", xml_declaration=True))
+        for name, data in other_files.items():
+            if name == "word/document.xml":
+                continue
+            z.writestr(name, data)
+    tmp_out.replace(docx_path)
+
+
+def expand_simple_macros(tex: str) -> str:
     # Expand \artifactdate from its \newcommand definition, if present.
     m = re.search(r"\\newcommand\{\\artifactdate\}\{([^}]*)\}", tex)
     if m:
@@ -91,21 +525,9 @@ def expand_simple_macros(tex: str) -> str:
         # Remove the macro definition itself to avoid producing invalid TeX like:
         # \newcommand{2026-01-16}{2026-01-16}
         tex = re.sub(r"^\\newcommand\{\\artifactdate\}\{[^}]*\}\s*$", "", tex, flags=re.MULTILINE)
-        # Replace only the standalone macro token, not prefixes of other commands.
+        # Replace only the standalone macro \artifactdate, not prefixes of other macros
+        # like \artifactdateSystemImpact.
         tex = re.sub(r"\\artifactdate(?![A-Za-z])", date, tex)
-
-    # Expand \artifactdateSystemImpact too (prevents leaking macros into the DOCX).
-    m2 = re.search(r"\\newcommand\{\\artifactdateSystemImpact\}\{([^}]*)\}", tex)
-    if m2:
-        dsi = m2.group(1).strip()
-        tex = re.sub(
-            r"^\\newcommand\{\\artifactdateSystemImpact\}\{[^}]*\}\s*$",
-            "",
-            tex,
-            flags=re.MULTILINE,
-        )
-        tex = re.sub(r"\\artifactdateSystemImpact(?![A-Za-z])", dsi, tex)
-
     return tex
 
 
@@ -299,8 +721,9 @@ def normalize_tex_for_word(tex: str) -> str:
     # Replace common math symbols with Unicode to avoid unit/sign corruption.
     tex = tex.replace(r"$\mu$", "µ")
     tex = tex.replace(r"$\times$", "×")
-    tex = tex.replace(r"\times", "×")
-    tex = tex.replace(r"\mu", "µ")
+    # IMPORTANT: only replace standalone commands (avoid corrupting macros like \multicolumn).
+    tex = re.sub(r"\\times(?![A-Za-z])", "×", tex)
+    tex = re.sub(r"\\mu(?![A-Za-z])", "µ", tex)
     return tex
 
 
@@ -366,6 +789,31 @@ def remove_braced_command(tex: str, command: str) -> str:
             k += 1
         i = k
     return "".join(out)
+
+
+def extract_braced_command_content(tex: str, command: str) -> str | None:
+    """
+    Extract the balanced-brace content of the first occurrence of \\command{...}.
+    Returns None if not found or malformed.
+    """
+    marker = "\\" + command + "{"
+    j = tex.find(marker)
+    if j == -1:
+        return None
+    k = j + len(marker)
+    depth = 1
+    n = len(tex)
+    start = k
+    while k < n and depth > 0:
+        ch = tex[k]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        k += 1
+    if depth != 0:
+        return None
+    return tex[start : k - 1]
 
 
 def normalize_texttt_code_strings(tex: str) -> str:
@@ -499,7 +947,7 @@ def tables_to_images_for_word(
             "\\usepackage{multirow}\n"
             "\\usepackage{makecell}\n"
             "\\newcommand{\\real}[1]{#1}\n"
-            "\\providecommand{\\artifactdate}{2026-01-16}\n"
+            f"\\providecommand{{\\artifactdate}}{{{os.environ.get('ARTIFACT_DATE') or os.environ.get('SKYBRIDGE_ARTIFACT_DATE') or '2026-01-23'}}}\n"
             "\\providecommand{\\tightlist}{}\n"
             "\\begin{document}\n"
             "\\begin{minipage}{\\linewidth}\\centering\n"
@@ -543,6 +991,15 @@ def tables_to_images_for_word(
             return block  # fallback: keep original
         n = ref_map.get(label, "??")
         cap = strip_latex_commands(caption or "", cite_map=cite_map)
+        # Pandoc is fragile around math in \textit{...}. Flatten math to plain text.
+        # Examples:
+        # - "$T_{connect}$" -> "T_connect"
+        # - "50$\pm$20" -> "50±20"
+        cap = cap.replace("\\pm", "±")
+        cap = re.sub(r"\$([^$]*)\$", r"\1", cap)
+        cap = cap.replace("$", "")
+        cap = cap.replace("{", "").replace("}", "")
+        cap = cap.replace("\\_", "_")
         rel = png.relative_to(docs).as_posix()
         # Word-friendly: caption line then image, avoiding broken table conversions.
         return (
@@ -576,6 +1033,43 @@ def simplify_tables_for_pandoc(tex: str) -> str:
         tab = tab.replace("\\toprule", "\\hline")
         tab = tab.replace("\\midrule", "\\hline")
         tab = tab.replace("\\bottomrule", "\\hline")
+        # Pandoc cannot reliably interpret booktabs midrule helpers.
+        tab = re.sub(r"\\cmidrule\([^)]*\)\{[^}]*\}\s*", "", tab)
+        tab = re.sub(r"\\cmidrule\{[^}]*\}\s*", "", tab)
+        # Remove \multicolumn and \multirow constructs by expanding them to plain cells.
+        # This trades visual fidelity for correctness + editability in Word.
+        def _expand_multicolumn_in_row(row: str) -> str:
+            # Only process rows that end with '\\'
+            if "\\\\" not in row:
+                return row
+            parts = [p.strip() for p in row.split("&")]
+            out: list[str] = []
+            mc_re = re.compile(r"\\multicolumn\{(\d+)\}\{[^}]*\}\{([\s\S]*?)\}\s*$")
+            mr_re = re.compile(r"\\multirow\{(\d+)\}\{[^}]*\}\{([\s\S]*?)\}\s*$")
+            for cell in parts:
+                # Expand multirow -> just content (no row spanning in Word export).
+                m = mr_re.search(cell)
+                if m:
+                    cell = mr_re.sub(r"\\2", cell)
+                m = mc_re.search(cell)
+                if m:
+                    try:
+                        span = int(m.group(1))
+                    except Exception:
+                        span = 1
+                    content = m.group(2).strip()
+                    out.append(content)
+                    for _ in range(max(0, span - 1)):
+                        out.append("")
+                else:
+                    out.append(cell)
+            return " & ".join(out)
+
+        # Apply multicolumn expansion line-by-line.
+        new_lines = []
+        for ln in tab.splitlines():
+            new_lines.append(_expand_multicolumn_in_row(ln))
+        tab = "\n".join(new_lines)
         # Remove column spec complexity: replace the entire balanced {...} spec with plain l-columns.
         def count_cols(spec: str) -> int:
             i = 0
@@ -828,25 +1322,70 @@ def postprocess_docx_ieee(docx_path: Path, author_lines: list[str] | None = None
         styles_xml_path = td_path / "word" / "styles.xml"
         numbering_xml_path = td_path / "word" / "numbering.xml"
 
+        def _normalize_numbering_xml_namespaces() -> None:
+            """
+            Normalize numbering.xml namespaces to avoid Word "Repaired: Lists X" dialogs.
+
+            We ensure:
+            - `mc:Ignorable="w14 wp14"` (not `ns1:Ignorable`)
+            - `xmlns:mc`, `xmlns:w14`, `xmlns:wp14` are present on <w:numbering ...>
+            """
+            if not numbering_xml_path.exists():
+                return
+            try:
+                txt = numbering_xml_path.read_text("utf-8", errors="ignore")
+                m = re.search(r"<w:numbering\b[^>]*>", txt)
+                if not m:
+                    return
+                open_tag = m.group(0)
+                open_tag2 = open_tag
+
+                # Prefer conventional prefixes.
+                open_tag2 = open_tag2.replace(
+                    'xmlns:ns1="http://schemas.openxmlformats.org/markup-compatibility/2006"',
+                    'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"',
+                )
+                open_tag2 = open_tag2.replace("ns1:Ignorable", "mc:Ignorable")
+
+                if 'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"' not in open_tag2:
+                    # Insert after xmlns:w if present, else before the closing '>'.
+                    if 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"' in open_tag2:
+                        open_tag2 = open_tag2.replace(
+                            'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"',
+                            'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+                            'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"',
+                            1,
+                        )
+                    else:
+                        open_tag2 = open_tag2[:-1] + ' xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">'
+
+                if 'xmlns:w14=' not in open_tag2:
+                    open_tag2 = open_tag2[:-1] + ' xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">'
+                if 'xmlns:wp14=' not in open_tag2:
+                    open_tag2 = open_tag2[:-1] + ' xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing">'
+
+                if "mc:Ignorable" not in open_tag2:
+                    open_tag2 = open_tag2[:-1] + ' mc:Ignorable="w14 wp14">'
+                else:
+                    ign_m = re.search(r'mc:Ignorable="([^"]*)"', open_tag2)
+                    if ign_m:
+                        parts = ign_m.group(1).split()
+                        for needed in ("w14", "wp14"):
+                            if needed not in parts:
+                                parts.append(needed)
+                        open_tag2 = re.sub(r'mc:Ignorable="[^"]*"', f'mc:Ignorable="{" ".join(parts)}"', open_tag2)
+
+                if open_tag2 != open_tag:
+                    txt = txt[: m.start()] + open_tag2 + txt[m.end() :]
+                    numbering_xml_path.write_text(txt, "utf-8")
+            except Exception:
+                return
+
         if doc_xml_path.exists():
             doc_xml = doc_xml_path.read_text("utf-8", errors="ignore")
-            # Insert pgSz/pgMar/cols into the *final* sectPr if missing.
-            def _sect_repl(m: re.Match) -> str:
-                sect = m.group(0)
-                insert = (
-                    '<w:pgSz w:w="12240" w:h="15840"/>'
-                    '<w:pgMar w:top="1080" w:right="1080" w:bottom="1080" w:left="1080" '
-                    'w:header="720" w:footer="720" w:gutter="0"/>'
-                    '<w:cols w:num="2" w:space="360"/>'
-                )
-                if "<w:cols" in sect:
-                    return sect
-                # Put before footnotePr if present, else right after sectPr open.
-                if "<w:footnotePr" in sect:
-                    return sect.replace("<w:footnotePr", insert + "<w:footnotePr", 1)
-                return sect.replace("<w:sectPr>", "<w:sectPr>" + insert, 1)
-
-            doc_xml = re.sub(r"<w:sectPr>[\s\S]*?</w:sectPr>", _sect_repl, doc_xml, count=1)
+            # NOTE: do NOT use a regex like `count=1` here: DOCX may contain many <w:sectPr>
+            # (continuous section breaks, full-width table* sections, etc.). We must ensure the
+            # **final body section** is two-column reliably by editing the XML structure.
 
             # Make front matter (Title/Author/Abstract/Keywords) single-column, then switch to 2-col at body.
             # We insert a continuous section break (1-col) at the Keywords paragraph (style FirstParagraph,
@@ -858,10 +1397,140 @@ def postprocess_docx_ieee(docx_path: Path, author_lines: list[str] | None = None
             try:
                 import xml.etree.ElementTree as ET
 
+                # Pin common prefixes to avoid Word "unreadable content" errors caused by
+                # prefix renaming (e.g., ns4:id instead of r:id).
+                ET.register_namespace("w", ns_w)
+                ET.register_namespace("r", "http://schemas.openxmlformats.org/officeDocument/2006/relationships")
+                ET.register_namespace("wp", "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing")
+                ET.register_namespace("a", "http://schemas.openxmlformats.org/drawingml/2006/main")
+                ET.register_namespace("pic", "http://schemas.openxmlformats.org/drawingml/2006/picture")
+                ET.register_namespace("m", "http://schemas.openxmlformats.org/officeDocument/2006/math")
+
                 root = ET.fromstring(doc_xml)
                 body = root.find(f"{{{ns_w}}}body")
                 if body is not None:
                     paras = [p for p in body.findall(f"{{{ns_w}}}p")]
+
+                    def _ensure_child(parent: ET.Element, tag_local: str) -> ET.Element:
+                        el = parent.find(f"{{{ns_w}}}{tag_local}")
+                        if el is None:
+                            el = ET.SubElement(parent, f"{{{ns_w}}}{tag_local}")
+                        return el
+
+                    def _set_attr(el: ET.Element, local_attr: str, value: str) -> None:
+                        el.set(f"{{{ns_w}}}{local_attr}", value)
+
+                    def _ensure_final_body_section_two_columns() -> None:
+                        """
+                        Ensure the final section (body-level <w:sectPr>) is 2 columns with Letter page size
+                        and standard 1" margins. This is the anchor that makes the main body render as
+                        IEEE/TDSC two-column after the front-matter 1-column break.
+                        """
+                        # Word normally stores the last section as a direct child of <w:body>.
+                        sectPr = body.find(f"{{{ns_w}}}sectPr")
+                        if sectPr is None:
+                            sectPr = ET.SubElement(body, f"{{{ns_w}}}sectPr")
+
+                        # Page size: Letter (8.5x11) in twips.
+                        pgSz = _ensure_child(sectPr, "pgSz")
+                        _set_attr(pgSz, "w", "12240")
+                        _set_attr(pgSz, "h", "15840")
+
+                        # Margins: 1" all around (1080 twips) with standard header/footer.
+                        pgMar = _ensure_child(sectPr, "pgMar")
+                        _set_attr(pgMar, "top", "1080")
+                        _set_attr(pgMar, "right", "1080")
+                        _set_attr(pgMar, "bottom", "1080")
+                        _set_attr(pgMar, "left", "1080")
+                        _set_attr(pgMar, "header", "720")
+                        _set_attr(pgMar, "footer", "720")
+                        _set_attr(pgMar, "gutter", "0")
+
+                        cols = _ensure_child(sectPr, "cols")
+                        _set_attr(cols, "num", "2")
+                        _set_attr(cols, "space", "360")
+
+                    # Always anchor final body section to 2 columns.
+                    _ensure_final_body_section_two_columns()
+
+                    def _emu_from_twips(twips: int) -> int:
+                        # 1 inch = 1440 twips = 914400 EMU => 1 twip = 635 EMU.
+                        return int(twips) * 635
+
+                    def _get_cols_from_sectpr(sectPr_el: ET.Element) -> int | None:
+                        cols_el = sectPr_el.find(f"{{{ns_w}}}cols")
+                        if cols_el is None:
+                            return None
+                        v = cols_el.get(f"{{{ns_w}}}num")
+                        try:
+                            return int(v) if v is not None else None
+                        except Exception:
+                            return None
+
+                    def _scale_inline_images_to_fit_columns() -> None:
+                        """
+                        Pandoc's LaTeX->DOCX conversion does not understand IEEE two-column widths,
+                        so it can emit images whose cx exceeds the column width; Word then clips
+                        the right side at the column boundary (what you observed for Fig. 2).
+
+                        We walk the body in document order, track the current section's column count
+                        from any continuous section breaks, and cap inline image widths accordingly.
+                        """
+                        ns_wp = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+                        ns_a = "http://schemas.openxmlformats.org/drawingml/2006/main"
+
+                        # Heuristic widths (twips) consistent with our table widths:
+                        # - 2-col: one column ~4500 twips
+                        # - 1-col: full text width ~9360 twips
+                        max_twips_for_cols = {1: 9360, 2: 4500}
+
+                        current_cols = 1  # safe default for front-matter
+                        for child in list(body):
+                            # Section breaks can live inside paragraph properties.
+                            if child.tag == f"{{{ns_w}}}p":
+                                pPr = child.find(f"{{{ns_w}}}pPr")
+                                if pPr is not None:
+                                    sectPr = pPr.find(f"{{{ns_w}}}sectPr")
+                                    if sectPr is not None:
+                                        cols = _get_cols_from_sectpr(sectPr)
+                                        if cols in (1, 2):
+                                            current_cols = cols
+
+                            # Scale all inline drawings inside this element.
+                            for inline in child.findall(f".//{{{ns_wp}}}inline"):
+                                extent = inline.find(f"{{{ns_wp}}}extent")
+                                if extent is None:
+                                    continue
+                                cx = extent.get("cx")
+                                cy = extent.get("cy")
+                                try:
+                                    cx_i = int(cx) if cx is not None else None
+                                    cy_i = int(cy) if cy is not None else None
+                                except Exception:
+                                    continue
+                                if not cx_i or not cy_i:
+                                    continue
+
+                                max_twips = max_twips_for_cols.get(current_cols, 4500)
+                                max_emu = _emu_from_twips(max_twips)
+                                if cx_i <= max_emu:
+                                    continue
+
+                                scale = max_emu / float(cx_i)
+                                new_cx = int(round(cx_i * scale))
+                                new_cy = int(round(cy_i * scale))
+                                extent.set("cx", str(new_cx))
+                                extent.set("cy", str(new_cy))
+
+                                # Also update the picture transform extents if present.
+                                for a_ext in inline.findall(f".//{{{ns_a}}}xfrm/{{{ns_a}}}ext"):
+                                    a_ext.set("cx", str(new_cx))
+                                    a_ext.set("cy", str(new_cy))
+
+                        # Finally, also respect the body-level (final) section if no earlier break appeared.
+                        # (No-op in most cases.)
+
+                    _scale_inline_images_to_fit_columns()
 
                     def _p_style(p):
                         pPr = p.find(f"{{{ns_w}}}pPr")
@@ -876,6 +1545,41 @@ def postprocess_docx_ieee(docx_path: Path, author_lines: list[str] | None = None
                             if t.text:
                                 texts.append(t.text)
                         return "".join(texts).strip()
+
+                    # Map style name <-> styleId from styles.xml (localized templates supported).
+                    style_name_to_id: dict[str, str] = {}
+                    style_id_to_name: dict[str, str] = {}
+                    try:
+                        if styles_xml_path.exists():
+                            styles_bytes = styles_xml_path.read_bytes()
+                            sroot = ET.fromstring(styles_bytes)
+                            ns = {"w": ns_w}
+                            for st in sroot.findall("w:style", ns):
+                                sid = st.attrib.get(f"{{{ns_w}}}styleId")
+                                name_el = st.find("w:name", ns)
+                                name = name_el.attrib.get(f"{{{ns_w}}}val") if name_el is not None else None
+                                if sid and name:
+                                    style_name_to_id[name] = sid
+                                    style_id_to_name[sid] = name
+                    except Exception:
+                        style_name_to_id = {}
+                        style_id_to_name = {}
+
+                    def _style_id(name: str, fallback: str) -> str:
+                        # Case-insensitive match
+                        for k, v in style_name_to_id.items():
+                            if k.strip().lower() == name.strip().lower():
+                                return v
+                        return fallback
+
+                    def _heading1_style_ids() -> set[str]:
+                        out: set[str] = set()
+                        for sid, name in style_id_to_name.items():
+                            if name.strip().lower() == "heading 1":
+                                out.add(sid)
+                        # Common Word default id in some templates
+                        out.add("Heading1")
+                        return out
 
                     def _ensure_pPr(p):
                         pPr = p.find(f"{{{ns_w}}}pPr")
@@ -906,8 +1610,9 @@ def postprocess_docx_ieee(docx_path: Path, author_lines: list[str] | None = None
                         nid.set(f"{{{ns_w}}}val", num_id)
 
                     intro_idx = None
+                    heading1_ids = _heading1_style_ids()
                     for i, p in enumerate(paras):
-                        if _p_style(p) == "Heading1" and _p_text(p).strip() == "Introduction":
+                        if (_p_style(p) in heading1_ids) and _p_text(p).strip().lower() == "introduction":
                             intro_idx = i
                             break
 
@@ -935,7 +1640,8 @@ def postprocess_docx_ieee(docx_path: Path, author_lines: list[str] | None = None
                             mar.set(f"{{{ns_w}}}footer", "720")
                             mar.set(f"{{{ns_w}}}gutter", "0")
                             cols = ET.SubElement(sectPr, f"{{{ns_w}}}cols")
-                            cols.set(f"{{{ns_w}}}num", "1")
+                            # Switch to IEEE/TDSC two-column layout for the main body (starting at Introduction).
+                            cols.set(f"{{{ns_w}}}num", "2")
                             cols.set(f"{{{ns_w}}}space", "360")
 
                     def _prepend_paragraph_text(p, prefix: str) -> None:
@@ -953,25 +1659,60 @@ def postprocess_docx_ieee(docx_path: Path, author_lines: list[str] | None = None
                     # Figures are already prefixed in LaTeX as "Fig. N." (env-scoped),
                     # so we MUST NOT auto-prefix again here (it would create "Fig. 1. Fig. 1. ...").
 
-                    # Insert IEEE-like author block lines (affiliation/email) right after the first Author paragraph.
-                    if author_lines:
-                        for i, p in enumerate(paras):
-                            if _p_style(p) == "Author":
-                                insert_at = i + 1
-                                for line in author_lines:
-                                    line = line.strip()
-                                    if not line:
-                                        continue
-                                    np = ET.Element(f"{{{ns_w}}}p")
-                                    pPr = ET.SubElement(np, f"{{{ns_w}}}pPr")
-                                    ET.SubElement(pPr, f"{{{ns_w}}}pStyle").set(f"{{{ns_w}}}val", "Author")
-                                    r = ET.SubElement(np, f"{{{ns_w}}}r")
-                                    t = ET.SubElement(r, f"{{{ns_w}}}t")
-                                    t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-                                    t.text = line
-                                    body.insert(insert_at, np)
-                                    insert_at += 1
+                    # Rebuild IEEE-like author block lines (affiliation/email) right after the Authors name line.
+                    # If we previously inserted legacy lines (single-author), remove them to avoid duplication.
+                    if author_lines and body is not None:
+                        authors_style = _style_id("Authors", _style_id("Author", "Authors"))
+                        # Refresh paras list from body children to keep indices stable
+                        body_children = list(body)
+                        # Find first author paragraph (names line)
+                        first_auth_idx = None
+                        for idx, el in enumerate(body_children):
+                            if el.tag != f"{{{ns_w}}}p":
+                                continue
+                            if _p_style(el) in ("Author", "Authors", authors_style):
+                                first_auth_idx = idx
                                 break
+                        if first_auth_idx is not None:
+                            # Remove subsequent Authors paragraphs (affiliation/email lines) until the next non-Authors paragraph
+                            rm_indices = []
+                            for j in range(first_auth_idx + 1, len(body_children)):
+                                el = body_children[j]
+                                if el.tag != f"{{{ns_w}}}p":
+                                    continue
+                                if _p_style(el) in ("Author", "Authors", authors_style):
+                                    rm_indices.append(j)
+                                else:
+                                    break
+                            for j in reversed(rm_indices):
+                                body.remove(body_children[j])
+
+                            insert_at = first_auth_idx + 1
+                            for line in author_lines:
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                np = ET.Element(f"{{{ns_w}}}p")
+                                pPr = ET.SubElement(np, f"{{{ns_w}}}pPr")
+                                ET.SubElement(pPr, f"{{{ns_w}}}pStyle").set(f"{{{ns_w}}}val", authors_style)
+                                r = ET.SubElement(np, f"{{{ns_w}}}r")
+                                t = ET.SubElement(r, f"{{{ns_w}}}t")
+                                t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+                                t.text = line
+                                body.insert(insert_at, np)
+                                insert_at += 1
+
+                    # Normalize title/author paragraph styles to match the reference template.
+                    # Pandoc sometimes emits pStyle ids like "Author" which may not exist in localized templates
+                    # (e.g., trans_jour uses styleId="Authors" and "Ttulo" for the title).
+                    title_style = _style_id("Title", "Ttulo")
+                    authors_style = _style_id("Authors", _style_id("Author", "Authors"))
+                    for p in paras:
+                        st = _p_style(p)
+                        if st == "Author":
+                            _set_p_style(p, authors_style)
+                        elif st == "Title":
+                            _set_p_style(p, title_style)
 
                     # Reformat Abstract/Keywords to IEEE-style labels and remove the centered AbstractTitle line.
                     # AbstractTitle paragraph (style AbstractTitle) is removed; Abstract paragraph is prefixed with "Abstract—".
@@ -1009,6 +1750,37 @@ def postprocess_docx_ieee(docx_path: Path, author_lines: list[str] | None = None
                                 _prepend_label(kw, "Index Terms— ", bold=False, italic=True)
                                 _set_p_style(kw, "IndexTerms")
                             break
+
+                    # Enforce IEEE Transactions/Journals template caption styles (localized templates supported):
+                    # - Table captions: "TABLE X." paragraphs -> "Table Title" (TRANS-JOUR) or "Table Caption"
+                    # - Figure captions: "Fig. X." paragraphs -> "Figure Caption" (TRANS-JOUR) or "Image Caption"
+                    table_caption_style = _style_id("Table Title", _style_id("Table Caption", "Caption"))
+                    fig_caption_style = _style_id("Figure Caption", _style_id("Image Caption", "Caption"))
+                    for p in paras:
+                        txt = _p_text(p)
+                        if not txt:
+                            continue
+                        if txt.startswith("TABLE ") or txt.startswith("Table "):
+                            _set_p_style(p, table_caption_style)
+                        elif txt.startswith("Fig. "):
+                            _set_p_style(p, fig_caption_style)
+
+                    # References styling: apply the template's "References" style to bibliography entries.
+                    # Detect the REFERENCES heading then style subsequent paragraphs until the next Heading 1.
+                    refs_style = _style_id("References", "BodyText")
+                    in_refs = False
+                    for p in paras:
+                        t = _p_text(p)
+                        st = _p_style(p)
+                        if (st in heading1_ids) and t.strip().lower() in {"references", "reference"}:
+                            in_refs = True
+                            continue
+                        if in_refs and (st in heading1_ids):
+                            in_refs = False
+                        if in_refs:
+                            # don't touch empty lines
+                            if t.strip():
+                                _set_p_style(p, refs_style)
 
                     # Apply IEEE-like multi-level heading numbering (Roman for sections, A/B/C for subsections).
                     # Important: do NOT number unnumbered sections (REFERENCES/Acknowledgment/etc.).
@@ -1152,8 +1924,17 @@ def postprocess_docx_ieee(docx_path: Path, author_lines: list[str] | None = None
                 new = patch_fn(old)
                 return styles_xml.replace(old, new, 1)
 
-            # Title: closer to IEEE (24pt Times, bold)
+            # Determine localized styleIds from style names.
+            # trans_jour uses styleId="Ttulo" for the style named "Title", and "Authors" for "Authors".
+            title_style_id = style_id_by_name(styles, "Title") or "Title"
+            authors_style_id = style_id_by_name(styles, "Authors") or style_id_by_name(styles, "Author") or "Author"
+
+            # Title: closer to IEEE (24pt Times, bold, centered)
             def _title_patch(block: str) -> str:
+                # Some IEEE Word templates position Title/Authors using paragraph frames (framePr).
+                # Pandoc output uses normal flow; keeping framePr causes overlap (absolute y=1).
+                block = re.sub(r"<w:framePr[^>]*/>", "", block)
+                block = re.sub(r"<w:framePr[\s\S]*?</w:framePr>", "", block)
                 block = re.sub(
                     r"<w:rFonts[^>]*/>",
                     '<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman" w:eastAsia="Times New Roman"/>',
@@ -1163,12 +1944,17 @@ def postprocess_docx_ieee(docx_path: Path, author_lines: list[str] | None = None
                 block = re.sub(r"<w:szCs\s+[^>]*w:val=\"\d+\"[^>]*/>", "<w:szCs w:val=\"48\"/>", block)
                 if "<w:b" not in block:
                     block = block.replace("<w:rPr>", "<w:rPr><w:b/>", 1)
+                if "<w:jc" not in block:
+                    block = block.replace("<w:pPr>", "<w:pPr><w:jc w:val=\"center\"/>", 1)
                 return block
 
-            styles = _patch_style(styles, "Title", _title_patch)
+            styles = _patch_style(styles, title_style_id, _title_patch)
 
-            # Author: 11pt Times, centered, not inheriting Title size.
-            def _author_patch(block: str) -> str:
+            # Authors: 11pt Times, centered.
+            def _authors_patch(block: str) -> str:
+                # Remove paragraph frames to avoid absolute positioning overlap with Title.
+                block = re.sub(r"<w:framePr[^>]*/>", "", block)
+                block = re.sub(r"<w:framePr[\s\S]*?</w:framePr>", "", block)
                 block = re.sub(r"<w:basedOn\s+w:val=\"[^\"]+\"\s*/>", "<w:basedOn w:val=\"Normal\"/>", block)
                 block = re.sub(r"<w:sz\s+[^>]*w:val=\"\d+\"[^>]*/>", "<w:sz w:val=\"22\"/>", block)
                 block = re.sub(r"<w:szCs\s+[^>]*w:val=\"\d+\"[^>]*/>", "<w:szCs w:val=\"22\"/>", block)
@@ -1192,7 +1978,7 @@ def postprocess_docx_ieee(docx_path: Path, author_lines: list[str] | None = None
                     block = block.replace("<w:pPr>", '<w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/>', 1)
                 return block
 
-            styles = _patch_style(styles, "Author", _author_patch)
+            styles = _patch_style(styles, authors_style_id, _authors_patch)
 
             # Abstract: 9pt Times, single spaced, no extra before/after.
             def _abstract_repl(m: re.Match) -> str:
@@ -1332,6 +2118,9 @@ def postprocess_docx_ieee(docx_path: Path, author_lines: list[str] | None = None
             except Exception:
                 pass
 
+        # After any modifications, normalize numbering.xml namespaces (ET may reintroduce ns1:* prefixes).
+        _normalize_numbering_xml_namespaces()
+
         # Repack DOCX
         tmp_out = docx_path.with_suffix(".tmp.docx")
         with zipfile.ZipFile(tmp_out, "w", compression=zipfile.ZIP_DEFLATED) as z:
@@ -1344,15 +2133,38 @@ def postprocess_docx_ieee(docx_path: Path, author_lines: list[str] | None = None
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--docs-dir", required=True, help="Docs directory containing .tex/.aux and figures/")
-    ap.add_argument("--tex", default="IEEE_Paper_SkyBridge_Compass_patched.tex", help="Main LaTeX file name")
-    ap.add_argument("--aux", default="IEEE_Paper_SkyBridge_Compass_patched.aux", help="Main AUX file name")
+    ap.add_argument("--tex", default="TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.tex", help="Main LaTeX file name")
+    ap.add_argument("--aux", default="TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.aux", help="Main AUX file name")
     ap.add_argument("--supp-aux", default="TDSC-2026-01-0318_supplementary.aux", help="Supplementary AUX file name (optional)")
-    ap.add_argument("--out-docx", default="IEEE_Paper_SkyBridge_Compass_patched.docx", help="Output DOCX file name")
+    ap.add_argument("--out-docx", default="TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.docx", help="Output DOCX file name")
     ap.add_argument("--backup-existing", action="store_true", help="Backup existing output docx with timestamp suffix")
+    ap.add_argument(
+        "--reference-doc",
+        default=None,
+        help=(
+            "Reference DOCX (Word template) to control styles. "
+            "If omitted, the exporter auto-selects trans_jour.docx (IEEE Transactions / TDSC recommended) "
+            "when present under the docs dir, otherwise falls back to _pandoc_reference.docx."
+        ),
+    )
     ap.add_argument("--figure-dpi", type=int, default=450, help="Rasterization DPI for figures (recommended 300–600)")
+    ap.add_argument(
+        "--rasterize-tables",
+        action="store_true",
+        help="Rasterize LaTeX tables into images (NOT suitable for IEEE TDSC; use only as last-resort preview).",
+    )
     args = ap.parse_args()
 
     docs = Path(args.docs_dir).expanduser().resolve()
+    # Auto-select the TDSC/IEEE Transactions Word template if present.
+    # This keeps the exported DOCX visually aligned with the TDSC/IEEEtran PDF.
+    reference_doc = args.reference_doc
+    if reference_doc is None:
+        if (docs / "trans_jour.docx").exists():
+            reference_doc = "trans_jour.docx"
+        else:
+            reference_doc = "_pandoc_reference.docx"
+
     tex_path = docs / args.tex
     aux_path = docs / args.aux
     supp_aux_path = docs / args.supp_aux
@@ -1373,25 +2185,50 @@ def main() -> int:
 
     src = tex_path.read_text(encoding="utf-8", errors="ignore")
 
-    # Extract author affiliation/email lines from the pinned supplementary TeX (clean, simple author block).
+    # Extract author affiliation/email lines for DOCX front-matter.
+    # Prefer IEEEtran compsoc \IEEEcompsocthanksitem blocks from the main TeX (has multi-author info),
+    # fall back to TDSC supplementary.tex's simple \author{...\\...} if needed.
+    def _clean_tex_inline(s: str) -> str:
+        s = re.sub(r"%.*$", "", s, flags=re.MULTILINE)
+        # Simple inline macro stripping for display in Word (keep content)
+        s = re.sub(r"\\emph\{([^}]*)\}", r"\1", s)
+        s = re.sub(r"\\texttt\{([^}]*)\}", r"\1", s)
+        s = re.sub(r"\\href\{[^}]*\}\{([^}]*)\}", r"\1", s)
+        s = s.replace("~", " ")
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
+
     author_lines: list[str] = []
     try:
-        # Use the pinned submission supplementary TeX as source of truth.
-        supp_tex = (docs / "TDSC-2026-01-0318_supplementary.tex").read_text(encoding="utf-8", errors="ignore")
-        m = re.search(r"\\author\{([\s\S]*?)\}", supp_tex)
+        m = re.search(r"\\author\{([\s\S]*?)\}\s*$", src, flags=re.MULTILINE)
         if m:
-            raw = m.group(1)
-            parts = [p.strip() for p in raw.split("\\\\") if p.strip()]
-            # Skip first part if it's just the author name (already present in DOCX).
-            if parts:
-                # Heuristic: first segment likely contains the name.
-                parts = parts[1:]
-            # Normalize common prefixes
-            for p in parts:
-                p = re.sub(r"\s+", " ", p).strip()
-                author_lines.append(p)
+            author_block = m.group(1)
+            items = re.findall(r"\\IEEEcompsocthanksitem\s+([\s\S]*?)(?=\\IEEEcompsocthanksitem|\}\s*\}|$)", author_block)
+            for it in items:
+                it = _clean_tex_inline(it)
+                # Remove any trailing braces that come from regex boundary matching.
+                it = re.sub(r"\s*\}+\s*$", "", it).strip()
+                it = it.rstrip().rstrip("%").strip()
+                if it:
+                    author_lines.append(it)
     except Exception:
         author_lines = []
+
+    if not author_lines:
+        try:
+            supp_tex = (docs / "TDSC-2026-01-0318_supplementary.tex").read_text(encoding="utf-8", errors="ignore")
+            m = re.search(r"\\author\{([\s\S]*?)\}", supp_tex)
+            if m:
+                raw = m.group(1)
+                parts = [p.strip() for p in raw.split("\\\\") if p.strip()]
+                if parts:
+                    parts = parts[1:]
+                for p in parts:
+                    p = _clean_tex_inline(p)
+                    if p:
+                        author_lines.append(p)
+        except Exception:
+            author_lines = []
 
     # Expand \input{...} to avoid losing tables/figures during conversion.
     src = expand_inputs(src, docs)
@@ -1452,12 +2289,29 @@ def main() -> int:
     if (docx_fig_dir / "fig_state_machines.png").exists():
         src = replace_tikz_figure(src, "fig:state-machines", "_docx_figs/fig_state_machines.png")
 
-    # 2b) Keep tables as real Word table objects (w:tbl) for IEEE production/editability.
-    # We simplify complex IEEE tabular specs so pandoc can convert them reliably.
-    src = simplify_tables_for_pandoc(src)
-
-    # 2c) Prefix captions with stable Fig./TABLE numbering derived from LaTeX labels.
+    # 2b) Tables: IEEE TDSC requires editable Word tables (not images).
+    # Pandoc's LaTeX reader is unreliable for complex IEEE tabular constructs.
+    # Strategy:
+    # - Prefix captions (TABLE X. / Fig. Y.) using LaTeX label numbers.
+    # - Extract labeled tables into placeholders and store a cell-matrix per table label.
+    # - Let pandoc convert the rest of the document.
+    # - Post-process the produced DOCX to inject true w:tbl tables at placeholders.
+    #
+    # Rasterization remains available behind a flag for debugging only (NOT for submission).
     src = prefix_table_and_figure_captions_in_envs(src, ref_map)
+    src, table_matrices = extract_labeled_tables_as_placeholders(src, ref_map=ref_map, cite_map=cite_map)
+    if args.rasterize_tables:
+        src = tables_to_images_for_word(
+            src,
+            docs=docs,
+            ref_map=ref_map,
+            cite_map=cite_map,
+            dpi=args.figure_dpi,
+            out_dir=docx_fig_dir,
+        )
+    # Best-effort simplification for any remaining (unlabeled) LaTeX tables.
+    src = simplify_tables_for_pandoc(src)
+    # Keep captions as explicit paragraphs (pandoc sometimes drops table captions).
     src = flatten_table_captions_for_pandoc(src)
 
     # 3) Resolve \ref/\cite to concrete numbers (stabilize evidence chain)
@@ -1491,9 +2345,10 @@ def main() -> int:
         backup = out_docx.with_name(out_docx.stem + f"_BACKUP_{ts}" + out_docx.suffix)
         shutil.copy2(out_docx, backup)
 
-    # Create a default reference docx if not present (improves Word styling vs random defaults)
-    ref_docx = docs / "_pandoc_reference.docx"
+    # Reference DOCX controls Word styles. Prefer IEEE Journals template if provided.
+    ref_docx = (docs / reference_doc) if not Path(reference_doc).is_absolute() else Path(reference_doc)
     if not ref_docx.exists():
+        # Fallback: create a default reference docx if missing (best-effort).
         # pandoc prints the binary reference.docx to stdout; write to file.
         with open(ref_docx, "wb") as f:
             subprocess.run(["pandoc", "--print-default-data-file", "reference.docx"], cwd=str(docs), check=True, stdout=f)
@@ -1512,10 +2367,24 @@ def main() -> int:
             "--resource-path",
             ".:figures:_docx_figs:tables:supp_tables",
             "--reference-doc",
-            str(ref_docx.name),
+            str(ref_docx.name if ref_docx.parent == docs else str(ref_docx)),
         ],
         cwd=docs,
     )
+
+    # Inject real Word tables at placeholders (ensures editability for IEEE TDSC).
+    # Prefer the reference template's "Normal Table" style (TRANS-JOUR), else fallback.
+    try:
+        with zipfile.ZipFile(ref_docx) as z:
+            styles_bytes = z.read("word/styles.xml")
+        table_style_id = (
+            style_id_by_name_xml(styles_bytes, "Normal Table")
+            or style_id_by_name_xml(styles_bytes, "Table")
+            or None
+        )
+    except Exception:
+        table_style_id = None
+    inject_tables_into_docx(out_docx, table_matrices, table_style_id=table_style_id)
 
     # Make Word output visually closer to IEEE two-column look.
     postprocess_docx_ieee(out_docx, author_lines=author_lines)
@@ -1525,5 +2394,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-

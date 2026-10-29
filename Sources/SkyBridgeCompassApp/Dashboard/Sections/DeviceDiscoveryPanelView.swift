@@ -7,17 +7,19 @@ import os.log
 public struct DeviceDiscoveryPanelView: View {
     @EnvironmentObject var appModel: DashboardViewModel
     @EnvironmentObject var themeConfiguration: ThemeConfiguration
-    
+
     @Binding var deviceSearchText: String
     @Binding var filteredDevices: [DiscoveredDevice]
     @Binding var isSearching: Bool
     @Binding var showManualConnectSheet: Bool
     @Binding var extendedSearchCountdown: Int
-    
+
     @State private var searchTask: Task<Void, Never>?
-    
+    @State private var showDiagnosticsPanel = false
+    @StateObject private var settingsManager = SettingsManager.shared
+
     private let logger = Logger(subsystem: "com.skybridge.SkyBridgeCompassApp", category: "DeviceDiscoveryPanel")
-    
+
     public init(
         deviceSearchText: Binding<String>,
         filteredDevices: Binding<[DiscoveredDevice]>,
@@ -31,7 +33,7 @@ public struct DeviceDiscoveryPanelView: View {
         self._showManualConnectSheet = showManualConnectSheet
         self._extendedSearchCountdown = extendedSearchCountdown
     }
-    
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
@@ -39,7 +41,7 @@ public struct DeviceDiscoveryPanelView: View {
                     .font(.headline)
                     .foregroundStyle(themeConfiguration.primaryTextColor)
                 Spacer()
-                
+
  // 添加扫描状态指示器
                 if appModel.isScanning || UnifiedOnlineDeviceManager.shared.isScanning {
                     HStack(spacing: 6) {
@@ -50,8 +52,22 @@ public struct DeviceDiscoveryPanelView: View {
                             .foregroundColor(.secondary)
                     }
                 }
+
+                if settingsManager.showDebugInfo {
+                    // 诊断按钮
+                    Button(action: { showDiagnosticsPanel.toggle() }) {
+                        Image(systemName: "stethoscope")
+                            .font(.system(size: 14))
+                    }
+                    .buttonStyle(.borderless)
+                    .help(LocalizationManager.shared.localizedString("discovery.diagnostics.title"))
+                    .popover(isPresented: $showDiagnosticsPanel, arrowEdge: .bottom) {
+                        DiscoveryDiagnosticsView()
+                            .frame(width: 450, height: 500)
+                    }
+                }
             }
-            
+
             VStack(spacing: 16) {
  // 搜索栏和刷新按钮 - 优化版本
                 HStack {
@@ -103,7 +119,7 @@ public struct DeviceDiscoveryPanelView: View {
                     .padding(.vertical, 8)
                     .background(Color.white.opacity(0.05))
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    
+
                     Button(action: {
  // 异步刷新，避免阻塞UI
                         Task { @MainActor in
@@ -113,19 +129,19 @@ public struct DeviceDiscoveryPanelView: View {
                         Image(systemName: (appModel.isScanning || UnifiedOnlineDeviceManager.shared.isScanning) ? "stop.circle" : "arrow.clockwise")
                             .font(.system(size: 14, weight: .medium))
                             .rotationEffect(.degrees((appModel.isScanning || UnifiedOnlineDeviceManager.shared.isScanning) ? 0 : 360))
-                            .animation(.linear(duration: 1).repeatForever(autoreverses: false), 
+                            .animation(.linear(duration: 1).repeatForever(autoreverses: false),
                                      value: (appModel.isScanning || UnifiedOnlineDeviceManager.shared.isScanning))
                     }
                     .buttonStyle(.bordered)
                     .disabled(appModel.isScanning || UnifiedOnlineDeviceManager.shared.isScanning)
                 }
-                
+
  // 设备列表 - 虚拟化优化
                 if filteredDevices.isEmpty {
                     EmptyStateView(
                         title: deviceSearchText.isEmpty ? LocalizationManager.shared.localizedString("dashboard.noDevicesFound") : LocalizationManager.shared.localizedString("discovery.noMatch"),
-                        subtitle: deviceSearchText.isEmpty ? 
-                            LocalizationManager.shared.localizedString("dashboard.checkNetwork") : 
+                        subtitle: deviceSearchText.isEmpty ?
+                            LocalizationManager.shared.localizedString("dashboard.checkNetwork") :
                             LocalizationManager.shared.localizedString("discovery.adjustSearch")
                     )
                 } else {
@@ -150,87 +166,34 @@ public struct DeviceDiscoveryPanelView: View {
             }
         }
         .padding(20)
-        .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .dashboardGlassSurface(cornerRadius: 18)
         .overlay(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(themeConfiguration.borderColor, lineWidth: 1)
         )
     }
-    
- /// 异步过滤设备列表，支持名称、IP和服务搜索
+
     @MainActor
     private func filterDevices(with searchText: String) async {
         isSearching = true
-        
-        let filtered = await withTaskGroup(of: [DiscoveredDevice].self) { group in
-            group.addTask { @MainActor in
-                self.mapOnlineToDiscovered(self.appModel.onlineDevices)
-            }
-            
-            var result: [DiscoveredDevice] = []
-            for await devices in group {
-                if searchText.isEmpty {
-                    result = devices
-                } else {
-                    let lowercasedSearch = searchText.lowercased()
-                    result = devices.filter { device in
-                        device.name.lowercased().contains(lowercasedSearch) ||
-                        (device.ipv4?.contains(lowercasedSearch) == true) ||
-                        (device.ipv6?.contains(lowercasedSearch) == true) ||
-                        device.services.contains { service in
-                            service.lowercased().contains(lowercasedSearch)
-                        }
-                    }
-                }
-            }
-            return result
-        }
-        
-        filteredDevices = sortDevicesBySignalStrength(filtered)
+        filteredDevices = DashboardDeviceProjection.filter(
+            appModel.discoveredDevices,
+            searchText: searchText,
+            sortBySignalStrength: settingsManager.sortBySignalStrength
+        )
         isSearching = false
     }
-    
-    @MainActor
-    private func mapOnlineToDiscovered(_ online: [OnlineDevice]) -> [DiscoveredDevice] {
-        online.map { od in
-            DiscoveredDevice(
-                id: od.id,
-                name: od.name,
-                ipv4: od.ipv4,
-                ipv6: od.ipv6,
-                services: od.services,
-                portMap: od.portMap,
-                connectionTypes: od.connectionTypes,
-                uniqueIdentifier: od.uniqueIdentifier,
-                signalStrength: nil,
-                source: od.sources.first ?? .unknown,
-                isLocalDevice: od.isLocalDevice,
-                deviceId: nil,
-                pubKeyFP: nil,
-                macSet: od.macAddress.map { Set([$0]) } ?? []
-            )
-        }
-    }
 
-    private func sortDevicesBySignalStrength(_ devices: [DiscoveredDevice]) -> [DiscoveredDevice] {
-        let settings = SettingsManager.shared
-        guard settings.sortBySignalStrength else { return devices }
-        func score(for d: DiscoveredDevice) -> Int {
-            return Int(d.signalStrength ?? 0)
-        }
-        return devices.sorted { a, b in
-            let sa = score(for: a)
-            let sb = score(for: b)
-            if sa != sb { return sa > sb }
-            return a.name.localizedCompare(b.name) == .orderedAscending
-        }
-    }
-    
     @MainActor
     private func connectToDevice(_ device: DiscoveredDevice) async {
         logger.info("正在连接到设备: \(device.name)")
-        await appModel.connect(to: device)
+        if DashboardDeviceProjection.isSkyBridgePeer(device) {
+            await appModel.connectDiscoveredPeer(to: device)
+        } else if let onlineDevice = appModel.onlineDevices.first(where: { $0.id == device.id }) {
+            await appModel.connect(to: onlineDevice)
+        } else {
+            await appModel.connect(to: device)
+        }
         logger.info("连接设备操作完成: \(device.name)")
     }
 }
-

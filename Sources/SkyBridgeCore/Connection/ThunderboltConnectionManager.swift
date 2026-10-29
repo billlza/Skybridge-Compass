@@ -1,3 +1,8 @@
+// macOS-exclusive: this file is built on frameworks that exist only on macOS
+// (AppKit / IOKit / ScreenCaptureKit / CoreWLAN / MetalFX / ServiceManagement /
+// ApplicationServices). It is excluded from other platforms so SkyBridgeCore can be
+// the single shared core for iOS as well. No behaviour changes on macOS.
+#if os(macOS)
 import Foundation
 import Network
 import OSLog
@@ -5,22 +10,23 @@ import IOKit
 
 /// Thunderbolt连接管理器
 public final class ThunderboltConnectionManager: @unchecked Sendable {
-    
+
  // MARK: - 私有属性
-    
+
     private let logger = Logger(subsystem: "com.skybridge.connection", category: "ThunderboltConnectionManager")
     private let connectionQueue = DispatchQueue(label: "thunderbolt.connection.queue", qos: .userInitiated)
+    private let stateLock = OSAllocatedUnfairLock()
     private var connections: [UUID: NWConnection] = [:]
     private var stats: [UUID: ConnectionStats] = [:]
-    
+
  // MARK: - 初始化
-    
+
     public init() {
         logger.info("Thunderbolt连接管理器已初始化")
     }
-    
+
  // MARK: - 公共方法
-    
+
  /// 检查Thunderbolt是否可用
     public func isAvailable() async -> Bool {
         return await withCheckedContinuation { continuation in
@@ -31,74 +37,79 @@ public final class ThunderboltConnectionManager: @unchecked Sendable {
                     continuation.resume(returning: false)
                     return
                 }
-                
-                defer { freeifaddrs(ifaddr) }
-                
-                var current = ifaddr
-                while current != nil {
-                    let interface = current!.pointee
+
+                guard let first = ifaddr else {
+                    continuation.resume(returning: false)
+                    return
+                }
+
+                defer { freeifaddrs(first) }
+
+                var current: UnsafeMutablePointer<ifaddrs>? = first
+                while let interfacePointer = current {
+                    let interface = interfacePointer.pointee
+                    current = interface.ifa_next
+
+                    guard let namePtr = interface.ifa_name else { continue }
  // 统一使用安全的 UTF8 C 字符串解码，替代已弃用的 String(cString:)
-                    let name = decodeCString(interface.ifa_name)
-                    
+                    let name = decodeCString(namePtr)
+
  // 检查是否为Thunderbolt Bridge接口
                     if name.hasPrefix("bridge") && (interface.ifa_flags & UInt32(IFF_UP)) != 0 {
                         continuation.resume(returning: true)
                         return
                     }
-                    
-                    current = interface.ifa_next
                 }
-                
+
                 continuation.resume(returning: false)
             }
         }
     }
-    
+
  /// 建立Thunderbolt连接
     public func connect(to device: DiscoveredDevice, interface: String) async throws -> ActiveConnection {
         logger.info("建立Thunderbolt连接到设备: \(device.name)")
-        
+
  // 从设备信息中获取连接地址和端口
         guard let address = device.ipv4 ?? device.ipv6 else {
             throw ConnectionError.networkUnreachable
         }
-        
+
         let host = NWEndpoint.Host(address)
-        
+
  // 从端口映射中获取连接端口，默认使用22端口
         let portNumber = device.portMap["ssh"] ?? device.portMap["rdp"] ?? 22
         let port = NWEndpoint.Port(integerLiteral: UInt16(portNumber))
         let endpoint = NWEndpoint.hostPort(host: host, port: port)
-        
+
  // 创建高性能TCP连接参数，针对Thunderbolt优化
         let tcpOptions = NWProtocolTCP.Options()
         tcpOptions.enableKeepalive = true
         tcpOptions.keepaliveIdle = 10  // 更短的保活时间
         tcpOptions.noDelay = true      // 禁用Nagle算法以降低延迟
-        
+
         let parameters = NWParameters(tls: nil, tcp: tcpOptions)
  // 注意：由于NWInterface构造函数限制，我们让系统自动选择最佳接口
  // parameters.requiredInterface = NWInterface(name: interface)
-        
+
  // 设置高优先级服务类别
         parameters.serviceClass = .responsiveData
-        
+
         let connection = NWConnection(to: endpoint, using: parameters)
         let connectionId = UUID()
-        
+
         return try await withCheckedThrowingContinuation { continuation in
             let resumedFlag = OSAllocatedUnfairLock(initialState: false)
-            
+
             connection.stateUpdateHandler = { @Sendable state in
                 resumedFlag.withLock { resumed in
                     switch state {
                     case .ready:
                         if !resumed {
                             resumed = true
-                            Task { @MainActor in
-                                self.connections[connectionId] = connection
-                            }
-                            
+                            self.stateLock.withLock { self.connections[connectionId] = connection }
+                            self.updateStats(for: connectionId)
+
                             let activeConnection = ActiveConnection(method: .thunderbolt(interface: interface), device: device)
                             self.logger.info("Thunderbolt连接建立成功: \(connectionId)")
                             continuation.resume(returning: activeConnection)
@@ -119,28 +130,30 @@ public final class ThunderboltConnectionManager: @unchecked Sendable {
                     }
                 }
             }
-            
+
             connection.start(queue: self.connectionQueue)
         }
     }
-    
+
  /// 断开连接
     public func disconnect(_ connectionId: UUID) async {
         logger.info("断开Thunderbolt连接: \(connectionId)")
-        
-        if let connection = connections[connectionId] {
-            connection.cancel()
+
+        let connection = stateLock.withLock { () -> NWConnection? in
+            let conn = connections[connectionId]
             connections.removeValue(forKey: connectionId)
             stats.removeValue(forKey: connectionId)
+            return conn
         }
+        connection?.cancel()
     }
-    
+
  /// 发送数据
     public func sendData(_ data: Data, connectionId: UUID) async throws {
-        guard let connection = connections[connectionId] else {
+        guard let connection = stateLock.withLock({ connections[connectionId] }) else {
             throw ConnectionError.connectionNotFound
         }
-        
+
         return try await withCheckedThrowingContinuation { continuation in
             connection.send(content: data, completion: .contentProcessed { error in
                 if let error = error {
@@ -151,25 +164,26 @@ public final class ThunderboltConnectionManager: @unchecked Sendable {
             })
         }
     }
-    
+
  /// 获取连接统计信息
     public func getStats(_ connectionId: UUID) -> ConnectionStats? {
-        return stats[connectionId]
+        return stateLock.withLock { stats[connectionId] }
     }
-    
+
  // MARK: - 私有方法
-    
- /// 更新连接统计信息（真实测量）
+
+ /// 更新连接统计信息（基于路径属性的启发式估算，非端到端真实测量）
     private func updateStats(for connectionId: UUID) {
-        guard let connection = connections[connectionId] else { return }
-        
- // 🔧 真实测量：Thunderbolt 连接质量
+        guard let connection = stateLock.withLock({ connections[connectionId] }) else { return }
+
+ // 启发式估算：Thunderbolt 连接质量（基于路径属性推断，非 iperf/RTT 真实测量）
         var bandwidth: Double = 800.0 // 默认 800 Mbps
         var latency: Double = 0.5 // 默认 0.5ms
         var packetLoss: Double = 0.001 // 默认 0.1%
-        
- // 从 NWConnection 的 currentPath 获取质量指标
-        if let path = connection.currentPath {
+
+// 从 NWConnection 的 currentPath 获取质量指标
+// 仅在连接 ready 后再访问，避免 Network.framework 打印 "unconnected nw_connection" 警告刷屏
+        if case .ready = connection.state, let path = connection.currentPath {
             if path.status == .satisfied {
  // Thunderbolt 典型带宽：TB3 (500-1000 Mbps), TB4 (1000-2000 Mbps)
                 if path.usesInterfaceType(.wiredEthernet) {
@@ -183,7 +197,7 @@ public final class ThunderboltConnectionManager: @unchecked Sendable {
                     latency = 0.5
                     packetLoss = 0.001
                 }
-                
+
  // Thunderbolt 连接通常非常稳定，即使受限也保持高性能
                 if path.isConstrained {
                     bandwidth *= 0.8
@@ -197,7 +211,7 @@ public final class ThunderboltConnectionManager: @unchecked Sendable {
                 packetLoss = 0.05
             }
         }
-        
+
         let stats = ConnectionStats(
             connectionId: connectionId,
             bandwidth: bandwidth,
@@ -205,10 +219,10 @@ public final class ThunderboltConnectionManager: @unchecked Sendable {
             packetLoss: packetLoss,
             uptime: Date().timeIntervalSince1970
         )
-        
-        self.stats[connectionId] = stats
+
+        stateLock.withLock { self.stats[connectionId] = stats }
     }
-    
+
  /// 检查Thunderbolt硬件状态
     private func checkThunderboltHardware() -> Bool {
  // 这里可以添加更详细的Thunderbolt硬件检测逻辑
@@ -216,3 +230,4 @@ public final class ThunderboltConnectionManager: @unchecked Sendable {
         return true
     }
 }
+#endif

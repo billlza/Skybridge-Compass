@@ -1,0 +1,33 @@
+{
+  "comparedFiles": 10115,
+  "gitOnly": [
+    ".gitattributes",
+    ".gitignore",
+    "doc/.gitignore",
+    "doc/doxy/.gitignore",
+    "doc/examples/.gitignore",
+    "ffbuild/.gitignore",
+    "fftools/resources/.gitignore",
+    "libavcodec/.gitignore",
+    "libavcodec/tests/.gitignore",
+    "libavdevice/.gitignore",
+    "libavdevice/tests/.gitignore",
+    "libavfilter/.gitignore",
+    "libavfilter/opencl/.gitignore",
+    "libavfilter/tests/.gitignore",
+    "libavfilter/vulkan/.gitignore",
+    "libavformat/.gitignore",
+    "libavformat/tests/.gitignore",
+    "libavutil/.gitignore",
+    "libavutil/tests/.gitignore",
+    "libswresample/tests/.gitignore",
+    "libswscale/tests/.gitignore",
+    "tests/.gitignore",
+    "tests/api/.gitignore",
+    "tests/checkasm/.gitignore",
+    "tools/.gitignore"
+  ],
+  "archiveOnlyGenerated": [
+    "VERSION"
+  ]
+}

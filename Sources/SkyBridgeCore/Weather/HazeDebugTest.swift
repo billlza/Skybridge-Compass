@@ -1,3 +1,4 @@
+#if DEBUG || SKYBRIDGE_TESTING
 import Foundation
 import SwiftUI
 import MetalKit
@@ -75,7 +76,12 @@ public struct HazeDebugTestView: View {
         
         SkyBridgeLogger.metal.debugOnly("✅ Metal device available: \(device.name)")
         
-        guard let library = device.makeDefaultLibrary() else {
+        guard let library = SkyBridgeMetalShaderLibrary.loadIfAvailable(
+            device: device,
+            bundle: SkyBridgeResourceBundleLocator.core,
+            sourceResourceNames: ["HazeShaders"],
+            requiredFunctionNames: ["hazeVertex", "hazeFragment"]
+        ) else {
             testMessage = "❌ Metal library not available"
             SkyBridgeLogger.metal.error("❌ Metal library not available")
             return
@@ -101,3 +107,4 @@ struct HazeDebugTestView_Previews: PreviewProvider {
         HazeDebugTestView()
     }
 }
+#endif

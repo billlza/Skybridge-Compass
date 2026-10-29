@@ -1,20 +1,26 @@
 import SwiftUI
 import SkyBridgeCore
+import SkyBridgeProtocolCore
+import SkyBridgeUI
 import UniformTypeIdentifiers
+import UserNotifications
+import CoreLocation
+import Darwin
+import Security
+import ImageIO
 
 // 确保可以访问天气管理器
 import Combine
 
 /// macOS 偏好设置窗口 - 遵循 Apple 设计规范
 struct PreferencesView: View {
-    
+
  // MARK: - 状态管理
     @EnvironmentObject private var settingsManager: SettingsManager
     @EnvironmentObject private var weatherManager: WeatherIntegrationManager
-    @EnvironmentObject private var weatherSettings: WeatherEffectsSettings
-    
+
     @State private var selectedTab: PreferencesTab = .general
-    
+
  // MARK: - 偏好设置标签页枚举
     enum PreferencesTab: String, CaseIterable {
         case general = "通用"
@@ -23,7 +29,7 @@ struct PreferencesView: View {
         case permissions = "权限"
         case advanced = "高级"
         case about = "关于"
-        
+
         var iconName: String {
             switch self {
             case .general:
@@ -41,7 +47,7 @@ struct PreferencesView: View {
             }
         }
     }
-    
+
     var body: some View {
         TabView(selection: $selectedTab) {
  // 通用设置
@@ -50,35 +56,35 @@ struct PreferencesView: View {
                     Label(PreferencesTab.general.rawValue, systemImage: PreferencesTab.general.iconName)
                 }
                 .tag(PreferencesTab.general)
-            
+
  // 网络设置
             NetworkPreferencesView()
                 .tabItem {
                     Label(PreferencesTab.network.rawValue, systemImage: PreferencesTab.network.iconName)
                 }
                 .tag(PreferencesTab.network)
-            
+
  // 设备设置
             DevicePreferencesView()
                 .tabItem {
                     Label(PreferencesTab.devices.rawValue, systemImage: PreferencesTab.devices.iconName)
                 }
                 .tag(PreferencesTab.devices)
-            
+
  // 权限设置
             PermissionPreferencesView()
                 .tabItem {
                     Label(PreferencesTab.permissions.rawValue, systemImage: PreferencesTab.permissions.iconName)
                 }
                 .tag(PreferencesTab.permissions)
-            
+
  // 高级设置
             AdvancedPreferencesView()
                 .tabItem {
                     Label(PreferencesTab.advanced.rawValue, systemImage: PreferencesTab.advanced.iconName)
                 }
                 .tag(PreferencesTab.advanced)
-            
+
  // 关于
             AboutPreferencesView()
                 .tabItem {
@@ -96,7 +102,35 @@ struct GeneralPreferencesView: View {
     @EnvironmentObject private var settingsManager: SettingsManager
     @EnvironmentObject private var themeConfiguration: ThemeConfiguration
     @EnvironmentObject private var localizationManager: LocalizationManager
-    
+
+    // 缓存的背景缩略图：只在路径变化时在后台解码一次，避免在 body 每次重绘时同步解码整张全分辨率图片。
+    @State private var backgroundThumbnail: NSImage?
+
+    /// 在后台用 ImageIO 生成下采样缩略图（最长边约 240px，覆盖 100×60 的 retina 预览），完成后回主线程赋值。
+    private func reloadBackgroundThumbnail(path: String?) {
+        guard let path else {
+            backgroundThumbnail = nil
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let url = URL(fileURLWithPath: path)
+            var produced: NSImage?
+            if let source = CGImageSourceCreateWithURL(url as CFURL, nil) {
+                let options: [CFString: Any] = [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceThumbnailMaxPixelSize: 240
+                ]
+                if let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
+                    produced = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+                }
+            }
+            DispatchQueue.main.async {
+                self.backgroundThumbnail = produced
+            }
+        }
+    }
+
     var body: some View {
         Form {
             Section(header: Text("settings.general.language.sectionTitle", bundle: .module)) {
@@ -126,32 +160,31 @@ struct GeneralPreferencesView: View {
             Section("应用行为") {
                 Toggle("启动时自动扫描设备", isOn: $settingsManager.autoScanOnStartup)
                     .help("应用启动时自动开始扫描可用设备")
-                
+
                 Toggle("显示系统通知", isOn: $settingsManager.showSystemNotifications)
                     .help("设备连接状态变化时显示系统通知")
-                
+
                 Toggle("启用后台扫描", isOn: $settingsManager.enableBackgroundScanning)
                     .help("在后台继续扫描设备")
             }
-            
+
             Section("界面设置") {
                 Toggle("使用深色模式", isOn: $settingsManager.useDarkMode)
                     .help("启用深色界面主题")
-                
+
                 Toggle("紧凑模式", isOn: $settingsManager.compactMode)
                     .help("使用更紧凑的界面布局")
-                
+
                 Toggle("显示设备详情", isOn: $settingsManager.showDeviceDetails)
                     .help("在设备列表中显示详细信息")
-                
+
                 Toggle("显示连接统计", isOn: $settingsManager.showConnectionStats)
                     .help("显示连接速度和质量统计")
             }
-            
+
             Section("个性化背景") {
                 HStack {
-                    if let path = themeConfiguration.customBackgroundImagePath,
-                       let image = NSImage(contentsOfFile: path) {
+                    if let image = backgroundThumbnail {
                         Image(nsImage: image)
                             .resizable()
                             .aspectRatio(contentMode: .fill)
@@ -181,7 +214,7 @@ struct GeneralPreferencesView: View {
                                     .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
                             )
                     }
-                    
+
                     VStack(alignment: .leading, spacing: 8) {
                         Button("选择图片...") {
                             let panel = NSOpenPanel()
@@ -189,7 +222,7 @@ struct GeneralPreferencesView: View {
                             panel.allowsMultipleSelection = false
                             panel.canChooseDirectories = false
                             panel.message = "选择一张图片作为自定义背景"
-                            
+
                             if panel.runModal() == .OK, let url = panel.url {
  // Save image to app sandbox
                                 Task { @MainActor in
@@ -197,21 +230,21 @@ struct GeneralPreferencesView: View {
                                         let fileManager = FileManager.default
                                         let appSupport = try fileManager.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
                                         let saveDir = appSupport.appendingPathComponent("CustomBackgrounds")
-                                        
+
                                         if !fileManager.fileExists(atPath: saveDir.path) {
                                             try fileManager.createDirectory(at: saveDir, withIntermediateDirectories: true)
                                         }
-                                        
+
                                         let ext = url.pathExtension.isEmpty ? "jpg" : url.pathExtension
                                         let destURL = saveDir.appendingPathComponent("background.\(ext)")
-                                        
+
                                         if fileManager.fileExists(atPath: destURL.path) {
                                             try fileManager.removeItem(at: destURL)
                                         }
-                                        
+
                                         try fileManager.copyItem(at: url, to: destURL)
                                         themeConfiguration.setCustomBackgroundImage(path: destURL.path)
-                                        
+
                                     } catch {
                                         SkyBridgeLogger.ui.error("Failed to save background image: \(error.localizedDescription, privacy: .private)")
                                     }
@@ -219,7 +252,7 @@ struct GeneralPreferencesView: View {
                             }
                         }
                         .help("从本地选择一张图片作为背景")
-                        
+
                         if themeConfiguration.customBackgroundImagePath != nil {
                             Button("清除背景") {
                                 themeConfiguration.customBackgroundImagePath = nil
@@ -235,14 +268,18 @@ struct GeneralPreferencesView: View {
                     .padding(.leading, 8)
                 }
                 .padding(.vertical, 4)
-                
+                .onAppear { reloadBackgroundThumbnail(path: themeConfiguration.customBackgroundImagePath) }
+                .onChange(of: themeConfiguration.customBackgroundImagePath) { _, newPath in
+                    reloadBackgroundThumbnail(path: newPath)
+                }
+
                 if themeConfiguration.customBackgroundImagePath != nil {
                     Text("提示: 选择图片后将自动切换到“自定义背景”主题。")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
             }
-            
+
             Section("数据管理") {
                 HStack {
                     Button("导出设置") {
@@ -250,12 +287,12 @@ struct GeneralPreferencesView: View {
                             do {
  // exportSettings() 返回 URL，是异步方法
                                 let exportedURL = try await settingsManager.exportSettings()
-                                
+
  // 显示保存面板让用户选择保存位置
                                 let panel = NSSavePanel()
                                 panel.allowedContentTypes = [.json]
                                 panel.nameFieldStringValue = "SkyBridge设置.json"
-                                
+
                                 if panel.runModal() == .OK, let url = panel.url {
  // 将导出的临时文件复制到用户选择的位置
                                     try FileManager.default.copyItem(at: exportedURL, to: url)
@@ -266,12 +303,12 @@ struct GeneralPreferencesView: View {
                         }
                     }
                     .help("将当前设置导出到文件")
-                    
+
                     Button("导入设置") {
                         let panel = NSOpenPanel()
                         panel.allowedContentTypes = [.json]
                         panel.allowsMultipleSelection = false
-                        
+
                         if panel.runModal() == .OK, let url = panel.urls.first {
                             Task {
                                 do {
@@ -283,9 +320,9 @@ struct GeneralPreferencesView: View {
                         }
                     }
                     .help("从文件导入设置")
-                    
+
                     Spacer()
-                    
+
                     Button("重置为默认") {
                         Task {
                             await settingsManager.resetToDefaults()
@@ -304,67 +341,125 @@ struct GeneralPreferencesView: View {
 // MARK: - 网络偏好设置视图
 struct NetworkPreferencesView: View {
     @EnvironmentObject private var settingsManager: SettingsManager
-    
+    @State private var showingBandwidthSettings = false
+    @State private var showingTransferSettings = false
+
     var body: some View {
         Form {
+            Section("带宽限速") {
+                Button("打开带宽限速设置…") { showingBandwidthSettings = true }
+                    .help("配置全局/按设备的传输带宽上限与时段规则，对文件传输实时生效")
+            }
+            .sheet(isPresented: $showingBandwidthSettings) {
+                VStack(spacing: 0) {
+                    BandwidthSettingsView()
+                    Divider()
+                    HStack {
+                        Spacer()
+                        Button("完成") { showingBandwidthSettings = false }
+                            .keyboardShortcut(.defaultAction)
+                    }
+                    .padding()
+                }
+                .frame(minWidth: 520, minHeight: 480)
+            }
+
+            Section("文件传输") {
+                Button("打开文件传输设置…") { showingTransferSettings = true }
+                    .help("并发数、端到端加密等核心项绑定到权威设置，跨重启持久化并在启动时应用")
+            }
+            .sheet(isPresented: $showingTransferSettings) {
+                ModernTransferSettingsView()
+            }
+
             Section("WiFi 设置") {
                 Toggle("自动连接已知网络", isOn: $settingsManager.autoConnectKnownNetworks)
                     .help("自动连接之前连接过的WiFi网络")
-                
+
                 Toggle("显示隐藏网络", isOn: $settingsManager.showHiddenNetworks)
                     .help("在WiFi列表中显示隐藏的网络")
-                
+
                 Toggle("优先使用5GHz/6GHz频段", isOn: $settingsManager.prefer5GHz)
                     .help("在可用时优先连接5GHz/6GHz WiFi网络")
-                
-                Stepper("WiFi扫描超时: \(settingsManager.wifiScanTimeout)秒", 
-                       value: $settingsManager.wifiScanTimeout, 
-                       in: 5...60, 
+
+                Stepper("WiFi扫描超时: \(settingsManager.wifiScanTimeout)秒",
+                       value: $settingsManager.wifiScanTimeout,
+                       in: 5...60,
                        step: 5)
                     .help("WiFi网络扫描的超时时间")
             }
-            
+
             Section("网络发现") {
                 Toggle("启用Bonjour发现", isOn: $settingsManager.enableBonjourDiscovery)
                     .help("使用Bonjour协议发现网络设备")
-                
+
                 Toggle("启用mDNS解析", isOn: $settingsManager.enableMDNSResolution)
                     .help("启用多播DNS名称解析")
-                
+
                 Toggle("扫描自定义端口", isOn: $settingsManager.scanCustomPorts)
                     .help("扫描自定义服务端口")
-                
-                Stepper("发现超时: \(settingsManager.discoveryTimeout)秒", 
-                       value: $settingsManager.discoveryTimeout, 
-                       in: 10...120, 
+
+                Stepper("发现超时: \(settingsManager.discoveryTimeout)秒",
+                       value: $settingsManager.discoveryTimeout,
+                       in: 10...120,
                        step: 10)
                     .help("网络发现的超时时间")
             }
-            
+
+            Section("顶部网络信息") {
+                Toggle("显示 IP 城市与代理状态", isOn: $settingsManager.showTopBarIPLocation)
+                    .help("在顶部栏显示公网 IP 出口城市，并标注系统代理是否开启")
+
+                Toggle("显示实时网速", isOn: $settingsManager.showTopBarNetworkSpeed)
+                    .help("在顶部栏显示当前网络下载和上传吞吐")
+
+                Toggle("显示网络延迟", isOn: $settingsManager.showTopBarNetworkLatency)
+                    .help("在顶部栏显示 HTTPS 网络延迟探测结果")
+            }
+
             Section("连接设置") {
-                Stepper("连接超时: \(settingsManager.connectionTimeout)秒", 
-                       value: $settingsManager.connectionTimeout, 
-                       in: 5...60, 
+                Stepper("连接超时: \(settingsManager.connectionTimeout)秒",
+                       value: $settingsManager.connectionTimeout,
+                       in: 5...60,
                        step: 5)
                     .help("设备连接的超时时间")
-                
-                Stepper("重试次数: \(settingsManager.retryCount)", 
-                       value: $settingsManager.retryCount, 
+
+                Stepper("重试次数: \(settingsManager.retryCount)",
+                       value: $settingsManager.retryCount,
                        in: 1...10)
                     .help("连接失败时的最大重试次数")
-                
-                Toggle("启用连接加密", isOn: $settingsManager.enableConnectionEncryption)
-                    .help("对连接数据进行加密")
-                
-                Toggle("验证证书", isOn: $settingsManager.verifyCertificates)
-                    .help("验证服务器SSL证书")
+
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "lock.fill")
+                        .foregroundColor(.blue)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("连接加密始终开启")
+                            .font(.subheadline)
+                        Text("已认证连接和文件传输不允许关闭加密。")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "lock.shield")
+                        .foregroundColor(.blue)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("证书校验始终开启")
+                            .font(.subheadline)
+                        Text("当前版本固定启用严格证书校验，不可关闭。")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .help("验证服务器SSL证书")
             }
-            
+
             Section("自定义服务") {
                 VStack(alignment: .leading) {
                     Text("自定义服务类型:")
                         .font(.headline)
-                    
+
                     ForEach(Array(settingsManager.customServiceTypes.enumerated()), id: \.offset) { index, serviceType in
                         HStack {
                             TextField("服务类型", text: Binding(
@@ -377,7 +472,7 @@ struct NetworkPreferencesView: View {
                                     }
                                 }
                             ))
-                            
+
                             Button("删除") {
                                 if index < settingsManager.customServiceTypes.count {
                                     settingsManager.customServiceTypes.remove(at: index)
@@ -386,7 +481,7 @@ struct NetworkPreferencesView: View {
                             .foregroundColor(.red)
                         }
                     }
-                    
+
                     Button("添加服务类型") {
                         settingsManager.customServiceTypes.append("")
                     }
@@ -401,26 +496,45 @@ struct NetworkPreferencesView: View {
 // MARK: - 设备偏好设置视图
 struct DevicePreferencesView: View {
     @EnvironmentObject private var settingsManager: SettingsManager
-    
+    @State private var showingClipboardSettings = false
+
     var body: some View {
         Form {
+            Section("随航剪贴板") {
+                Button("打开随航剪贴板设置…") { showingClipboardSettings = true }
+                    .help("跨设备同步剪贴板（在与配对设备建立 P2P 连接时生效），可配置同步图片/文件路径与历史")
+            }
+            .sheet(isPresented: $showingClipboardSettings) {
+                VStack(spacing: 0) {
+                    ClipboardSyncSettingsView()
+                    Divider()
+                    HStack {
+                        Spacer()
+                        Button("完成") { showingClipboardSettings = false }
+                            .keyboardShortcut(.defaultAction)
+                    }
+                    .padding()
+                }
+                .frame(minWidth: 520, minHeight: 480)
+            }
+
             Section("设备显示") {
                 Toggle("显示设备RSSI", isOn: $settingsManager.showDeviceRSSI)
                     .help("显示设备信号强度指示器")
-                
+
                 Toggle("仅显示可连接设备", isOn: $settingsManager.showConnectableDevicesOnly)
                     .help("隐藏不可连接的设备")
-                
+
                 Toggle("隐藏离线设备", isOn: $settingsManager.hideOfflineDevices)
                     .help("不显示离线或不可用的设备")
-                
+
                 Toggle("显示设备图标", isOn: $settingsManager.showDeviceIcons)
                     .help("在设备列表中显示设备类型图标")
-                
+
                 Toggle("按信号强度排序", isOn: $settingsManager.sortBySignalStrength)
                     .help("根据信号强度对设备进行排序")
             }
-            
+
             Section("提醒设置") {
                 Toggle("仅提醒已验签设备", isOn: $settingsManager.onlyNotifyVerifiedDevices)
                     .help("启用后，仅针对验签通过的设备触发“可连接设备”提醒。")
@@ -429,7 +543,7 @@ struct DevicePreferencesView: View {
                 Toggle("敏感人群更严格模式", isOn: $settingsManager.strictModeForSensitiveGroups)
                     .help("启用后，将适当下调AQI阈值以更严格地提示健康防护。")
             }
-            
+
             Section("健康提醒阈值") {
                 Group {
                     Text("AQI阈值（城市）").font(.subheadline).foregroundColor(.secondary)
@@ -501,7 +615,7 @@ struct DevicePreferencesView: View {
                         }
                     }
                 }
-                
+
                 Group {
                     Text("UV 阈值").font(.subheadline).foregroundColor(.secondary)
                     HStack {
@@ -522,7 +636,7 @@ struct DevicePreferencesView: View {
                     }
                 }
             }
-            
+
             Section("设备排序权重") {
                 HStack {
                     Text("验签通过权重")
@@ -533,7 +647,7 @@ struct DevicePreferencesView: View {
                     }
                 }
                 .help("验签通过的设备在列表排序中获得该分值，以提高优先级")
-                
+
                 HStack {
                     Text("已连接权重")
                     Spacer()
@@ -543,7 +657,7 @@ struct DevicePreferencesView: View {
                     }
                 }
                 .help("已连接设备在列表排序中获得该分值，以提高优先级")
-                
+
                 HStack {
                     Text("信号强度系数")
                     Spacer()
@@ -558,21 +672,21 @@ struct DevicePreferencesView: View {
             Section("AirPlay 设置") {
                 Toggle("自动发现Apple TV", isOn: $settingsManager.autoDiscoverAppleTV)
                     .help("自动发现网络中的Apple TV设备")
-                
+
                 Toggle("显示HomePod设备", isOn: $settingsManager.showHomePodDevices)
                     .help("在设备列表中显示HomePod")
-                
+
                 Toggle("显示第三方AirPlay设备", isOn: $settingsManager.showThirdPartyAirPlayDevices)
                     .help("显示非Apple的AirPlay兼容设备")
             }
-            
+
             Section("设备管理") {
                 Toggle("自动连接配对设备", isOn: $settingsManager.autoConnectPairedDevices)
                     .help("自动连接之前配对过的设备")
-                
-                Stepper("最小信号强度: \(Int(settingsManager.minimumSignalStrength)) dBm", 
-                       value: $settingsManager.minimumSignalStrength, 
-                       in: -100...0, 
+
+                Stepper("最小信号强度: \(Int(settingsManager.minimumSignalStrength)) dBm",
+                       value: $settingsManager.minimumSignalStrength,
+                       in: -100...0,
                        step: 5)
                     .help("过滤掉信号强度低于此值的设备")
             }
@@ -586,43 +700,43 @@ struct DevicePreferencesView: View {
 struct PermissionPreferencesView: View {
     @State private var isLocationAuthorized = false
     @State private var isNotificationAuthorized = false
-    @State private var isNetworkAuthorized = false
-    
+    @State private var networkState: PermissionRowState = .unavailable
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("权限管理")
                 .font(.title2)
                 .fontWeight(.semibold)
-            
+
             Text("SkyBridge Compass 需要以下权限来正常工作:")
                 .foregroundColor(.secondary)
-            
+
  // 简化的权限列表
             VStack(spacing: 12) {
                 PermissionSimpleRow(
                     title: "位置权限",
                     description: "用于获取天气信息",
-                    isGranted: isLocationAuthorized,
+                    state: isLocationAuthorized ? .granted : .denied,
                     icon: "location.fill"
                 )
-                
+
                 PermissionSimpleRow(
                     title: "通知权限",
                     description: "用于设备连接提醒",
-                    isGranted: isNotificationAuthorized,
+                    state: isNotificationAuthorized ? .granted : .denied,
                     icon: "bell.fill"
                 )
-                
+
                 PermissionSimpleRow(
                     title: "网络权限",
-                    description: "用于设备发现和连接",
-                    isGranted: isNetworkAuthorized,
+                    description: "用于设备发现和连接；由 App Sandbox 网络 entitlement 提供",
+                    state: networkState,
                     icon: "network"
                 )
             }
-            
+
             Divider()
-            
+
             HStack {
                 Button("打开系统设置") {
                     if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy") {
@@ -630,18 +744,102 @@ struct PermissionPreferencesView: View {
                     }
                 }
                 .buttonStyle(.bordered)
-                
+
                 Spacer()
             }
-            
+
             Spacer()
         }
         .padding()
-        .onAppear {
- // 简单检查权限状态
-            isLocationAuthorized = true // 简化处理
-            isNotificationAuthorized = true
-            isNetworkAuthorized = true
+        .task {
+            await refreshPermissionStatus()
+        }
+    }
+
+    @MainActor
+    private func refreshPermissionStatus() async {
+        isLocationAuthorized = await LocationAuthorizationProbe.current()
+
+        // Notifications: 使用 UNUserNotificationCenter 查询真实授权状态
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        isNotificationAuthorized = (settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional)
+
+        networkState = NetworkEntitlementProbe.current()
+    }
+}
+
+// MARK: - Best-effort location authorization probe
+@MainActor
+private enum LocationAuthorizationProbe {
+    static func current() async -> Bool {
+        let locationManager = CLLocationManager()
+        switch locationManager.authorizationStatus {
+        case .authorizedAlways, .authorizedWhenInUse:
+            return true
+        case .notDetermined, .restricted, .denied:
+            return false
+        @unknown default:
+            return false
+        }
+    }
+}
+
+private enum NetworkEntitlementProbe {
+    private static let networkClientEntitlement = "com.apple.security.network.client"
+
+    static func current() -> PermissionRowState {
+        guard let task = SecTaskCreateFromSelf(nil),
+              let value = SecTaskCopyValueForEntitlement(
+                task,
+                networkClientEntitlement as CFString,
+                nil
+              ) as? Bool else {
+            return .unavailable
+        }
+        return value ? .configured : .unavailable
+    }
+}
+
+enum PermissionRowState {
+    case granted
+    case denied
+    case configured
+    case unavailable
+
+    var color: Color {
+        switch self {
+        case .granted:
+            return .green
+        case .denied:
+            return .orange
+        case .configured:
+            return .blue
+        case .unavailable:
+            return .red
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .granted, .configured:
+            return "checkmark.circle.fill"
+        case .denied:
+            return "xmark.circle.fill"
+        case .unavailable:
+            return "exclamationmark.triangle.fill"
+        }
+    }
+
+    var accessibilityText: String {
+        switch self {
+        case .granted:
+            return "已授权"
+        case .denied:
+            return "未授权"
+        case .configured:
+            return "已配置"
+        case .unavailable:
+            return "未配置"
         }
     }
 }
@@ -650,18 +848,18 @@ struct PermissionPreferencesView: View {
 struct PermissionSimpleRow: View {
     let title: String
     let description: String
-    let isGranted: Bool
+    let state: PermissionRowState
     let icon: String
-    
+
     var body: some View {
         HStack {
  // 使用通用符号视图以实现全局一致的符号兜底，避免图标缺失
             SystemSymbolIcon(name: icon,
-                              color: isGranted ? .green : .orange,
+                              color: state.color,
                               size: 16,
                               weight: .regular)
                 .frame(width: 24)
-            
+
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.headline)
@@ -669,11 +867,12 @@ struct PermissionSimpleRow: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            
+
             Spacer()
-            
-            Image(systemName: isGranted ? "checkmark.circle.fill" : "xmark.circle.fill")
-                .foregroundColor(isGranted ? .green : .red)
+
+            Image(systemName: state.systemImage)
+                .foregroundColor(state.color)
+                .accessibilityLabel(state.accessibilityText)
         }
         .padding(.vertical, 4)
     }
@@ -686,20 +885,20 @@ struct PermissionSimpleRow: View {
                     Text("一步完成定位授权并验证天气功能。")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
-                    
+
                     HStack(spacing: 8) {
                         Button("请求定位权限") {
                             locationService.requestLocationPermission()
                         }
                         .buttonStyle(.bordered)
-                        
+
                         Button("打开隐私设置") {
                             if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy") {
                                 NSWorkspace.shared.open(url)
                             }
                         }
                         .buttonStyle(.bordered)
-                        
+
                         Button("一键请求所有必需权限") {
                             Task {
                                 await permissionManager.requestAllRequiredPermissions()
@@ -708,9 +907,9 @@ struct PermissionSimpleRow: View {
                         .buttonStyle(.borderedProminent)
                         .disabled(permissionManager.allRequiredPermissionsGranted)
                     }
-                    
+
                     Divider()
-                    
+
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
                             Text("定位状态:")
@@ -745,19 +944,19 @@ struct PermissionSimpleRow: View {
                                 .foregroundColor(.red)
                         }
                     }
-                    
+
                     HStack {
                         Button("开始位置更新") {
                             locationService.startLocationUpdates()
                         }
                         .disabled(!locationService.isLocationAuthorized)
-                        
+
                         Button("停止位置更新") {
                             locationService.stopLocationUpdates()
                         }
-                        
+
                         Spacer()
-                        
+
                         Button("拉取天气数据") {
                             if let loc = locationService.currentLocation {
                                 isVerifyingWeather = true
@@ -770,7 +969,7 @@ struct PermissionSimpleRow: View {
                         .buttonStyle(.borderedProminent)
                         .disabled(locationService.currentLocation == nil)
                     }
-                    
+
                     if isVerifyingWeather {
                         ProgressView("正在获取天气…")
                     } else {
@@ -785,7 +984,7 @@ struct PermissionSimpleRow: View {
                     }
                 }
             }
-            
+
             Spacer()
         }
         .padding()
@@ -802,29 +1001,29 @@ struct PermissionSimpleRow: View {
 /*
 struct PermissionRowView: View {
     let permission: PermissionInfo
-    
+
     var body: some View {
         HStack {
             Image(systemName: permission.type.iconName)
                 .foregroundColor(permission.status == .authorized ? .green : .red)
                 .frame(width: 20)
-            
+
             VStack(alignment: .leading, spacing: 2) {
                 Text(permission.type.description)
                     .font(.headline)
-                
+
                 Text(permission.description)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            
+
             Spacer()
-            
+
             VStack(alignment: .trailing) {
                 Text(permission.status.rawValue)
                     .font(.caption)
                     .foregroundColor(permission.status == .authorized ? .green : .red)
-                
+
                 if permission.isRequired && !permission.status.isAuthorized {
                     Text("必需")
                         .font(.caption2)
@@ -847,24 +1046,27 @@ struct PermissionRowView: View {
 struct AdvancedPreferencesView: View {
     @EnvironmentObject private var settingsManager: SettingsManager
     @EnvironmentObject private var weatherManager: WeatherIntegrationManager
-    @EnvironmentObject private var weatherSettings: WeatherEffectsSettings
     @AppStorage("ssh.trustOnFirstUse") private var trustOnFirstUse: Bool = false
     @State private var knownHosts: [SSHKnownHostEntry] = []
     @State private var showingKnownHostsImporter = false
+    @State private var showingKnownHostsClearConfirmation = false
+    @State private var showingKnownHostsResetConfirmation = false
     @State private var knownHostsMessage: String?
-    
+    @State private var knownHostsOperationGeneration = 0
+    @State private var isKnownHostsOperationInProgress = false
+
     var body: some View {
         ScrollView {
             Form {
                 Section("性能设置") {
-                    Picker("性能模式", selection: $settingsManager.performanceMode) {
+                    Picker("动效性能模式", selection: $settingsManager.performanceMode) {
                         ForEach(SettingsManager.PerformanceMode.allCases, id: \.self) { mode in
                             Text(mode.rawValue).tag(mode)
                         }
                     }
                     .pickerStyle(.segmented)
-                    .help("调整背景动画的渲染帧率以平衡性能和功耗")
-                    
+                    .help("控制背景/天气动效的整体帧率与特效预算（系统性能档位）。远程桌面 MetalFX 渲染质量在「高级 → 渲染性能」中单独设置。")
+
                     Text("目标帧率: \(Int(settingsManager.performanceMode.targetFPS)) FPS")
                         .font(.caption)
                         .foregroundColor(.secondary)
@@ -873,20 +1075,16 @@ struct AdvancedPreferencesView: View {
                 Section("调试选项") {
                 Toggle("启用详细日志", isOn: $settingsManager.enableVerboseLogging)
                     .help("启用详细的调试日志记录")
-                
+
                 Toggle("显示调试信息", isOn: $settingsManager.showDebugInfo)
                     .help("在界面中显示调试信息")
-                
+
                 Toggle("保存网络日志", isOn: $settingsManager.saveNetworkLogs)
                     .help("将网络活动保存到日志文件")
-                
+
  // 隐私诊断开关，用于采集TLS握手中的ALPN与SNI，仅供诊断使用，默认关闭以保护隐私
                 Toggle("启用握手隐私诊断（ALPN/SNI）", isOn: $settingsManager.enableHandshakeDiagnostics)
                     .help("采集TLS握手期间的ALPN与SNI，仅用于诊断，默认关闭以保护隐私")
-
- // 实时FPS显示开关（默认关闭），开启后在仪表盘顶部显示渲染FPS
-                Toggle("显示实时FPS", isOn: $settingsManager.showRealtimeFPS)
-                    .help("在仪表盘顶部显示Metal渲染FPS（每0.5秒更新，发布频率2Hz）")
 
  // 兼容/更多设备发现开关（默认关闭）；开启后将扫描 AirPlay/SSH/RDP 等更多服务类型
                 Toggle("兼容/更多设备", isOn: $settingsManager.enableCompatibilityMode)
@@ -903,29 +1101,31 @@ struct AdvancedPreferencesView: View {
                 }
                 .help("设置日志记录的详细程度")
             }
-            
+
+            Section("连接加密") {
+                PQCModeSettingsView(settingsManager: settingsManager)
+            }
+
             Section("性能优化") {
  // 实时FPS显示开关（性能监控相关，放置于性能优化分组，位置更直观）
                 Toggle("显示实时FPS", isOn: $settingsManager.showRealtimeFPS)
                     .help("在顶部导航显示Metal渲染FPS；无数据时显示占位字符 — FPS")
                 Toggle("启用硬件加速", isOn: $settingsManager.enableHardwareAcceleration)
                     .help("使用硬件加速提升性能")
-                
+
                 Toggle("优化内存使用", isOn: $settingsManager.optimizeMemoryUsage)
                     .help("启用内存使用优化")
-                
-                Stepper("最大并发连接: \(settingsManager.maxConcurrentConnections)", 
-                       value: $settingsManager.maxConcurrentConnections, 
+
+                Stepper("最大并发连接: \(settingsManager.maxConcurrentConnections)",
+                       value: $settingsManager.maxConcurrentConnections,
                        in: 1...50)
                     .help("同时允许的最大连接数")
             }
-            
+
             Section("天气效果") {
                 Toggle("实时天气API", isOn: $settingsManager.enableRealTimeWeather)
                     .help("启用实时天气API和动态天气粒子效果（雨、雪、雾霾等）")
-                    .onChange(of: settingsManager.enableRealTimeWeather) { _, newValue in
-                    }
-                
+
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text("开关状态:")
@@ -934,7 +1134,7 @@ struct AdvancedPreferencesView: View {
                             .foregroundColor(settingsManager.enableRealTimeWeather ? .green : .red)
                     }
                     .font(.caption)
-                    
+
                     HStack {
                         Text("天气系统:")
                         Spacer()
@@ -942,7 +1142,7 @@ struct AdvancedPreferencesView: View {
                             .foregroundColor(weatherManager.isInitialized ? .green : .orange)
                     }
                     .font(.caption)
-                    
+
                     if settingsManager.enableRealTimeWeather {
                         HStack {
                             Text("当前天气:")
@@ -956,7 +1156,7 @@ struct AdvancedPreferencesView: View {
                             }
                         }
                         .font(.caption)
-                        
+
                         HStack {
                             Text("主题:")
                             Spacer()
@@ -969,13 +1169,13 @@ struct AdvancedPreferencesView: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
-                    
+
                     if let error = weatherManager.error {
                         Text("错误: \(error)")
                             .font(.caption)
                             .foregroundColor(.red)
                     }
-                    
+
                     HStack(spacing: 8) {
                         Button("刷新天气") {
                             Task {
@@ -983,9 +1183,9 @@ struct AdvancedPreferencesView: View {
                             }
                         }
                         .buttonStyle(.bordered)
-                        .disabled(!weatherSettings.isEnabled)
-                        
-                        if !weatherManager.isInitialized {
+                        .disabled(!settingsManager.enableRealTimeWeather)
+
+                        if settingsManager.enableRealTimeWeather && !weatherManager.isInitialized {
                             Button("启动天气系统") {
                                 Task {
                                     await weatherManager.start()
@@ -1010,10 +1210,17 @@ struct AdvancedPreferencesView: View {
                         reloadKnownHosts()
                     }
                     Button("清空已信任主机") {
-                        SSHKnownHostsStore.shared.removeAll()
-                        knownHostsMessage = "已清空所有主机密钥"
-                        reloadKnownHosts()
+                        showingKnownHostsClearConfirmation = true
                     }
+                    Button("安全重置信任库", role: .destructive) {
+                        showingKnownHostsResetConfirmation = true
+                    }
+                }
+                .disabled(isKnownHostsOperationInProgress)
+
+                if isKnownHostsOperationInProgress {
+                    ProgressView()
+                        .controlSize(.small)
                 }
 
                 if let message = knownHostsMessage {
@@ -1039,29 +1246,31 @@ struct AdvancedPreferencesView: View {
                                 }
                                 Spacer()
                                 Button("删除") {
-                                    SSHKnownHostsStore.shared.remove(entry: entry)
-                                    knownHostsMessage = "已删除 \(entry.host):\(entry.port)"
-                                    reloadKnownHosts()
+                                    runKnownHostsOperation {
+                                        try SSHKnownHostsStore.shared.remove(entry: entry)
+                                        return "已删除 \(entry.host):\(entry.port)"
+                                    }
                                 }
                                 .buttonStyle(.bordered)
+                                .disabled(isKnownHostsOperationInProgress)
                             }
                         }
                     }
                     .padding(.vertical, 4)
                 }
             }
-            
+
             Section("实验性功能") {
                 Toggle("启用IPv6支持", isOn: $settingsManager.enableIPv6Support)
                     .help("启用IPv6网络协议支持")
-                
+
                 Toggle("使用新发现算法", isOn: $settingsManager.useNewDiscoveryAlgorithm)
                     .help("使用改进的设备发现算法")
-                
+
                 Toggle("启用P2P直连", isOn: $settingsManager.enableP2PDirectConnection)
                     .help("启用点对点直接连接功能")
             }
-            
+
             Section("缓存和存储") {
                 HStack {
                     Text("当前缓存大小:")
@@ -1069,19 +1278,19 @@ struct AdvancedPreferencesView: View {
                     Text(settingsManager.getCacheSize())
                         .foregroundColor(.secondary)
                 }
-                
+
                 Button("清除缓存") {
                     settingsManager.clearCache()
                 }
                 .help("清除所有缓存数据")
             }
-            
+
             Section("网络设置重置") {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("重置网络设置将清除所有WiFi、网络发现和连接配置。")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    
+
                     Button("重置网络设置") {
                         settingsManager.resetNetworkSettings()
                     }
@@ -1089,7 +1298,7 @@ struct AdvancedPreferencesView: View {
                     .help("重置所有网络相关设置为默认值")
                 }
             }
-            
+
  // MARK: - 关于
             Section("关于 SkyBridge Compass Pro") {
                 VStack(alignment: .leading, spacing: 16) {
@@ -1099,12 +1308,12 @@ struct AdvancedPreferencesView: View {
                         title: "应用信息",
                         items: [
                             ("名称", "SkyBridge Compass Pro"),
-                            ("版本", "1.0.0 (Build 2025.10.31)"),
+                            ("版本", SkyBridgeAppVersionInfo.displayVersion()),
                             ("开发商", "SkyBridge Team"),
                             ("类别", "远程桌面 / 生产力工具")
                         ]
                     )
-                    
+
  // 系统要求卡片
                     AboutInfoCard(
                         icon: "cpu",
@@ -1116,7 +1325,7 @@ struct AdvancedPreferencesView: View {
                             ("存储", "500MB 可用空间")
                         ]
                     )
-                    
+
  // 技术亮点
                     AboutInfoCard(
                         icon: "sparkles",
@@ -1128,9 +1337,9 @@ struct AdvancedPreferencesView: View {
                             ("AI 加速", "Neural Engine / CoreML")
                         ]
                     )
-                    
+
                     Divider()
-                    
+
  // 链接和联系方式
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
@@ -1138,7 +1347,7 @@ struct AdvancedPreferencesView: View {
                                 .foregroundColor(.blue)
                             Link("官方网站", destination: URL(string: "https://skybridge-compass.vercel.app")!)
                         }
-                        
+
                         HStack {
                             Image(systemName: "envelope")
                                 .foregroundColor(.blue)
@@ -1146,13 +1355,13 @@ struct AdvancedPreferencesView: View {
                                 .foregroundColor(.secondary)
                                 .font(.caption)
                         }
-                        
+
                         HStack {
                             Image(systemName: "doc.text")
                                 .foregroundColor(.blue)
                             Link("隐私政策", destination: URL(string: "https://skybridge-compass.vercel.app/privacy")!)
                         }
-                        
+
                         HStack {
                             Image(systemName: "checkmark.shield")
                                 .foregroundColor(.blue)
@@ -1160,16 +1369,16 @@ struct AdvancedPreferencesView: View {
                         }
                     }
                     .font(.caption)
-                    
+
                     Divider()
-                    
+
  // 版权信息
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("© 2024-2025 SkyBridge Team. All rights reserved.")
+                        Text("© 2024-2026 SkyBridge Team. All rights reserved.")
                             .font(.caption)
                             .foregroundColor(.secondary)
-                        
-                        Text("专为 Apple Silicon 优化 • 采用 Swift 6.2 构建")
+
+                        Text("专为 Apple Silicon 优化 • 采用 Swift 6.3 构建")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
@@ -1195,21 +1404,119 @@ struct AdvancedPreferencesView: View {
                 knownHostsMessage = "导入失败：\(error.localizedDescription)"
             }
         }
+        .confirmationDialog(
+            "清空所有已信任的 SSH 主机密钥？",
+            isPresented: $showingKnownHostsClearConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("关闭 TOFU 并清空全部信任", role: .destructive) {
+                trustOnFirstUse = false
+                runKnownHostsOperation {
+                    try SSHKnownHostsStore.shared.removeAll()
+                    return "已关闭 TOFU 并清空所有主机密钥"
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("清空后所有 SSH 主机都将变为未知。为避免下一次连接自动建立未验证信任，此操作会同时关闭 TOFU。")
+        }
+        .confirmationDialog(
+            "安全重置 SSH 主机密钥信任库？",
+            isPresented: $showingKnownHostsResetConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("重置并删除全部信任", role: .destructive) {
+                trustOnFirstUse = false
+                runKnownHostsOperation {
+                    try SSHKnownHostsStore.shared.resetAuthorityAfterUserConfirmation()
+                    return "SSH 主机密钥信任库已安全重置，TOFU 已关闭"
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("此操作会删除全部已记录的 SSH 主机密钥并关闭 TOFU，仅用于从损坏或不可用的信任库中显式恢复。")
+        }
         .padding()
     }
 
     private func reloadKnownHosts() {
-        knownHosts = SSHKnownHostsStore.shared.allEntries()
+        knownHostsOperationGeneration += 1
+        let generation = knownHostsOperationGeneration
+        isKnownHostsOperationInProgress = true
+        Task {
+            let outcome = await Task.detached(priority: .userInitiated) {
+                do {
+                    return KnownHostsUIOutcome(
+                        entries: try SSHKnownHostsStore.shared.allEntries(),
+                        message: nil
+                    )
+                } catch {
+                    return KnownHostsUIOutcome(
+                        entries: [],
+                        message: "读取失败：\(error.localizedDescription)"
+                    )
+                }
+            }.value
+            guard generation == knownHostsOperationGeneration else { return }
+            knownHosts = outcome.entries ?? []
+            if let message = outcome.message {
+                knownHostsMessage = message
+            }
+            isKnownHostsOperationInProgress = false
+        }
     }
 
     private func importKnownHosts(from url: URL) {
-        do {
+        runKnownHostsOperation {
+            let accessedSecurityScope = url.startAccessingSecurityScopedResource()
+            defer {
+                if accessedSecurityScope {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            }
             let result = try SSHKnownHostsStore.shared.importKnownHostsFile(from: url)
-            knownHostsMessage = "导入完成：新增 \(result.added) 条，跳过 \(result.skipped) 条"
-            reloadKnownHosts()
-        } catch {
-            knownHostsMessage = "导入失败：\(error.localizedDescription)"
+            return "导入完成：新增 \(result.added) 条，跳过 \(result.skipped) 条"
         }
+    }
+
+    private func runKnownHostsOperation(
+        _ operation: @escaping @Sendable () throws -> String
+    ) {
+        knownHostsOperationGeneration += 1
+        let generation = knownHostsOperationGeneration
+        isKnownHostsOperationInProgress = true
+        Task {
+            let outcome = await Task.detached(priority: .userInitiated) {
+                do {
+                    let message = try operation()
+                    do {
+                        let entries = try SSHKnownHostsStore.shared.allEntries()
+                        return KnownHostsUIOutcome(entries: entries, message: message)
+                    } catch {
+                        return KnownHostsUIOutcome(
+                            entries: nil,
+                            message: "操作已提交，但重新读取信任库失败：\(error.localizedDescription)"
+                        )
+                    }
+                } catch {
+                    return KnownHostsUIOutcome(
+                        entries: nil,
+                        message: "操作失败：\(error.localizedDescription)"
+                    )
+                }
+            }.value
+            guard generation == knownHostsOperationGeneration else { return }
+            if let entries = outcome.entries {
+                knownHosts = entries
+            }
+            knownHostsMessage = outcome.message
+            isKnownHostsOperationInProgress = false
+        }
+    }
+
+    private struct KnownHostsUIOutcome: Sendable {
+        let entries: [SSHKnownHostEntry]?
+        let message: String?
     }
 }
 
@@ -1218,7 +1525,7 @@ struct AboutInfoCard: View {
     let icon: String
     let title: String
     let items: [(String, String)]
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
@@ -1230,7 +1537,7 @@ struct AboutInfoCard: View {
                 Text(title)
                     .font(.headline)
             }
-            
+
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(items, id: \.0) { item in
                     HStack {
@@ -1257,7 +1564,7 @@ struct AboutInfoCard: View {
 struct AboutPreferencesView: View {
     @State private var selectedSection: AboutSection = .app
     @State private var copiedToClipboard = false
-    
+
     enum AboutSection: String, CaseIterable {
         case app = "应用信息"
         case system = "系统要求"
@@ -1265,7 +1572,7 @@ struct AboutPreferencesView: View {
         case tech = "技术栈"
         case license = "开源许可"
         case credits = "贡献者"
-        
+
         var icon: String {
             switch self {
             case .app: return "app.badge"
@@ -1277,7 +1584,7 @@ struct AboutPreferencesView: View {
             }
         }
     }
-    
+
     var body: some View {
         HStack(spacing: 0) {
  // 左侧导航栏
@@ -1302,15 +1609,15 @@ struct AboutPreferencesView: View {
                     }
                     .buttonStyle(.plain)
                 }
-                
+
                 Spacer()
             }
             .frame(width: 150)
             .padding(8)
             .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
-            
+
             Divider()
-            
+
  // 右侧内容区
             ScrollView {
                 contentView
@@ -1319,7 +1626,7 @@ struct AboutPreferencesView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
-    
+
     @ViewBuilder
     private var contentView: some View {
         switch selectedSection {
@@ -1337,35 +1644,28 @@ struct AboutPreferencesView: View {
             creditsView
         }
     }
-    
+
  // MARK: - 应用信息
     private var appInfoView: some View {
         VStack(alignment: .center, spacing: 20) {
  // 应用图标
-            ZStack {
-                Circle()
-                    .fill(LinearGradient(
-                        colors: [.blue, .cyan],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ))
-                    .frame(width: 120, height: 120)
-                
-                Image(systemName: "globe.americas.fill")
-                    .font(.system(size: 60))
-                    .foregroundColor(.white)
-            }
+            BrandAppIconView(
+                contentMode: .fit,
+                safeInset: 0,
+                clipCornerRadius: 28
+            )
+            .frame(width: 120, height: 120)
             .shadow(color: .blue.opacity(0.3), radius: 20, y: 10)
-            
+
  // 应用名称和版本
             VStack(spacing: 8) {
                 Text("SkyBridge Compass Pro")
                     .font(.system(size: 28, weight: .bold))
-                
-                Text("版本 1.0.0 (Build 2025.10.31)")
+
+                Text("版本 \(SkyBridgeAppVersionInfo.displayVersion())")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
-                
+
                 Text("专为 Apple Silicon 优化")
                     .font(.caption)
                     .padding(.horizontal, 12)
@@ -1374,27 +1674,27 @@ struct AboutPreferencesView: View {
                     .foregroundColor(.blue)
                     .cornerRadius(12)
             }
-            
+
             Divider()
                 .padding(.vertical, 8)
-            
+
  // 应用描述
             VStack(alignment: .leading, spacing: 12) {
                 Text("革命性的远程桌面应用")
                     .font(.headline)
-                
+
                 Text("SkyBridge Compass Pro 是专为 Apple Silicon (M1-M5) 设计的下一代远程桌面解决方案，采用 2025 年最新 Apple 技术，提供硬件级画质和近距离低延迟体验。")
                     .font(.body)
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            
+
  // 核心特性
             VStack(alignment: .leading, spacing: 12) {
                 Text("核心特性")
                     .font(.headline)
-                
+
                 FeatureRow(icon: "bolt.fill", title: "Metal 4 增强渲染", color: .orange)
                 FeatureRow(icon: "brain", title: "Neural Engine 加速", color: .purple)
                 FeatureRow(icon: "video.fill", title: "ProRes 硬件编码", color: .red)
@@ -1402,21 +1702,21 @@ struct AboutPreferencesView: View {
                 FeatureRow(icon: "wand.and.stars", title: "MetalFX 超分辨率", color: .pink)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            
+
             Divider()
                 .padding(.vertical, 8)
-            
+
  // 版权信息
             VStack(spacing: 8) {
-                Text("© 2024-2025 SkyBridge Team")
+                Text("© 2024-2026 SkyBridge Team")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                
+
                 Text("保留所有权利 All Rights Reserved")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            
+
  // 操作按钮
             HStack(spacing: 12) {
                 Button("访问官网") {
@@ -1425,14 +1725,14 @@ struct AboutPreferencesView: View {
                     }
                 }
                 .buttonStyle(.bordered)
-                
+
                 Button("用户手册") {
                     if let url = URL(string: "https://skybridge-compass.vercel.app/docs") {
                         NSWorkspace.shared.open(url)
                     }
                 }
                 .buttonStyle(.bordered)
-                
+
                 Button("技术支持") {
                     if let url = URL(string: "https://skybridge-compass.vercel.app/support") {
                         NSWorkspace.shared.open(url)
@@ -1444,81 +1744,83 @@ struct AboutPreferencesView: View {
         }
         .frame(maxWidth: 400)
     }
-    
+
  // MARK: - 系统要求
     private var systemRequirementsView: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        let requirements = SystemRequirementProbe.current()
+
+        return VStack(alignment: .leading, spacing: 20) {
             Text("系统要求")
                 .font(.title2)
                 .fontWeight(.bold)
-            
+
  // 最低要求
             GroupBox {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("最低要求")
                         .font(.headline)
                         .foregroundColor(.orange)
-                    
-                    RequirementRow(icon: "cpu", title: "处理器", requirement: "Apple M1 或更新", met: true)
-                    RequirementRow(icon: "memorychip", title: "内存", requirement: "8 GB", met: true)
-                    RequirementRow(icon: "internaldrive", title: "存储空间", requirement: "500 MB 可用空间", met: true)
-                    RequirementRow(icon: "macwindow", title: "操作系统", requirement: "macOS 14.0 (Sonoma) 或更新", met: true)
-                    RequirementRow(icon: "display", title: "显示器", requirement: "1280 x 720 或更高分辨率", met: true)
+
+                    RequirementRow(icon: "cpu", title: "处理器", requirement: "Apple M1 或更新", status: requirements.minimumProcessor)
+                    RequirementRow(icon: "memorychip", title: "内存", requirement: "8 GB", status: requirements.minimumMemory)
+                    RequirementRow(icon: "internaldrive", title: "存储空间", requirement: "500 MB 可用空间", status: requirements.minimumStorage)
+                    RequirementRow(icon: "macwindow", title: "操作系统", requirement: "macOS 14.0 (Sonoma) 或更新", status: requirements.minimumOS)
+                    RequirementRow(icon: "display", title: "显示器", requirement: "1280 x 720 或更高分辨率", status: requirements.minimumDisplay)
                 }
                 .padding()
             }
-            
+
  // 推荐配置
             GroupBox {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("推荐配置")
                         .font(.headline)
                         .foregroundColor(.green)
-                    
-                    RequirementRow(icon: "cpu", title: "处理器", requirement: "Apple M3 Pro/Max/Ultra", met: true)
-                    RequirementRow(icon: "memorychip", title: "内存", requirement: "16 GB 或更多", met: false)
-                    RequirementRow(icon: "internaldrive", title: "存储空间", requirement: "2 GB 可用空间（用于缓存）", met: true)
-                    RequirementRow(icon: "macwindow", title: "操作系统", requirement: "macOS 14.0 或更高", met: true)
-                    RequirementRow(icon: "display", title: "显示器", requirement: "2560 x 1440 (Retina) 或 4K", met: false)
-                    RequirementRow(icon: "wifi", title: "网络", requirement: "Wi-Fi 6E (802.11ax)", met: false)
+
+                    RequirementRow(icon: "cpu", title: "处理器", requirement: "Apple M3 Pro/Max/Ultra", status: requirements.recommendedProcessor)
+                    RequirementRow(icon: "memorychip", title: "内存", requirement: "16 GB 或更多", status: requirements.recommendedMemory)
+                    RequirementRow(icon: "internaldrive", title: "存储空间", requirement: "2 GB 可用空间（用于缓存）", status: requirements.recommendedStorage)
+                    RequirementRow(icon: "macwindow", title: "操作系统", requirement: "macOS 14.0 或更高", status: requirements.minimumOS)
+                    RequirementRow(icon: "display", title: "显示器", requirement: "2560 x 1440 (Retina) 或 4K", status: requirements.recommendedDisplay)
+                    RequirementRow(icon: "wifi", title: "网络", requirement: "Wi-Fi 6E (802.11ax)", status: requirements.wifi6E)
                 }
                 .padding()
             }
-            
+
  // 支持的芯片
             GroupBox {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("支持的 Apple Silicon 芯片")
                         .font(.headline)
-                    
+
                     HStack(spacing: 8) {
                         ChipBadge(name: "M1", color: .blue)
                         ChipBadge(name: "M1 Pro", color: .blue)
                         ChipBadge(name: "M1 Max", color: .blue)
                         ChipBadge(name: "M1 Ultra", color: .blue)
                     }
-                    
+
                     HStack(spacing: 8) {
                         ChipBadge(name: "M2", color: .purple)
                         ChipBadge(name: "M2 Pro", color: .purple)
                         ChipBadge(name: "M2 Max", color: .purple)
                         ChipBadge(name: "M2 Ultra", color: .purple)
                     }
-                    
+
                     HStack(spacing: 8) {
                         ChipBadge(name: "M3", color: .pink)
                         ChipBadge(name: "M3 Pro", color: .pink)
                         ChipBadge(name: "M3 Max", color: .pink)
                         ChipBadge(name: "M3 Ultra", color: .pink)
                     }
-                    
+
                     HStack(spacing: 8) {
                         ChipBadge(name: "M4", color: .orange)
                         ChipBadge(name: "M4 Pro", color: .orange)
                         ChipBadge(name: "M4 Max", color: .orange)
                         ChipBadge(name: "M4 Ultra", color: .orange)
                     }
-                    
+
                     HStack(spacing: 8) {
                         ChipBadge(name: "M5", color: .green)
                         ChipBadge(name: "M5 Pro", color: .green)
@@ -1528,7 +1830,7 @@ struct AboutPreferencesView: View {
                 }
                 .padding()
             }
-            
+
  // 注意事项
             GroupBox {
                 VStack(alignment: .leading, spacing: 8) {
@@ -1538,15 +1840,15 @@ struct AboutPreferencesView: View {
                         Text("重要提示")
                             .font(.headline)
                     }
-                    
+
                     Text("• 本应用专为 Apple Silicon Mac 设计，充分利用 M 系列芯片性能")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    
+
                     Text("• ProRes 编码功能需要 M3 Pro/Max/Ultra 或更新芯片")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    
+
                     Text("• 推荐使用 macOS 15.0 或更新以获得最佳体验")
                         .font(.caption)
                         .foregroundColor(.secondary)
@@ -1555,14 +1857,14 @@ struct AboutPreferencesView: View {
             }
         }
     }
-    
+
  // MARK: - 版本历史
     private var versionHistoryView: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("版本历史")
                 .font(.title2)
                 .fontWeight(.bold)
-            
+
             VersionCard(
                 version: "1.0.0",
                 date: "2025-10-31",
@@ -1580,37 +1882,37 @@ struct AboutPreferencesView: View {
             )
         }
     }
-    
+
  // MARK: - 技术栈
     private var techStackView: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("技术栈")
                 .font(.title2)
                 .fontWeight(.bold)
-            
+
             Text("SkyBridge Compass Pro 采用最新的 Apple 技术构建")
                 .foregroundColor(.secondary)
-            
+
  // 核心框架
             GroupBox {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("核心框架")
                         .font(.headline)
-                    
-                    TechRow(icon: "swift", name: "Swift 6.2", description: "并发安全、现代化语法")
+
+                    TechRow(icon: "swift", name: "Swift 6.3", description: "并发安全、现代化语法")
                     TechRow(icon: "swiftui", name: "SwiftUI", description: "声明式 UI 框架")
                     TechRow(icon: "apple.logo", name: "Metal 4", description: "高性能图形渲染")
                     TechRow(icon: "cube.transparent", name: "MetalFX", description: "帧插值和超分辨率")
                 }
                 .padding()
             }
-            
+
  // 多媒体
             GroupBox {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("多媒体处理")
                         .font(.headline)
-                    
+
                     TechRow(icon: "video", name: "VideoToolbox", description: "硬件视频编解码")
                     TechRow(icon: "waveform", name: "AVFoundation", description: "音视频框架")
                     TechRow(icon: "camera.aperture", name: "ScreenCaptureKit", description: "高性能屏幕捕获")
@@ -1618,13 +1920,13 @@ struct AboutPreferencesView: View {
                 }
                 .padding()
             }
-            
+
  // 网络
             GroupBox {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("网络通信")
                         .font(.headline)
-                    
+
                     TechRow(icon: "network", name: "Network.framework", description: "现代网络 API")
                     TechRow(icon: "bolt.horizontal", name: "QUIC", description: "低延迟传输协议")
                     TechRow(icon: "antenna.radiowaves.left.and.right", name: "Bonjour/mDNS", description: "设备发现")
@@ -1632,13 +1934,13 @@ struct AboutPreferencesView: View {
                 }
                 .padding()
             }
-            
+
  // AI 和机器学习
             GroupBox {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("AI 和机器学习")
                         .font(.headline)
-                    
+
                     TechRow(icon: "brain", name: "CoreML", description: "机器学习模型")
                     TechRow(icon: "cpu", name: "Neural Engine", description: "ANE 加速推理")
                     TechRow(icon: "sparkles", name: "Vision", description: "图像分析")
@@ -1646,33 +1948,33 @@ struct AboutPreferencesView: View {
                 }
                 .padding()
             }
-            
+
  // 安全
             GroupBox {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("安全和加密")
                         .font(.headline)
-                    
+
                     TechRow(icon: "lock.shield", name: "CryptoKit", description: "现代加密 API")
                     TechRow(icon: "key", name: "Keychain", description: "安全凭证存储")
                     TechRow(icon: "checkmark.seal", name: "Code Signing", description: "代码签名验证")
-                    TechRow(icon: "shield.lefthalf.filled", name: "Quantum-Safe", description: "量子安全算法")
+                    TechRow(icon: "shield.lefthalf.filled", name: "Negotiated PQC", description: "协商后证明的 PQC 套件")
                 }
                 .padding()
             }
         }
     }
-    
+
  // MARK: - 开源许可
     private var licensesView: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("开源许可证")
                 .font(.title2)
                 .fontWeight(.bold)
-            
+
             Text("本应用使用以下开源组件")
                 .foregroundColor(.secondary)
-            
+
             LicenseCard(
                 name: "FreeRDP",
                 version: "3.0+",
@@ -1680,7 +1982,7 @@ struct AboutPreferencesView: View {
                 description: "远程桌面协议实现",
                 url: "https://github.com/FreeRDP/FreeRDP"
             )
-            
+
             LicenseCard(
  // 说明：迁移到 Apple 原生 Network.framework 的 WebSocket 实现，替换第三方 Starscream
  // 原因：提升性能与系统集成度，遵循 macOS 14+ 最新 API，便于严格并发控制
@@ -1690,7 +1992,7 @@ struct AboutPreferencesView: View {
                 description: "原生 WebSocket 客户端 (NWProtocolWebSocket)",
                 url: "https://developer.apple.com/documentation/network/nwprotocolwebsocket"
             )
-            
+
             LicenseCard(
                 name: "SwiftUI NavigationSplitView",
                 version: "Internal",
@@ -1698,28 +2000,28 @@ struct AboutPreferencesView: View {
                 description: "Apple 原生组件",
                 url: nil
             )
-            
+
             Divider()
-            
+
             Text("完整许可证信息")
                 .font(.headline)
-            
+
             ScrollView {
                 Text("""
                 MIT License
-                
-                Copyright (c) 2024-2025 SkyBridge Team
-                
+
+                Copyright (c) 2024-2026 SkyBridge Team
+
                 Permission is hereby granted, free of charge, to any person obtaining a copy
                 of this software and associated documentation files (the "Software"), to deal
                 in the Software without restriction, including without limitation the rights
                 to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
                 copies of the Software, and to permit persons to whom the Software is
                 furnished to do so, subject to the following conditions:
-                
+
                 The above copyright notice and this permission notice shall be included in all
                 copies or substantial portions of the Software.
-                
+
                 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
                 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
                 FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -1737,37 +2039,37 @@ struct AboutPreferencesView: View {
             .frame(height: 200)
         }
     }
-    
+
  // MARK: - 贡献者
     private var creditsView: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("贡献者")
                 .font(.title2)
                 .fontWeight(.bold)
-            
+
             Text("感谢以下开发者和贡献者")
                 .foregroundColor(.secondary)
-            
+
  // 核心团队
             GroupBox {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("核心团队")
                         .font(.headline)
-                    
+
                     ContributorRow(
                         name: "主架构师",
                         role: "Metal 4 渲染引擎、核心架构设计",
                         avatar: "person.circle.fill",
                         color: .blue
                     )
-                    
+
                     ContributorRow(
                         name: "网络工程师",
                         role: "QUIC 传输、设备发现优化",
                         avatar: "network",
                         color: .green
                     )
-                    
+
                     ContributorRow(
                         name: "UI/UX 设计师",
                         role: "界面设计、用户体验优化",
@@ -1777,13 +2079,13 @@ struct AboutPreferencesView: View {
                 }
                 .padding()
             }
-            
+
  // 特别感谢
             GroupBox {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("特别感谢")
                         .font(.headline)
-                    
+
                     Text("• Apple - 提供优秀的开发工具和框架")
                     Text("• FreeRDP 社区 - 开源 RDP 协议实现")
                     Text("• 所有测试人员和早期用户")
@@ -1793,21 +2095,21 @@ struct AboutPreferencesView: View {
                 .foregroundColor(.secondary)
                 .padding()
             }
-            
+
  // 联系方式
             GroupBox {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("联系我们")
                         .font(.headline)
-                    
+
                     HStack {
                         Image(systemName: "envelope.fill")
                             .foregroundColor(.blue)
                         Text("2403871950@qq.com")
                             .textSelection(.enabled)
-                        
+
                         Spacer()
-                        
+
                         Button {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString("2403871950@qq.com", forType: .string)
@@ -1820,13 +2122,13 @@ struct AboutPreferencesView: View {
                         }
                         .buttonStyle(.borderless)
                     }
-                    
+
                     HStack {
                         Image(systemName: "globe")
                             .foregroundColor(.blue)
                         Link("https://skybridge-compass.vercel.app", destination: URL(string: "https://skybridge-compass.vercel.app")!)
                     }
-                    
+
                     HStack {
                         Image(systemName: "message.fill")
                             .foregroundColor(.blue)
@@ -1845,7 +2147,7 @@ struct FeatureRow: View {
     let icon: String
     let title: String
     let color: Color
-    
+
     var body: some View {
         HStack(spacing: 12) {
  // 功能项采用通用符号视图，确保符号在不同系统下稳定显示
@@ -1854,10 +2156,10 @@ struct FeatureRow: View {
                               size: 16,
                               weight: .regular)
                 .frame(width: 24)
-            
+
             Text(title)
                 .font(.body)
-            
+
             Spacer()
         }
     }
@@ -1867,8 +2169,8 @@ struct RequirementRow: View {
     let icon: String
     let title: String
     let requirement: String
-    let met: Bool
-    
+    let status: SystemRequirementStatus
+
     var body: some View {
         HStack(spacing: 12) {
  // 要求项采用通用符号视图，实现全局一致的兜底策略
@@ -1877,29 +2179,158 @@ struct RequirementRow: View {
                               size: 16,
                               weight: .regular)
                 .frame(width: 24)
-            
+
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.subheadline)
                     .fontWeight(.medium)
-                
+
                 Text(requirement)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            
+
             Spacer()
-            
-            Image(systemName: met ? "checkmark.circle.fill" : "circle")
-                .foregroundColor(met ? .green : .secondary)
+
+            Image(systemName: status.systemImage)
+                .foregroundColor(status.color)
+                .accessibilityLabel(status.accessibilityText)
         }
+    }
+}
+
+enum SystemRequirementStatus {
+    case met
+    case unmet
+    case unknown
+
+    var systemImage: String {
+        switch self {
+        case .met:
+            return "checkmark.circle.fill"
+        case .unmet:
+            return "xmark.circle.fill"
+        case .unknown:
+            return "questionmark.circle.fill"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .met:
+            return .green
+        case .unmet:
+            return .red
+        case .unknown:
+            return .secondary
+        }
+    }
+
+    var accessibilityText: String {
+        switch self {
+        case .met:
+            return "满足"
+        case .unmet:
+            return "不满足"
+        case .unknown:
+            return "无法检测"
+        }
+    }
+}
+
+private struct SystemRequirementSnapshot {
+    let minimumProcessor: SystemRequirementStatus
+    let recommendedProcessor: SystemRequirementStatus
+    let minimumMemory: SystemRequirementStatus
+    let recommendedMemory: SystemRequirementStatus
+    let minimumStorage: SystemRequirementStatus
+    let recommendedStorage: SystemRequirementStatus
+    let minimumOS: SystemRequirementStatus
+    let minimumDisplay: SystemRequirementStatus
+    let recommendedDisplay: SystemRequirementStatus
+    let wifi6E: SystemRequirementStatus
+}
+
+private enum SystemRequirementProbe {
+    static func current() -> SystemRequirementSnapshot {
+        SystemRequirementSnapshot(
+            minimumProcessor: isAppleSilicon() ? .met : .unmet,
+            recommendedProcessor: appleSiliconGenerationStatus(minimumGeneration: 3),
+            minimumMemory: memoryStatus(minimumBytes: 8 * 1024 * 1024 * 1024),
+            recommendedMemory: memoryStatus(minimumBytes: 16 * 1024 * 1024 * 1024),
+            minimumStorage: storageStatus(minimumBytes: 500 * 1024 * 1024),
+            recommendedStorage: storageStatus(minimumBytes: 2 * 1024 * 1024 * 1024),
+            minimumOS: osStatus(major: 14),
+            minimumDisplay: displayStatus(minimumWidth: 1280, minimumHeight: 720),
+            recommendedDisplay: displayStatus(minimumWidth: 2560, minimumHeight: 1440),
+            wifi6E: .unknown
+        )
+    }
+
+    private static func isAppleSilicon() -> Bool {
+        #if arch(arm64)
+        return true
+        #else
+        return false
+        #endif
+    }
+
+    private static func appleSiliconGenerationStatus(minimumGeneration: Int) -> SystemRequirementStatus {
+        guard isAppleSilicon() else { return .unmet }
+        let brand = sysctlString("machdep.cpu.brand_string")
+        guard let generation = appleSiliconGeneration(from: brand) else { return .unknown }
+        return generation >= minimumGeneration ? .met : .unmet
+    }
+
+    private static func appleSiliconGeneration(from brand: String) -> Int? {
+        guard let marker = brand.range(of: "M", options: [.caseInsensitive]) else { return nil }
+        let suffix = brand[marker.upperBound...]
+        let digits = suffix.prefix { $0.isNumber }
+        return Int(digits)
+    }
+
+    private static func memoryStatus(minimumBytes: UInt64) -> SystemRequirementStatus {
+        ProcessInfo.processInfo.physicalMemory >= minimumBytes ? .met : .unmet
+    }
+
+    private static func storageStatus(minimumBytes: Int64) -> SystemRequirementStatus {
+        do {
+            let values = try FileManager.default.homeDirectoryForCurrentUser.resourceValues(
+                forKeys: [.volumeAvailableCapacityForImportantUsageKey]
+            )
+            guard let available = values.volumeAvailableCapacityForImportantUsage else { return .unknown }
+            return available >= minimumBytes ? .met : .unmet
+        } catch {
+            return .unknown
+        }
+    }
+
+    private static func osStatus(major: Int) -> SystemRequirementStatus {
+        ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= major ? .met : .unmet
+    }
+
+    private static func displayStatus(minimumWidth: CGFloat, minimumHeight: CGFloat) -> SystemRequirementStatus {
+        guard let screen = NSScreen.main else { return .unknown }
+        let scale = screen.backingScaleFactor
+        let pixelWidth = screen.frame.width * scale
+        let pixelHeight = screen.frame.height * scale
+        return pixelWidth >= minimumWidth && pixelHeight >= minimumHeight ? .met : .unmet
+    }
+
+    private static func sysctlString(_ name: String) -> String {
+        var size = 0
+        guard sysctlbyname(name, nil, &size, nil, 0) == 0, size > 0 else { return "" }
+        var buffer = [CChar](repeating: 0, count: size)
+        guard sysctlbyname(name, &buffer, &size, nil, 0) == 0 else { return "" }
+        let bytes = buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+        return String(decoding: bytes, as: UTF8.self)
     }
 }
 
 struct ChipBadge: View {
     let name: String
     let color: Color
-    
+
     var body: some View {
         Text(name)
             .font(.caption)
@@ -1917,10 +2348,10 @@ struct VersionCard: View {
     let date: String
     let type: VersionType
     let changes: [String]
-    
+
     enum VersionType {
         case major, minor, patch
-        
+
         var badge: (String, Color) {
             switch self {
             case .major: return ("重大更新", .red)
@@ -1929,7 +2360,7 @@ struct VersionCard: View {
             }
         }
     }
-    
+
     var body: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 12) {
@@ -1937,7 +2368,7 @@ struct VersionCard: View {
                     Text("v\(version)")
                         .font(.title3)
                         .fontWeight(.bold)
-                    
+
                     Text(type.badge.0)
                         .font(.caption)
                         .padding(.horizontal, 8)
@@ -1945,16 +2376,16 @@ struct VersionCard: View {
                         .background(type.badge.1.opacity(0.2))
                         .foregroundColor(type.badge.1)
                         .cornerRadius(4)
-                    
+
                     Spacer()
-                    
+
                     Text(date)
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
-                
+
                 Divider()
-                
+
                 ForEach(changes, id: \.self) { change in
                     Text(change)
                         .font(.body)
@@ -1969,7 +2400,7 @@ struct TechRow: View {
     let icon: String
     let name: String
     let description: String
-    
+
     var body: some View {
         HStack(spacing: 12) {
  // 技术项采用通用符号视图，保证图标可用性与风格统一
@@ -1983,12 +2414,12 @@ struct TechRow: View {
                 Text(name)
                     .font(.subheadline)
                     .fontWeight(.medium)
-                
+
                 Text(description)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            
+
             Spacer()
         }
     }
@@ -2000,16 +2431,16 @@ struct LicenseCard: View {
     let license: String
     let description: String
     let url: String?
-    
+
     var body: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text(name)
                         .font(.headline)
-                    
+
                     Spacer()
-                    
+
                     Text(version)
                         .font(.caption)
                         .padding(.horizontal, 6)
@@ -2017,16 +2448,16 @@ struct LicenseCard: View {
                         .background(Color.secondary.opacity(0.2))
                         .cornerRadius(4)
                 }
-                
+
                 Text(description)
                     .font(.caption)
                     .foregroundColor(.secondary)
-                
+
                 HStack {
                     Text("许可证: \(license)")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    
+
                     if let url = url {
                         Spacer()
                         Link("查看源码", destination: URL(string: url)!)
@@ -2044,7 +2475,7 @@ struct ContributorRow: View {
     let role: String
     let avatar: String
     let color: Color
-    
+
     var body: some View {
         HStack(spacing: 12) {
  // 贡献者头像采用通用符号视图，避免可用性差异导致的缺失
@@ -2055,17 +2486,17 @@ struct ContributorRow: View {
                 .frame(width: 40, height: 40)
                 .background(color.opacity(0.1))
                 .clipShape(Circle())
-            
+
             VStack(alignment: .leading, spacing: 2) {
                 Text(name)
                     .font(.subheadline)
                     .fontWeight(.medium)
-                
+
                 Text(role)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            
+
             Spacer()
         }
     }

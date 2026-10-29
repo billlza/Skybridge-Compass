@@ -1,29 +1,51 @@
+// DEDUPLICATION TARGET — not inherently macOS-only.
+//
+// macOS 侧 Bonjour 发现实现，与 iOS App 的同名 DeviceDiscoveryManager 是一份分叉。
+// 阶段 0 只让 SkyBridgeCore 能为 iOS 编译；两者合并为单一实现是阶段 3 的迁移工作，
+// 也是本次会话中「同一协议两套各自独立 bug」的结构性成因。
+// 见 Docs/background-wake-capability-ledger.md。
+#if os(macOS)
 import Foundation
 import Network
 import OSLog
 import Combine
 import CryptoKit
+import SkyBridgeProtocolCore
+#if os(iOS)
+import UIKit
+#endif
 
 /// 设备发现管理器 - 基于 Bonjour + Network.framework
 /// 继承 BaseManager，统一管理器模式和生命周期管理
 @MainActor
 public class DeviceDiscoveryManager: BaseManager {
-    
+    nonisolated private static let protocolIdentityLogRedaction = "<redacted>"
+
+    private struct ValidatedBrowseMetadata: Sendable {
+        let deviceInfo: BonjourDeviceInfo?
+        let protocolPublicKeyFingerprint: String?
+    }
+
  // MARK: - 发布的属性
-    
+
  /// 发现的设备列表
     @Published public var discoveredDevices: [DiscoveredDevice] = []
     @Published public var connectionStatus: DeviceDiscoveryConnectionStatus = .disconnected
     @Published public var isScanning: Bool = false
-    
+
  // MARK: - 私有属性
     private var browsers: [NWBrowser] = []  // 多个浏览器，扫描不同服务类型
-    private var listener: NWListener?
     private var connections: [String: NWConnection] = [:]
-    
+
+    /// Best-effort cache of Bonjour TXT info keyed by advertised deviceId.
+    /// Static so it can be accessed from `nonisolated` inbound handler via `MainActor.run`.
+    @MainActor private static var bonjourInfoByDeviceId: [String: BonjourDeviceInfo] = [:]
+
  // 服务类型瘦身 - 默认仅SkyBridge；兼容/调试模式可扩展
     private let allServiceTypes = [
-        "_skybridge._tcp",
+        BonjourInteropContract.controlServiceType,
+        BonjourInteropContract.fileTransferServiceType,
+        BonjourInteropContract.remoteControlServiceType,
         "_companion-link._tcp",
         "_airplay._tcp",
         "_rdlink._tcp",
@@ -32,7 +54,7 @@ public class DeviceDiscoveryManager: BaseManager {
     public var enableCompatibilityMode: Bool = false
     public var enableCompanionLink: Bool = false
     private func effectiveServiceTypes() -> [String] {
-        var base = ["_skybridge._tcp"]
+        var base = BonjourInteropContract.defaultDiscoveryServiceTypes
         if enableCompanionLink { base.append("_companion-link._tcp") }
         if enableCompatibilityMode {
             base.append(contentsOf: allServiceTypes.filter { !$0.hasPrefix("_skybridge") && !$0.hasPrefix("_companion-link") })
@@ -40,58 +62,66 @@ public class DeviceDiscoveryManager: BaseManager {
         return base
     }
     private let serviceDomain = "local."
-    
+
     public init() {
  // 调用父类初始化，传入管理器类别
         super.init(category: "DeviceDiscoveryManager")
     }
-    
+
  // MARK: - BaseManager 重写方法
-    
+
  /// 执行设备发现管理器的初始化逻辑
     public override func performInitialization() async {
         await super.performInitialization()
         logger.info("✅ 设备发现管理器初始化完成")
     }
-    
+
  /// 启动设备发现管理器
     public override func performStart() async throws {
         logger.info("🚀 启动设备发现服务")
         startScanning()
     }
-    
+
  /// 停止设备发现管理器
     public override func performStop() async {
         logger.info("🛑 停止设备发现服务")
         stopScanning()
     }
-    
+
  /// 清理资源
     public override func cleanup() {
         super.cleanup()
-        
+
  // 清理发现的设备
         discoveredDevices.removeAll()
         connectionStatus = .disconnected
         isScanning = false
-        
+
  // 清理网络连接
         connections.values.forEach { $0.cancel() }
         connections.removeAll()
-        
- // 停止浏览器和监听器
+
+ // 停止浏览器
         browsers.forEach { $0.cancel() }
         browsers.removeAll()
-        listener?.cancel()
-        listener = nil
+
+ // 清理 Bonjour TXT 信息缓存（完整销毁时释放）
+        Self.bonjourInfoByDeviceId.removeAll()
     }
-    
+
  // MARK: - 公共方法
-    
+
  /// 开始扫描设备 - 多服务类型扫描
     public func startScanning() {
         guard isInitialized else {
-            Task { await self.handleError(.notInitialized) }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if await self.waitUntilInitialized() {
+                    self.startScanning()
+                } else {
+                    await self.handleError(.notInitialized)
+                }
+            }
             return
         }
         guard !isScanning else {
@@ -101,65 +131,64 @@ public class DeviceDiscoveryManager: BaseManager {
         let selected = effectiveServiceTypes()
         logger.info("🔍 开始扫描设备（服务类型：\(selected)）")
         isScanning = true
-        
+
  // 为每种服务类型创建独立的浏览器
         for serviceType in selected {
-            let descriptor = NWBrowser.Descriptor.bonjour(type: serviceType, domain: serviceDomain)
+            let descriptor = NWBrowser.Descriptor.bonjourWithTXTRecord(type: serviceType, domain: serviceDomain)
             let parameters = NWParameters()
             parameters.includePeerToPeer = true  // 支持点对点（AWDL）
-            
+
             let browser = NWBrowser(for: descriptor, using: parameters)
-            
+
  // 设置状态更新处理器
             browser.stateUpdateHandler = { [weak self, serviceType] state in
                 Task { @MainActor in
                     self?.handleBrowserStateUpdate(state, for: serviceType)
                 }
             }
-            
+
  // 设置结果变化处理器
             browser.browseResultsChangedHandler = { [weak self, serviceType] results, changes in
                 Task { @MainActor in
                     self?.handleBrowseResultsChanged(results: results, changes: changes, serviceType: serviceType)
                 }
             }
-            
+
  // 启动浏览器
             browser.start(queue: .global(qos: .utility))
             browsers.append(browser)
-            
+
             logger.debugOnly("  ✅ 启动浏览器: \(serviceType)")
         }
-        
- // 同时启动监听器以便其他设备发现我们
-        startAdvertising()
+
+        // `_skybridge._tcp` is owned exclusively by P2PDiscoveryService. This
+        // legacy manager is a browser only; publishing here would replace the
+        // authenticated inbound connection handler.
     }
-    
+
  /// 停止扫描设备
     public func stopScanning() {
         logger.info("⏹️ 停止扫描设备")
         isScanning = false
-        
+
  // 取消所有浏览器
         for browser in browsers {
             browser.cancel()
         }
         browsers.removeAll()
-        
-        stopAdvertising()
-        
+
  // 扫描结束后清洗缓存，确保本机唯一性
         Task { [weak self] in
             guard let self = self else { return }
-            let selfId = await SelfIdentityProvider.shared.snapshot()
+            let selfId = await SelfIdentityProvider.shared.presentationSnapshot()
             await self.sanitizeCache(selfId)
         }
     }
-    
+
  /// 连接到指定设备
     public func connectToDevice(_ device: DiscoveredDevice) async throws {
         logger.info("尝试连接到设备: \(device.name)")
-        
+
         guard let ipv4 = device.ipv4 else {
             throw DeviceDiscoveryError.deviceNotConnected
         }
@@ -167,53 +196,83 @@ public class DeviceDiscoveryManager: BaseManager {
             logger.debugOnly("忽略本机地址，跳过连接尝试: \(ipv4)")
             throw DeviceDiscoveryError.connectionCancelled
         }
-        
-        let portNumber = device.portMap["_skybridge._tcp"] ?? device.portMap.values.first ?? 0
+
+        let portNumber = resolvedConnectablePort(for: device)
         guard portNumber > 0 else { throw DeviceDiscoveryError.scanningFailed }
         let host = NWEndpoint.Host(ipv4)
         let port = NWEndpoint.Port(integerLiteral: UInt16(portNumber))
         let endpoint = NWEndpoint.hostPort(host: host, port: port)
-        
+
  // 应用统一 TLS 策略（近距连接）
         let net = RemoteDesktopSettingsManager.shared.settings.networkSettings
-        
+
         let connection: NWConnection
-        if net.enableEncryption,
-           let tls = TLSConfigurator.options(for: net.encryptionAlgorithm) {
+        if isSkyBridgeControlDevice(device) {
+            // SkyBridge 控制通道使用应用层握手加密；传输层固定纯 TCP。
+            let params = NWParameters.tcp
+            params.includePeerToPeer = true
+            params.allowLocalEndpointReuse = true
+            connection = NWConnection(to: endpoint, using: params)
+        } else if net.enableEncryption,
+                  let tls = TLSConfigurator.options(for: net.encryptionAlgorithm) {
             let tcp = NWProtocolTCP.Options()
             let params = NWParameters(tls: tls, tcp: tcp)
             connection = NWConnection(to: endpoint, using: params)
         } else {
             connection = NWConnection(to: endpoint, using: .tcp)
         }
-        
+
         let deviceId = device.id.uuidString
         connections[deviceId] = connection
-        
+
  // 等待连接建立（内部会设置 stateUpdateHandler 并启动连接）
         try await waitForConnection(connection, deviceId: deviceId)
-        
+
         logger.info("✅ 成功连接到设备: \(device.name, privacy: .public)")
     }
-    
+
+    private func isSkyBridgeControlDevice(_ device: DiscoveredDevice) -> Bool {
+        device.services.contains("_skybridge._tcp")
+            || device.services.contains("_skybridge._udp")
+            || device.portMap["_skybridge._tcp"] != nil
+            || device.portMap["_skybridge._udp"] != nil
+    }
+
+    private func resolvedConnectablePort(for device: DiscoveredDevice) -> Int {
+        if let port = device.portMap["_skybridge._tcp"], port > 0 { return port }
+        if let port = device.portMap["_skybridge._udp"], port > 0 { return port }
+
+        for (serviceType, port) in device.portMap where port > 0 {
+            if looksLikeBonjourServiceType(serviceType) {
+                return port
+            }
+        }
+        return 0
+    }
+
+    private func looksLikeBonjourServiceType(_ raw: String) -> Bool {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.hasPrefix("_") && (value.hasSuffix("._tcp") || value.hasSuffix("._udp"))
+    }
+
  /// 断开与指定设备的连接
     public func disconnectFromDevice(_ deviceId: String) {
         logger.info("🔌 断开设备连接: \(deviceId, privacy: .public)")
-        
+
         connections[deviceId]?.cancel()
         connections.removeValue(forKey: deviceId)
-        
+
         if connections.isEmpty {
             connectionStatus = .disconnected
         }
     }
-    
+
  /// 发送数据到指定设备
     public func sendData(_ data: Data, to deviceId: String) async throws {
         guard let connection = connections[deviceId] else {
             throw DeviceDiscoveryError.deviceNotConnected
         }
-        
+
         return try await withCheckedThrowingContinuation { continuation in
             connection.send(content: data, completion: .contentProcessed { error in
                 if let error = error {
@@ -224,20 +283,20 @@ public class DeviceDiscoveryManager: BaseManager {
             })
         }
     }
-    
+
  // MARK: - 私有方法
-    
+
  // MARK: - 本机判定核心（"永久防第三方设备变本机"）
-    
+
  /// 推断设备来源（source）
     private func inferSource(from serviceType: String) -> DeviceSource {
         let lower = serviceType.lowercased()
-        
+
  // SkyBridge 自有服务
         if lower.contains("skybridge") {
             return DeviceSource.skybridgeBonjour
         }
-        
+
  // 第三方 Bonjour 服务
         if lower.contains("airplay") ||
            lower.contains("ipp") ||
@@ -247,10 +306,10 @@ public class DeviceDiscoveryManager: BaseManager {
            lower.contains("sftp") {
             return DeviceSource.thirdPartyBonjour
         }
-        
+
         return DeviceSource.unknown
     }
-    
+
  /// A. 统一写入点：唯一能调用 setIsLocalDeviceByDiscovery() 的地方
     private func applyLocalFlag(_ device: inout DiscoveredDevice, selfId: SelfIdentitySnapshot) async {
  // 前置检查：只有 SkyBridge 来源才有资格成为本机
@@ -259,7 +318,7 @@ public class DeviceDiscoveryManager: BaseManager {
             device.source == .skybridgeP2P ||
             device.source == .skybridgeUSB ||
             device.source == .skybridgeCloud
-        
+
         if !eligible {
  // 非本服务：强制清零身份字段
             device.deviceId = nil
@@ -268,53 +327,16 @@ public class DeviceDiscoveryManager: BaseManager {
             device.setIsLocalDeviceByDiscovery(false)
             return
         }
-        
+
         let local = await IdentityResolver.resolveIsLocal(device: device, selfId: selfId)
         device.setIsLocalDeviceByDiscovery(local)
     }
-    
- /// 同步版本的本机判定（内联 IdentityResolver 逻辑）
+
+ /// 同步版本复用唯一的强身份判定，避免异步/同步路径语义漂移。
     private func resolveIsLocalSync(device: DiscoveredDevice, selfId: SelfIdentitySnapshot) -> Bool {
- // 前置检查：selfId 为空不允许判定本机
-        if selfId.deviceId.isEmpty || selfId.pubKeyFP.isEmpty {
-            if let id = device.deviceId, id == selfId.deviceId, !id.isEmpty {
-                return true
-            }
-            return false
-        }
-        
- // 优先级 A：deviceId 硬匹配
-        if let deviceId = device.deviceId,
-           !deviceId.isEmpty,
-           deviceId.count >= 8,
-           !selfId.deviceId.isEmpty,
-           selfId.deviceId.count >= 8,
-           deviceId == selfId.deviceId {
-            return true
-        }
-        
- // 优先级 B：pubKeyFP 硬匹配
-        if let pubKeyFP = device.pubKeyFP,
-           !pubKeyFP.isEmpty,
-           pubKeyFP.count == 64,
-           pubKeyFP.allSatisfy({ $0.isHexDigit }),
-           !selfId.pubKeyFP.isEmpty,
-           selfId.pubKeyFP.count == 64,
-           pubKeyFP == selfId.pubKeyFP {
-            return true
-        }
-        
- // 优先级 C：MAC 地址匹配（仅 SkyBridge 来源）
-        if !device.macSet.isEmpty && !selfId.macSet.isEmpty {
-            let overlap = device.macSet.intersection(selfId.macSet)
-            if !overlap.isEmpty {
-                return true
-            }
-        }
-        
-        return false
+        IdentityResolver.resolveIsLocalSynchronously(device: device, selfId: selfId)
     }
-    
+
  /// B. 刷新后清洗：对历史缓存污染进行一次性清洗
     private func sanitizeCache(_ selfId: SelfIdentitySnapshot) async {
         for i in discoveredDevices.indices {
@@ -324,12 +346,12 @@ public class DeviceDiscoveryManager: BaseManager {
         }
         hardClampSingleLocal(selfId: selfId)
     }
-    
+
  /// C. 周期末兜底：确保全局只有一个本机（"单机硬化"）
     private func hardClampSingleLocal(selfId: SelfIdentitySnapshot) {
         var localCount = 0
         var firstLocalIndex: Int?
-        
+
         for (index, device) in discoveredDevices.enumerated() {
             if device.isLocalDevice {
                 localCount += 1
@@ -338,11 +360,11 @@ public class DeviceDiscoveryManager: BaseManager {
                 }
             }
         }
-        
+
  // 如果发现多个本机，只保留第一个强匹配的
         if localCount > 1 {
             logger.warning("⚠️ 检测到多个本机设备（\(localCount)个），执行硬化清零")
-            
+
             for i in discoveredDevices.indices {
                 if i != firstLocalIndex {
                     discoveredDevices[i].setIsLocalDeviceByDiscovery(false)
@@ -350,50 +372,7 @@ public class DeviceDiscoveryManager: BaseManager {
             }
         }
     }
-    
- /// 开始广播服务
-    private func startAdvertising() {
-        logger.info("📡 开始广播服务")
-        if let existing = listener {
-            existing.cancel()
-            listener = nil
-        }
-        
-        Task { @MainActor in
-            if await ServiceAdvertiserCenter.shared.isAdvertising("_skybridge._tcp") {
-                logger.debugOnly("📡 广播中心已在运行，忽略重复启动")
-                return
-            }
-            do {
- // 通过统一广播中心启动，避免跨管理器重复监听同一服务类型
-                let port = try await ServiceAdvertiserCenter.shared.startAdvertising(
-                    serviceName: getDeviceName(),
-                    serviceType: "_skybridge._tcp",
-                    connectionHandler: { [weak self] connection in
-                        Task { @MainActor in self?.handleNewConnection(connection) }
-                    },
-                    stateHandler: { [weak self] state in
-                        Task { @MainActor in self?.handleListenerStateUpdate(state) }
-                    }
-                )
-                if port > 0 {
-                    logger.info("📡 广播服务已启动，端口: \(port, privacy: .public)")
-                } else {
-                    logger.info("📡 广播服务已启动（系统分配端口）")
-                }
-            } catch {
-                logger.error("❌ 启动广播服务失败: \(error.localizedDescription, privacy: .public)")
-            }
-        }
-    }
-    
- /// 停止广播服务
-    private func stopAdvertising() {
-        logger.info("📡 停止广播服务")
-        listener?.cancel()
-        listener = nil
-    }
-    
+
  /// 处理浏览器状态更新
     private func handleBrowserStateUpdate(_ state: NWBrowser.State, for serviceType: String) {
         switch state {
@@ -407,7 +386,7 @@ public class DeviceDiscoveryManager: BaseManager {
             break
         }
     }
-    
+
  /// 处理浏览结果变化 - 多服务类型
     private func handleBrowseResultsChanged(
         results: Set<NWBrowser.Result>,
@@ -431,11 +410,36 @@ public class DeviceDiscoveryManager: BaseManager {
     }
  /// 异步添加发现的设备（后台解析 + 主线程回填）
     private func addDiscoveredDeviceAsync(from result: NWBrowser.Result, serviceType: String) {
-        Task.detached { [serviceType, weak self] in
+        Task(priority: .userInitiated) { [serviceType, weak self] in
             guard let self = self else { return }
-            
-            let deviceName = Self.DDM_ExtractDeviceName(result)
-            let (ipv4, ipv6, port) = Self.DDM_ExtractNetworkInfo(result)
+
+            guard let validated = Self.DDM_ValidatedBrowseMetadata(
+                result,
+                serviceType: serviceType
+            ) else {
+                self.logger.error(
+                    "❌ 拒绝无效 SkyBridge Bonjour TXT: service=\(serviceType, privacy: .public)"
+                )
+                return
+            }
+            let bonjourInfo = validated.deviceInfo
+            let deviceName = Self.DDM_ExtractDeviceName(
+                result,
+                deviceInfo: bonjourInfo
+            )
+            let (ipv4, ipv6, port) = Self.DDM_ExtractNetworkInfo(
+                result,
+                expectedServiceType: serviceType
+            )
+            let bonjourIdentifier = Self.DDM_BonjourIdentifier(from: result.endpoint)
+            let pubKeyFingerprint = validated.protocolPublicKeyFingerprint
+            let uniqueIdentifier = P2PDiscoveryBonjourPolicy.preferredUniqueIdentifier(
+                deviceId: bonjourInfo?.deviceId,
+                pubKeyFP: pubKeyFingerprint,
+                bonjourIdentifier: bonjourIdentifier,
+                ipv4: ipv4,
+                ipv6: ipv6
+            )
             var detectedDeviceType = ""
             if serviceType.contains("airplay") {
                 if !deviceName.lowercased().contains("iphone") &&
@@ -447,10 +451,10 @@ public class DeviceDiscoveryManager: BaseManager {
                     detectedDeviceType = " 🍎"
                 }
             }
-            
+
  // 推断设备来源
-            let source = await self.inferSource(from: serviceType)
-            
+            let source = self.inferSource(from: serviceType)
+
             var device = DiscoveredDevice(
                 id: UUID(),
                 name: deviceName + detectedDeviceType,
@@ -459,17 +463,32 @@ public class DeviceDiscoveryManager: BaseManager {
                 services: [serviceType],
                 portMap: [serviceType: port],
                 connectionTypes: [.wifi],
-                uniqueIdentifier: ipv4 ?? ipv6,
+                uniqueIdentifier: uniqueIdentifier,
+                routeIdentifiers: [bonjourIdentifier].compactMap { $0 },
                 signalStrength: nil,
                 source: source,
-                isLocalDevice: false  // 初始化为 false，由 applyLocalFlag 统一判定
+                isLocalDevice: false,  // 初始化为 false，由 applyLocalFlag 统一判定
+                deviceId: bonjourInfo?.deviceId,
+                pubKeyFP: pubKeyFingerprint
             )
- // 获取本机身份快照
-            let selfId = await SelfIdentityProvider.shared.snapshot()
-            
+ // 本机判定必须来自完整 authority tuple；身份不可用时不发布该发现结果。
+            let selfId: SelfIdentitySnapshot
+            do {
+                selfId = try await SelfIdentityProvider.shared
+                    .snapshotEnsuringProtocolDeviceId(allowCreate: true)
+            } catch {
+                self.logger.error(
+                    "❌ Discovery result blocked because local identity authority is unavailable: \(error.localizedDescription, privacy: .public)"
+                )
+                return
+            }
+
  // 应用本机标志（统一写入点）
             await self.applyLocalFlag(&device, selfId: selfId)
             await MainActor.run { [self] in
+                if let info = bonjourInfo, let did = info.deviceId, !did.isEmpty {
+                    Self.bonjourInfoByDeviceId[did] = info
+                }
                 if let existingIndex = self.discoveredDevices.firstIndex(where: { existing in
                     if let existingIPv4 = existing.ipv4,
                        let newIPv4 = device.ipv4,
@@ -486,15 +505,28 @@ public class DeviceDiscoveryManager: BaseManager {
                     return !cleanExistingName.isEmpty && cleanExistingName == cleanNewName
                 }) {
                     var existingDevice = self.discoveredDevices[existingIndex]
+                    var didChange = false
                     if !existingDevice.services.contains(serviceType) {
                         existingDevice.services.append(serviceType)
                         existingDevice.portMap[serviceType] = port
- // 合并后重新判定本机（异步）
+                        didChange = true
+                    } else if (existingDevice.portMap[serviceType] ?? 0) <= 0, port > 0 {
+                        existingDevice.portMap[serviceType] = port
+                        didChange = true
+                    }
+                    if didChange {
+	// 合并后重新判定本机（异步）
+                        let targetId = existingDevice.id
                         Task { [weak self] in
                             guard let self = self else { return }
                             var updated = existingDevice
                             await self.applyLocalFlag(&updated, selfId: selfId)
-                            await MainActor.run { self.discoveredDevices[existingIndex] = updated }
+                            await MainActor.run {
+                                if let idx = self.discoveredDevices.firstIndex(where: { $0.id == targetId }) {
+                                    self.discoveredDevices[idx] = updated
+                                }
+                                // else: row was removed during teardown — drop the stale merge, no-op
+                            }
                         }
                         self.logger.debug("🔄 更新设备服务: \(device.name) - 新增服务: \(serviceType)")
                     }
@@ -507,20 +539,20 @@ public class DeviceDiscoveryManager: BaseManager {
             }
         }
     }
-    
+
  /// 移除设备
     private func removeDiscoveredDevice(from result: NWBrowser.Result) {
         let rawName = extractDeviceName(from: result)
         let cleanTarget = rawName.filter { $0.isLetter || $0.isNumber }
-        
+
         discoveredDevices.removeAll { existing in
             let cleanExisting = existing.name.filter { $0.isLetter || $0.isNumber }
             return !cleanTarget.isEmpty && cleanExisting == cleanTarget
         }
-        
+
         logger.info("设备已离线: \(rawName, privacy: .public)")
     }
-    
+
  /// 更新设备信息（目前仅日志）
     private func updateDiscoveredDevice(from result: NWBrowser.Result, serviceType: String) {
         let deviceId = extractDeviceName(from: result)
@@ -529,7 +561,7 @@ public class DeviceDiscoveryManager: BaseManager {
             logger.info("🔄 更新[\(serviceType, privacy: .public)]: \(deviceId, privacy: .public) - IPv4: \(ipv4 ?? "无")")
         }
     }
-    
+
  /// 处理监听器状态更新
     private func handleListenerStateUpdate(_ state: NWListener.State) {
         switch state {
@@ -543,20 +575,23 @@ public class DeviceDiscoveryManager: BaseManager {
             break
         }
     }
-    
+
  /// 处理新连接
-    private func handleNewConnection(_ connection: NWConnection) {
+    nonisolated private static func handleNewConnection(_ connection: NWConnection) {
+        let logger = Logger(subsystem: "com.skybridge.Compass", category: "DeviceDiscoveryManager")
         logger.info("🔗 收到新连接")
-        
-        connection.stateUpdateHandler = { [weak self] state in
-            Task { @MainActor in
-                self?.handleIncomingConnectionStateUpdate(state, connection: connection)
-            }
+        RemoteControlSmokeStatusWriter.append(
+            "mac-control-inbound accepted endpoint=\(Self.stableEndpointLabel(for: connection.endpoint))"
+        )
+
+        connection.stateUpdateHandler = { [weak connection] state in
+            guard let connection else { return }
+            Self.handleIncomingConnectionStateUpdate(state, connection: connection)
         }
-        
-        connection.start(queue: .global())
+
+        connection.start(queue: .global(qos: .userInitiated))
     }
-    
+
  /// 处理连接状态更新（主动连接）
     private func handleConnectionStateUpdate(_ state: NWConnection.State, for deviceId: String) {
         switch state {
@@ -583,16 +618,20 @@ public class DeviceDiscoveryManager: BaseManager {
             break
         }
     }
-    
+
  /// 处理传入连接状态更新
-    private func handleIncomingConnectionStateUpdate(_ state: NWConnection.State, connection: NWConnection) {
+    nonisolated private static func handleIncomingConnectionStateUpdate(_ state: NWConnection.State, connection: NWConnection) {
+        let logger = Logger(subsystem: "com.skybridge.Compass", category: "DeviceDiscoveryManager")
+        let endpointLabel = Self.stableEndpointLabel(for: connection.endpoint)
         switch state {
         case .ready:
             logger.info("✅ 传入连接就绪")
+            RemoteControlSmokeStatusWriter.append("mac-control-inbound state=ready endpoint=\(endpointLabel)")
+            connection.stateUpdateHandler = nil
             // iOS 端会在此连接上发起 HandshakeDriver 握手；这里必须读取并回包，否则对端必然 timeout
             // 重要：DeviceDiscoveryManager 是 @MainActor；入站读取/握手必须放到后台，
             // 否则主线程繁忙时会“只打印启用通道”但永远读不到帧。
-            Task.detached(priority: .userInitiated) {
+            Task(priority: .userInitiated) {
                 await Self.consumeInboundHandshakeOrControlChannel(connection)
             }
         case .failed(let error):
@@ -601,15 +640,76 @@ public class DeviceDiscoveryManager: BaseManager {
             } else {
                 logger.error("❌ 传入连接失败: \(error.localizedDescription, privacy: .public)")
             }
+            RemoteControlSmokeStatusWriter.append(
+                "mac-control-inbound state=failed endpoint=\(endpointLabel) error=\(error.localizedDescription)"
+            )
+            connection.stateUpdateHandler = nil
             connection.cancel()
         case .cancelled:
+            connection.stateUpdateHandler = nil
             logger.info("⏹️ 传入连接已取消")
+            RemoteControlSmokeStatusWriter.append("mac-control-inbound state=cancelled endpoint=\(endpointLabel)")
         default:
             break
         }
     }
 
     // MARK: - Inbound control channel (HandshakeDriver compatibility)
+
+    nonisolated private static func stablePeerIdentifier(for endpoint: NWEndpoint) -> String {
+        switch endpoint {
+        case .service(let name, _, let domain, _):
+            let resolvedDomain = domain.isEmpty ? "local." : domain.lowercased()
+            return "bonjour:\(name)@\(resolvedDomain)"
+        case .hostPort(let host, _):
+            return "peer:\(normalizePeerHostToken(String(describing: host)))"
+        default:
+            return "peer:\(normalizePeerHostToken(endpoint.debugDescription))"
+        }
+    }
+
+    nonisolated private static func stableEndpointLabel(for endpoint: NWEndpoint) -> String {
+        stablePeerIdentifier(for: endpoint)
+    }
+
+    nonisolated private static func normalizePeerHostToken(_ raw: String) -> String {
+        var token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if token.hasPrefix("[") && token.hasSuffix("]") {
+            token = String(token.dropFirst().dropLast())
+        }
+        if let pct = token.firstIndex(of: "%") {
+            token = String(token[..<pct])
+        }
+
+        if token.contains(":"),
+           let dot = token.lastIndex(of: "."),
+           token[token.index(after: dot)...].allSatisfy({ $0.isNumber }) {
+            token = String(token[..<dot])
+        } else {
+            let parts = token.split(separator: ".")
+            if parts.count == 5,
+               parts.dropLast().allSatisfy({ Int($0) != nil }),
+               let port = Int(parts.last ?? ""), (0...65535).contains(port) {
+                token = parts.dropLast().map(String.init).joined(separator: ".")
+            }
+        }
+
+        return token.lowercased()
+    }
+
+    nonisolated private static func canonicalSOAIdentityString(_ raw: String) -> String {
+        var normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized.hasPrefix("id:") {
+            normalized.removeFirst(3)
+        }
+        return normalized
+    }
+
+    nonisolated private static func soaPeerIdBytes(from raw: String) -> Data {
+        let canonical = canonicalSOAIdentityString(raw)
+        return Data(SHA256.hash(data: Data(canonical.utf8)))
+    }
 
     nonisolated private static func consumeInboundHandshakeOrControlChannel(_ connection: NWConnection) async {
         let logger = Logger(subsystem: "com.skybridge.Compass", category: "InboundHandshake")
@@ -621,99 +721,960 @@ public class DeviceDiscoveryManager: BaseManager {
             logger.info("⏳ 入站连接等待结束: ready=\(becameReady, privacy: .public) state=\(String(describing: connection.state), privacy: .public)")
         }
 
+        let endpointDescription = stableEndpointLabel(for: connection.endpoint)
+        RemoteControlSmokeStatusWriter.append("mac-control-inbound consume-start endpoint=\(endpointDescription)")
+
         struct DirectHandshakeTransport: DiscoveryTransport {
-            let connection: NWConnection
+            let sendRaw: @Sendable (Data) async throws -> Void
             func send(to peer: PeerIdentifier, data: Data) async throws {
-                var framed = Data()
-                var length = UInt32(data.count).bigEndian
-                framed.append(Data(bytes: &length, count: 4))
-                framed.append(data)
-                try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-                    connection.send(content: framed, completion: .contentProcessed { err in
-                        if let err { c.resume(throwing: err) } else { c.resume() }
-                    })
-                }
+                try await sendRaw(data)
             }
         }
 
-        func receiveFixed(_ length: Int) async throws -> Data {
-            enum InboundReceiveError: Error {
-                case eof
-                case shortRead(expected: Int, actual: Int)
+        @Sendable func sendFramed(_ data: Data) async throws {
+            let framed = try P2PControlFramePolicy.frame(body: data)
+            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+                connection.send(content: framed, completion: .contentProcessed { err in
+                    if let err { c.resume(throwing: err) } else { c.resume() }
+                })
             }
-            return try await withCheckedThrowingContinuation { (c: CheckedContinuation<Data, Error>) in
-                connection.receive(minimumIncompleteLength: length, maximumLength: length) { data, _, _, err in
-                    if let err { c.resume(throwing: err) }
-                    else if let data {
-                        if data.count == length {
-                            c.resume(returning: data)
-                        } else {
-                            c.resume(throwing: InboundReceiveError.shortRead(expected: length, actual: data.count))
-                        }
-                    } else {
-                        c.resume(throwing: InboundReceiveError.eof)
-                    }
-                }
-            }
+            RemoteControlSmokeStatusWriter.append("mac-control-inbound send-frame bytes=\(data.count) endpoint=\(endpointDescription)")
         }
 
-        let transport = DirectHandshakeTransport(connection: connection)
-        let peer = PeerIdentifier(deviceId: "ios-\(connection.endpoint.debugDescription)")
+        let framedReader = FramedReader.nwConnection(connection)
 
-        // Classic-only responder：用于兼容 iOS 端 PQC fallback（当前 iOS 日志显示 pqcProviderUnavailable）
-        let classicProvider = ClassicCryptoProvider()
-        let offeredSuites = classicProvider.supportedSuites.filter { !$0.isPQC && !$0.isHybrid }
-        let signatureProvider = ProtocolSignatureProviderSelector.select(for: .ed25519)
-        let identityPrivateKey = Curve25519.Signing.PrivateKey()
-        let identityKeyHandle: SigningKeyHandle = .softwareKey(identityPrivateKey.rawRepresentation)
-        let identityPublicKey = identityPrivateKey.publicKey.rawRepresentation
-        // iOS 端要求 IdentityPublicKeys 的“新 wire 格式”（带算法字节 + 长度），不能直接发裸 32B Ed25519
-        let identityPublicKeyWire = ProtocolIdentityPublicKeys(
-            protocolPublicKey: identityPublicKey,
-            protocolAlgorithm: .ed25519,
-            sePoPPublicKey: nil
-        ).asWire().encoded
+        let transport = DirectHandshakeTransport(sendRaw: { data in
+            try await sendFramed(data)
+        })
 
-        let driver: HandshakeDriver
+        // Use a stable peer id string aligned with iOS discovery (bonjour:<name>@<domain>) when possible.
+        // This improves trust/pairing UX and ensures trust lookups don't churn across reconnects.
+        let peerDeviceId = stablePeerIdentifier(for: connection.endpoint)
+        let endpointHostOrIP: String? = {
+            if case let .hostPort(host, _) = connection.endpoint {
+                return String(describing: host)
+            }
+            return nil
+        }()
+        let classicTransferSessionId = "discovery-inbound:\(UUID().uuidString)"
+        let presencePeerId = peerDeviceId
+        let localIdentityDeviceId: String
         do {
-            driver = try HandshakeDriver(
-                transport: transport,
-                cryptoProvider: classicProvider,
-                protocolSignatureProvider: signatureProvider,
-                protocolSigningKeyHandle: identityKeyHandle,
-                sigAAlgorithm: .ed25519,
-                identityPublicKey: identityPublicKeyWire,
-                offeredSuites: offeredSuites,
-                policy: .default
-            )
+            localIdentityDeviceId = try await SelfIdentityProvider.shared
+                .protocolIdentityDeviceId(allowCreate: true)
         } catch {
-            logger.error("❌ HandshakeDriver 初始化失败: \(error.localizedDescription, privacy: .public)")
+            logger.error(
+                "❌ inbound handshake local identity unavailable: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
+            )
+            connection.cancel()
             return
         }
+        let localSOAPeerId = soaPeerIdBytes(from: localIdentityDeviceId)
+        var expectedRemoteSOAPeerId: Data?
+        var inboundPairKey: Data?
+        var establishedArbiterLease: PeerSessionArbiter.EstablishedLease?
+        var previousEstablishedArbiterLeaseBeforeRekey: PeerSessionArbiter.EstablishedLease?
+        var driver: HandshakeDriver?
+        var presenceLease: ConnectionPresenceService.PresenceLease?
+        var classicTransferSessionLease: ClassicTransferSessionRegistry.SessionLease?
+        var latestPeerCapabilities: [String] = []
+        var acceptedClassicCapabilities: ClassicTransferPeerCapabilities?
+        let peer = PeerIdentifier(deviceId: peerDeviceId)
 
-        logger.info("🤝 入站连接：启用 HandshakeDriver 兼容通道（iOS 互通） state=\(String(describing: connection.state), privacy: .public)")
+        // 关键：入站 responder 不能硬编码 Classic。
+        // 需要先读取 MessageA，再根据 offeredSuites 选择：
+        // - sigAAlgorithm: ML-DSA-65 (PQC/Hybrid) vs Ed25519 (Classic)
+        // - cryptoProvider: preferPQC vs classicOnly
+        // 并使用本机稳定的身份密钥（DeviceIdentityKeyManager），而不是每次随机生成。
+        var sessionKeys: SessionKeys?
+        var previousSessionKeysBeforeRekey: SessionKeys?
+        var previousAuthenticatedRemoteAuthorityBeforeRekey: AuthenticatedRemoteAuthority?
+        var declaredDeviceIdForVerification: String?
+        var lastPairingIdentityExchangeReplyAt: Date?
+        var authenticatedRemoteAuthority: AuthenticatedRemoteAuthority?
+        struct PairingOperationState {
+            var sessionKeys: SessionKeys?
+            var authority: AuthenticatedRemoteAuthority?
+            var isRekeying: Bool
+        }
+        let pairingOperationState = OSAllocatedUnfairLock(
+            initialState: PairingOperationState(
+                sessionKeys: nil,
+                authority: nil,
+                isRekeying: false
+            )
+        )
 
-        do {
-            while connection.state == .ready {
+        func trimmedIdentifier(_ raw: String?) -> String? {
+            guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !trimmed.isEmpty else {
+                return nil
+            }
+            return trimmed
+        }
+
+        func validatedPairingIdentityPayload(
+            _ payload: AppMessage.PairingIdentityExchangePayload
+        ) -> AppMessage.PairingIdentityExchangePayload? {
+            guard let normalized = payload.normalizedBootstrapPayload else {
+                logger.warning(
+                    "⚠️ ignoring pairingIdentityExchange with empty declaredDeviceId: peer=\(peerDeviceId, privacy: .public) endpoint=\(endpointDescription, privacy: .public)"
+                )
+                return nil
+            }
+            return normalized
+        }
+
+        func validatedPairingIdentityAuthority(
+            _ payload: AppMessage.PairingIdentityExchangePayload
+        ) async -> ValidatedPairingIdentityAuthority? {
+            await AuthenticatedProtocolIdentityBinding
+                .validatedPairingIdentityAuthorityForPersistence(
+                    payload: payload,
+                    authority: authenticatedRemoteAuthority,
+                    authenticatedRemoteSOAPeerId: expectedRemoteSOAPeerId,
+                    sessionDeviceIds: [peerDeviceId, peer.deviceId]
+                )
+        }
+
+        func normalizedClassicTransferSessionAliases(_ values: [String?]) -> [String] {
+            var normalized: [String] = []
+            var seen = Set<String>()
+
+            for value in values {
+                for candidate in PeerTrustLookup.lookupCandidates(for: value) {
+                    let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else { continue }
+                    let lowered = trimmed.lowercased()
+                    guard seen.insert(lowered).inserted else { continue }
+                    normalized.append(trimmed)
+                }
+            }
+
+            return normalized
+        }
+
+        func recordRemoteControlSecurityIdentity(
+            from payload: AppMessage.PairingIdentityExchangePayload,
+            validatedAuthority: ValidatedPairingIdentityAuthority
+        ) {
+            let identity = RemoteControlSecurityIdentity(
+                accountDisplayName: payload.accountDisplayName,
+                nebulaId: payload.nebulaId,
+                deviceId: validatedAuthority.declaredDeviceId,
+                deviceName: LocalDevicePresentation.sanitizedDisplayNameCandidate(payload.deviceName)
+            )
+            guard !identity.isEmpty else { return }
+
+            let aliases = validatedAuthority.authorizedDeviceIds + [
+                LocalDevicePresentation.sanitizedDisplayNameCandidate(payload.deviceName),
+                endpointHostOrIP,
+                endpointDescription
+            ].compactMap { $0 }
+            RemoteControlSecurityPeerIdentityStore.record(
+                identity: identity,
+                aliases: aliases
+            )
+        }
+
+        func publishClassicTransferSessionSnapshot(keys: SessionKeys) async -> Bool {
+            let declaredPeerId = trimmedIdentifier(declaredDeviceIdForVerification)
+            let fallbackPeerId = trimmedIdentifier(peerDeviceId) ?? endpointDescription
+            let primaryPeerId = declaredPeerId ?? fallbackPeerId
+            let resolvedPeerDeviceId = PeerTrustLookup.persistentDeviceId(from: declaredPeerId)
+                ?? PeerTrustLookup.persistentDeviceId(from: fallbackPeerId)
+                ?? primaryPeerId
+            let aliases = normalizedClassicTransferSessionAliases([
+                declaredDeviceIdForVerification,
+                primaryPeerId,
+                peerDeviceId,
+                endpointHostOrIP,
+                endpointDescription
+            ])
+            let snapshot = ClassicTransferSessionSnapshot(
+                sessionId: classicTransferSessionId,
+                matchDeviceId: primaryPeerId,
+                resolvedPeerDeviceId: resolvedPeerDeviceId,
+                aliases: aliases,
+                endpointHostOrIP: endpointHostOrIP,
+                capabilities: latestPeerCapabilities,
+                sessionKeys: keys,
+                capabilityEvidence: acceptedClassicCapabilities
+            )
+            if let activeLease = classicTransferSessionLease {
+                guard await ClassicTransferSessionRegistry.shared
+                    .updateAuthenticatedSessionIfOwned(activeLease, snapshot: snapshot) else {
+                    logger.error(
+                        "⛔️ inbound classic transfer owner was replaced; closing stale session"
+                    )
+                    connection.cancel()
+                    return false
+                }
+            } else {
+                classicTransferSessionLease = await ClassicTransferSessionRegistry.shared
+                    .upsertOwned(session: snapshot)
+            }
+            return true
+        }
+
+        func presenceDisplayName() -> String {
+            if presencePeerId.hasPrefix("bonjour:") {
+                let payload = presencePeerId.dropFirst("bonjour:".count)
+                return payload.split(separator: "@", maxSplits: 1).first.map(String.init) ?? endpointDescription
+            }
+            return endpointDescription
+        }
+
+        func publishPresence(keys: SessionKeys) async {
+            let suite = keys.negotiatedSuite
+            let cryptoKind = ConnectionCryptoPresentation.modeLabel(kind: nil, suite: suite.rawValue) ?? suite.rawValue
+            let publishedLease = await MainActor.run {
+                let displayName = presenceDisplayName()
+                let lease = ConnectionPresenceService.shared.markConnectedOwned(
+                    peerId: presencePeerId,
+                    displayName: displayName,
+                    address: endpointHostOrIP,
+                    cryptoKind: cryptoKind,
+                    suite: suite.rawValue
+                )
+                UnifiedOnlineDeviceManager.shared.markDeviceAsConnected(
+                    peerId: presencePeerId,
+                    displayName: displayName,
+                    cryptoKind: cryptoKind,
+                    suite: suite.rawValue,
+                    guardStatus: "守护中"
+                )
+                return lease
+            }
+            presenceLease = publishedLease
+        }
+
+        func isLikelyHandshakeControlPacket(_ data: Data) -> Bool {
+            // Finished: 固定长度 38 bytes（magic 4 + version 1 + direction 1 + mac 32）
+            if data.count == 38, (try? HandshakeFinished.decode(from: data)) != nil {
+                return true
+            }
+            if (try? HandshakeMessageA.decode(from: data)) != nil { return true }
+            if (try? HandshakeMessageB.decode(from: data)) != nil { return true }
+            return false
+        }
+
+        func encryptAppPayload(_ plaintext: Data, with keys: SessionKeys) throws -> Data {
+            let key = SymmetricKey(data: keys.sendKey)
+            let sealed = try AES.GCM.seal(plaintext, using: key)
+            guard let combined = sealed.combined else {
+                throw AuthenticatedAppPayloadCryptoError.combinedCiphertextUnavailable
+            }
+            return combined
+        }
+
+        func decryptAppPayload(_ ciphertext: Data, with keys: SessionKeys) throws -> Data {
+            let key = SymmetricKey(data: keys.receiveKey)
+            let box = try AES.GCM.SealedBox(combined: ciphertext)
+            return try AES.GCM.open(box, using: key)
+        }
+
+        func isCurrentPairingOperation(
+            keys expectedKeys: SessionKeys,
+            authority expectedAuthority: AuthenticatedRemoteAuthority
+        ) -> Bool {
+            let current = pairingOperationState.withLock { $0 }
+            guard !Task.isCancelled,
+                  !current.isRekeying,
+                  let currentKeys = current.sessionKeys,
+                  currentKeys.sessionId == expectedKeys.sessionId,
+                  currentKeys.transcriptHash == expectedKeys.transcriptHash,
+                  current.authority == expectedAuthority else {
+                return false
+            }
+            if case .ready = connection.state { return true }
+            return false
+        }
+
+        func handlePreHandshakePlaintextControl(_ frame: Data) async -> Bool {
+            guard let plaintextControl = try? AppMessage.decodeWireMessage(from: frame) else {
+                return false
+            }
+
+            guard let controlResponse = await P2PDiscoveryService.makeBootstrapControlResponse(for: plaintextControl) else {
+                return false
+            }
+            do {
+                let encoded = try JSONEncoder().encode(controlResponse.message)
+                try await sendFramed(encoded)
+            } catch {
+                logger.error("⛔️ failed to send bootstrap control response: \(error.localizedDescription, privacy: .public)")
+                connection.cancel()
+                return true
+            }
+
+            if let binding = controlResponse.protocolIdentityBindingPayload,
+               let code = controlResponse.protocolIdentityBindingCode {
+                await MainActor.run {
+                    PairingTrustApprovalService.shared.showProtocolIdentityBindingCode(
+                        peerEndpoint: endpointDescription,
+                        declaredDeviceId: binding.deviceId,
+                        displayName: binding.deviceName ?? presenceDisplayName(),
+                        model: "Mac",
+                        platform: "macOS",
+                        osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+                        verificationCode: code,
+                        protocolIdentityFingerprint: binding.protocolIdentityFingerprint
+                    )
+                }
+            }
+            if controlResponse.isFailure {
+                logger.error("\(controlResponse.statusLine, privacy: .public)")
+            } else {
+                logger.info("\(controlResponse.statusLine, privacy: .public)")
+            }
+            RemoteControlSmokeStatusWriter.append(controlResponse.statusLine)
+            connection.cancel()
+            return true
+        }
+
+        func runSession() async throws {
+        logger.info("🤝 入站连接：启用 HandshakeDriver 兼容通道（iOS 互通） endpoint=\(endpointDescription, privacy: .public) state=\(String(describing: connection.state), privacy: .public)")
+
+            while true {
+                if case .failed = connection.state { break }
+                if case .cancelled = connection.state { break }
                 logger.info("📥 等待入站帧（读取 4B length header）… state=\(String(describing: connection.state), privacy: .public)")
-                let lenData = try await receiveFixed(4)
-                let totalLen = lenData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-                guard totalLen > 0 && totalLen < 1_048_576 else { break }
-                let payload = try await receiveFixed(Int(totalLen))
+                RemoteControlSmokeStatusWriter.append("mac-control-inbound receive-wait endpoint=\(endpointDescription)")
+                let lenData = try await framedReader.receiveExactly(
+                    P2PControlFramePolicy.lengthPrefixByteCount
+                )
+                let totalLen = lenData.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
+                let bodyByteCount = try P2PControlFramePolicy.inboundBodyByteCount(
+                    from: totalLen
+                )
+                let payload = try await framedReader.receiveExactly(bodyByteCount)
                 logger.info("📥 入站帧: \(payload.count, privacy: .public) bytes")
+                RemoteControlSmokeStatusWriter.append("mac-control-inbound frame bytes=\(payload.count) endpoint=\(endpointDescription)")
                 // Phase C2: optional traffic padding (SBP2) — unwrap before handing to handshake driver.
-                let unwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx")
-                await driver.handleMessage(unwrapped, from: peer)
+                // Phase C1: optional handshake padding (SBP1) — unwrap before decoding handshake frames.
+                let frame = P2PDiscoveryService.normalizeInboundControlFrame(payload)
+                let frameKind: String
+                if (try? HandshakeMessageA.decode(from: frame)) != nil {
+                    frameKind = "messageA"
+                } else if (try? HandshakeMessageB.decode(from: frame)) != nil {
+                    frameKind = "messageB"
+                } else if (try? HandshakeFinished.decode(from: frame)) != nil {
+                    frameKind = "finished"
+                } else {
+                    frameKind = "app-or-unknown"
+                }
+                RemoteControlSmokeStatusWriter.append(
+                    "mac-control-inbound normalized-frame bytes=\(frame.count) kind=\(frameKind) endpoint=\(endpointDescription)"
+                )
+
+                if await handlePreHandshakePlaintextControl(frame) {
+                    return
+                }
+
+                if let messageA = try? HandshakeMessageA.decode(from: frame),
+                   sessionKeys != nil,
+                   previousSessionKeysBeforeRekey == nil {
+                    let fromSuite = sessionKeys?.negotiatedSuite.rawValue ?? "?"
+                    let toSuite = messageA.supportedSuites.first?.rawValue ?? "?"
+                    if let activeLease = establishedArbiterLease {
+                        logger.info("🧩 inbound rekey: releasing SOA established guard peer=\(peer.deviceId, privacy: .public)")
+                        guard await PeerSessionArbiter.shared.clearEstablished(activeLease) else {
+                            logger.error(
+                                "⛔️ inbound rekey could not release exact SOA lease; closing session peer=\(peer.deviceId, privacy: .public)"
+                            )
+                            connection.cancel()
+                            return
+                        }
+                        previousEstablishedArbiterLeaseBeforeRekey = activeLease
+                        establishedArbiterLease = nil
+                    }
+                    logger.info(
+                        "🔁 入站 rekey：\(fromSuite, privacy: .public) -> \(toSuite, privacy: .public) peer=\(peer.deviceId, privacy: .public)"
+                    )
+                    let fromKind = sessionKeys.map {
+                        ConnectionCryptoPresentation.modeLabel(kind: nil, suite: $0.negotiatedSuite.rawValue)
+                            ?? $0.negotiatedSuite.rawValue
+                    } ?? fromSuite
+                    let toKind = messageA.supportedSuites.first.flatMap {
+                        ConnectionCryptoPresentation.modeLabel(kind: nil, suite: $0.rawValue)
+                    } ?? toSuite
+                    await MainActor.run {
+                        ConnectionPresenceService.shared.markRekeying(.init(
+                            peerId: presencePeerId,
+                            fromKind: fromKind,
+                            fromSuite: fromSuite,
+                            toKind: toKind,
+                            toSuite: toSuite
+                        ))
+                    }
+                    previousSessionKeysBeforeRekey = sessionKeys
+                    previousAuthenticatedRemoteAuthorityBeforeRekey = authenticatedRemoteAuthority
+                    pairingOperationState.withLock { $0.isRekeying = true }
+                    authenticatedRemoteAuthority = nil
+                    driver = nil
+                    sessionKeys = nil
+                    if let activeClassicTransferSessionLease = classicTransferSessionLease {
+                        _ = await ClassicTransferSessionRegistry.shared.remove(
+                            ifOwned: activeClassicTransferSessionLease
+                        )
+                        classicTransferSessionLease = nil
+                    }
+                }
+
+                // 如果已建立会话密钥且不是握手控制包，则作为业务消息处理
+                if let keys = sessionKeys, !isLikelyHandshakeControlPacket(frame) {
+                    do {
+                        let plaintext = try decryptAppPayload(frame, with: keys)
+                        let msg = try AppMessage.decodeWireMessage(from: plaintext)
+                        switch msg {
+                            case .kemRefreshRequest, .signedKEMRefresh, .kemRefreshFailure,
+                                 .protocolIdentityBindingRequest, .signedProtocolIdentityBinding,
+                                 .protocolIdentityBindingConfirm, .signedProtocolIdentityBindingFinalAck:
+                                break
+                            case .pairingIdentityExchange(let payload):
+                                guard let payload = validatedPairingIdentityPayload(payload) else {
+                                    connection.cancel()
+                                    return
+                                }
+                                guard let validatedAuthority = await validatedPairingIdentityAuthority(payload) else {
+                                    logger.error(
+                                        "⛔️ inbound pairingIdentityExchange rejected before persistence: peer=\(Self.protocolIdentityLogRedaction, privacy: .public) declared=\(Self.protocolIdentityLogRedaction, privacy: .public) reason=identity_authority_unbound"
+                                    )
+                                    connection.cancel()
+                                    return
+                                }
+                                guard let pairingAuthorityLease = authenticatedRemoteAuthority else {
+                                    logger.error("⛔️ pairing identity exchange lost authenticated authority owner")
+                                    connection.cancel()
+                                    return
+                                }
+                                let pairingReservation: PairingIdentityExchangeCommitCoordinator.Reservation
+                                do {
+                                    pairingReservation = try await PairingIdentityExchangeCommitCoordinator
+                                        .reserve(deviceIds: validatedAuthority.authorizedDeviceIds)
+                                } catch {
+                                    logger.error(
+                                        "⛔️ pairing commit admission unavailable: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
+                                    )
+                                    connection.cancel()
+                                    return
+                                }
+                                let transportIsCurrent: @MainActor @Sendable () -> Bool = {
+                                    isCurrentPairingOperation(
+                                        keys: keys,
+                                        authority: pairingAuthorityLease
+                                    )
+                                }
+                                guard await transportIsCurrent() else {
+                                    _ = await PairingIdentityExchangeCommitCoordinator
+                                        .rollback(pairingReservation)
+                                    return
+                                }
+                                // Pairing / trust UI prompt: Always allow / Allow once / Reject.
+                                // This gates the bootstrap KEM identity exchange used for strict-PQC onboarding.
+                                declaredDeviceIdForVerification = validatedAuthority.declaredDeviceId
+                                latestPeerCapabilities = payload.capabilities ?? []
+                                let endpoint = endpointDescription
+                                let info = await MainActor.run {
+                                    Self.bonjourInfoByDeviceId[validatedAuthority.declaredDeviceId]
+                                }
+                                let displayName = info?.displayName ?? info?.hostname ?? endpoint
+                                let declaredDiagnosticLabel = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(
+                                    validatedAuthority.declaredDeviceId
+                                )
+
+                                await MainActor.run {
+                                    PairingTrustApprovalService.shared.updateVerificationCode(
+                                        declaredDeviceId: validatedAuthority.declaredDeviceId,
+                                        sessionKeys: keys
+                                    )
+                                }
+
+                                let policyBindingKey = PairingTrustApprovalService.policyBindingKey(
+                                    declaredDeviceId: validatedAuthority.declaredDeviceId,
+                                    algorithmRawValue: validatedAuthority.protocolSigningAlgorithm.rawValue,
+                                    protocolPublicKeyFingerprint: validatedAuthority.protocolPublicKeyFingerprint
+                                )
+
+                                let request = PairingTrustApprovalService.Request(
+                                    peerEndpoint: endpoint,
+                                    declaredDeviceId: validatedAuthority.declaredDeviceId,
+                                    policyBindingKey: policyBindingKey,
+                                    displayName: displayName,
+                                    model: info?.model ?? info?.type,
+                                    platform: info?.platform,
+                                    osVersion: info?.osVersion ?? info?.version,
+                                    kemKeyCount: payload.kemPublicKeys.count
+                                )
+
+                                let decision = await PairingTrustApprovalService.shared.decide(for: request)
+                                guard decision != PairingTrustApprovalService.Decision.reject else {
+                                    _ = await PairingIdentityExchangeCommitCoordinator
+                                        .rollback(pairingReservation)
+                                    logger.info("🛑 Pairing/trust request rejected (no KEM reply): deviceId=\(declaredDiagnosticLabel, privacy: .public)")
+                                    break
+                                }
+
+                                let commitReceipt: PairingIdentityExchangeCommitCoordinator.CommitReceipt
+                                do {
+                                    let result = try await PairingIdentityExchangeCommitCoordinator
+                                        .commitAuthorityAndKEM(
+                                        reservation: pairingReservation,
+                                        payload: payload,
+                                        authority: pairingAuthorityLease,
+                                        displayName: displayName,
+                                        platform: payload.platform ?? info?.platform,
+                                        osVersion: payload.osVersion ?? info?.osVersion ?? info?.version,
+                                        isCurrent: transportIsCurrent
+                                    )
+                                    guard case .committed(let receipt) = result else { return }
+                                    commitReceipt = receipt
+                                } catch {
+                                    logger.error(
+                                        "⛔️ inbound pairing authority/KEM commit failed closed: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
+                                    )
+                                    connection.cancel()
+                                    return
+                                }
+                                let shouldReturnFromPairingHandler = try await
+                                    PairingIdentityExchangeCommitCoordinator.withCommittedReceipt(
+                                        commitReceipt
+                                    ) {
+                                recordRemoteControlSecurityIdentity(
+                                    from: payload,
+                                    validatedAuthority: validatedAuthority
+                                )
+                                logger.info(
+                                    "🔑 已提交对端 authority-bound KEM：declared=\(declaredDiagnosticLabel, privacy: .public) peer=\(Self.protocolIdentityLogRedaction, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"
+                                )
+                                guard await PairingIdentityExchangeCommitCoordinator.isCurrent(
+                                    commitReceipt, transportIsCurrent: transportIsCurrent
+                                ) else { return true }
+                                acceptedClassicCapabilities = try ClassicTransferPeerCapabilities(
+                                    acceptedCapabilities: payload.capabilities,
+                                    sessionID: keys.sessionId, transcriptHash: keys.transcriptHash
+                                )
+                                guard await publishClassicTransferSessionSnapshot(keys: keys) else {
+                                    return true
+                                }
+                                guard await PairingIdentityExchangeCommitCoordinator.isCurrent(
+                                    commitReceipt,
+                                    transportIsCurrent: transportIsCurrent
+                                ) else {
+                                    return true
+                                }
+
+                                let now = Date()
+                                guard P2PDiscoveryService.shouldSendPairingIdentityExchangeReply(
+                                    lastSentAt: lastPairingIdentityExchangeReplyAt,
+                                    now: now
+                                ) else {
+                                    logger.debug("ℹ️ pairingIdentityExchange reply rate-limited during bootstrap")
+                                    return false
+                                }
+
+                                // Reply with our KEM identity public keys (bootstrap for iOS initiator).
+                                let provider = CryptoProviderFactory.make(policy: .preferPQC)
+                                let km = DeviceIdentityKeyManager.shared
+                                let kemKeys: [KEMPublicKeyInfo]
+                                do {
+                                    kemKeys = KEMPublicKeyInfo.normalizedValidKeys(
+                                        try await km.pairingIdentityKEMPublicKeys(using: provider)
+                                    )
+                                } catch {
+                                    logger.warning("⚠️ 本机 KEM 公钥准备失败（bootstrap reply）：\(error.localizedDescription, privacy: .public)")
+                                    kemKeys = []
+                                }
+                                guard !kemKeys.isEmpty else {
+                                    logger.warning("⚠️ 跳过 pairingIdentityExchange reply：本机无有效 KEM 公钥")
+                                    return false
+                                }
+                                let localIdRaw = localIdentityDeviceId
+                                let localId = localIdRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+                                guard !localId.isEmpty else {
+                                    logger.warning("⚠️ 跳过 pairingIdentityExchange reply：本机 deviceId 为空")
+                                    return false
+                                }
+                                let localPresentation = LocalDevicePresentation.current()
+                                let endpoints = ServiceEndpointRegistry.shared.snapshot()
+                                let localIdentity = RemoteControlSecurityNoticeCenter.cachedLocalIdentitySnapshot()
+                                let protocolIdentityPublicKeys = try await LocalProtocolIdentityAdvertisement.load()
+                                let reply = AppMessage.pairingIdentityExchange(.init(
+                                    deviceId: localId,
+                                    kemPublicKeys: kemKeys,
+                                    protocolIdentityPublicKeys: protocolIdentityPublicKeys,
+                                    deviceName: localPresentation.deviceName,
+                                    modelName: localPresentation.modelName,
+                                    platform: localPresentation.platformName,
+                                    osVersion: localPresentation.osVersion,
+                                    chip: nil,
+                                    accountDisplayName: localIdentity?.accountDisplayName,
+                                    nebulaId: localIdentity?.nebulaId,
+                                    capabilities: ["clipboard_sync", "file_transfer", "remote_desktop", "remote_control"],
+                                    fileTransferPort: endpoints.fileTransferPort,
+                                    remoteControlPort: endpoints.remoteControlPort
+                                ))
+                                let outPlain = try JSONEncoder().encode(reply)
+                                let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                let outPadded = try TrafficPadding.wrapForP2PControlFrame(
+                                    outCipher,
+                                    label: "tx"
+                                )
+                                try await sendFramed(outPadded)
+                                guard await PairingIdentityExchangeCommitCoordinator.isCurrent(
+                                    commitReceipt,
+                                    transportIsCurrent: transportIsCurrent
+                                ) else {
+                                    return true
+                                }
+                                lastPairingIdentityExchangeReplyAt = now
+                                logger.info("🔑 已回传本机 KEM 公钥：count=\(kemKeys.count, privacy: .public) decision=\(decision.rawValue, privacy: .public)")
+                                return false
+                            }
+                            if shouldReturnFromPairingHandler {
+                                return
+                            }
+                            case .heartbeat(let payload):
+                                guard let activeLease = classicTransferSessionLease,
+                                      await ClassicTransferSessionRegistry.shared.refreshIfOwned(
+                                        activeLease,
+                                        capabilities: payload.capabilities,
+                                        fileTransferPort: payload.fileTransferPort,
+                                        remoteControlPort: payload.remoteControlPort
+                                      ) else {
+                                    logger.error(
+                                        "⛔️ inbound classic transfer heartbeat lost exact owner; closing stale session"
+                                    )
+                                    connection.cancel()
+                                    return
+                                }
+                            case .ping(let payload):
+                                // RTT probe: respond as fast as possible with an echoed pong.
+                                let reply = AppMessage.pong(.init(id: payload.id))
+                                let outPlain = try JSONEncoder().encode(reply)
+                                let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                let outPadded = try TrafficPadding.wrapForP2PControlFrame(
+                                    outCipher,
+                                    label: "tx"
+                                )
+                                try await sendFramed(outPadded)
+                            case .pong:
+                                break
+                            default:
+                                break
+                        }
+                    } catch {
+                        logger.error(
+                            "⛔️ authenticated app frame failed validation; closing session: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
+                        )
+                        connection.cancel()
+                        return
+                    }
+                    continue
+                }
+
+                // 延迟初始化：必须先看到 MessageA 才知道 offeredSuites 的分组，从而选择 sigAAlgorithm / provider
+                if driver == nil {
+                    if let messageA = try? HandshakeMessageA.decode(from: frame) {
+                        RemoteControlSmokeStatusWriter.append(
+                            "mac-control-inbound handshake-messageA suites=\(messageA.supportedSuites.map { $0.rawValue }.joined(separator: ",")) endpoint=\(endpointDescription)"
+                        )
+                        let soaBinding = InboundHandshakeAdapter.bindSOAState(
+                            from: messageA,
+                            localPeerId: localSOAPeerId
+                        )
+                        expectedRemoteSOAPeerId = soaBinding.expectedRemotePeerId
+                        inboundPairKey = soaBinding.pairKey
+                        if soaBinding.usedAuthenticatedInitiator {
+                            logger.info("🧩 inboundSOA: binding to MessageA initiatorPeerId (endpointId=\(peer.deviceId, privacy: .public))")
+                        }
+                        let inboundProtocolIdentity: InboundProtocolIdentitySelection
+                        do {
+                            inboundProtocolIdentity = try await InboundProtocolIdentitySelectionPolicy.resolve(
+                                messageA: messageA,
+                                candidateDeviceIds: [peer.deviceId, endpointDescription]
+                            )
+                        } catch {
+                            logger.error(
+                                "❌ 入站协议身份选择失败: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public). peer=\(peer.deviceId, privacy: .public)"
+                            )
+                            return
+                        }
+                        let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
+                        let requestedPolicy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
+                        // This pre-selection gate only evaluates the peer offer shape.
+                        // Local PQC capability is checked after choosing the responder provider.
+                        if let rejection = StrictPQCAdmissionGate.inboundRejection(
+                            policy: requestedPolicy,
+                            peerSupportedSuites: messageA.supportedSuites,
+                            localPQCSuitesAvailable: true
+                        ), rejection == .peerOfferedClassicOnly {
+                            logger.error(
+                                "❌ \(rejection.diagnosticMessage, privacy: .public). peer=\(peer.deviceId, privacy: .public)"
+                            )
+                            return
+                        }
+
+                        let effectivePolicy = requestedPolicy
+
+                        // Choose provider first, then derive sigA/offeredSuites from local capability.
+                        var selection: CryptoProviderFactory.SelectionPolicy = .classicOnly
+                        var cryptoProvider: any CryptoProvider = CryptoProviderFactory.make(policy: .classicOnly)
+                        var sigAAlgorithm: ProtocolSigningAlgorithm = .ed25519
+                        var offeredSuites: [CryptoSuite] = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+
+                        if inboundProtocolIdentity.algorithm != .ed25519 {
+                            selection = (effectivePolicy.requirePQC ? .requirePQC : .preferPQC)
+                            cryptoProvider = CryptoProviderFactory.makeInboundPQCResponderProvider(
+                                policy: selection,
+                                peerSupportedSuites: messageA.supportedSuites
+                            )
+                            let localPQCSuites = CryptoProviderFactory.handshakeOfferedPQCSuites(using: cryptoProvider)
+
+                            if let rejection = StrictPQCAdmissionGate.inboundRejection(
+                                policy: effectivePolicy,
+                                peerSupportedSuites: messageA.supportedSuites,
+                                localPQCSuitesAvailable: !localPQCSuites.isEmpty
+                            ) {
+                                logger.error(
+                                    "❌ \(rejection.diagnosticMessage, privacy: .public). peer=\(peer.deviceId, privacy: .public)"
+                                )
+                                return
+                            }
+
+                            let compatibleSuites = InboundProtocolIdentitySelectionPolicy
+                                .compatibleResponderPQCSuites(
+                                    localPQCSuites,
+                                    algorithm: inboundProtocolIdentity.algorithm
+                                )
+                            guard !compatibleSuites.isEmpty else {
+                                logger.error(
+                                    "❌ \(InboundProtocolIdentitySelectionError.noCompatibleResponderSuite(inboundProtocolIdentity.algorithm).localizedDescription, privacy: .public). peer=\(peer.deviceId, privacy: .public)"
+                                )
+                                return
+                            }
+                            sigAAlgorithm = inboundProtocolIdentity.algorithm
+                            offeredSuites = compatibleSuites
+                        } else {
+                            selection = .classicOnly
+                            cryptoProvider = CryptoProviderFactory.make(policy: selection)
+                            sigAAlgorithm = .ed25519
+                            offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                        }
+
+                        let identityProvider = DeviceIdentityHandshakeProvider(
+                            sigAAlgorithm: sigAAlgorithm,
+                            protocolSigningKeyProtection: inboundProtocolIdentity.protection,
+                            includeSecureEnclavePoP: effectivePolicy.requireSecureEnclavePoP
+                        )
+
+                        do {
+                            let trustProvider: (any HandshakeTrustProvider)?
+                            let decodedMessageAIdentity = try? messageA.decodedIdentityPublicKeys()
+                            let messageAFingerprint = try? decodedMessageAIdentity?
+                                .authoritativeProtocolFingerprint()
+                                .lowercased()
+                            if let messageAFingerprint,
+                               await PeerProtocolIdentityBootstrapStore.shared.containsTrustedFingerprint(messageAFingerprint),
+                               let bootstrapProvider = BootstrapProtocolIdentityTrustProvider(
+                                    protocolIdentityFingerprint: messageAFingerprint,
+                                    protocolSigningAlgorithm: decodedMessageAIdentity.flatMap {
+                                        ProtocolSigningAlgorithm(from: $0.protocolAlgorithm)
+                                    },
+                                    protocolPublicKey: decodedMessageAIdentity?.protocolPublicKey
+                               ) {
+                                trustProvider = bootstrapProvider
+                                RemoteControlSmokeStatusWriter.append(
+                                    "mac-control-inbound handshake-bootstrap-pin matched fingerprint=\(messageAFingerprint) endpoint=\(endpointDescription)"
+                                )
+                            } else {
+                                trustProvider = nil
+                                RemoteControlSmokeStatusWriter.append(
+                                    "mac-control-inbound handshake-bootstrap-pin missing endpoint=\(endpointDescription)"
+                                )
+                            }
+                            let cryptoPolicy = HandshakeCryptoPolicyResolver.policy(for: offeredSuites)
+                            driver = try HandshakeDriver(
+                                transport: transport,
+                                cryptoProvider: cryptoProvider,
+                                protocolSignatureProvider: ProtocolSignatureProviderSelector.select(for: sigAAlgorithm),
+                                identityProvider: identityProvider,
+                                sigAAlgorithm: sigAAlgorithm,
+                                offeredSuites: offeredSuites,
+                                policy: effectivePolicy,
+                                cryptoPolicy: cryptoPolicy,
+                                trustProvider: trustProvider,
+                                localSOAPeerId: localSOAPeerId,
+                                expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
+                            )
+                            logger.info("🤝 入站 HandshakeDriver 初始化完成: sigA=\(sigAAlgorithm.rawValue, privacy: .public) provider=\(String(describing: type(of: cryptoProvider)), privacy: .public)")
+                            RemoteControlSmokeStatusWriter.append(
+                                "mac-control-inbound handshake-driver initialized sigA=\(sigAAlgorithm.rawValue) suites=\(offeredSuites.map { $0.rawValue }.joined(separator: ",")) endpoint=\(endpointDescription)"
+                            )
+                        } catch {
+                            logger.error("❌ 入站 HandshakeDriver 初始化失败: \(error.localizedDescription, privacy: .public)")
+                            RemoteControlSmokeStatusWriter.append(
+                                "mac-control-inbound handshake-driver failed endpoint=\(endpointDescription) error=\(error.localizedDescription)"
+                            )
+                            return
+                        }
+                    } else {
+                        // 如果不是 MessageA（例如 probe/噪声），直接丢给一个最小 classic driver 会引入误判。
+                        // 这里选择忽略，等待下一帧 MessageA。
+                        logger.debug("ℹ️ 入站首帧不是 MessageA（忽略，等待下一帧） size=\(frame.count, privacy: .public)")
+                        RemoteControlSmokeStatusWriter.append(
+                            "mac-control-inbound handshake-skip non-messageA bytes=\(frame.count) endpoint=\(endpointDescription)"
+                        )
+                        continue
+                    }
+                }
+
+                guard let driver else { continue }
+                RemoteControlSmokeStatusWriter.append("mac-control-inbound handshake-handle begin endpoint=\(endpointDescription)")
+                await driver.handleMessage(frame, from: peer)
                 let st = await driver.getCurrentState()
                 logger.info("🤝 HandshakeDriver state: \(String(describing: st), privacy: .public)")
+                RemoteControlSmokeStatusWriter.append("mac-control-inbound handshake-state \(String(describing: st)) endpoint=\(endpointDescription)")
+
+                switch st {
+                case .waitingFinished(_, let keys, _):
+                    if let declaredDeviceIdForVerification {
+                        await MainActor.run {
+                            PairingTrustApprovalService.shared.updateVerificationCode(
+                                declaredDeviceId: declaredDeviceIdForVerification,
+                                sessionKeys: keys
+                            )
+                        }
+                    }
+                case .established(let keys):
+                    let establishedAuthority = await driver.getAuthenticatedRemoteAuthority()
+                    authenticatedRemoteAuthority = establishedAuthority
+                    let newArbiterLease = await driver.getEstablishedArbiterLease()
+                    if let inboundPairKey {
+                        guard let newArbiterLease,
+                              newArbiterLease.pairKey == inboundPairKey,
+                              newArbiterLease.sessionId == keys.sessionId else {
+                            logger.error(
+                                "⛔️ inbound established without matching SOA lease; closing session peer=\(peer.deviceId, privacy: .public)"
+                            )
+                            connection.cancel()
+                            return
+                        }
+                    }
+                    establishedArbiterLease = newArbiterLease
+                    previousEstablishedArbiterLeaseBeforeRekey = nil
+                    sessionKeys = keys
+                    pairingOperationState.withLock {
+                        $0.sessionKeys = keys
+                        $0.authority = establishedAuthority
+                        $0.isRekeying = false
+                    }
+                    previousSessionKeysBeforeRekey = nil
+                    previousAuthenticatedRemoteAuthorityBeforeRekey = nil
+                    guard await publishClassicTransferSessionSnapshot(keys: keys) else {
+                        return
+                    }
+                    await publishPresence(keys: keys)
+                    if let declaredDeviceIdForVerification {
+                        await MainActor.run {
+                            PairingTrustApprovalService.shared.updateVerificationCode(
+                                declaredDeviceId: declaredDeviceIdForVerification,
+                                sessionKeys: keys
+                            )
+                        }
+                    }
+                case .failed(let reason):
+                    if let previousKeys = previousSessionKeysBeforeRekey {
+                        if let previousLease = previousEstablishedArbiterLeaseBeforeRekey {
+                            guard await PeerSessionArbiter.shared.restoreEstablishedIfVacant(
+                                previousLease
+                            ) else {
+                                logger.error(
+                                    "⛔️ inbound rekey failed and exact SOA lease could not be restored; closing session peer=\(peer.deviceId, privacy: .public)"
+                                )
+                                connection.cancel()
+                                return
+                            }
+                            establishedArbiterLease = previousLease
+                            previousEstablishedArbiterLeaseBeforeRekey = nil
+                        } else if inboundPairKey != nil {
+                            logger.error(
+                                "⛔️ inbound rekey failed without an exact prior SOA lease; closing session peer=\(peer.deviceId, privacy: .public)"
+                            )
+                            connection.cancel()
+                            return
+                        }
+                        sessionKeys = previousKeys
+                        let restoredAuthority = previousAuthenticatedRemoteAuthorityBeforeRekey
+                        authenticatedRemoteAuthority = restoredAuthority
+                        pairingOperationState.withLock {
+                            $0.sessionKeys = previousKeys
+                            $0.authority = restoredAuthority
+                            $0.isRekeying = false
+                        }
+                        previousSessionKeysBeforeRekey = nil
+                        previousAuthenticatedRemoteAuthorityBeforeRekey = nil
+                        guard await publishClassicTransferSessionSnapshot(keys: previousKeys) else {
+                            return
+                        }
+                        await publishPresence(keys: previousKeys)
+                        logger.warning(
+                            "⚠️ inbound rekey failed; restored previous session. peer=\(peer.deviceId, privacy: .public) reason=\(String(describing: reason), privacy: .public) suite=\(previousKeys.negotiatedSuite.rawValue, privacy: .public)"
+                        )
+                    }
+                default:
+                    break
+                }
             }
+        }
+
+        do {
+            try await runSession()
         } catch {
             // 连接被对端关闭 / 读取不足在真实网络环境下很常见（例如对端取消、并发探测连接等）。
             // 这里降级为 debug，避免污染正常日志与论文采集数据。
-            if let ns = error as NSError?, ns.domain == "SkyBridgeInbound", ns.code == -1 {
+            if let framedError = error as? FramedReaderError, framedError == .peerClosed {
+                logger.debug("ℹ️ 入站控制通道结束（peer closed）")
+                RemoteControlSmokeStatusWriter.append("mac-control-inbound consume-ended endpoint=\(endpointDescription) reason=peer-closed")
+            } else if let ns = error as NSError?, ns.domain == "SkyBridgeInbound", ns.code == -1 {
                 logger.debug("ℹ️ 入站控制通道结束（EOF/short read）: \(ns.localizedDescription, privacy: .public)")
+                RemoteControlSmokeStatusWriter.append("mac-control-inbound consume-ended endpoint=\(endpointDescription) reason=short-read")
             } else {
                 logger.debug("ℹ️ 入站控制通道结束: \(error.localizedDescription, privacy: .public)")
+                RemoteControlSmokeStatusWriter.append("mac-control-inbound consume-ended endpoint=\(endpointDescription) reason=\(error.localizedDescription)")
+            }
+        }
+        if let driver {
+            switch await driver.getCurrentState() {
+            case .idle, .established, .failed:
+                break
+            default:
+                await driver.cancel()
+            }
+        }
+        if let establishedArbiterLease {
+            _ = await PeerSessionArbiter.shared.clearEstablished(establishedArbiterLease)
+        }
+        if let classicTransferSessionLease {
+            _ = await ClassicTransferSessionRegistry.shared.remove(
+                ifOwned: classicTransferSessionLease
+            )
+        }
+        let didDisconnectPresence: Bool
+        if let presenceLease {
+            didDisconnectPresence = await MainActor.run {
+                ConnectionPresenceService.shared.disconnectIfOwned(presenceLease)
+            }
+        } else {
+            didDisconnectPresence = false
+        }
+        if didDisconnectPresence {
+            await MainActor.run {
+                UnifiedOnlineDeviceManager.shared.markDeviceAsDisconnected(
+                    peerId: presencePeerId,
+                    displayName: presenceDisplayName()
+                )
             }
         }
     }
@@ -725,11 +1686,20 @@ public class DeviceDiscoveryManager: BaseManager {
             if connection.state == .ready { return true }
             if case .failed = connection.state { return false }
             if case .cancelled = connection.state { return false }
-            try? await Task.sleep(for: .milliseconds(50))
+            do {
+                try await Task.sleep(for: .milliseconds(50))
+            } catch is CancellationError {
+                return false
+            } catch {
+                SkyBridgeLogger.p2p.error(
+                    "P2P readiness polling failed: errorType=\(String(reflecting: Swift.type(of: error)), privacy: .public)"
+                )
+                return false
+            }
         }
         return connection.state == .ready
     }
-    
+
  /// 等待连接建立（负责设置 stateUpdateHandler + 启动连接）
     private func waitForConnection(_ connection: NWConnection, deviceId: String) async throws {
         try await withCheckedThrowingContinuation { continuation in
@@ -779,12 +1749,29 @@ public class DeviceDiscoveryManager: BaseManager {
                     }
                 }
             }
-            
+
             let connectionQueue = DispatchQueue(label: "com.skybridge.discovery.connection", qos: .utility)
             connection.start(queue: connectionQueue)
 
             Task {
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                do {
+                    try await Task.sleep(nanoseconds: 5_000_000_000)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    let shouldResume = resumed.withLock { isResumed -> Bool in
+                        guard !isResumed else { return false }
+                        isResumed = true
+                        return true
+                    }
+                    guard shouldResume else { return }
+                    connection.stateUpdateHandler = nil
+                    connection.cancel()
+                    await MainActor.run {
+                        continuation.resume(throwing: error)
+                    }
+                    return
+                }
                 let shouldResume = resumed.withLock { isResumed -> Bool in
                     guard !isResumed else { return false }
                     isResumed = true
@@ -799,12 +1786,12 @@ public class DeviceDiscoveryManager: BaseManager {
             }
         }
     }
-    
+
  /// 获取设备名称
     private func getDeviceName() -> String {
-        return Host.current().localizedName ?? "SkyBridge设备"
+        return LocalHostName.localizedName ?? "SkyBridge设备"
     }
-    
+
  /// 判断给定 IPv4 地址是否属于本机，避免自连接导致路径冲突
     private func isLocalIPAddress(_ address: String) -> Bool {
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
@@ -827,45 +1814,24 @@ public class DeviceDiscoveryManager: BaseManager {
         }
         return false
     }
-    
+
  /// 从结果中提取设备名称
     private func extractDeviceName(from result: NWBrowser.Result) -> String {
         var deviceName = "未知设备"
-        
+
         if case .service(let name, _, _, _) = result.endpoint {
             deviceName = name
-            
-            let metadata = result.metadata
-            if case .bonjour(let txtRecord) = metadata {
-                let deviceInfo = BonjourTXTParser.extractDeviceInfo(txtRecord)
-                
-                if let friendlyName = deviceInfo.name ?? deviceInfo.hostname {
-                    deviceName = friendlyName
-                }
-                
-                if let deviceType = deviceInfo.type ?? deviceInfo.model {
-                    deviceName += " (\(deviceType))"
-                }
-            }
-            
             deviceName = cleanDeviceName(deviceName)
             if DDM_IsProbablyLocalDevice(name: deviceName, ipv4: nil, ipv6: nil) {
-                let localName = Host.current().localizedName ?? deviceName
+                let localName = LocalHostName.localizedName ?? deviceName
                 deviceName = cleanDeviceName(localName) + " (本机)"
             }
         }
-        
+
         logger.info("提取设备名称: \(deviceName, privacy: .public)")
         return deviceName
     }
-    
- /// 解析 TXT 记录（已废弃，请使用 BonjourTXTParser）
-    @available(*, deprecated, message: "Use BonjourTXTParser.parse instead")
-    private func parseTXTRecord(_ txtRecord: NWTXTRecord) -> [String: String]? {
-        let dict = BonjourTXTParser.parse(txtRecord)
-        return dict.isEmpty ? nil : dict
-    }
-    
+
  /// 清理设备名称
     private func cleanDeviceName(_ name: String) -> String {
         var cleaned = name
@@ -873,67 +1839,58 @@ public class DeviceDiscoveryManager: BaseManager {
         cleaned = cleaned.replacingOccurrences(of: "._udp", with: "")
         cleaned = cleaned.replacingOccurrences(of: ".local", with: "")
         cleaned = cleaned.trimmingCharacters(in: .whitespaces)
-        
+
         if cleaned.count > 50 {
             cleaned = String(cleaned.prefix(47)) + "..."
         }
         return cleaned
     }
-    
+
  /// 从 IP 地址反向解析主机名（目前未在业务流程中使用，可保留做调试）
     private func resolveHostnameFromIP(_ ipAddress: String) -> String? {
         var hints = addrinfo()
         hints.ai_family = AF_UNSPEC
         hints.ai_socktype = SOCK_STREAM
-        
+
         var result: UnsafeMutablePointer<addrinfo>?
         guard getaddrinfo(ipAddress, nil, &hints, &result) == 0 else {
             return nil
         }
         defer { freeaddrinfo(result) }
-        
+
+        guard let resolved = result,
+              let addressPtr = resolved.pointee.ai_addr else {
+            return nil
+        }
+
         var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-        if getnameinfo(result?.pointee.ai_addr, socklen_t(result?.pointee.ai_addrlen ?? 0),
+        if getnameinfo(addressPtr, socklen_t(resolved.pointee.ai_addrlen),
                        &hostname, socklen_t(hostname.count),
                        nil, 0, NI_NAMEREQD) == 0 {
             let bytes = Data(bytes: hostname, count: hostname.count)
             let trimmed = bytes.prefix { $0 != 0 }
             return String(decoding: trimmed, as: UTF8.self)
         }
-        
+
         return nil
     }
-    
+
  /// 从结果中提取网络信息（IPv4 / IPv6 / 端口）
     private func extractNetworkInfo(from result: NWBrowser.Result) -> (ipv4: String?, ipv6: String?, port: Int) {
         var ipv4: String?
         var ipv6: String?
         var port: Int = 0
-        
- // 方法 1: 从接口推断 IP
-        if !result.interfaces.isEmpty {
-            for interface in result.interfaces {
-                let interfaceName = interface.name
-                logger.debug("检查网络接口: \(interfaceName, privacy: .public)")
-                
-                if let addresses = getIPAddressesForInterface(interfaceName) {
-                    if ipv4 == nil { ipv4 = addresses.ipv4 }
-                    if ipv6 == nil { ipv6 = addresses.ipv6 }
-                }
-            }
-        }
-        
- // 方法 2: 使用 NetService 解析端口 + 地址（当 endpoint 为 service 时）
+
+ // 方法 1: 使用 NetService 解析端口 + 地址（当 endpoint 为 service 时）
         if case .service(let name, let type, let domain, _) = result.endpoint {
             let netService = NetService(domain: domain.isEmpty ? "local." : domain,
                                         type: type,
                                         name: name)
             netService.resolve(withTimeout: 1.0)
-            
+
             if netService.port > 0 {
                 port = netService.port
             }
-            
             if let addresses = netService.addresses, (ipv4 == nil || ipv6 == nil) {
                 for addressData in addresses {
                     let address = extractIPAddress(from: addressData)
@@ -948,33 +1905,34 @@ public class DeviceDiscoveryManager: BaseManager {
                 }
             }
         }
-        
+
         logger.info("解析设备网络信息 - IPv4: \(ipv4 ?? "无"), IPv6: \(ipv6 ?? "无"), 端口: \(port)")
         return (ipv4, ipv6, port)
     }
-    
+
  /// 通过接口名称获取 IP 地址
     private func getIPAddressesForInterface(_ interfaceName: String) -> (ipv4: String?, ipv6: String?)? {
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddr) == 0 else { return nil }
         defer { freeifaddrs(ifaddr) }
-        
+
         var ipv4: String?
         var ipv6: String?
         var ptr = ifaddr
-        
+
         while ptr != nil {
             defer { ptr = ptr?.pointee.ifa_next }
-            
-            guard let interface = ptr?.pointee else { continue }
-            let name = String(decoding: Data(bytes: interface.ifa_name, count: Int(strlen(interface.ifa_name))), as: UTF8.self)
-            
+
+            guard let interface = ptr?.pointee,
+                  let name = decodeOptionalCString(interface.ifa_name),
+                  let addressPtr = interface.ifa_addr else { continue }
+
             if name == interfaceName || name.hasPrefix("en") || name.hasPrefix("awdl") {
-                let addr = interface.ifa_addr.pointee
-                
+                let addr = addressPtr.pointee
+
                 if addr.sa_family == UInt8(AF_INET) {
                     var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                    if getnameinfo(interface.ifa_addr, socklen_t(addr.sa_len),
+                    if getnameinfo(addressPtr, socklen_t(addr.sa_len),
                                    &hostname, socklen_t(hostname.count),
                                    nil, socklen_t(0), NI_NUMERICHOST) == 0 {
                         let data = Data(bytes: hostname, count: hostname.count)
@@ -986,7 +1944,7 @@ public class DeviceDiscoveryManager: BaseManager {
                     }
                 } else if addr.sa_family == UInt8(AF_INET6) {
                     var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                    if getnameinfo(interface.ifa_addr, socklen_t(addr.sa_len),
+                    if getnameinfo(addressPtr, socklen_t(addr.sa_len),
                                    &hostname, socklen_t(hostname.count),
                                    nil, socklen_t(0), NI_NUMERICHOST) == 0 {
                         let data = Data(bytes: hostname, count: hostname.count)
@@ -999,13 +1957,13 @@ public class DeviceDiscoveryManager: BaseManager {
                 }
             }
         }
-        
+
         if ipv4 != nil || ipv6 != nil {
             return (ipv4, ipv6)
         }
         return nil
     }
-    
+
  /// 从地址数据中提取 IP 字符串
     private func extractIPAddress(from data: Data) -> String {
         return data.withUnsafeBytes { bytes in
@@ -1013,7 +1971,7 @@ public class DeviceDiscoveryManager: BaseManager {
                   let sockaddr = bytes.bindMemory(to: sockaddr.self).baseAddress else {
                 return "未知地址"
             }
-            
+
             switch Int32(sockaddr.pointee.sa_family) {
             case AF_INET:
                 guard bytes.count >= MemoryLayout<sockaddr_in>.size,
@@ -1043,13 +2001,6 @@ public class DeviceDiscoveryManager: BaseManager {
 
 // MARK: - 辅助函数（后台解析用）
 
-/// 解析 TXT 记录（已废弃，使用统一解析器）
-@available(*, deprecated, message: "Use BonjourTXTParser.parse instead")
-nonisolated private static func DDM_ParseTXTRecord(_ txtRecord: NWTXTRecord) -> [String: String]? {
-    let dict = BonjourTXTParser.parse(txtRecord)
-    return dict.isEmpty ? nil : dict
-}
-
 nonisolated private static func DDM_CleanDeviceName(_ name: String) -> String {
     var cleaned = name
     cleaned = cleaned.replacingOccurrences(of: "._tcp", with: "")
@@ -1060,20 +2011,61 @@ nonisolated private static func DDM_CleanDeviceName(_ name: String) -> String {
     return cleaned
 }
 
-nonisolated private static func DDM_ExtractDeviceName(_ result: NWBrowser.Result) -> String {
+nonisolated private static func DDM_ValidatedBrowseMetadata(
+    _ result: NWBrowser.Result,
+    serviceType: String
+) -> ValidatedBrowseMetadata? {
+    if let role = BonjourInteropContract.advertisementRole(for: serviceType) {
+        guard case .bonjour(let txtRecord) = result.metadata,
+              let projection = try? BonjourInteropContract.decodeAdvertisement(
+                txtRecord,
+                role: role
+              ).discoveryProjection else {
+            return nil
+        }
+        return ValidatedBrowseMetadata(
+            deviceInfo: BonjourDeviceInfo(
+                deviceId: projection.deviceId,
+                platform: projection.platform?.rawValue
+            ),
+            protocolPublicKeyFingerprint: projection.protocolPublicKeyFingerprint
+        )
+    }
+
+    guard case .bonjour(let txtRecord) = result.metadata else {
+        return ValidatedBrowseMetadata(
+            deviceInfo: nil,
+            protocolPublicKeyFingerprint: nil
+        )
+    }
+    return ValidatedBrowseMetadata(
+        deviceInfo: BonjourTXTParser.extractDeviceInfo(txtRecord),
+        protocolPublicKeyFingerprint: nil
+    )
+}
+
+nonisolated private static func DDM_ExtractDeviceName(
+    _ result: NWBrowser.Result,
+    deviceInfo: BonjourDeviceInfo?
+) -> String {
     var deviceName = "未知设备"
     if case .service(let name, _, _, _) = result.endpoint {
         deviceName = name
-        let metadata = result.metadata
-        if case .bonjour(let txtRecord) = metadata {
-            let info = BonjourTXTParser.extractDeviceInfo(txtRecord)
-            if let friendly = info.name ?? info.hostname { deviceName = friendly }
-            if let model = info.type ?? info.model { deviceName += " (\(model))" }
-        }
+        if let friendly = deviceInfo?.name ?? deviceInfo?.hostname { deviceName = friendly }
+        if let model = deviceInfo?.type ?? deviceInfo?.model { deviceName += " (\(model))" }
         deviceName = DDM_CleanDeviceName(deviceName)
         if DDM_IsProbablyLocalDevice(name: deviceName, ipv4: nil, ipv6: nil) { deviceName += " (本机)" }
     }
     return deviceName
+}
+
+nonisolated private static func DDM_BonjourIdentifier(from endpoint: NWEndpoint) -> String? {
+    guard case .service(let name, _, let domain, _) = endpoint else { return nil }
+    let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedName.isEmpty else { return nil }
+    let trimmedDomain = domain.trimmingCharacters(in: .whitespacesAndNewlines)
+    let normalizedDomain = trimmedDomain.isEmpty ? "local." : trimmedDomain.lowercased()
+    return "bonjour:\(trimmedName)@\(normalizedDomain)"
 }
 
     nonisolated private static func DDM_GetIPAddressesForInterface(_ interfaceName: String) -> (ipv4: String?, ipv6: String?)? {
@@ -1085,13 +2077,14 @@ nonisolated private static func DDM_ExtractDeviceName(_ result: NWBrowser.Result
     var ptr = ifaddr
     while ptr != nil {
         defer { ptr = ptr?.pointee.ifa_next }
-        guard let interface = ptr?.pointee else { continue }
-        let name = String(decoding: Data(bytes: interface.ifa_name, count: Int(strlen(interface.ifa_name))), as: UTF8.self)
+        guard let interface = ptr?.pointee,
+              let name = decodeOptionalCString(interface.ifa_name),
+              let addressPtr = interface.ifa_addr else { continue }
         if name == interfaceName || name.hasPrefix("en") || name.hasPrefix("awdl") {
-            let addr = interface.ifa_addr.pointee
+            let addr = addressPtr.pointee
             if addr.sa_family == UInt8(AF_INET) {
                 var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                if getnameinfo(interface.ifa_addr, socklen_t(addr.sa_len), &hostname, socklen_t(hostname.count), nil, socklen_t(0), NI_NUMERICHOST) == 0 {
+                if getnameinfo(addressPtr, socklen_t(addr.sa_len), &hostname, socklen_t(hostname.count), nil, socklen_t(0), NI_NUMERICHOST) == 0 {
                     let data = Data(bytes: hostname, count: hostname.count)
                     let trimmed = data.prefix { $0 != 0 }
                     let address = String(decoding: trimmed, as: UTF8.self)
@@ -1099,7 +2092,7 @@ nonisolated private static func DDM_ExtractDeviceName(_ result: NWBrowser.Result
                 }
             } else if addr.sa_family == UInt8(AF_INET6) {
                 var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                if getnameinfo(interface.ifa_addr, socklen_t(addr.sa_len), &hostname, socklen_t(hostname.count), nil, socklen_t(0), NI_NUMERICHOST) == 0 {
+                if getnameinfo(addressPtr, socklen_t(addr.sa_len), &hostname, socklen_t(hostname.count), nil, socklen_t(0), NI_NUMERICHOST) == 0 {
                     let data = Data(bytes: hostname, count: hostname.count)
                     let trimmed = data.prefix { $0 != 0 }
                     let address = String(decoding: trimmed, as: UTF8.self)
@@ -1144,20 +2137,16 @@ nonisolated private static func DDM_ExtractIPAddress(from data: Data) -> String 
     }
 }
 
-nonisolated private static func DDM_ExtractNetworkInfo(_ result: NWBrowser.Result) -> (ipv4: String?, ipv6: String?, port: Int) {
+nonisolated private static func DDM_ExtractNetworkInfo(
+    _ result: NWBrowser.Result,
+    expectedServiceType: String
+) -> (ipv4: String?, ipv6: String?, port: Int) {
     var ipv4: String?
     var ipv6: String?
     var port: Int = 0
-    if !result.interfaces.isEmpty {
-        for interface in result.interfaces {
-            let name = interface.name
-            if let addrs = DDM_GetIPAddressesForInterface(name) {
-                if ipv4 == nil { ipv4 = addrs.ipv4 }
-                if ipv6 == nil { ipv6 = addrs.ipv6 }
-            }
-        }
-    }
-    if case .service(let name, let type, let domain, _) = result.endpoint, port == 0 {
+    if case .service(let name, let type, let domain, _) = result.endpoint,
+       type.caseInsensitiveCompare(expectedServiceType) == .orderedSame,
+       port == 0 {
         let netService = NetService(domain: domain.isEmpty ? "local." : domain, type: type, name: name)
         netService.resolve(withTimeout: 1.0)
         if netService.port > 0 { port = netService.port }
@@ -1183,7 +2172,7 @@ internal struct NetworkDiscoveredDevice: Identifiable, Sendable {
     public var metadata: NWTXTRecord?
     public let discoveredAt: Date
     public var lastSeen: Date = Date()
-    
+
     public init(id: String,
                 name: String,
                 endpoint: NWEndpoint,
@@ -1205,7 +2194,7 @@ public enum DeviceDiscoveryConnectionStatus: String, CaseIterable {
     case reconnecting = "重连中"
     case failed = "连接失败"
     case timeout = "连接超时"
-    
+
     public var displayName: String {
         rawValue
     }
@@ -1217,7 +2206,7 @@ public enum DeviceDiscoveryError: Error, LocalizedError {
     case connectionCancelled
     case scanningFailed
     case connectionTimeout
-    
+
     public var errorDescription: String? {
         switch self {
         case .deviceNotConnected:
@@ -1264,7 +2253,8 @@ public enum DeviceDiscoveryError: Error, LocalizedError {
         func norm(_ s: String) -> String {
             return s.lowercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "(", with: "").replacingOccurrences(of: ")", with: "")
         }
-        let localName = Host.current().localizedName ?? ""
+        let localName = LocalHostName.localizedName ?? ""
         if !localName.isEmpty, norm(name) == norm(localName) { return true }
         return false
     }
+#endif

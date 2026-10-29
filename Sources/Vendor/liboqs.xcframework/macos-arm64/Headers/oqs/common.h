@@ -19,6 +19,61 @@
 extern "C" {
 #endif
 
+#if defined(__GNUC__) || defined(__clang__)
+/**
+ * @def IGNORE_UNUSED_FUNC
+ *
+ * @brief suppress compiler warning for unused functions
+ */
+#define IGNORE_UNUSED_FUNC __attribute__((unused))
+#else
+/**
+ * @def IGNORE_UNUSED_FUNC
+ *
+ * @brief __attribute__((unused)) is unique to GNU C and/or Clang ecosystem,
+ */
+#define IGNORE_UNUSED_FUNC
+#endif
+
+#if defined(OQS_DISABLE_MEM_BLACK_BOX)
+
+#warning "DANGER: OQS_DISABLE_MEM_BLACK_BOX is for internal testing only"
+#warning "disabling optimization barrier may introduce side channels"
+/**
+ * @def OQS_MEM_BLACK_BOX
+ *
+ * @brief Optimization barrier is disabled explicitly
+ */
+#define OQS_MEM_BLACK_BOX(v) (void)v
+
+#elif defined(__GNUC__) || defined(__clang__)
+
+/**
+ * @def OQS_MEM_BLACK_BOX
+ *
+ * @brief prevent compiler from optimizing on secret values. Within GNU C and
+ * Clang ecosystem, inline ASM is the preferred method.
+ */
+#define OQS_MEM_BLACK_BOX(v)                                                   \
+    do {                                                                       \
+        __asm__ volatile("" : "+r"(v) :);                                      \
+    } while (0)
+
+#else
+
+#pragma message("WARNING: non-GNUC/Clang toolchain detected. liboqs cannot     \
+                 guarantee optimization barrier on unsupported platforms.      \
+                 Compiler may introduce non-constant-time behaviors. Please    \
+                 verify generated assembly and proceed with caution.")
+/**
+ * @def OQS_MEM_BLACK_BOX
+ *
+ * @brief On non-GNUC/Clang platforms, liboqs does not provide optimization
+ * barrier guarantees
+ */
+#define OQS_MEM_BLACK_BOX(v) (void)v
+#endif
+
 /**
  * Macro for terminating the program if x is
  * a null pointer.
@@ -105,12 +160,12 @@ extern "C" {
  * Callers should compare with the symbol rather than the individual value.
  * For example,
  *
- * ret = OQS_KEM_encaps(...);
- * if (ret == OQS_SUCCESS) { ... }
+ *     ret = OQS_KEM_encaps(...);
+ *     if (ret == OQS_SUCCESS) { ... }
  *
  * rather than
  *
- * if (!OQS_KEM_encaps(...) { ... }
+ *     if (!OQS_KEM_encaps(...) { ... }
  *
  */
 typedef enum {
@@ -225,7 +280,7 @@ OQS_API int OQS_MEM_secure_bcmp(const void *a, const void *b, size_t len);
  * Zeros out `len` bytes of memory starting at `ptr`.
  *
  * Designed to be protected against optimizing compilers which try to remove
- * "unnecessary" operations. Should be used for all buffers containing secret
+ * "unnecessary" operations.  Should be used for all buffers containing secret
  * data.
  *
  * @param[in] ptr The start of the memory to zero out.
@@ -239,7 +294,7 @@ OQS_API void OQS_MEM_cleanse(void *ptr, size_t len);
  * Can be called with `ptr = NULL`, in which case no operation is performed.
  *
  * Designed to be protected against optimizing compilers which try to remove
- * "unnecessary" operations. Should be used for all buffers containing secret
+ * "unnecessary" operations.  Should be used for all buffers containing secret
  * data.
  *
  * @param[in] ptr The start of the memory to zero out and free.

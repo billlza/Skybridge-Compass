@@ -1,3 +1,8 @@
+// macOS-exclusive: built on macOS-only APIs (AppKit / IOKit / ScreenCaptureKit / CoreWLAN /
+// MetalFX / ServiceManagement / ApplicationServices / CoreGraphics display services).
+// Excluded from other platforms so SkyBridgeCore can be the single shared core for iOS as
+// well. No behaviour changes on macOS.
+#if os(macOS)
 @preconcurrency import AVFoundation
 import SwiftUI
 import Vision
@@ -15,6 +20,8 @@ public final class QRCodeScannerManager: NSObject, ObservableObject, Sendable {
     @Published public var scanResult: String?
     @Published public var errorMessage: String?
     @Published public var isProcessing = false
+    @Published public private(set) var scanSessionID = UUID()
+    @Published public private(set) var deliveryEventID: UUID?
     
  // MARK: - 私有属性
     
@@ -22,6 +29,7 @@ public final class QRCodeScannerManager: NSObject, ObservableObject, Sendable {
     private var videoPreviewLayer: AVCaptureVideoPreviewLayer?
     private let sessionQueue = DispatchQueue(label: "qr.scanner.session", qos: .userInitiated)
     private var qrScannerCancellables = Set<AnyCancellable>()
+    private var deliveredTerminalEvent = false
     
  // MARK: - 单例
     
@@ -49,15 +57,9 @@ public final class QRCodeScannerManager: NSObject, ObservableObject, Sendable {
  /// 清理资源
     public func cleanup() {
         qrScannerCancellables.removeAll()
-        captureSession?.stopRunning()
-        captureSession = nil
-        videoPreviewLayer = nil
-        
- // 重置状态
-        isScanning = false
-        isProcessing = false
-        scanResult = nil
-        errorMessage = nil
+        releaseCaptureResources()
+        resetTransientState(startNewSession: true)
+        setupNotifications()
     }
     
  // MARK: - 公共方法
@@ -99,12 +101,12 @@ public final class QRCodeScannerManager: NSObject, ObservableObject, Sendable {
                 throw QRScannerError.cameraPermissionDenied
             }
         }
-        
+
+        releaseCaptureResources()
+        resetTransientState(startNewSession: true)
         try await setupCaptureSession()
         
         isScanning = true
-        errorMessage = nil
-        scanResult = nil
         
  // 使用nonisolated方式访问captureSession，避免并发警告
         let session = captureSession
@@ -127,6 +129,11 @@ public final class QRCodeScannerManager: NSObject, ObservableObject, Sendable {
         isProcessing = false
         SkyBridgeLogger.ui.debugOnly("📱 二维码扫描已停止")
     }
+
+    public func prepareForPresentation() {
+        releaseCaptureResources()
+        resetTransientState(startNewSession: true)
+    }
     
  /// 获取预览图层
     public func getPreviewLayer() -> AVCaptureVideoPreviewLayer? {
@@ -136,39 +143,61 @@ public final class QRCodeScannerManager: NSObject, ObservableObject, Sendable {
  /// 处理扫描到的传输链接
     public func handleTransferLink(_ linkUrl: String) async -> Bool {
         isProcessing = true
-        
- // 验证链接格式
-        guard linkUrl.hasPrefix("http://") || linkUrl.hasPrefix("https://"),
-              linkUrl.contains("/link/") else {
+
+        guard let components = URLComponents(string: linkUrl),
+              let scheme = components.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              let host = components.host,
+              !host.isEmpty,
+              components.path.contains("/link/") else {
             errorMessage = "无效的传输链接格式"
             isProcessing = false
             return false
         }
-        
- // 解析链接ID
-        let components = linkUrl.components(separatedBy: "/")
-        guard let linkIndex = components.firstIndex(of: "link"),
-              linkIndex + 1 < components.count else {
-            errorMessage = "无法解析传输链接ID"
-            isProcessing = false
-            return false
-        }
-        
-        let linkId = components[linkIndex + 1]
-        
- // 验证链接有效性
-        let linkManager = TransferLinkManager.shared
-        let isValid = await linkManager.validateLinkAccess(linkId: linkId)
-        
+
+        let isValid = await probeTransferLink(linkUrl)
+
         if isValid {
-            scanResult = linkUrl
             SkyBridgeLogger.ui.debugOnly("✅ 传输链接验证成功: \(linkUrl)")
         } else {
-            errorMessage = "传输链接已过期或无效"
+            publishError("传输链接已过期或无效")
         }
         isProcessing = false
         
         return isValid
+    }
+
+    private func probeTransferLink(_ linkUrl: String) async -> Bool {
+        guard let url = URL(string: linkUrl) else { return false }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 3
+        configuration.timeoutIntervalForResource = 3
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 3
+
+        do {
+            let (_, response) = try await session.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                return false
+            }
+            guard httpResponse.statusCode == 200 else {
+                return false
+            }
+            let marker = httpResponse.value(forHTTPHeaderField: "X-SkyBridge-Transfer")
+            let pageType = httpResponse.value(forHTTPHeaderField: "X-SkyBridge-Transfer-Page")
+            return marker == "v1" && (pageType == "preview" || pageType == "unlock")
+        } catch {
+            return false
+        }
     }
     
  // MARK: - 私有方法
@@ -218,10 +247,48 @@ public final class QRCodeScannerManager: NSObject, ObservableObject, Sendable {
         self.captureSession = session
         self.videoPreviewLayer = previewLayer
     }
+
+    private func releaseCaptureResources() {
+        captureSession?.stopRunning()
+        captureSession = nil
+        videoPreviewLayer?.removeFromSuperlayer()
+        videoPreviewLayer = nil
+    }
+
+    private func resetTransientState(startNewSession: Bool) {
+        if startNewSession {
+            scanSessionID = UUID()
+        }
+        isScanning = false
+        isProcessing = false
+        scanResult = nil
+        errorMessage = nil
+        deliveryEventID = nil
+        deliveredTerminalEvent = false
+    }
+
+    private func publishResult(_ value: String) {
+        guard !deliveredTerminalEvent else { return }
+        deliveredTerminalEvent = true
+        scanResult = value
+        errorMessage = nil
+        deliveryEventID = UUID()
+    }
+
+    private func publishError(_ value: String) {
+        guard !deliveredTerminalEvent else { return }
+        deliveredTerminalEvent = true
+        errorMessage = value
+        scanResult = nil
+        deliveryEventID = UUID()
+    }
     
  /// 设置通知监听
     private func setupNotifications() {
         NotificationCenter.default.publisher(for: .AVCaptureSessionRuntimeError)
+ // AVFoundation 在自己的后台队列派发该通知;本类 @MainActor、sink 闭包按 MainActor 隔离编译,
+ // Swift 6/macOS 27 会在闭包入口断言执行器==MainActor(早于内部 Task),后台直调即崩。先切回主队列。
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] notification in
                 Task { @MainActor in
                     self?.handleSessionError(notification)
@@ -236,7 +303,7 @@ public final class QRCodeScannerManager: NSObject, ObservableObject, Sendable {
             return
         }
         
-        errorMessage = "摄像头会话错误: \(error.localizedDescription)"
+        publishError("摄像头会话错误: \(error.localizedDescription)")
         stopScanning()
     }
 }
@@ -259,25 +326,25 @@ extension QRCodeScannerManager: AVCaptureMetadataOutputObjectsDelegate {
  // 使用Task在MainActor上下文中安全处理扫描结果
         Task { @MainActor in
  // 避免重复处理
-            guard !self.isProcessing else { return }
+            guard !self.isProcessing, !self.deliveredTerminalEvent else { return }
             
             self.isProcessing = true
             
             if stringValue.contains("/link/") {
                 let success = await self.handleTransferLink(stringValue)
                 if success {
-                    self.scanResult = stringValue
                     self.stopScanning()
+                    self.publishResult(stringValue)
                 } else {
-                    self.errorMessage = "无法处理传输链接"
+                    self.publishError("无法处理传输链接")
                 }
             } else if stringValue.hasPrefix("skybridge://connect/") {
  // 动态连接二维码，直接将结果交由上层逻辑处理
-                self.scanResult = stringValue
                 self.stopScanning()
+                self.publishResult(stringValue)
             } else {
  // 既不是传输链接也不是连接二维码
-                self.errorMessage = "未识别的二维码内容"
+                self.publishError("未识别的二维码内容")
             }
             
             self.isProcessing = false
@@ -314,16 +381,26 @@ public struct QRCodeScannerView: NSViewRepresentable {
     @ObservedObject private var scannerManager = QRCodeScannerManager.shared
     let onResult: (String) -> Void
     let onError: (String) -> Void
+
+    public final class Coordinator {
+        var handledSessionID: UUID?
+        var handledEventID: UUID?
+    }
     
     public init(onResult: @escaping (String) -> Void, onError: @escaping (String) -> Void) {
         self.onResult = onResult
         self.onError = onError
+    }
+
+    public func makeCoordinator() -> Coordinator {
+        Coordinator()
     }
     
     public func makeNSView(context: Context) -> NSView {
         let view = NSView()
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor.black.cgColor
+        scannerManager.prepareForPresentation()
         
  // 在Task外部捕获错误处理闭包，避免Sendable闭包警告
         let errorHandler = onError
@@ -336,6 +413,7 @@ public struct QRCodeScannerView: NSViewRepresentable {
  // 添加预览图层
                 if let previewLayer = scannerManager.getPreviewLayer() {
                     previewLayer.frame = view.bounds
+                    view.layer?.sublayers?.removeAll()
                     view.layer?.addSublayer(previewLayer)
                 }
             } catch {
@@ -347,23 +425,41 @@ public struct QRCodeScannerView: NSViewRepresentable {
     }
     
     public func updateNSView(_ nsView: NSView, context: Context) {
+        if context.coordinator.handledSessionID != scannerManager.scanSessionID {
+            context.coordinator.handledSessionID = scannerManager.scanSessionID
+            context.coordinator.handledEventID = nil
+        }
+
  // 在Task外部捕获闭包，避免Sendable闭包警告
         let resultHandler = onResult
         let errorHandler = onError
-        
- // 监听扫描结果
-        if let result = scannerManager.scanResult {
-            resultHandler(result)
-        }
-        
- // 监听错误信息
-        if let error = scannerManager.errorMessage {
-            errorHandler(error)
-        }
-        
- // 更新预览图层尺寸
+
         if let previewLayer = scannerManager.getPreviewLayer() {
             previewLayer.frame = nsView.bounds
+            if previewLayer.superlayer !== nsView.layer {
+                nsView.layer?.sublayers?.removeAll()
+                nsView.layer?.addSublayer(previewLayer)
+            }
+        }
+
+        guard let eventID = scannerManager.deliveryEventID,
+              context.coordinator.handledEventID != eventID else {
+            return
+        }
+
+        context.coordinator.handledEventID = eventID
+
+        if let result = scannerManager.scanResult {
+            resultHandler(result)
+        } else if let error = scannerManager.errorMessage {
+            errorHandler(error)
+        }
+    }
+
+    public static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        Task { @MainActor in
+            QRCodeScannerManager.shared.cleanup()
         }
     }
 }
+#endif

@@ -15,30 +15,36 @@ public final class SupabaseConfiguration: ObservableObject {
     @Published public var isConfigured = false
     @Published public var configurationError: String?
     
- // MARK: - 私有属性
+    // MARK: - 私有属性
     
     private var currentConfiguration: SupabaseService.Configuration?
+    private var keychainAutoConfigurationTask: Task<Void, Never>?
+
+    public var resolvedConfiguration: SupabaseService.Configuration? {
+        currentConfiguration
+    }
+
+    /// Settle the initial configuration lookup before restoring a persisted login.
+    /// A later UI owner must not make the first provider selection after that login
+    /// has already published its account authorization. This does not await the
+    /// independent network health check or change the missing-configuration policy.
+    func waitForInitialConfigurationAttempt() async {
+        if let task = keychainAutoConfigurationTask {
+            await task.value
+        }
+    }
     
  // MARK: - 初始化
     
     private init() {
- // 尝试从环境变量自动配置
+ // 尝试从非阻塞配置源自动配置；启动阶段不能触碰 Keychain，避免系统授权弹窗拖死 App。
         attemptAutoConfiguration()
     }
     
  // MARK: - 公共方法
     
- /// 尝试从环境变量自动配置Supabase
+    /// 尝试从可用配置源自动配置 Supabase（Keychain / 环境变量 / Info.plist / 资源文件）
     public func attemptAutoConfiguration() {
- // 首先尝试从 Keychain 加载
-        SkyBridgeLogger.ui.debugOnly("🔍 [SupabaseConfiguration] 尝试从 Keychain 加载...")
-        if let config = loadFromKeychain() {
-            SkyBridgeLogger.ui.debugOnly("✅ [SupabaseConfiguration] 从 Keychain 加载配置成功")
-            configureSupabase(with: config)
-            return
-        }
-        
- // 其次检查环境变量
         let urlEnv = ProcessInfo.processInfo.environment["SUPABASE_URL"]
         let keyEnv = ProcessInfo.processInfo.environment["SUPABASE_ANON_KEY"]
         
@@ -46,50 +52,52 @@ public final class SupabaseConfiguration: ObservableObject {
         SkyBridgeLogger.ui.debugOnly("   SUPABASE_URL: \(urlEnv ?? "未设置")")
         SkyBridgeLogger.ui.debugOnly("   SUPABASE_ANON_KEY: \(keyEnv != nil ? "已设置" : "未设置")")
         
- // 使用 if-let 绑定，config 在闭包中使用
+ // 先检查环境变量 / 包内配置，这些来源不会阻塞主线程。
         if let config = SupabaseService.Configuration.fromEnvironment() {
-            SkyBridgeLogger.ui.debugOnly("✅ [SupabaseConfiguration] 从环境变量加载配置成功")
-            configureSupabase(with: config)  // config 被使用
+            SkyBridgeLogger.ui.debugOnly("✅ [SupabaseConfiguration] 从可用配置源加载配置成功")
+            configureSupabase(with: config)
         } else {
-            SkyBridgeLogger.ui.debugOnly("⚠️ [SupabaseConfiguration] Keychain 和环境变量都未配置")
-            SkyBridgeLogger.ui.debugOnly("   请在应用中配置 Supabase 或设置环境变量")
- // 不再自动使用演示模式，让用户手动配置
+            SkyBridgeLogger.ui.debugOnly("⚠️ [SupabaseConfiguration] 环境变量与包内配置未命中，后台尝试 Keychain 配置")
             configurationError = "未找到 Supabase 配置，请在设置中配置"
             isConfigured = false
+            scheduleKeychainAutoConfiguration()
         }
     }
-    
- /// 从 Keychain 加载 Supabase 配置
-    private func loadFromKeychain() -> SupabaseService.Configuration? {
-        do {
-            let keychain = KeychainManager.shared
-            let config = try keychain.retrieveSupabaseConfig()
-            
- // 验证配置不为空
-            guard !config.url.isEmpty, !config.anonKey.isEmpty else {
-                SkyBridgeLogger.ui.debugOnly("⚠️ Keychain 中的配置不完整")
-                return nil
+
+    private func scheduleKeychainAutoConfiguration() {
+        guard keychainAutoConfigurationTask == nil else { return }
+
+        keychainAutoConfigurationTask = Task { [weak self] in
+            let keychainConfiguration = await Task.detached(priority: .utility) {
+                SupabaseService.Configuration.fromKeychain()
+            }.value
+
+            await MainActor.run {
+                guard let self else { return }
+                self.keychainAutoConfigurationTask = nil
+                guard !self.isConfigured,
+                      let keychainConfiguration else {
+                    return
+                }
+                SkyBridgeLogger.ui.debugOnly("✅ [SupabaseConfiguration] 从 Keychain 后台加载配置成功")
+                self.configureSupabase(with: keychainConfiguration)
             }
-            
- // 创建 URL
-            guard let url = URL(string: config.url) else {
-                SkyBridgeLogger.ui.debugOnly("⚠️ 无效的 Supabase URL: \(config.url)")
-                return nil
-            }
-            
-            return SupabaseService.Configuration(
-                url: url,
-                anonKey: config.anonKey,
-                serviceRoleKey: config.serviceRoleKey
-            )
-        } catch {
-            SkyBridgeLogger.ui.debugOnly("⚠️ 从 Keychain 加载失败: \(error.localizedDescription)")
-            return nil
         }
     }
     
  /// 手动配置Supabase
     public func configureSupabase(with configuration: SupabaseService.Configuration) {
+        guard validatedConfiguration(
+            urlString: configuration.url.absoluteString,
+            anonKey: configuration.anonKey
+        ) != nil else {
+            currentConfiguration = nil
+            isConfigured = false
+            configurationError = "Supabase 配置无效（需 https 且不能为占位值）"
+            SkyBridgeLogger.ui.error("❌ Supabase 配置被拒绝：无效或占位配置")
+            return
+        }
+
         currentConfiguration = configuration
         
  // 启用AuthenticationService的Supabase模式
@@ -100,36 +108,17 @@ public final class SupabaseConfiguration: ObservableObject {
         
         SkyBridgeLogger.ui.debugOnly("✅ Supabase已配置成功")
         SkyBridgeLogger.ui.debugOnly("   URL: \(configuration.url)")
-        SkyBridgeLogger.ui.debugOnly("   匿名密钥: \(String(configuration.anonKey.prefix(10)))...")
-    }
-    
- /// 配置演示模式（用于开发和测试）
- ///
- /// ⚠️ 警告：演示模式不会连接到真实的 Supabase 后端。
- /// 生产环境请使用以下方式配置：
- /// 1. 设置环境变量 SUPABASE_URL 和 SUPABASE_ANON_KEY
- /// 2. 在应用设置中手动配置
- /// 3. 将配置保存到 Keychain
-    public func configureDemoMode() {
- // ⚠️ 演示模式：使用本地模拟配置，不连接真实后端
- // 演示模式仅用于 UI 预览和开发测试，不提供任何后端功能
-        
-        SkyBridgeLogger.ui.warning("⚠️ 演示模式已启用 - 不连接真实 Supabase 后端")
-        SkyBridgeLogger.ui.warning("   在线功能（如账号同步、云备份）将不可用")
-        SkyBridgeLogger.ui.warning("   请配置真实的 Supabase 项目以启用完整功能")
-        
- // 设置为离线/演示状态，而不是使用无效的占位符密钥
-        isConfigured = false
-        configurationError = "演示模式：在线功能已禁用。请在设置中配置 Supabase 以启用云功能。"
-        currentConfiguration = nil
-        
- // 打印配置指南
-        Self.printSetupInstructions()
-    }
-    
- /// 检查是否处于演示/离线模式
-    public var isDemoMode: Bool {
-        return !isConfigured || currentConfiguration == nil
+        SkyBridgeLogger.ui.debugOnly("   匿名密钥: 已配置")
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let isHealthy = await self.validateConfiguration()
+            if isHealthy {
+                SkyBridgeLogger.ui.debugOnly("✅ [SupabaseConfiguration] Auth 健康检查通过")
+            } else {
+                SkyBridgeLogger.ui.error("⚠️ [SupabaseConfiguration] Auth 健康检查失败: \(self.configurationError ?? "未知错误", privacy: .private)")
+            }
+        }
     }
     
  /// 获取配置指南文本（用于 UI 显示）
@@ -226,5 +215,43 @@ public final class SupabaseConfiguration: ObservableObject {
         } else {
             SkyBridgeLogger.ui.debugOnly("✅ 所有必需的Supabase环境变量已设置")
         }
+    }
+
+    private func validatedConfiguration(
+        urlString: String,
+        anonKey: String
+    ) -> SupabaseService.Configuration? {
+        let trimmedURL = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedAnonKey = anonKey.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !trimmedURL.isEmpty, !trimmedAnonKey.isEmpty else {
+            return nil
+        }
+
+        let normalizedURL = trimmedURL.lowercased()
+        let normalizedAnonKey = trimmedAnonKey.lowercased()
+        if normalizedURL.contains("your-project.supabase.co") || normalizedAnonKey == "your-anon-key" {
+            return nil
+        }
+
+        guard let url = URL(string: trimmedURL),
+              let scheme = url.scheme?.lowercased(),
+              let host = url.host?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !host.isEmpty else {
+            return nil
+        }
+
+        if scheme != "https" {
+#if DEBUG
+            let isLocalHost = host == "localhost" || host == "127.0.0.1"
+            guard scheme == "http", isLocalHost else {
+                return nil
+            }
+#else
+            return nil
+#endif
+        }
+
+        return SupabaseService.Configuration(url: url, anonKey: trimmedAnonKey)
     }
 }

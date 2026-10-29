@@ -1,3 +1,8 @@
+// macOS-exclusive: this file is built on frameworks that exist only on macOS
+// (AppKit / IOKit / ScreenCaptureKit / CoreWLAN / MetalFX / ServiceManagement /
+// ApplicationServices). It is excluded from other platforms so SkyBridgeCore can be
+// the single shared core for iOS as well. No behaviour changes on macOS.
+#if os(macOS)
 import Foundation
 import AppKit
 import OSLog
@@ -542,3 +547,4 @@ private struct FocusRingConfiguration {
     var cornerRadius: CGFloat = 2.0
     var animated: Bool = false
 }
+#endif

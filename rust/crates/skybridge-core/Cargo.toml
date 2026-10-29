@@ -1,0 +1,58 @@
+[package]
+name = "skybridge-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+# Phase-0 cross-platform groundwork: links the macOS/iOS host C-ABI bridge for the
+# `platform` module. Off by default so the portable core builds without host symbols.
+# See src/platform.rs and ROADMAP.md.
+apple-platform-ffi = []
+
+# EXPERIMENTAL, DEFAULT-OFF: enables the Q-Periapt ContextBound PQ/T hybrid KEM
+# suite (wire_id 0x0011) alongside the shipping X-Wing / ML-KEM-768 suites. Pulls
+# in the three `q-periapt-*` crates by path. The production handshake path is
+# unchanged when this feature is off (`cargo build` with no features). See pqc.rs.
+q-periapt = ["dep:q-periapt-kem", "dep:q-periapt-backends", "dep:q-periapt-core"]
+
+[dependencies]
+anyhow.workspace = true
+aes-gcm.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+bytes.workspace = true
+ed25519-dalek.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
+hpke.workspace = true
+fips203.workspace = true
+fips204.workspace = true
+rand.workspace = true
+rtc.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sha3.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+url.workspace = true
+uuid.workspace = true
+webrtc.workspace = true
+webbrowser.workspace = true
+x25519-dalek.workspace = true
+
+# EXPERIMENTAL, DEFAULT-OFF (gated by the `q-periapt` feature): the Q-Periapt PQ/T
+# hybrid KEM crates, depended on by path. CI and local builds resolve the same
+# pinned, gitignored External/pqt_hybrid_suite checkout; unrelated sibling
+# worktrees are deliberately outside the Cargo build contract.
+q-periapt-core = { version = "=0.1.5", path = "../../../External/pqt_hybrid_suite/crates/q-periapt-core", optional = true }
+q-periapt-kem = { version = "=0.1.5", path = "../../../External/pqt_hybrid_suite/crates/q-periapt-kem", optional = true }
+q-periapt-backends = { version = "=0.1.5", path = "../../../External/pqt_hybrid_suite/crates/q-periapt-backends", optional = true }

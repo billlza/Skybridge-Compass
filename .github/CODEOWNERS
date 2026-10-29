@@ -1,0 +1,11 @@
+# Release authority and supply-chain control surfaces
+/.github/workflows/ @billlza
+/.github/CODEOWNERS @billlza
+/.github/dependabot.yml @billlza
+/rust-toolchain.toml @billlza
+/rust/scripts/ @billlza
+/rust/packaging/ @billlza
+/Sources/Vendor/ @billlza
+/VendorProvenance/ @billlza
+/Sources/SkyBridgeCore/P2P/Providers/QPeriaptPolicyRuntime.swift @billlza
+/Sources/SkyBridgeCore/P2P/QPeriaptPlatformPolicy.swift @billlza

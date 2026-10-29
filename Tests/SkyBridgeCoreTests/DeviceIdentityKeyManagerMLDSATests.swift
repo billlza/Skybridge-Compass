@@ -19,6 +19,18 @@ import OQSRAII
 
 @available(macOS 14.0, iOS 17.0, *)
 final class DeviceIdentityKeyManagerMLDSATests: XCTestCase {
+    private var identityContext: DeviceIdentityKeychainTestContext!
+
+    override func setUpWithError() throws {
+        identityContext = try DeviceIdentityKeychainTestContext()
+    }
+
+    override func tearDownWithError() throws {
+        if let identityContext {
+            try identityContext.reset()
+        }
+        identityContext = nil
+    }
     
  // MARK: - Property 8: ML-DSA Sign-Verify Round Trip
     
@@ -182,7 +194,7 @@ final class DeviceIdentityKeyManagerMLDSATests: XCTestCase {
  /// 测试 DeviceIdentityKeyManager.getProtocolSigningKeyHandle(for: .mlDSA65)
     func testDeviceIdentityKeyManagerMLDSAKeyHandle() async throws {
         #if canImport(OQSRAII)
-        let manager = DeviceIdentityKeyManager.shared
+        let manager = identityContext.manager
         
  // 获取 ML-DSA-65 密钥句柄
         let keyHandle = try await manager.getProtocolSigningKeyHandle(for: .mlDSA65)
@@ -204,7 +216,7 @@ final class DeviceIdentityKeyManagerMLDSATests: XCTestCase {
  /// 测试 DeviceIdentityKeyManager.getProtocolSigningPublicKey(for: .mlDSA65)
     func testDeviceIdentityKeyManagerMLDSAPublicKey() async throws {
         #if canImport(OQSRAII)
-        let manager = DeviceIdentityKeyManager.shared
+        let manager = identityContext.manager
         
  // 获取 ML-DSA-65 公钥
         let publicKey = try await manager.getProtocolSigningPublicKey(for: .mlDSA65)
@@ -220,7 +232,7 @@ final class DeviceIdentityKeyManagerMLDSATests: XCTestCase {
  /// 测试 ML-DSA 密钥的幂等性（多次调用返回相同密钥）
     func testMLDSAKeyIdempotency() async throws {
         #if canImport(OQSRAII)
-        let manager = DeviceIdentityKeyManager.shared
+        let manager = identityContext.manager
         
  // 第一次获取
         let publicKey1 = try await manager.getProtocolSigningPublicKey(for: .mlDSA65)
@@ -248,7 +260,7 @@ final class DeviceIdentityKeyManagerMLDSATests: XCTestCase {
  /// 测试 ML-DSA 密钥与 Ed25519 密钥独立
     func testMLDSAAndEd25519KeysAreIndependent() async throws {
         #if canImport(OQSRAII)
-        let manager = DeviceIdentityKeyManager.shared
+        let manager = identityContext.manager
         
  // 获取两种算法的公钥
         let ed25519PublicKey = try await manager.getProtocolSigningPublicKey(for: .ed25519)
@@ -268,7 +280,7 @@ final class DeviceIdentityKeyManagerMLDSATests: XCTestCase {
  /// 测试使用 DeviceIdentityKeyManager 的密钥进行签名验证
     func testSignVerifyWithDeviceIdentityKeyManager() async throws {
         #if canImport(OQSRAII)
-        let manager = DeviceIdentityKeyManager.shared
+        let manager = identityContext.manager
         let provider = PQCSignatureProvider(backend: .oqs)
         
  // 获取密钥

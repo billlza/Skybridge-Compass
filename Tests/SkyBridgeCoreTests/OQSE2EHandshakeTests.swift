@@ -3,7 +3,10 @@ import XCTest
 
 final class OQSE2EHandshakeTests: XCTestCase {
     func testE2EHandshakeWithSessionToken() async throws {
-        guard let provider = PQCProviderFactory.makeProvider() else { return }
+        let keychain = PQCKeychainTestContext()
+        let provider = try requireMLKEMMLDSAProvider(
+            scopeSource: keychain.scopeSource
+        )
         let peerA = "peer-A"
         let peerB = "peer-B"
  // 中文注释：A 侧封装
@@ -15,6 +18,11 @@ final class OQSE2EHandshakeTests: XCTestCase {
  // 中文注释：令牌签发与校验
         let payload = Data("token-payload".utf8)
         let sig = try await provider.sign(data: payload, peerId: peerA, algorithm: "ML-DSA-65")
+        _ = try await authenticateLocalSigningKeyForTesting(
+            signer: provider,
+            verifier: provider,
+            peerId: peerA
+        )
         let ok = await provider.verify(data: payload, signature: sig, peerId: peerA, algorithm: "ML-DSA-65")
         XCTAssertTrue(ok)
         _ = skB // 仅校验流程，无需进一步加密演示

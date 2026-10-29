@@ -1,3 +1,9 @@
+// DEDUPLICATION TARGET — not inherently macOS-only.
+//
+// macOS 侧的发现/连接编排实现。iOS 目前有自己的一份（iOS 侧自动连接逻辑），阶段 0 只让
+// SkyBridgeCore 能为 iOS 编译，不在同一二进制里立起第二套实现。采用 iOS 版本是
+// 阶段 3 的逐类型迁移工作，记录在 Docs/background-wake-capability-ledger.md。
+#if os(macOS)
 //
 // AutoConnectService.swift
 // SkyBridgeCore
@@ -41,6 +47,12 @@ public struct PairedDevice: Codable, Identifiable, Sendable {
 public class AutoConnectService: ObservableObject {
     
     public static let shared = AutoConnectService()
+    private static let pairedDevicesStore = CodablePersistenceStore<[PairedDevice]>(
+        location: .protectedApplicationSupport(
+            path: "DeviceDiscovery/paired-devices.json",
+            legacyUserDefaultsKey: "PairedDevices"
+        )
+    )
     
  // MARK: - 发布属性
     
@@ -75,10 +87,10 @@ public class AutoConnectService: ObservableObject {
     private let logger = Logger(subsystem: "com.skybridge.device", category: "AutoConnect")
     private var cancellables = Set<AnyCancellable>()
     private var monitoringTask: Task<Void, Never>?
-    private let userDefaultsKey = "PairedDevices"
     
     private init() {
         loadPairedDevices()
+        applyRuntimeSettingsSnapshot()
         setupSettingsObserver()
         setupDeviceDiscoveryObserver()
     }
@@ -93,6 +105,27 @@ public class AutoConnectService: ObservableObject {
                 self?.autoConnectEnabled = enabled
             }
             .store(in: &cancellables)
+
+        SettingsManager.shared.$connectionTimeout
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] value in
+                self?.connectionTimeout = TimeInterval(max(5, min(120, value)))
+            }
+            .store(in: &cancellables)
+
+        SettingsManager.shared.$retryCount
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] value in
+                self?.maxAutoConnectAttempts = max(1, min(10, value))
+            }
+            .store(in: &cancellables)
+    }
+
+    private func applyRuntimeSettingsSnapshot() {
+        let settings = SettingsManager.shared
+        autoConnectEnabled = settings.autoConnectPairedDevices
+        connectionTimeout = TimeInterval(max(5, min(120, settings.connectionTimeout)))
+        maxAutoConnectAttempts = max(1, min(10, settings.retryCount))
     }
     
     private func setupDeviceDiscoveryObserver() {
@@ -110,24 +143,17 @@ public class AutoConnectService: ObservableObject {
  // MARK: - 配对设备管理
     
     private func loadPairedDevices() {
-        guard let data = UserDefaults.standard.data(forKey: userDefaultsKey) else {
+        guard let devices = Self.pairedDevicesStore.load() else {
             logger.info("📋 无已保存的配对设备")
             return
         }
-        
-        do {
-            let devices = try JSONDecoder().decode([PairedDevice].self, from: data)
-            pairedDevices = devices
-            logger.info("📋 加载了 \(devices.count) 个配对设备")
-        } catch {
-            logger.error("❌ 加载配对设备失败: \(error.localizedDescription)")
-        }
+        pairedDevices = devices
+        logger.info("📋 加载了 \(devices.count) 个配对设备")
     }
     
     private func savePairedDevices() {
         do {
-            let data = try JSONEncoder().encode(pairedDevices)
-            UserDefaults.standard.set(data, forKey: userDefaultsKey)
+            try Self.pairedDevicesStore.save(pairedDevices)
             logger.debug("💾 保存了 \(self.pairedDevices.count) 个配对设备")
         } catch {
             logger.error("❌ 保存配对设备失败: \(error.localizedDescription)")
@@ -205,9 +231,9 @@ public class AutoConnectService: ObservableObject {
         guard autoConnectEnabled else { return }
         
         let deviceId = device.id.uuidString
-        
- // 检查是否为已配对设备
-        guard let pairedDevice = pairedDevices.first(where: { $0.id == deviceId }) else {
+
+ // 检查是否为已配对设备。动态发现的 UUID 可能变化，因此优先用协议指纹/名称兜底匹配。
+        guard let pairedDevice = pairedDeviceRecord(for: device) else {
             return
         }
         
@@ -233,6 +259,21 @@ public class AutoConnectService: ObservableObject {
  // 发起自动连接
         logger.info("🔗 发起自动连接到配对设备: \(pairedDevice.name)")
         initiateAutoConnect(to: device)
+    }
+
+    private func pairedDeviceRecord(for device: DiscoveredDevice) -> PairedDevice? {
+        let deviceId = device.id.uuidString
+        if let record = pairedDevices.first(where: { $0.id == deviceId }) {
+            return record
+        }
+        if let fingerprint = device.pubKeyFP?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !fingerprint.isEmpty,
+           let record = pairedDevices.first(where: { $0.publicKeyFingerprint == fingerprint }) {
+            return record
+        }
+        return pairedDevices.first { record in
+            record.name == device.name && record.deviceType == device.deviceType.rawValue
+        }
     }
     
  /// 发起自动连接
@@ -363,9 +404,11 @@ public class AutoConnectService: ObservableObject {
     
  /// 检查可连接的配对设备
     private func checkForPairedDevices() async {
- // 获取当前发现的设备列表
- // 这里应该从设备发现服务获取
- // 简化实现：发送检查请求
+ // 获取当前发现的设备列表并立即执行自动连接判断，通知仍保留给其它监听者。
+        let candidates = DeviceDiscoveryService.shared.discoveredDevices + P2PDiscoveryService.shared.discoveredDevices
+        for device in candidates {
+            handleDiscoveredDevice(device)
+        }
         NotificationCenter.default.post(name: .checkPairedDevicesAvailability, object: nil)
     }
     
@@ -423,4 +466,4 @@ public extension Notification.Name {
     static let deviceDiscovered = Notification.Name("com.skybridge.deviceDiscovered")
     static let checkPairedDevicesAvailability = Notification.Name("com.skybridge.checkPairedDevicesAvailability")
 }
-
+#endif

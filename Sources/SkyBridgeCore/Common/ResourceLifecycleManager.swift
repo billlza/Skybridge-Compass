@@ -40,6 +40,10 @@ public actor ResourceLifecycleManager {
  /// Metal 纹理池
     private var texturePool: [TextureDescriptor: [MTLTexture]] = [:]
     
+ /// 每个尺寸/格式分桶最多缓存的纹理数量，超过则直接丢弃（让其释放），
+ /// 防止远程桌面频繁 resize 时纹理池按 WxH 桶无界增长，长期占用 GPU 私有内存。
+    private let maxPooledTexturesPerBucket = 4
+    
  /// 纹理描述符（用作字典键）
     private struct TextureDescriptor: Hashable {
         let width: Int
@@ -170,6 +174,12 @@ public actor ResourceLifecycleManager {
             pixelFormat: texture.pixelFormat
         )
         
+        let bucketCount = texturePool[descriptor]?.count ?? 0
+        guard bucketCount < maxPooledTexturesPerBucket else {
+ // 该尺寸已缓存足够纹理，丢弃多余纹理交由系统释放，避免池无界增长。
+            logger.debug("♻️ 纹理池[\(texture.width)x\(texture.height)]已达上限(\(self.maxPooledTexturesPerBucket))，丢弃归还纹理")
+            return
+        }
         texturePool[descriptor, default: []].append(texture)
         logger.debug("📥 纹理已归还到池: \(texture.width)x\(texture.height)")
     }
@@ -190,10 +200,10 @@ public actor ResourceLifecycleManager {
             queue: .global(qos: .utility)
         )
         
-        source.setEventHandler {
-            Task { @MainActor [weak self] in
-                await self?.handleMemoryPressure()
-            }
+        source.setEventHandler { [weak self] in
+ // handleMemoryPressure 已是本 actor 隔离方法，无需绕行 MainActor；
+ // 内存压力下应尽快在后台清理，避免主线程多余跳转。
+            Task { await self?.handleMemoryPressure() }
         }
         
         source.resume()
@@ -419,4 +429,3 @@ extension ManagedResource where Self: AnyObject & Sendable {
  }
  ```
  */
-

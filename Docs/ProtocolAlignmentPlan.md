@@ -1,12 +1,16 @@
 # Protocol Alignment Plan (IEEE Paper vs Code)
 
 ## Summary
-The IEEE paper describes the newer handshake protocol (supportedSuites list, keyShares, clientNonce/serverNonce, transcript-bound signatures, and SigningKeyHandle support). The codebase contains both the newer handshake path (HandshakeDriver + HandshakeContext) and a legacy JSON handshake path in iOSP2PSessionManager. This document consolidates what is live, what is legacy, and how we are aligning implementation to the paper.
+The IEEE paper describes the binary handshake protocol (supportedSuites list, keyShares, clientNonce/serverNonce, transcript-bound signatures, and SigningKeyHandle support). The current codebase implements this binary handshake path (HandshakeDriver + HandshakeContext + HandshakeMessageA/B + Finished). Earlier drafts referenced a “legacy JSON handshake” path; that legacy JSON handshake is no longer present. The only remaining legacy compatibility is **identity-key decoding** for pre-migration key material.
 
 ## Current Reality (Code)
-- New handshake path exists: HandshakeDriver + HandshakeContext + HandshakeMessageA/B binary format.
-- Legacy JSON handshake still exists (P2PHandshakeMessage/P2PFinishedMessage) and is gated by a runtime flag.
-- HPKE-based envelope exists; signing uses SigningKeyHandle (raw/Keychain/Secure Enclave).
+- Binary handshake path exists and is the only wire protocol:
+  - HandshakeDriver + HandshakeContext + HandshakeMessageA/B binary format + Finished frames
+  - Two-attempt strategy (PQC-only then Classic-only) is enforced via policy (HandshakePolicy)
+- Legacy compatibility is limited to key-format decoding:
+  - `IdentityPublicKeys.decodeWithLegacyFallback` accepts legacy P-256 uncompressed public keys only under strict validation (65 bytes, 0x04 prefix)
+  - Legacy signature algorithm decoding (e.g., `.p256ECDSA`) exists as a compatibility layer for stored key material
+- HPKE/KEM-DEM style envelope exists; signing uses SigningKeyHandle (raw/Keychain/Secure Enclave).
 
 ## Target (Paper)
 - supportedSuites list + keyShares[] negotiation in MessageA.
@@ -20,12 +24,12 @@ The IEEE paper describes the newer handshake protocol (supportedSuites list, key
 1. Rename handshake nonces to clientNonce/serverNonce and update encoding/decoding.
 2. Enforce deterministic encoding for policy/capabilities and use the new fields in transcript binding.
 3. Add KEM-DEM API to CryptoProvider and route handshake payload encryption through it.
-4. Gate the legacy JSON handshake behind an explicit runtime switch (default off).
+4. Remove stale documentation references to the legacy JSON handshake (if any remain).
 
-### Phase 2 (Remove Legacy Path)
-1. Remove or fully deprecate the JSON handshake path.
-2. Remove related legacy nonce cache and code paths if no longer referenced.
-3. Update any documentation that points to JSON handshake messages.
+### Phase 2 (Retire Key-Format Legacy Compatibility)
+1. Keep legacy P-256 key decoding strict (already enforced) and scoped to the minimum necessary surface.
+2. Once migration is complete (all peers have migrated identity material), remove legacy key-format decoding and any compatibility-only code paths.
+3. Update any remaining documentation that implies multiple handshake wire protocols.
 
 ### Phase 3 (Full Secure Enclave Integration)
 1. Ensure SigningKeyHandle is used end-to-end for all handshake signing flows.
@@ -33,4 +37,4 @@ The IEEE paper describes the newer handshake protocol (supportedSuites list, key
 
 ## Notes
 - This is a breaking protocol change; roll out with versioning or upgrade coordination.
-- Keep the default path on the new binary handshake protocol; legacy remains opt-in only.
+- Keep the default path on the new binary handshake protocol; “legacy” in this document refers to key-format compatibility only (not an alternate JSON handshake).

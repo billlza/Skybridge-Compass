@@ -10,6 +10,7 @@
 
 import Foundation
 import OSLog
+@preconcurrency import Combine
 
 // MARK: - Signaling Session State
 
@@ -88,10 +89,15 @@ public final class SignalingService: ObservableObject {
     
     private let localDeviceId: String
     private let authToken: String
+    private let joinTimeout: Duration = .seconds(15)
     
  // MARK: - Private State
     
     private let logger = Logger(subsystem: "com.skybridge.compass", category: "SignalingService")
+    private var pendingJoinSessionId: String?
+    private var activeJoinAttemptID: UUID?
+    private var joinTimeoutTask: Task<Void, Never>?
+    private var connectionStateCancellable: AnyCancellable?
     
  // MARK: - Callbacks
     
@@ -124,8 +130,9 @@ public final class SignalingService: ObservableObject {
         self.authToken = authToken
         
         setupMessageHandler()
+        setupConnectionStateObserver()
     }
-    
+
  // MARK: - Public Interface - Session Management
     
  /// 加入信令会话
@@ -142,6 +149,12 @@ public final class SignalingService: ObservableObject {
         }
         
         updateSessionState(.joining)
+        currentSessionId = nil
+        lastError = nil
+        pendingJoinSessionId = sessionId
+        let attemptID = UUID()
+        activeJoinAttemptID = attemptID
+        scheduleJoinTimeout(for: sessionId, attemptID: attemptID)
         logger.info("正在加入会话: \(sessionId)")
         
         let message = SessionJoinMessage(
@@ -153,14 +166,19 @@ public final class SignalingService: ObservableObject {
             try await agentConnection.send(message)
  // 等待 session-joined 响应会在 handleMessage 中处理
         } catch {
-            updateSessionState(.failed)
-            lastError = .joinFailed(error.localizedDescription)
+            failPendingJoin(reason: error.localizedDescription)
             throw SignalingError.joinFailed(error.localizedDescription)
         }
     }
     
  /// 离开当前会话
     public func leaveSession() async {
+        if sessionState == .joining {
+            cancelPendingJoin()
+            logger.info("已取消加入会话")
+            updateSessionState(.idle)
+            return
+        }
         guard let sessionId = currentSessionId else {
             logger.warning("未在任何会话中")
             return
@@ -284,6 +302,14 @@ public final class SignalingService: ObservableObject {
             }
         }
     }
+
+    private func setupConnectionStateObserver() {
+        connectionStateCancellable = agentConnection.$connectionState.sink { [weak self] state in
+            Task { @MainActor [weak self] in
+                self?.handleAgentConnectionStateChange(state)
+            }
+        }
+    }
     
     private func handleMessage(_ message: any SkyBridgeMessage) {
         switch message {
@@ -295,6 +321,8 @@ public final class SignalingService: ObservableObject {
             handleSDPAnswer(msg)
         case let msg as SBICECandidateMessage:
             handleICECandidate(msg)
+        case let msg as ErrorMessage:
+            handleErrorMessage(msg)
         default:
  // 其他消息类型不在此处理
             break
@@ -302,7 +330,21 @@ public final class SignalingService: ObservableObject {
     }
     
     private func handleSessionJoined(_ message: SessionJoinedMessage) {
+        guard sessionState == .joining else {
+            logger.debug("忽略非 joining 状态下的 session-joined: \(message.sessionId, privacy: .public)")
+            return
+        }
+        guard pendingJoinSessionId == message.sessionId else {
+            logger.warning(
+                "忽略过期的 session-joined: expected=\(self.pendingJoinSessionId ?? "-", privacy: .public) actual=\(message.sessionId, privacy: .public)"
+            )
+            return
+        }
+        cancelJoinTimeout()
+        pendingJoinSessionId = nil
+        activeJoinAttemptID = nil
         currentSessionId = message.sessionId
+        lastError = nil
         updateSessionState(.joined)
         logger.info("已加入会话: \(message.sessionId)")
     }
@@ -321,9 +363,78 @@ public final class SignalingService: ObservableObject {
         logger.debug("收到 ICE Candidate 来自设备: \(message.deviceId)")
         onICECandidate?(message.candidate, message.deviceId)
     }
+
+    private func handleErrorMessage(_ message: ErrorMessage) {
+        guard sessionState == .joining else {
+            logger.debug("收到信令错误但当前未在 joining: \(message.code, privacy: .public)")
+            return
+        }
+
+        let detail = message.details?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let reason = [message.message, detail]
+            .compactMap { value in
+                guard let value, !value.isEmpty else { return nil }
+                return value
+            }
+            .joined(separator: " - ")
+
+        failPendingJoin(reason: reason.isEmpty ? "服务器拒绝加入会话" : reason)
+    }
     
     private func updateSessionState(_ newState: SignalingSessionState) {
         sessionState = newState
         onSessionStateChange?(newState)
+    }
+
+    private func scheduleJoinTimeout(for sessionId: String, attemptID: UUID) {
+        cancelJoinTimeout()
+        let timeout = joinTimeout
+        joinTimeoutTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: timeout)
+            } catch {
+                return
+            }
+            await MainActor.run {
+                self?.handleJoinTimeout(for: sessionId, attemptID: attemptID)
+            }
+        }
+    }
+
+    private func cancelJoinTimeout() {
+        joinTimeoutTask?.cancel()
+        joinTimeoutTask = nil
+    }
+
+    private func cancelPendingJoin() {
+        cancelJoinTimeout()
+        pendingJoinSessionId = nil
+        activeJoinAttemptID = nil
+        currentSessionId = nil
+        lastError = nil
+    }
+
+    private func handleJoinTimeout(for sessionId: String, attemptID: UUID) {
+        guard sessionState == .joining,
+              pendingJoinSessionId == sessionId,
+              activeJoinAttemptID == attemptID else {
+            return
+        }
+        failPendingJoin(reason: "timeout")
+    }
+
+    private func handleAgentConnectionStateChange(_ state: AgentConnectionState) {
+        guard sessionState == .joining else { return }
+        if state == .authenticated {
+            return
+        }
+        failPendingJoin(reason: "connection_\(state.rawValue)")
+    }
+
+    private func failPendingJoin(reason: String) {
+        cancelPendingJoin()
+        lastError = .joinFailed(reason)
+        logger.error("加入会话失败: \(reason, privacy: .public)")
+        updateSessionState(.failed)
     }
 }

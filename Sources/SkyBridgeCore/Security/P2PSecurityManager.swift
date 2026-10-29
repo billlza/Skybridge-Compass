@@ -10,6 +10,10 @@ public class P2PSecurityManager: ObservableObject, Sendable {
     
  /// 量子加密管理器
     private let quantumCryptoManager: QuantumCryptoManager
+
+    /// Production resolves the signed shared-group entitlement. Legacy DEBUG
+    /// handshake tests inject an isolated typed scope without process globals.
+    private let sharedIdentityScopeSource: SkyBridgeSharedIdentityScopeSource
     
  /// 设备密钥对
     private var deviceKeyPair: P256.KeyAgreement.PrivateKey
@@ -40,12 +44,17 @@ public class P2PSecurityManager: ObservableObject, Sendable {
     
  // MARK: - 生命周期管理属性
     private var isStarted = false
+
+ /// 策略同步通知观察者令牌
+ /// nonisolated(unsafe)：令牌仅在 init 写入、deinit 读取移除；deinit 时实例已是唯一引用，访问独占且安全
+    nonisolated(unsafe) private var policyObserver: NSObjectProtocol?
     
  // MARK: - 初始化
     
     public init(configuration: P2PSecurityConfiguration = .default) {
         self.configuration = configuration
         self.quantumCryptoManager = QuantumCryptoManager()
+        self.sharedIdentityScopeSource = .requiredEntitlement
         self.deviceKeyPair = P256.KeyAgreement.PrivateKey()
         self.permissionManager = P2PPermissionManager()
         
@@ -53,7 +62,29 @@ public class P2PSecurityManager: ObservableObject, Sendable {
         loadTrustedDevices()
         setupPolicyObservers()
     }
-    
+
+    #if DEBUG || SKYBRIDGE_TESTING
+    internal init(
+        configuration: P2PSecurityConfiguration = .default,
+        sharedIdentityScopeSource: SkyBridgeSharedIdentityScopeSource
+    ) {
+        self.configuration = configuration
+        self.quantumCryptoManager = QuantumCryptoManager()
+        self.sharedIdentityScopeSource = sharedIdentityScopeSource
+        self.deviceKeyPair = P256.KeyAgreement.PrivateKey()
+        self.permissionManager = P2PPermissionManager()
+
+        loadTrustedDevices()
+        setupPolicyObservers()
+    }
+    #endif
+
+    deinit {
+        if let policyObserver {
+            NotificationCenter.default.removeObserver(policyObserver)
+        }
+    }
+
  // MARK: - 生命周期管理方法
     
  /// 启动P2P安全管理器
@@ -286,12 +317,18 @@ public class P2PSecurityManager: ObservableObject, Sendable {
         return try verifyCertificate(response.certificate)
     }
     
- /// 建立会话密钥
+    /// 建立会话密钥（Legacy / pre-paper）
+    ///
+    /// 仅保留给单元测试/调试辅助使用，Release 构建中不编译进产物，避免误用偏离论文协议栈。
+    #if DEBUG || SKYBRIDGE_TESTING
+    @available(*, deprecated, message: "Legacy pre-paper handshake API. Use `HandshakeDriver` / `TwoAttemptHandshakeManager` to establish `SessionKeys` instead.")
     public func establishSessionKey(with deviceId: String, publicKey: P256.KeyAgreement.PublicKey) async throws {
- // 优先使用 PQC 会话协商（旧系统通过 oqs-provider），失败时回退到经典 P256/HKDF
-        if let provider = PQCProviderFactory.makeProvider() {
- // 使用 ML‑KEM‑768 完成共享密钥协商
- // 注意：此处为简化演示，真实场景需通过上层信令交换对端公钥标签
+        // 优先使用 PQC 会话协商（旧系统通过 oqs-provider），失败时回退到经典 P256/HKDF
+        if let provider = PQCProviderFactory.makeProvider(
+            scopeSource: sharedIdentityScopeSource
+        ) {
+            // 使用 ML‑KEM‑768 完成共享密钥协商
+            // 注意：此处为简化演示，真实场景需通过上层信令交换对端公钥标签
             let enc = try await provider.kemEncapsulate(peerId: deviceId, kemVariant: "ML-KEM-768")
             let ss2 = try await provider.kemDecapsulate(peerId: deviceId, encapsulated: enc.encapsulated, kemVariant: "ML-KEM-768")
             let info = Data("session:\(deviceId)".utf8)
@@ -301,7 +338,8 @@ public class P2PSecurityManager: ObservableObject, Sendable {
             mutableShared.secureErase()
             return
         }
- // 回退：经典算法 P256/HKDF
+
+        // 回退：经典算法 P256/HKDF
         let sharedSecret = try deviceKeyPair.sharedSecretFromKeyAgreement(with: publicKey)
         let sessionKey = sharedSecret.hkdfDerivedSymmetricKey(
             using: SHA256.self,
@@ -312,25 +350,39 @@ public class P2PSecurityManager: ObservableObject, Sendable {
         sessionKeys[deviceId] = sessionKey
     }
 
+    @available(*, deprecated, message: "Legacy pre-paper KEM API. Use `CryptoProvider` KEM APIs via the protocol handshake layer.")
     public func kemEncapsulate(deviceId: String, kemVariant: String = "ML-KEM-768") async throws -> (sharedSecret: Data, encapsulated: Data) {
-        guard let provider = PQCProviderFactory.makeProvider() else { throw P2PSecurityError.authenticationFailed }
+        guard let provider = PQCProviderFactory.makeProvider(
+            scopeSource: sharedIdentityScopeSource
+        ) else {
+            throw P2PSecurityError.authenticationFailed
+        }
         return try await provider.kemEncapsulate(peerId: deviceId, kemVariant: kemVariant)
     }
 
+    @available(*, deprecated, message: "Legacy pre-paper KEM API. Use `CryptoProvider` KEM APIs via the protocol handshake layer.")
     public func kemDecapsulate(deviceId: String, encapsulated: Data, kemVariant: String = "ML-KEM-768") async throws -> Data {
-        guard let provider = PQCProviderFactory.makeProvider() else { throw P2PSecurityError.authenticationFailed }
+        guard let provider = PQCProviderFactory.makeProvider(
+            scopeSource: sharedIdentityScopeSource
+        ) else {
+            throw P2PSecurityError.authenticationFailed
+        }
         return try await provider.kemDecapsulate(peerId: deviceId, encapsulated: encapsulated, kemVariant: kemVariant)
     }
 
+    @available(*, deprecated, message: "Legacy pre-paper session-key store. Use `SessionKeys` produced by the protocol handshake.")
     public func deriveAndStoreSessionKey(sharedSecret: Data, deviceId: String) {
         let info = Data("session:\(deviceId)".utf8)
         let sk = SessionTokenKit.deriveSessionKey(sharedSecret: sharedSecret, salt: Data(), info: info)
         sessionKeys[deviceId] = sk
     }
 
+    @available(*, deprecated, message: "Legacy pre-paper session-key store. Use `SessionKeys` produced by the protocol handshake.")
     public func hasSessionKey(for deviceId: String) -> Bool {
         return sessionKeys[deviceId] != nil
     }
+    #endif
+
 
     
     
@@ -395,6 +447,11 @@ public class P2PSecurityManager: ObservableObject, Sendable {
  // 清理相关数据
         sessionKeys.removeValue(forKey: deviceId)
         permissionManager.clearAllPermissions(for: deviceId)
+        Task {
+            if #available(macOS 14.0, iOS 17.0, *) {
+                await PeerBootstrapTrustMaterialCleanup.forgetDevice(deviceIds: [deviceId])
+            }
+        }
         saveTrustedDevices()
     }
     
@@ -434,18 +491,17 @@ public class P2PSecurityManager: ObservableObject, Sendable {
     
  /// 创建设备证书
     private func createDeviceCertificate(timestamp: Date) throws -> P2PDeviceCertificate {
-        let publicKeyData = deviceKeyPair.publicKey.rawRepresentation
+        let signingKey = P256.Signing.PrivateKey()
+        let publicKeyData = signingKey.publicKey.rawRepresentation
+        let deviceId = getDeviceId()
         let fingerprint = SHA256.hash(data: publicKeyData).compactMap { String(format: "%02x", $0) }.joined()
         
- // 创建签名数据
-        let signatureData = publicKeyData + Data(getDeviceId().utf8) + Data(timestamp.timeIntervalSince1970.description.utf8)
-        
- // 使用P256.Signing进行签名
-        let signingKey = P256.Signing.PrivateKey()
+ // 自签名证书：公钥、设备ID 与时间戳全部绑定到同一把签名密钥。
+        let signatureData = publicKeyData + Data(deviceId.utf8) + Data(timestamp.timeIntervalSince1970.description.utf8)
         let signature = try signingKey.signature(for: signatureData)
         
         return P2PDeviceCertificate(
-            deviceId: getDeviceId(),
+            deviceId: deviceId,
             publicKey: publicKeyData,
             fingerprint: fingerprint,
             timestamp: timestamp,
@@ -466,24 +522,23 @@ public class P2PSecurityManager: ObservableObject, Sendable {
         guard certificate.fingerprint == computedFingerprint else {
             return false
         }
-        
- // 简化验证，实际应用中需要更复杂的证书验证
-        return true
+
+        let signatureData = certificate.publicKey
+            + Data(certificate.deviceId.utf8)
+            + Data(certificate.timestamp.timeIntervalSince1970.description.utf8)
+        let verifyingKey = try P256.Signing.PublicKey(rawRepresentation: certificate.publicKey)
+        let signature = try P256.Signing.ECDSASignature(rawRepresentation: certificate.signature)
+        return verifyingKey.isValidSignature(signature, for: signatureData)
     }
     
  /// 加载信任设备
     private func loadTrustedDevices() {
-        if let data = UserDefaults.standard.data(forKey: "TrustedDevices"),
-           let devices = try? JSONDecoder().decode(Set<String>.self, from: data) {
-            self.trustedDevices = devices
-        }
+        self.trustedDevices = Set(TrustedDevicePersistence.loadDeviceIDs())
     }
     
  /// 保存信任设备
     private func saveTrustedDevices() {
-        if let data = try? JSONEncoder().encode(trustedDevices) {
-            UserDefaults.standard.set(data, forKey: "TrustedDevices")
-        }
+        TrustedDevicePersistence.saveDeviceIDs(trustedDevices)
     }
     
  /// 证书有效性检查
@@ -551,7 +606,7 @@ public class P2PSecurityManager: ObservableObject, Sendable {
  // MARK: - 策略持久化
     private func setupPolicyObservers() {
  // 简化：在变更时直接持久化
-        NotificationCenter.default.addObserver(forName: NSNotification.Name("sec.policy.sync"), object: nil, queue: .main) { [weak self] _ in
+        policyObserver = NotificationCenter.default.addObserver(forName: NSNotification.Name("sec.policy.sync"), object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.persistPolicies()
             }
@@ -576,17 +631,18 @@ public class P2PSecurityManager: ObservableObject, Sendable {
     }
 }
 
-/// 量子加密管理器 - 多版本兼容实现（macOS 14.x/15.x/26.x 经典+liboqs，macOS 26+ 优先 CryptoKit PQC）
+/// 量子加密管理器 - 多版本兼容实现（iOS 17+/macOS 14+ 经典兼容，iOS/macOS 26+ 可在运行时证明 X-Wing 后启用 PQC 路径）
 ///
 /// 策略：
-/// - macOS 26+ 且 PQC API 可用：优先使用 ML-KEM/ML-DSA/HPKE（后量子密码学）
-/// - macOS 14/15 或 PQC 不可用：自动使用 AES-GCM（经典算法）
-/// - 自动回退：PQC 失败时无缝回退到 AES-GCM
+/// - iOS/macOS 26+ 且 X-Wing HPKE runtime probe 与本次操作所需 key material 均存在：automatic 模式可使用 HPKE X-Wing
+/// - 旧系统、SDK 符号缺失、runtime probe 失败或本次操作未配置 HPKE key material：automatic 模式使用 AES-GCM（经典兼容）
+/// - 一旦选择 PQC 路径，PQC 失败必须抛错，不得静默降级为 AES-GCM
+/// - pqcOnly：未证明 X-Wing runtime 可用时 fail closed；缺少 HPKE key material 或 PQC 操作失败时抛错
 /// - 性能优化：Apple Silicon 优化的分块处理、零拷贝、缓存能力检测
 public class QuantumCryptoManager {
  /// 运行时模式
     public enum QuantumMode: Sendable {
-        case automatic    // 自动选择（优先 PQC，失败回退）
+        case automatic    // 自动选择；未选择 PQC 时使用经典算法，已选择 PQC 后失败即抛错
         case classicOnly  // 强制仅经典（AES-GCM）
         case pqcOnly      // 强制仅 PQC（macOS 26+，失败抛错）
     }
@@ -610,22 +666,24 @@ public class QuantumCryptoManager {
     private let capabilityCache: CapabilityCache
     private let perfLock = OSAllocatedUnfairLock<PerformanceMetrics>(initialState: PerformanceMetrics())
     
- // HPKE 密钥缓存（仅在 macOS 26 可用时参与编译）
+ // HPKE 密钥缓存（仅在 iOS/macOS 26 可用时参与编译）
  // 注意：存储属性不能使用 @available，使用可选类型并在方法中检查版本
     private var hpkeRecipientPublicKeyStorage: Any? = nil
     private var hpkeRecipientPrivateKeyStorage: Any? = nil
     
-    @available(iOS 26.0, macOS 26.0, *)
-    private var hpkeRecipientPublicKey: XWingMLKEM768X25519.PublicKey? {
-        get { hpkeRecipientPublicKeyStorage as? XWingMLKEM768X25519.PublicKey }
-        set { hpkeRecipientPublicKeyStorage = newValue }
-    }
+    #if HAS_APPLE_PQC_SDK
+        @available(iOS 26.0, macOS 26.0, *)
+        private var hpkeRecipientPublicKey: XWingMLKEM768X25519.PublicKey? {
+            get { hpkeRecipientPublicKeyStorage as? XWingMLKEM768X25519.PublicKey }
+            set { hpkeRecipientPublicKeyStorage = newValue }
+        }
 
-    @available(iOS 26.0, macOS 26.0, *)
-    private var hpkeRecipientPrivateKey: XWingMLKEM768X25519.PrivateKey? {
-        get { hpkeRecipientPrivateKeyStorage as? XWingMLKEM768X25519.PrivateKey }
-        set { hpkeRecipientPrivateKeyStorage = newValue }
-    }
+        @available(iOS 26.0, macOS 26.0, *)
+        private var hpkeRecipientPrivateKey: XWingMLKEM768X25519.PrivateKey? {
+            get { hpkeRecipientPrivateKeyStorage as? XWingMLKEM768X25519.PrivateKey }
+            set { hpkeRecipientPrivateKeyStorage = newValue }
+        }
+    #endif
     
  /// 性能指标
     private struct PerformanceMetrics: Sendable {
@@ -634,7 +692,12 @@ public class QuantumCryptoManager {
         var encMs: UInt64 = 0
         var decMs: UInt64 = 0
         var pqcUsageCount: UInt64 = 0
-        var classicFallbackCount: UInt64 = 0
+        var classicSuccessCount: UInt64 = 0
+    }
+
+    private enum QuantumOperation {
+        case encrypt
+        case decrypt
     }
     
  /// 初始化量子加密管理器
@@ -657,13 +720,20 @@ public class QuantumCryptoManager {
         SkyBridgeLogger.security.debugOnly("   - 运行模式: \(mode)")
     }
     
- /// 运行时检测 PQC 能力（iOS 26+/macOS 26+ 原生 PQC 可用）
+ /// 运行时检测当前 API 实际会使用的 X-Wing HPKE 能力。
+ /// SDK 符号和系统版本不是可用性证明；该 manager 的 PQC 路径只有在
+ /// suite-specific X-Wing seal/open runtime probe 通过后才标记为可用。
     private static func detectPQCCapability() -> (hasPQC: Bool, version: String, algorithmType: AlgorithmType) {
         let version = ProcessInfo.processInfo.operatingSystemVersionString
 
-        if #available(iOS 26.0, macOS 26.0, *) {
-            return (hasPQC: true, version: version, algorithmType: .pqcHybrid)
-        }
+        #if HAS_APPLE_PQC_SDK
+            if #available(iOS 26.0, macOS 26.0, *) {
+                let hasXWingRuntime = PQCProviderFactory.supportsSuite(.hybridXWing)
+                if hasXWingRuntime {
+                    return (hasPQC: true, version: version, algorithmType: .pqcHybrid)
+                }
+            }
+        #endif
         return (hasPQC: false, version: version, algorithmType: .classic)
     }
     
@@ -677,22 +747,31 @@ public class QuantumCryptoManager {
  /// 加密（多版本兼容，自动选择最优算法）
     public func quantumSafeEncrypt(_ data: Data, using key: SymmetricKey) throws -> Data {
         let t0 = DispatchTime.now().uptimeNanoseconds
+        try requirePQCIfStrictMode(operation: "加密", unavailableCode: -102)
         
  // 根据模式和能力选择算法
-        let usePQC = shouldUsePQC()
+        let usePQC = shouldUsePQC(for: .encrypt)
         
         if usePQC {
- // 尝试使用 PQC（macOS 15+）
-            if #available(macOS 15.0, *) {
-                if let result = try? encryptWithPQC(data, using: key) {
+ // 尝试使用 PQC（iOS 17+/macOS 15+ API 边界；实际 X-Wing 操作仍要求 iOS/macOS 26+）
+            if #available(iOS 17.0, macOS 15.0, *) {
+                do {
+                    let result = try encryptWithPQC(data, using: key)
                     recordPerf(encBytes: UInt64(data.count), encMs: UInt64((DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000), isPQC: true)
                     return result
-                } else if mode == .pqcOnly {
-                    throw NSError(domain: "QuantumCrypto", code: -100, userInfo: [NSLocalizedDescriptionKey: "PQC 加密失败，且模式为仅 PQC"])
+                } catch {
+                    throw makePQCFailureError(
+                        code: -100,
+                        operation: "加密",
+                        underlyingError: error
+                    )
                 }
             }
- // 回退到经典算法
-            recordPerf(encBytes: 0, encMs: 0, isPQC: false)
+            throw makePQCFailureError(
+                code: -100,
+                operation: "加密",
+                underlyingError: NSError(domain: "QuantumCrypto", code: -102, userInfo: [NSLocalizedDescriptionKey: "当前系统版本不满足 PQC 加密 API 调用边界"])
+            )
         }
         
  // 使用经典 AES-GCM（兼容所有版本，性能最优）
@@ -705,22 +784,31 @@ public class QuantumCryptoManager {
  /// 解密（多版本兼容，自动选择最优算法）
     public func quantumSafeDecrypt(_ encryptedData: Data, using key: SymmetricKey) throws -> Data {
         let t0 = DispatchTime.now().uptimeNanoseconds
+        try requirePQCIfStrictMode(operation: "解密", unavailableCode: -103)
         
  // 根据模式和能力选择算法
-        let usePQC = shouldUsePQC()
+        let usePQC = shouldUsePQC(for: .decrypt)
         
         if usePQC {
- // 尝试使用 PQC（macOS 15+）
-            if #available(macOS 15.0, *) {
-                if let result = try? decryptWithPQC(encryptedData, using: key) {
+ // 尝试使用 PQC（iOS 17+/macOS 15+ API 边界；实际 X-Wing 操作仍要求 iOS/macOS 26+）
+            if #available(iOS 17.0, macOS 15.0, *) {
+                do {
+                    let result = try decryptWithPQC(encryptedData, using: key)
                     recordPerf(decBytes: UInt64(encryptedData.count), decMs: UInt64((DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000), isPQC: true)
                     return result
-                } else if mode == .pqcOnly {
-                    throw NSError(domain: "QuantumCrypto", code: -101, userInfo: [NSLocalizedDescriptionKey: "PQC 解密失败，且模式为仅 PQC"])
+                } catch {
+                    throw makePQCFailureError(
+                        code: -101,
+                        operation: "解密",
+                        underlyingError: error
+                    )
                 }
             }
- // 回退到经典算法
-            recordPerf(decBytes: 0, decMs: 0, isPQC: false)
+            throw makePQCFailureError(
+                code: -101,
+                operation: "解密",
+                underlyingError: NSError(domain: "QuantumCrypto", code: -103, userInfo: [NSLocalizedDescriptionKey: "当前系统版本不满足 PQC 解密 API 调用边界"])
+            )
         }
         
  // 使用经典 AES-GCM（兼容所有版本，性能最优）
@@ -731,26 +819,63 @@ public class QuantumCryptoManager {
     }
     
  // MARK: - 私有实现方法
+
+    private func requirePQCIfStrictMode(operation: String, unavailableCode: Int) throws {
+        guard mode == .pqcOnly, !capabilityCache.hasPQC else { return }
+        throw NSError(
+            domain: "QuantumCrypto",
+            code: unavailableCode,
+            userInfo: [
+                NSLocalizedDescriptionKey: "PQC \(operation)失败：当前运行环境不支持 PQC，且模式为仅 PQC"
+            ]
+        )
+    }
+
+    private func makePQCFailureError(code: Int, operation: String, underlyingError: Error) -> NSError {
+        NSError(
+            domain: "QuantumCrypto",
+            code: code,
+            userInfo: [
+                NSLocalizedDescriptionKey: "PQC \(operation)失败；所选 PQC 路径不得静默降级到 AES-GCM",
+                NSUnderlyingErrorKey: underlyingError
+            ]
+        )
+    }
     
- /// 判断是否应使用 PQC
-    private func shouldUsePQC() -> Bool {
+	 /// 判断是否应使用 PQC
+    private func shouldUsePQC(for operation: QuantumOperation) -> Bool {
         switch mode {
         case .classicOnly:
             return false
         case .pqcOnly:
-            return capabilityCache.hasPQC
+            return true
         case .automatic:
-            return capabilityCache.hasPQC
+            return capabilityCache.hasPQC && hasHPKEKeyMaterial(for: operation)
         }
     }
+
+    private func hasHPKEKeyMaterial(for operation: QuantumOperation) -> Bool {
+        #if HAS_APPLE_PQC_SDK
+        if #available(iOS 26.0, macOS 26.0, *) {
+            switch operation {
+            case .encrypt:
+                return hpkeRecipientPublicKey != nil
+            case .decrypt:
+                return hpkeRecipientPrivateKey != nil
+            }
+        }
+        #endif
+        return false
+    }
     
- /// 使用 PQC 加密（iOS 17+/macOS 15+）
+	 /// 使用 PQC 加密（iOS 17+/macOS 15+）
     @available(iOS 17.0, macOS 15.0, *)
     private func encryptWithPQC(_ data: Data, using key: SymmetricKey) throws -> Data {
- // 仅在 iOS 26+/macOS 26+ 环境下执行 HPKE X‑Wing 加密；较低版本抛错由上层回退到 AES‑GCM
+ // 仅在 iOS 26+/macOS 26+ 环境下执行 HPKE X‑Wing 加密；较低版本抛错由调用方显式处理
         if #available(iOS 26.0, macOS 26.0, *) {
- // 说明：为保持现有接口不变，PQC 分支采用 HPKE X‑Wing（X25519+ML‑KEM‑768）
- // 需要事先设置对端的公钥；若未设置，则回退由调用方决定（此处抛错以触发回退）。
+            #if HAS_APPLE_PQC_SDK
+	 // 说明：为保持现有接口不变，PQC 分支采用 HPKE X‑Wing（X25519+ML‑KEM‑768）
+		 // 需要事先设置对端的公钥；若未设置，则抛错并由调用方保持 fail-closed。
             guard let hpkeRecipientPublicKey = self.hpkeRecipientPublicKey else {
                 throw NSError(domain: "QuantumCrypto", code: -210, userInfo: [NSLocalizedDescriptionKey: "缺少 HPKE 收件人公钥"])
             }
@@ -772,17 +897,21 @@ public class QuantumCryptoManager {
             envelope.append(encapsulatedKey)
             envelope.append(ciphertext)
             return envelope
+            #else
+            throw NSError(domain: "QuantumCrypto", code: -215, userInfo: [NSLocalizedDescriptionKey: "当前 SDK 未提供 Apple PQC 符号"])
+            #endif
         } else {
             throw NSError(domain: "QuantumCrypto", code: -211, userInfo: [NSLocalizedDescriptionKey: "当前系统版本不支持 PQC（HPKE X‑Wing）"])
         }
     }
     
- /// 使用 PQC 解密（iOS 17+/macOS 15+）
+	 /// 使用 PQC 解密（iOS 17+/macOS 15+）
     @available(iOS 17.0, macOS 15.0, *)
     private func decryptWithPQC(_ encryptedData: Data, using key: SymmetricKey) throws -> Data {
- // 仅在 iOS 26+/macOS 26+ 环境下执行 HPKE X‑Wing 解密；较低版本抛错由上层回退到 AES‑GCM
+ // 仅在 iOS 26+/macOS 26+ 环境下执行 HPKE X‑Wing 解密；较低版本抛错由调用方显式处理
         if #available(iOS 26.0, macOS 26.0, *) {
- // 需要本端的 HPKE 私钥；若未设置，则抛错以触发回退。
+            #if HAS_APPLE_PQC_SDK
+		 // 需要本端的 HPKE 私钥；若未设置，则抛错并由调用方保持 fail-closed。
             guard let hpkeRecipientPrivateKey = self.hpkeRecipientPrivateKey else {
                 throw NSError(domain: "QuantumCrypto", code: -211, userInfo: [NSLocalizedDescriptionKey: "缺少 HPKE 接收方私钥"])
             }
@@ -811,15 +940,19 @@ public class QuantumCryptoManager {
             )
             let aad = key.withUnsafeBytes { Data($0) }
             return try recipient.open(ciphertext, authenticating: aad)
+            #else
+            throw NSError(domain: "QuantumCrypto", code: -216, userInfo: [NSLocalizedDescriptionKey: "当前 SDK 未提供 Apple PQC 符号"])
+            #endif
         } else {
             throw NSError(domain: "QuantumCrypto", code: -214, userInfo: [NSLocalizedDescriptionKey: "当前系统版本不支持 PQC（HPKE X‑Wing）"])
         }
     }
 
- // MARK: - HPKE 密钥管理（仅 macOS 26+ 可用）
-    
- /// 生成 HPKE X-Wing 密钥对（iOS 26+/macOS 26+）
- /// - Returns: (私钥, 公钥) 元组
+	 // MARK: - HPKE 密钥管理（仅 iOS/macOS 26+ 可用）
+
+    #if HAS_APPLE_PQC_SDK
+	 /// 生成 HPKE X-Wing 密钥对（iOS 26+/macOS 26+）
+	 /// - Returns: (私钥, 公钥) 元组
  /// - Note:
  /// - 私钥使用 integrityCheckedRepresentation 序列化后可安全存储到钥匙串
  /// - 公钥可安全共享，用于密钥交换
@@ -833,44 +966,49 @@ public class QuantumCryptoManager {
         return (privateKey, publicKey)
     }
     
- /// 设置对端公钥（用于加密）
-    @available(macOS 26.0, *)
+	 /// 设置对端公钥（用于加密）
+    @available(iOS 26.0, macOS 26.0, *)
     public func setHPKERecipientPublicKey(_ key: XWingMLKEM768X25519.PublicKey) {
         self.hpkeRecipientPublicKey = key
     }
-    
- /// 设置本端私钥（用于解密）
-    @available(macOS 26.0, *)
+
+	 /// 设置本端私钥（用于解密）
+    @available(iOS 26.0, macOS 26.0, *)
     public func setHPKERecipientPrivateKey(_ key: XWingMLKEM768X25519.PrivateKey) {
         self.hpkeRecipientPrivateKey = key
     }
-    
- /// 检查是否已设置 HPKE 密钥
-    @available(macOS 15.0, *)
+    #endif
+
+	 /// 检查是否已设置 HPKE 密钥
+    @available(iOS 17.0, macOS 15.0, *)
     public var hasHPKEKeys: Bool {
- // 仅在 26+ 系统下访问 HPKE 密钥状态；低版本始终返回 false
-        if #available(macOS 26.0, *) {
+	 // 仅在 26+ 系统下访问 HPKE 密钥状态；低版本始终返回 false
+        #if HAS_APPLE_PQC_SDK
+        if #available(iOS 26.0, macOS 26.0, *) {
             return hpkeRecipientPublicKey != nil && hpkeRecipientPrivateKey != nil
-        } else {
-            return false
         }
+        #endif
+        return false
     }
     
  /// 清除 HPKE 密钥（内存中）
-    @available(macOS 15.0, *)
+    @available(iOS 17.0, macOS 15.0, *)
     public func clearHPKEKeys() {
- // 仅在 26+ 清理 HPKE 密钥；低版本无需操作
-        if #available(macOS 26.0, *) {
+	 // 仅在 26+ 清理 HPKE 密钥；低版本无需操作
+        #if HAS_APPLE_PQC_SDK
+        if #available(iOS 26.0, macOS 26.0, *) {
             hpkeRecipientPublicKey = nil
             hpkeRecipientPrivateKey = nil
         }
+        #endif
     }
-    
- /// 从钥匙串加载 HPKE 私钥（macOS 26+）
+
+    #if HAS_APPLE_PQC_SDK
+	 /// 从钥匙串加载 HPKE 私钥（iOS/macOS 26+）
  /// - Parameter keyTag: 钥匙串标签（用于标识密钥）
  /// - Returns: 成功返回私钥，失败返回 nil
  /// - Note: 使用 CryptoKit 的 GenericPasswordConvertible 协议或 integrityCheckedRepresentation
-    @available(macOS 26.0, *)
+    @available(iOS 26.0, macOS 26.0, *)
     public func loadHPKEPrivateKeyFromKeychain(keyTag: String) throws -> XWingMLKEM768X25519.PrivateKey? {
  // 方法1：使用 GenericPasswordConvertible 协议（如果 X-Wing 密钥实现了该协议）
  // 这是 CryptoKit 推荐的方式
@@ -906,7 +1044,7 @@ public class QuantumCryptoManager {
         }
     }
     
- /// 保存 HPKE 私钥到钥匙串（macOS 26+）
+ /// 保存 HPKE 私钥到钥匙串（iOS/macOS 26+）
  /// - Parameters:
  /// - privateKey: 要保存的私钥
  /// - keyTag: 钥匙串标签
@@ -915,7 +1053,7 @@ public class QuantumCryptoManager {
  /// - integrityCheckedRepresentation 是设备绑定的，只能在生成它的设备上恢复
  /// - X-Wing 密钥可能实现 GenericPasswordConvertible 协议，可直接使用标准方法
  /// - Secure Enclave PQC 仅在 macOS 26+ 可用，且需要 SecureEnclave.MLKEM*/MLDSA* 密钥类型
-    @available(macOS 26.0, *)
+    @available(iOS 26.0, macOS 26.0, *)
     public func saveHPKEPrivateKeyToKeychain(_ privateKey: XWingMLKEM768X25519.PrivateKey, keyTag: String) throws {
  // 获取带完整性校验的私钥表示（Data 类型属性）
  // integrityCheckedRepresentation 包含完整性校验信息，防止篡改
@@ -951,23 +1089,25 @@ public class QuantumCryptoManager {
  /// - Returns: (ML-KEM 私钥, ML-KEM 公钥) 元组
     @available(macOS 26.0, *)
     public static func generateSecureEnclaveMLKEMKeyPair() throws -> (privateKey: SecureEnclave.MLKEM768.PrivateKey, publicKey: MLKEM768.PublicKey) {
- // 在 Secure Enclave 中生成 ML-KEM 768 私钥
+	 // 在 Secure Enclave 中生成 ML-KEM 768 私钥
  // 私钥永远不离开硬件安全区域
  // 公钥可以从私钥导出，类型可能是 MLKEM768.PublicKey
         let privateKey = try SecureEnclave.MLKEM768.PrivateKey()
         let publicKey = privateKey.publicKey
         return (privateKey, publicKey)
     }
-    
- /// 自动初始化：从钥匙串加载 HPKE 私钥（如果存在）
+    #endif
+
+	 /// 自动初始化：从钥匙串加载 HPKE 私钥（如果存在）
  /// - Parameter keyTag: 钥匙串标签
  /// - Returns: 是否成功加载
  /// - Note: 使用 integrityCheckedRepresentation 恢复的私钥只能在生成它的设备上使用
-    @available(macOS 15.0, *)
+    @available(iOS 17.0, macOS 15.0, *)
     @discardableResult
     public func autoLoadHPKEPrivateKey(keyTag: String = "com.skybridge.hpke.private") -> Bool {
- // 在 macOS 15.x 环境下进行运行时判断；仅在 26+ 调用钥匙串恢复
-        if #available(macOS 26.0, *) {
+	 // 在旧系统环境下进行运行时判断；仅在 26+ 调用钥匙串恢复
+        #if HAS_APPLE_PQC_SDK
+        if #available(iOS 26.0, macOS 26.0, *) {
             do {
                 if let privateKey = try loadHPKEPrivateKeyFromKeychain(keyTag: keyTag) {
                     setHPKERecipientPrivateKey(privateKey)
@@ -978,15 +1118,18 @@ public class QuantumCryptoManager {
                 SkyBridgeLogger.security.error("⚠️ 自动加载 HPKE 私钥失败: \(error.localizedDescription, privacy: .private)")
             }
         }
+        #endif
         return false
     }
-    
- /// 获取本端公钥（用于密钥交换）
+
+    #if HAS_APPLE_PQC_SDK
+	 /// 获取本端公钥（用于密钥交换）
  /// - Returns: 当前设置的私钥对应的公钥，如果未设置则返回 nil
-    @available(macOS 26.0, *)
+    @available(iOS 26.0, macOS 26.0, *)
     public func getHPKEPublicKey() -> XWingMLKEM768X25519.PublicKey? {
         return hpkeRecipientPrivateKey?.publicKey
     }
+    #endif
     
  /// 使用 AES-GCM 加密（所有版本支持，性能优化）
     private func encryptWithAESGCM(_ data: Data, using key: SymmetricKey) throws -> Data {
@@ -1061,7 +1204,7 @@ public class QuantumCryptoManager {
             if isPQC {
                 metrics.pqcUsageCount &+= 1
             } else {
-                metrics.classicFallbackCount &+= 1
+                metrics.classicSuccessCount &+= 1
             }
         }
     }
@@ -1071,16 +1214,32 @@ public class QuantumCryptoManager {
  /// 性能快照（用于 Dashboard 展示）
     public var performanceSnapshot: (encBytes: UInt64, decBytes: UInt64, encMs: UInt64, decMs: UInt64, pqcCount: UInt64, classicCount: UInt64) {
         perfLock.withLock { metrics in
-            (metrics.encBytes, metrics.decBytes, metrics.encMs, metrics.decMs, metrics.pqcUsageCount, metrics.classicFallbackCount)
+            (metrics.encBytes, metrics.decBytes, metrics.encMs, metrics.decMs, metrics.pqcUsageCount, metrics.classicSuccessCount)
         }
     }
     
- /// 当前使用的算法类型
+ /// 本地 runtime 探测到的候选算法；不代表已协商或本次操作已使用。
+    public var localCapabilityAlgorithm: AlgorithmType {
+        return capabilityCache.algorithmType
+    }
+
+ /// 本地 X-Wing runtime 是否通过 suite-specific probe；不代表 peer 协商或 key material 已存在。
+    public var localPqcRuntimeAvailable: Bool {
+        return capabilityCache.hasPQC
+    }
+
+ /// 当前可完成双向操作的算法类型；只有具备 X-Wing runtime 与收发 HPKE key material 时才报告 HPKE-X-Wing。
     public var currentAlgorithm: AlgorithmType {
+        guard mode != .classicOnly,
+              capabilityCache.hasPQC,
+              hasHPKEKeyMaterial(for: .encrypt),
+              hasHPKEKeyMaterial(for: .decrypt) else {
+            return .classic
+        }
         return capabilityCache.algorithmType
     }
     
- /// 系统版本信息
+ /// 系统版本和本地 X-Wing runtime proof；不代表已协商或本次操作已使用 PQC。
     public var systemInfo: (version: String, hasPQC: Bool) {
         return (capabilityCache.systemVersion, capabilityCache.hasPQC)
     }
@@ -1097,8 +1256,27 @@ public struct SessionTokenKit {
     public static func issueToken(provider: PQCProvider, payload: Data, peerId: String) async throws -> Data {
         return try await provider.sign(data: payload, peerId: peerId, algorithm: "ML-DSA-65")
     }
- /// 验证令牌签名（ML‑DSA‑65）
-    public static func verifyToken(provider: PQCProvider, payload: Data, signature: Data, peerId: String) async -> Bool {
-        return await provider.verify(data: payload, signature: signature, peerId: peerId, algorithm: "ML-DSA-65")
+ /// 验证令牌签名（ML‑DSA‑65）。远端公钥必须来自已认证的信任记录。
+    public static func verifyToken(
+        provider: PQCProvider,
+        payload: Data,
+        signature: Data,
+        peerId: String,
+        authenticatedPublicKey: Data
+    ) async throws -> Bool {
+        guard let consumer = provider as? any AuthenticatedPQCSigningKeyConsumer else {
+            throw PQCSigningTrustError.unsupportedSignatureAlgorithm("ML-DSA-65")
+        }
+        try await consumer.registerAuthenticatedSigningPublicKey(
+            authenticatedPublicKey,
+            peerId: peerId,
+            algorithm: "ML-DSA-65"
+        )
+        return await provider.verify(
+            data: payload,
+            signature: signature,
+            peerId: peerId,
+            algorithm: "ML-DSA-65"
+        )
     }
 }

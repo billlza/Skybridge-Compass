@@ -59,7 +59,7 @@ final class PolicyDowngradeBenchTests: XCTestCase {
                 ) { strategy, _ in
                     let count = await attemptCounter.next()
                     if count == 1 {
-                        throw HandshakeError.failed(.suiteNotSupported)
+                        throw HandshakeError.failed(.suiteNegotiationFailed)
                     }
                     if strategy == .classicOnly {
                         await tracker.recordClassicAttempt()
@@ -80,12 +80,10 @@ final class PolicyDowngradeBenchTests: XCTestCase {
     }
 
     private func writeCSV(rows: [String]) throws {
-        let artifactsDir = URL(fileURLWithPath: "Artifacts")
+        let artifactsDir = ArtifactDate.writableArtifactsDirectory()
         try FileManager.default.createDirectory(at: artifactsDir, withIntermediateDirectories: true)
 
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy-MM-dd"
-        let dateString = dateFormatter.string(from: Date())
+        let dateString = ArtifactDate.current()
         let csvPath = artifactsDir.appendingPathComponent("policy_downgrade_\(dateString).csv")
 
         var content = "policy,iterations,classic_attempts,fallback_events\n"

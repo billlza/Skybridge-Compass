@@ -27,7 +27,8 @@ final class MultiAlgorithmSignatureVerifierPropertyTests: XCTestCase {
         publicKey: Data,
         protocolPublicKey: Data? = nil,
         legacyP256PublicKey: Data? = nil,
-        signatureAlgorithm: SignatureAlgorithm? = nil
+        signatureAlgorithm: SignatureAlgorithm? = nil,
+        lifecycleState: TrustLifecycleState = .active
     ) -> TrustRecord {
         TrustRecord(
             deviceId: deviceId,
@@ -47,7 +48,8 @@ final class MultiAlgorithmSignatureVerifierPropertyTests: XCTestCase {
             signature: Data(repeating: 0, count: 64),
             recordType: .add,
             revokedAt: nil,
-            deviceName: "Test Device"
+            deviceName: "Test Device",
+            lifecycleState: lifecycleState
         )
     }
     
@@ -183,12 +185,42 @@ final class MultiAlgorithmSignatureVerifierPropertyTests: XCTestCase {
         )
         XCTAssertTrue(result, "Verify with TrustRecord should succeed")
     }
+
+    func testNonActiveTrustRecordsCannotVerifyValidSignatures() async throws {
+        let privateKey = Curve25519.Signing.PrivateKey()
+        let publicKey = privateKey.publicKey.rawRepresentation
+        let data = Data("inactive trust record".utf8)
+        let signature = try privateKey.signature(for: data)
+
+        for lifecycleState in [
+            TrustLifecycleState.quarantined,
+            .reverificationRequired,
+            .revoked
+        ] {
+            let record = createTestTrustRecord(
+                deviceId: "inactive-\(lifecycleState.rawValue)",
+                publicKey: publicKey,
+                protocolPublicKey: publicKey,
+                signatureAlgorithm: .ed25519,
+                lifecycleState: lifecycleState
+            )
+            XCTAssertFalse(record.allowsLegacyFallback)
+            XCTAssertNil(record.getVerificationPublicKey(for: .ed25519))
+
+            let verified = try await MultiAlgorithmSignatureVerifier.verify(
+                data: data,
+                signature: Data(signature),
+                expectedAlgorithm: .ed25519,
+                trustRecord: record
+            )
+            XCTAssertFalse(verified, "\(lifecycleState.rawValue) records must not authenticate")
+        }
+    }
     
  // MARK: - Property 6.5: getVerificationPublicKey returns correct key
     
     func testGetVerificationPublicKeyReturnsCorrectKey() {
         let ed25519Key = Data(repeating: 0x01, count: 32)
-        let p256Key = Data(repeating: 0x02, count: 65)
         let legacyKey = Data(repeating: 0x03, count: 65)
         
  // TrustRecord with all keys
@@ -201,8 +233,8 @@ final class MultiAlgorithmSignatureVerifierPropertyTests: XCTestCase {
  // Ed25519 should return protocolPublicKey
         XCTAssertEqual(trustRecord.getVerificationPublicKey(for: .ed25519), ed25519Key)
         
- // ML-DSA-65 should return protocolPublicKey
-        XCTAssertEqual(trustRecord.getVerificationPublicKey(for: .mlDSA65), ed25519Key)
+ // An Ed25519-sized protocol key must never be reinterpreted as ML-DSA-65.
+        XCTAssertNil(trustRecord.getVerificationPublicKey(for: .mlDSA65))
         
  // P-256 ECDSA should return legacyP256PublicKey
         XCTAssertEqual(trustRecord.getVerificationPublicKey(for: .p256ECDSA), legacyKey)

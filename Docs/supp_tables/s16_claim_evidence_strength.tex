@@ -1,0 +1,22 @@
+\begin{table*}[!t]
+\centering
+\scriptsize
+\caption{Claim-to-evidence strength map (main-paper claims only).}
+\label{tab:claim-evidence-strength}
+\begin{tabular}{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.22}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.20}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.23}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.35}}@{}}
+\toprule
+Claim axis & Evidence method & Scale / sample scope & Artifact / section anchor \\
+\midrule
+Negotiation integrity and transcript binding & Formal proof obligations + protocol/property tests & Theorem/Proposition set + reproducible seeded tests & Section~\ref{sec:security-model}; \texttt{formal/skybridge\_v2.spthy}; Section~\ref{sec:evaluation} \\
+Policy-gated downgrade correctness & Decision-matrix validation + forced-error policy bench + migration-threat harness contrast & N=1000 per policy/scenario family; Wilson CI reported & Fig.~\ref{fig:policy-downgrade}; Fig.~\ref{fig:downgrade-matrix}; Table~\ref{tab:ablation-by-property}; Table~\ref{tab:migration-threat-harness}; Table~\ref{tab:migration-provider-matrix}; policy-downgrade + migration-threat CSV artifacts \\
+Deterministic failure semantics and event typing & Fault injection + spec-to-event trace mapping & Fault injection n=1000 per scenario; MR=1.00/SR=0.00 in reported classes & Table~\ref{tab:failure-mode-robustness}; Table~\ref{tab:audit-signal-fidelity}; fault-injection CSV artifact \\
+Performance and overhead characterization & Distributional microbench + system-level amortization & Classic/liboqs N=1000, CryptoKit N=5000; multi-batch CI support & Table~\ref{tab:perf-summary}; Fig.~\ref{fig:system-impact-amortization}; Section~\ref{sec:system-impact} \\
+External-validity guardrail (deployment instance) & Controlled simulation + kernel cross-check + fleet-level migration dynamics + real-network micro-study & Controlled N=10{,}000/condition; dedicated direct-path external run n=50/payload & Table~\ref{tab:network-conditions}; Table~\ref{tab:migration-fleet-behavior}; Section~\ref{sec:network-conditions}; Supplementary Tables~\ref{tab:supp-kernel-emulation}, \ref{tab:supp-ec2-direct}, \ref{tab:supp-interop-matrix}; migration-fleet/interoperability CSV artifacts \\
+\bottomrule
+\end{tabular}
+\end{table*}
+

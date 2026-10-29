@@ -3,10 +3,22 @@ import Atomics
 import Network
 import Security
 import SkyBridgeCore
+import SkyBridgeBenchmarkSupport
 import NoiseKit
 
 @main
 struct BaselineBenchRunner {
+    private enum BenchConfigurationError: Error, CustomStringConvertible {
+        case invalidEnvironmentValue(key: String, value: String, expected: String)
+
+        var description: String {
+            switch self {
+            case .invalidEnvironmentValue(let key, let value, let expected):
+                return "invalid \(key)=\(value.debugDescription); expected \(expected)"
+            }
+        }
+    }
+
     struct BenchConfig {
         let iterations: Int
         let warmup: Int
@@ -17,12 +29,17 @@ struct BaselineBenchRunner {
         let dtlsPort: UInt16
         let noisePort: UInt16
         let skybridgePort: UInt16
-        let p12Path: String
-        let p12Password: String
+        let certificatePath: String
+        let privateKeyPath: String
         let protocolFilter: Set<String>?
         let kickoffBytes: Int
         let tlsVersion: tls_protocol_version_t
         let quicAlpn: String
+    }
+
+    struct LoadedIdentity {
+        let secIdentity: SecIdentity
+        let certificateDER: Data
     }
 
     struct TimingSample {
@@ -36,25 +53,20 @@ struct BaselineBenchRunner {
 
     static func main() async {
         do {
-            let config = makeConfig()
-            let skipIdentity = boolEnv(ProcessInfo.processInfo.environment, "BASELINE_SKIP_IDENTITY", defaultValue: false)
+            let config = try makeConfig()
             if debugEnabled() {
                 let env = ProcessInfo.processInfo.environment
-                print("[BASELINE] ENV BASELINE_PROTOCOLS=\(env["BASELINE_PROTOCOLS"] ?? "<nil>") BASELINE_SKIP_IDENTITY=\(env["BASELINE_SKIP_IDENTITY"] ?? "<nil>")")
+                print("[BASELINE] ENV BASELINE_PROTOCOLS=\(env["BASELINE_PROTOCOLS"] ?? "<nil>")")
             }
             let needsIdentity = shouldRun("TLS13", filter: config.protocolFilter)
                 || shouldRun("QUIC", filter: config.protocolFilter)
                 || shouldRun("WebRTC-DTLS", filter: config.protocolFilter)
-            var identity: SecIdentity?
-            if needsIdentity && !skipIdentity {
-                do {
-                    identity = try loadIdentity(path: config.p12Path, password: config.p12Password)
-                } catch {
-                    print("[BASELINE] Skipping TLS/QUIC/DTLS: \(error)")
-                }
-            } else if needsIdentity && skipIdentity {
-                print("[BASELINE] Skipping TLS/QUIC/DTLS: BASELINE_SKIP_IDENTITY=1")
-            }
+            let identity = needsIdentity
+                ? try loadIdentity(
+                    certificatePath: config.certificatePath,
+                    privateKeyPath: config.privateKeyPath
+                )
+                : nil
 
             var samples: [TimingSample] = []
 
@@ -69,6 +81,7 @@ struct BaselineBenchRunner {
                 samples += try await runSkyBridgeBench(config: config, filter: config.protocolFilter)
             }
 
+            try validateTimingSamples(samples, config: config)
             try writeTimings(samples, to: config.outputPath)
             print("[BASELINE] Wrote timings to \(config.outputPath)")
         } catch {
@@ -77,29 +90,87 @@ struct BaselineBenchRunner {
         }
     }
 
-    private static func makeConfig() -> BenchConfig {
+    private static func makeConfig() throws -> BenchConfig {
         let env = ProcessInfo.processInfo.environment
-        let iterations = intEnv(env, "BASELINE_ITERATIONS", defaultValue: 200)
-        let warmup = intEnv(env, "BASELINE_WARMUP", defaultValue: 10)
-        let timeoutSeconds = doubleEnv(env, "BASELINE_TIMEOUT_SECONDS", defaultValue: 5.0)
+        let iterations = try intEnv(env, "BASELINE_ITERATIONS", defaultValue: 200)
+        let warmup = try intEnv(env, "BASELINE_WARMUP", defaultValue: 10)
+        let timeoutSeconds = try doubleEnv(env, "BASELINE_TIMEOUT_SECONDS", defaultValue: 5.0)
+
+        guard (1...100_000).contains(iterations) else {
+            throw invalidConfiguration(
+                key: "BASELINE_ITERATIONS",
+                value: String(iterations),
+                expected: "an integer between 1 and 100000"
+            )
+        }
+        guard (0...100_000).contains(warmup) else {
+            throw invalidConfiguration(
+                key: "BASELINE_WARMUP",
+                value: String(warmup),
+                expected: "an integer between 0 and 100000"
+            )
+        }
+        let (totalIterations, iterationOverflow) = iterations.addingReportingOverflow(warmup)
+        guard !iterationOverflow, totalIterations <= 100_000 else {
+            throw invalidConfiguration(
+                key: "BASELINE_ITERATIONS+BASELINE_WARMUP",
+                value: "\(iterations)+\(warmup)",
+                expected: "a total no greater than 100000"
+            )
+        }
+        guard timeoutSeconds.isFinite, timeoutSeconds > 0, timeoutSeconds <= 300 else {
+            throw invalidConfiguration(
+                key: "BASELINE_TIMEOUT_SECONDS",
+                value: String(timeoutSeconds),
+                expected: "a finite number greater than 0 and no greater than 300"
+            )
+        }
 
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyy-MM-dd_HHmmss"
         let dateString = dateFormatter.string(from: Date())
         let outputPath = env["BASELINE_OUTPUT"] ?? "Artifacts/baseline_timings_\(dateString).csv"
 
-        let tlsPort = UInt16(intEnv(env, "BASELINE_TLS_PORT", defaultValue: 9443))
-        let quicPort = UInt16(intEnv(env, "BASELINE_QUIC_PORT", defaultValue: 9444))
-        let dtlsPort = UInt16(intEnv(env, "BASELINE_DTLS_PORT", defaultValue: 9445))
-        let noisePort = UInt16(intEnv(env, "BASELINE_NOISE_PORT", defaultValue: 9446))
-        let skybridgePort = UInt16(intEnv(env, "BASELINE_SKYBRIDGE_PORT", defaultValue: 9447))
+        let tlsPort = try portEnv(env, "BASELINE_TLS_PORT", defaultValue: 9443)
+        let quicPort = try portEnv(env, "BASELINE_QUIC_PORT", defaultValue: 9444)
+        let dtlsPort = try portEnv(env, "BASELINE_DTLS_PORT", defaultValue: 9445)
+        let noisePort = try portEnv(env, "BASELINE_NOISE_PORT", defaultValue: 9446)
+        let skybridgePort = try portEnv(env, "BASELINE_SKYBRIDGE_PORT", defaultValue: 9447)
 
-        let p12Path = env["BASELINE_P12_PATH"] ?? "Tests/Fixtures/loopback_identity.p12"
-        let p12Password = env["BASELINE_P12_PASSWORD"] ?? "skybridge"
-        let protocolFilter = parseProtocolFilter(env["BASELINE_PROTOCOLS"])
-        let kickoffBytes = intEnv(env, "BASELINE_KICKOFF_BYTES", defaultValue: 0)
-        let tlsVersion = parseTLSVersion(env["BASELINE_TLS_VERSION"]) ?? .TLSv13
+        let certificatePath = env["BASELINE_CERTIFICATE_PATH"]
+            ?? "Tests/Fixtures/loopback_test_server_certificate.der"
+        let privateKeyPath = env["BASELINE_PRIVATE_KEY_PATH"]
+            ?? "Tests/Fixtures/loopback_test_server_private_key.x963"
+        let protocolFilter = try parseProtocolFilter(env["BASELINE_PROTOCOLS"])
+        let kickoffBytes = try intEnv(env, "BASELINE_KICKOFF_BYTES", defaultValue: 0)
+        guard (0...1_048_576).contains(kickoffBytes) else {
+            throw invalidConfiguration(
+                key: "BASELINE_KICKOFF_BYTES",
+                value: String(kickoffBytes),
+                expected: "an integer between 0 and 1048576"
+            )
+        }
+        let tlsVersion: tls_protocol_version_t
+        if let rawTLSVersion = env["BASELINE_TLS_VERSION"] {
+            guard let parsedTLSVersion = parseTLSVersion(rawTLSVersion) else {
+                throw invalidConfiguration(
+                    key: "BASELINE_TLS_VERSION",
+                    value: rawTLSVersion,
+                    expected: "TLS 1.2 or TLS 1.3"
+                )
+            }
+            tlsVersion = parsedTLSVersion
+        } else {
+            tlsVersion = .TLSv13
+        }
         let quicAlpn = env["BASELINE_QUIC_ALPN"] ?? "sbq"
+        guard (1...255).contains(quicAlpn.utf8.count) else {
+            throw invalidConfiguration(
+                key: "BASELINE_QUIC_ALPN",
+                value: quicAlpn,
+                expected: "a non-empty protocol identifier of at most 255 UTF-8 bytes"
+            )
+        }
 
         return BenchConfig(
             iterations: iterations,
@@ -111,8 +182,8 @@ struct BaselineBenchRunner {
             dtlsPort: dtlsPort,
             noisePort: noisePort,
             skybridgePort: skybridgePort,
-            p12Path: p12Path,
-            p12Password: p12Password,
+            certificatePath: certificatePath,
+            privateKeyPath: privateKeyPath,
             protocolFilter: protocolFilter,
             kickoffBytes: kickoffBytes,
             tlsVersion: tlsVersion,
@@ -120,41 +191,179 @@ struct BaselineBenchRunner {
         )
     }
 
-    private static func intEnv(_ env: [String: String], _ key: String, defaultValue: Int) -> Int {
-        if let raw = env[key], let value = Int(raw) {
-            return value
-        }
-        return defaultValue
+    private static func invalidConfiguration(
+        key: String,
+        value: String,
+        expected: String
+    ) -> BenchConfigurationError {
+        .invalidEnvironmentValue(key: key, value: value, expected: expected)
     }
 
-    private static func doubleEnv(_ env: [String: String], _ key: String, defaultValue: Double) -> Double {
-        if let raw = env[key], let value = Double(raw) {
-            return value
+    private static func intEnv(
+        _ env: [String: String],
+        _ key: String,
+        defaultValue: Int
+    ) throws -> Int {
+        guard let raw = env[key] else { return defaultValue }
+        guard let value = Int(raw) else {
+            throw invalidConfiguration(key: key, value: raw, expected: "an integer")
         }
-        return defaultValue
+        return value
     }
 
-    private static func boolEnv(_ env: [String: String], _ key: String, defaultValue: Bool) -> Bool {
+    private static func doubleEnv(
+        _ env: [String: String],
+        _ key: String,
+        defaultValue: Double
+    ) throws -> Double {
+        guard let raw = env[key] else { return defaultValue }
+        guard let value = Double(raw), value.isFinite else {
+            throw invalidConfiguration(key: key, value: raw, expected: "a finite number")
+        }
+        return value
+    }
+
+    private static func portEnv(
+        _ env: [String: String],
+        _ key: String,
+        defaultValue: UInt16
+    ) throws -> UInt16 {
+        let value = try intEnv(env, key, defaultValue: Int(defaultValue))
+        guard let port = UInt16(exactly: value), port != 0 else {
+            throw invalidConfiguration(key: key, value: String(value), expected: "an integer from 1 through 65535")
+        }
+        return port
+    }
+
+    private static func boolEnv(
+        _ env: [String: String],
+        _ key: String,
+        defaultValue: Bool
+    ) throws -> Bool {
         guard let raw = env[key]?.lowercased() else { return defaultValue }
         if ["1", "true", "yes", "y"].contains(raw) { return true }
         if ["0", "false", "no", "n"].contains(raw) { return false }
-        return defaultValue
+        throw invalidConfiguration(key: key, value: raw, expected: "one of 1, true, yes, y, 0, false, no, n")
     }
 
-    private static func parseProtocolFilter(_ value: String?) -> Set<String>? {
-        guard let value, !value.isEmpty else { return nil }
-        let items = value
-            .split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-            .filter { !$0.isEmpty }
-        return items.isEmpty ? nil : Set(items)
+    private static func parseProtocolFilter(_ value: String?) throws -> Set<String>? {
+        guard let value else { return nil }
+
+        let aliases: [String: String] = [
+            "tcp": "tcp",
+            "tls13": "tls13",
+            "tls-13": "tls13",
+            "quic": "quic",
+            "webrtc-dtls": "webrtc-dtls",
+            "dtls": "webrtc-dtls",
+            "noise-xx": "noise-xx",
+            "noise": "noise-xx",
+            "skybridge": "skybridge",
+            "skybridge-classic": "skybridge-classic",
+            "skybridge-liboqs": "skybridge-liboqs",
+            "skybridge-cryptokit": "skybridge-cryptokit"
+        ]
+        let rawTokens = value.split(separator: ",", omittingEmptySubsequences: false)
+        guard !rawTokens.isEmpty else {
+            throw invalidConfiguration(
+                key: "BASELINE_PROTOCOLS",
+                value: value,
+                expected: "a comma-separated list of known protocol names"
+            )
+        }
+
+        var protocols = Set<String>()
+        for rawToken in rawTokens {
+            let token = rawToken.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !token.isEmpty, let canonical = aliases[token] else {
+                throw invalidConfiguration(
+                    key: "BASELINE_PROTOCOLS",
+                    value: value,
+                    expected: "TCP, TLS13, QUIC, WebRTC-DTLS, Noise-XX, SkyBridge, SkyBridge-Classic, SkyBridge-liboqs, or SkyBridge-CryptoKit"
+                )
+            }
+            protocols.insert(canonical)
+        }
+        return protocols
     }
 
     private static func shouldRun(_ label: String, filter: Set<String>?) -> Bool {
         guard let filter else { return true }
-        let normalized = label.lowercased()
-        if filter.contains(normalized) { return true }
-        return filter.contains { normalized.contains($0) }
+        return filter.contains(label.lowercased())
+    }
+
+    private static func validateTimingSamples(
+        _ samples: [TimingSample],
+        config: BenchConfig
+    ) throws {
+        var expectedLabels = Set<String>()
+        let filter = config.protocolFilter
+
+        if filter == nil || filter?.contains("tls13") == true {
+            expectedLabels.insert("TLS13")
+        }
+        if filter == nil || filter?.contains("quic") == true {
+            expectedLabels.insert("QUIC")
+        }
+        if filter == nil || filter?.contains("webrtc-dtls") == true {
+            expectedLabels.insert("WebRTC-DTLS")
+        }
+        if filter == nil || filter?.contains("noise-xx") == true {
+            expectedLabels.insert("Noise-XX")
+        }
+        if filter?.contains("tcp") == true {
+            expectedLabels.insert("TCP")
+        }
+
+        let allSkyBridge = filter == nil || filter?.contains("skybridge") == true
+        if allSkyBridge || filter?.contains("skybridge-classic") == true {
+            expectedLabels.insert("SkyBridge-Classic")
+        }
+        if allSkyBridge || filter?.contains("skybridge-liboqs") == true {
+            expectedLabels.insert("SkyBridge-liboqs")
+        }
+        if allSkyBridge || filter?.contains("skybridge-cryptokit") == true {
+            #if HAS_APPLE_PQC_SDK
+            expectedLabels.insert("SkyBridge-CryptoKit")
+            #else
+            throw NoiseError.handshakeFailed(
+                "SkyBridge-CryptoKit evidence was requested but HAS_APPLE_PQC_SDK is not compiled"
+            )
+            #endif
+        }
+
+        guard !expectedLabels.isEmpty else {
+            throw invalidConfiguration(
+                key: "BASELINE_PROTOCOLS",
+                value: config.protocolFilter?.sorted().joined(separator: ",") ?? "<default>",
+                expected: "at least one runnable protocol"
+            )
+        }
+
+        let actualLabels = Set(samples.map(\.protocolName))
+        guard actualLabels == expectedLabels else {
+            let missing = expectedLabels.subtracting(actualLabels).sorted().joined(separator: ",")
+            let unexpected = actualLabels.subtracting(expectedLabels).sorted().joined(separator: ",")
+            throw NoiseError.handshakeFailed(
+                "baseline evidence label mismatch: missing=[\(missing)] unexpected=[\(unexpected)]"
+            )
+        }
+
+        for label in expectedLabels {
+            let labelSamples = samples.filter { $0.protocolName == label }
+            guard labelSamples.count == config.iterations else {
+                throw NoiseError.handshakeFailed(
+                    "baseline evidence count mismatch for \(label): expected \(config.iterations), got \(labelSamples.count)"
+                )
+            }
+            let actualIterations = Set(labelSamples.map(\.iteration))
+            let expectedIterations = Set(0..<config.iterations)
+            guard actualIterations == expectedIterations else {
+                throw NoiseError.handshakeFailed(
+                    "baseline evidence iteration set mismatch for \(label)"
+                )
+            }
+        }
     }
 
     private static func debugEnabled() -> Bool {
@@ -174,26 +383,46 @@ struct BaselineBenchRunner {
         }
     }
 
-    private static func loadIdentity(path: String, password: String) throws -> SecIdentity {
-        let data = try Data(contentsOf: URL(fileURLWithPath: path))
-        let options: [String: Any] = [kSecImportExportPassphrase as String: password]
-        var items: CFArray?
-        let status = SecPKCS12Import(data as CFData, options as CFDictionary, &items)
-        if status == errSecSuccess,
-           let array = items as? [[String: Any]],
-           let first = array.first,
-           let anyIdentity = first[kSecImportItemIdentity as String],
-           CFGetTypeID(anyIdentity as CFTypeRef) == SecIdentityGetTypeID() {
-            return unsafeDowncast(anyIdentity as AnyObject, to: SecIdentity.self)
+    private static func loadIdentity(
+        certificatePath: String,
+        privateKeyPath: String
+    ) throws -> LoadedIdentity {
+        let certificateData = try Data(contentsOf: URL(fileURLWithPath: certificatePath))
+        guard let certificate = SecCertificateCreateWithData(nil, certificateData as CFData) else {
+            throw NSError(domain: "BaselineBench", code: 6, userInfo: [
+                NSLocalizedDescriptionKey: "Invalid loopback certificate DER: \(certificatePath)"
+            ])
         }
 
-        throw NSError(domain: "BaselineBench", code: Int(status), userInfo: [
-            NSLocalizedDescriptionKey: "PKCS#12 import failed (\(status)). Use a legacy PKCS#12 (PBE-SHA1-3DES) via BASELINE_P12_PATH."
-        ])
+        let privateKeyData = try Data(contentsOf: URL(fileURLWithPath: privateKeyPath))
+        let attributes: [String: Any] = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
+            kSecAttrKeySizeInBits as String: 256
+        ]
+        var keyError: Unmanaged<CFError>?
+        guard let privateKey = SecKeyCreateWithData(
+            privateKeyData as CFData,
+            attributes as CFDictionary,
+            &keyError
+        ) else {
+            let underlyingError = keyError?.takeRetainedValue()
+            throw NSError(domain: "BaselineBench", code: 7, userInfo: [
+                NSLocalizedDescriptionKey: "Invalid loopback private-key representation: \(privateKeyPath)",
+                NSUnderlyingErrorKey: underlyingError as Any
+            ])
+        }
+
+        guard let identity = SecIdentityCreate(nil, certificate, privateKey) else {
+            throw NSError(domain: "BaselineBench", code: 8, userInfo: [
+                NSLocalizedDescriptionKey: "Loopback certificate and private key do not match"
+            ])
+        }
+        return LoadedIdentity(secIdentity: identity, certificateDER: certificateData)
     }
 
     private static func makeTLSOptions(
-        identity: SecIdentity,
+        identity: LoadedIdentity,
         isServer: Bool,
         version: tls_protocol_version_t,
         alpn: String? = nil
@@ -206,7 +435,7 @@ struct BaselineBenchRunner {
             version: version,
             alpn: alpn,
             serverName: "localhost",
-            peerAuthenticationRequired: false,
+            peerAuthenticationRequired: !isServer,
             useVerifyBlock: true
         )
 
@@ -215,7 +444,7 @@ struct BaselineBenchRunner {
 
     private static func configureTLSOptions(
         _ secOptions: sec_protocol_options_t,
-        identity: SecIdentity,
+        identity: LoadedIdentity,
         isServer: Bool,
         version: tls_protocol_version_t,
         alpn: String?,
@@ -233,8 +462,10 @@ struct BaselineBenchRunner {
             }
         }
 
+        sec_protocol_options_set_peer_authentication_required(secOptions, peerAuthenticationRequired)
+
         if isServer {
-            if let secIdentity = sec_identity_create(identity) {
+            if let secIdentity = sec_identity_create(identity.secIdentity) {
                 sec_protocol_options_set_local_identity(secOptions, secIdentity)
             } else if debugEnabled() {
                 print("[BASELINE] Failed to create sec_identity_t for TLS server")
@@ -246,16 +477,23 @@ struct BaselineBenchRunner {
                     sec_protocol_options_set_tls_server_name(secOptions, base)
                 }
             }
-            sec_protocol_options_set_peer_authentication_required(secOptions, peerAuthenticationRequired)
             if useVerifyBlock {
-                sec_protocol_options_set_verify_block(secOptions, { _, _, complete in
-                    complete(true)
+                let expectedCertificateDER = identity.certificateDER
+                sec_protocol_options_set_verify_block(secOptions, { _, trust, complete in
+                    let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
+                    guard let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate],
+                          let leafCertificate = chain.first else {
+                        complete(false)
+                        return
+                    }
+                    let actualCertificateDER = SecCertificateCopyData(leafCertificate) as Data
+                    complete(actualCertificateDER == expectedCertificateDER)
                 }, .global())
             }
         }
     }
 
-    private static func runTLSBench(config: BenchConfig, identity: SecIdentity) async throws -> [TimingSample] {
+    private static func runTLSBench(config: BenchConfig, identity: LoadedIdentity) async throws -> [TimingSample] {
         guard shouldRun("TLS13", filter: config.protocolFilter) else { return [] }
         print("[BASELINE] TLS13 bench start (iterations=\(config.iterations))")
         let tlsOptions = makeTLSOptions(identity: identity, isServer: true, version: config.tlsVersion)
@@ -264,7 +502,6 @@ struct BaselineBenchRunner {
 
         let clientTlsOptions = makeTLSOptions(identity: identity, isServer: false, version: config.tlsVersion)
         let clientParams = NWParameters(tls: clientTlsOptions, tcp: NWProtocolTCP.Options())
-        clientParams.allowLocalEndpointReuse = true
 
         return try await runNWHandshakeBench(
             protocolName: "TLS13",
@@ -278,7 +515,7 @@ struct BaselineBenchRunner {
         )
     }
 
-    private static func runQUICBench(config: BenchConfig, identity: SecIdentity) async throws -> [TimingSample] {
+    private static func runQUICBench(config: BenchConfig, identity: LoadedIdentity) async throws -> [TimingSample] {
         guard shouldRun("QUIC", filter: config.protocolFilter) else { return [] }
         print("[BASELINE] QUIC bench start (iterations=\(config.iterations))")
         let serverQuicOptions = NWProtocolQUIC.Options(alpn: [config.quicAlpn])
@@ -315,11 +552,10 @@ struct BaselineBenchRunner {
             version: .TLSv13,
             alpn: nil,
             serverName: "localhost",
-            peerAuthenticationRequired: false,
+            peerAuthenticationRequired: true,
             useVerifyBlock: true
         )
         let clientParams = NWParameters(quic: clientQuicOptions)
-        clientParams.allowLocalEndpointReuse = true
 
         return try await runNWHandshakeBench(
             protocolName: "QUIC",
@@ -333,7 +569,7 @@ struct BaselineBenchRunner {
         )
     }
 
-    private static func runDTLSBench(config: BenchConfig, identity: SecIdentity) async throws -> [TimingSample] {
+    private static func runDTLSBench(config: BenchConfig, identity: LoadedIdentity) async throws -> [TimingSample] {
         guard shouldRun("WebRTC-DTLS", filter: config.protocolFilter) else { return [] }
         print("[BASELINE] WebRTC-DTLS bench start (iterations=\(config.iterations))")
         let serverTlsOptions = makeTLSOptions(identity: identity, isServer: true, version: .DTLSv12, alpn: "webrtc")
@@ -342,7 +578,6 @@ struct BaselineBenchRunner {
 
         let clientTlsOptions = makeTLSOptions(identity: identity, isServer: false, version: .DTLSv12, alpn: "webrtc")
         let clientParams = NWParameters(dtls: clientTlsOptions, udp: NWProtocolUDP.Options())
-        clientParams.allowLocalEndpointReuse = true
 
         return try await runNWHandshakeBench(
             protocolName: "WebRTC-DTLS",
@@ -360,25 +595,42 @@ struct BaselineBenchRunner {
         guard shouldRun("Noise-XX", filter: config.protocolFilter) else { return [] }
         print("[BASELINE] Noise-XX bench start (iterations=\(config.iterations))")
         let queue = DispatchQueue(label: "baseline.noise")
-        let listener = try NWListener(using: .udp, on: NWEndpoint.Port(rawValue: config.noisePort)!)
+        guard let noisePort = NWEndpoint.Port(rawValue: config.noisePort) else {
+            throw NSError(domain: "BaselineBenchRunner", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Invalid UDP port: \(config.noisePort)"
+            ])
+        }
+        let listener = try NWListener(using: .udp, on: noisePort)
+        defer {
+            listener.newConnectionHandler = nil
+            listener.cancel()
+        }
+        let serverConnectionStream = makeSingleConnectionStream(
+            listener: listener,
+            queue: queue,
+            timeoutSeconds: config.timeoutSeconds
+        )
+        var serverConnectionIterator = serverConnectionStream.makeAsyncIterator()
+        try await startListenerAndWaitUntilReady(
+            listener: listener,
+            queue: queue,
+            timeoutSeconds: config.timeoutSeconds
+        )
         let clientConnection = NWConnection(
-            to: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: config.noisePort)!),
+            to: .hostPort(host: "127.0.0.1", port: noisePort),
             using: .udp
         )
-        listener.start(queue: queue)
+        defer { clientConnection.cancel() }
         clientConnection.start(queue: queue)
 
         let clientChannel = UDPChannel(connection: clientConnection)
-        let connectionTask = Task {
-            try await waitForNewConnection(
-                listener: listener,
-                queue: queue,
-                timeoutSeconds: config.timeoutSeconds
-            )
-        }
-        await Task.yield()
         try await clientChannel.send(Data([0x00]))
-        let serverConnection = try await connectionTask.value
+        guard let serverConnection = try await serverConnectionIterator.next() else {
+            throw NSError(domain: "BaselineBench", code: 9, userInfo: [
+                NSLocalizedDescriptionKey: "Noise listener did not accept a connection"
+            ])
+        }
+        defer { serverConnection.cancel() }
         let serverChannel = UDPChannel(connection: serverConnection)
         _ = try await serverChannel.receive()
 
@@ -387,7 +639,8 @@ struct BaselineBenchRunner {
 
         var samples: [TimingSample] = []
         for iteration in 0..<(config.warmup + config.iterations) {
-            let start = Date().timeIntervalSince1970
+            let startEpoch = Date().timeIntervalSince1970
+            let start = ContinuousClock.now
             async let responderTask: Void = try NoiseXX.runResponder(
                 staticKey: responderStatic,
                 send: serverChannel.send,
@@ -399,22 +652,20 @@ struct BaselineBenchRunner {
                 receive: clientChannel.receive
             )
             try await responderTask
-            let end = Date().timeIntervalSince1970
+            let elapsed = ContinuousClock.now - start
+            let endEpoch = Date().timeIntervalSince1970
             if iteration >= config.warmup {
                 samples.append(TimingSample(
                     protocolName: "Noise-XX",
                     iteration: iteration - config.warmup,
-                    startEpoch: start,
-                    endEpoch: end,
-                    durationMs: (end - start) * 1000.0,
+                    startEpoch: startEpoch,
+                    endEpoch: endEpoch,
+                    durationMs: durationToSeconds(elapsed) * 1_000.0,
                     ports: "\(config.noisePort)"
                 ))
             }
         }
 
-        clientConnection.cancel()
-        serverConnection.cancel()
-        listener.cancel()
         print("[BASELINE] Noise-XX bench done")
         return samples
     }
@@ -429,62 +680,33 @@ struct BaselineBenchRunner {
         timeoutSeconds: Double,
         kickoffBytes: Int
     ) async throws -> [TimingSample] {
-        let queue = DispatchQueue(label: "baseline.\(protocolName.lowercased())")
-        let listener = try NWListener(using: serverParameters, on: NWEndpoint.Port(rawValue: port)!)
-        listener.newConnectionHandler = { connection in
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) {
-                        connection.cancel()
-                    }
-                case .failed, .cancelled:
-                    connection.cancel()
-                default:
-                    break
-                }
-            }
-            connection.start(queue: queue)
+        guard let benchmarkPort = NWEndpoint.Port(rawValue: port) else {
+            throw NSError(domain: "BaselineBenchRunner", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "Invalid benchmark port: \(port)"
+            ])
         }
-        listener.start(queue: queue)
-        try await waitForListenerReady(listener: listener, queue: queue, timeoutSeconds: timeoutSeconds)
-        try await Task.sleep(for: .milliseconds(10))
+        let lifecycleSamples = try await NetworkLoopbackLifecycle.measureHandshakes(
+            protocolName: protocolName,
+            serverParameters: serverParameters,
+            clientParameters: clientParameters,
+            listenerPort: benchmarkPort,
+            iterations: iterations,
+            warmup: warmup,
+            timeoutSeconds: timeoutSeconds,
+            kickoffBytes: kickoffBytes
+        )
 
-        var samples: [TimingSample] = []
-        let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!)
-        for iteration in 0..<(warmup + iterations) {
-            let connection = NWConnection(to: endpoint, using: clientParameters)
-            let start = Date().timeIntervalSince1970
-            do {
-                try await waitForReady(
-                    connection: connection,
-                    queue: queue,
-                    timeoutSeconds: timeoutSeconds,
-                    kickoffBytes: kickoffBytes
-                )
-            } catch {
-                connection.cancel()
-                throw NSError(domain: "BaselineBench", code: 5, userInfo: [
-                    NSLocalizedDescriptionKey: "\(protocolName) ready timeout on iteration \(iteration): \(error)"
-                ])
-            }
-            let end = Date().timeIntervalSince1970
-            connection.cancel()
-            if iteration >= warmup {
-                samples.append(TimingSample(
-                    protocolName: protocolName,
-                    iteration: iteration - warmup,
-                    startEpoch: start,
-                    endEpoch: end,
-                    durationMs: (end - start) * 1000.0,
-                    ports: "\(port)"
-                ))
-            }
-        }
-
-        listener.cancel()
         print("[BASELINE] \(protocolName) bench done")
-        return samples
+        return lifecycleSamples.map { sample in
+            TimingSample(
+                protocolName: protocolName,
+                iteration: sample.iteration,
+                startEpoch: sample.startEpoch,
+                endEpoch: sample.endEpoch,
+                durationMs: durationToSeconds(sample.readyDuration) * 1_000.0,
+                ports: "\(port)"
+            )
+        }
     }
 
     private static func runTCPBench(config: BenchConfig) async throws -> [TimingSample] {
@@ -493,7 +715,6 @@ struct BaselineBenchRunner {
         let serverParams = NWParameters.tcp
         serverParams.allowLocalEndpointReuse = true
         let clientParams = NWParameters.tcp
-        clientParams.allowLocalEndpointReuse = true
 
         return try await runNWHandshakeBench(
             protocolName: "TCP",
@@ -518,14 +739,14 @@ struct BaselineBenchRunner {
             || shouldRun("SkyBridge-CryptoKit", filter: filter)
         guard shouldRunAny else { return [] }
 
-        let contexts = await makeSkyBridgeContexts(filter: filter)
+        let contexts = try await makeSkyBridgeContexts(filter: filter)
         var samples: [TimingSample] = []
-        let useHandshakeMetrics = boolEnv(
+        let useHandshakeMetrics = try boolEnv(
             ProcessInfo.processInfo.environment,
             "BASELINE_USE_HANDSHAKE_METRICS",
             defaultValue: false
         )
-        let reuseSkyBridgeConnections = boolEnv(
+        let reuseSkyBridgeConnections = try boolEnv(
             ProcessInfo.processInfo.environment,
             "BASELINE_REUSE_CONNECTIONS",
             defaultValue: false
@@ -552,7 +773,8 @@ struct BaselineBenchRunner {
                     offeredSuites: context.offeredSuites,
                     policy: context.handshakePolicy,
                     timeout: context.handshakeTimeout,
-                    trustProvider: context.trustProviderInitiator
+                    trustProvider: context.trustProviderInitiator,
+                    kemIdentityStore: context.kemIdentityStore
                 )
 
                 let responderDriver = try HandshakeDriver(
@@ -565,7 +787,8 @@ struct BaselineBenchRunner {
                     offeredSuites: context.offeredSuites,
                     policy: context.handshakePolicy,
                     timeout: context.handshakeTimeout,
-                    trustProvider: context.trustProviderResponder
+                    trustProvider: context.trustProviderResponder,
+                    kemIdentityStore: context.kemIdentityStore
                 )
 
                 let benchPeer = PeerIdentifier(
@@ -646,12 +869,13 @@ struct BaselineBenchRunner {
         let responderIdentityPublicKey: Data
         let trustProviderInitiator: any HandshakeTrustProvider
         let trustProviderResponder: any HandshakeTrustProvider
+        let kemIdentityStore: BenchmarkHandshakeKEMIdentityStore
         let handshakePolicy: HandshakePolicy
         let handshakeTimeout: Duration
     }
 
     @available(macOS 14.0, *)
-    private static func makeSkyBridgeContexts(filter: Set<String>?) async -> [SkyBridgeContext] {
+    private static func makeSkyBridgeContexts(filter: Set<String>?) async throws -> [SkyBridgeContext] {
         var contexts: [SkyBridgeContext] = []
         let runAll = shouldRun("SkyBridge", filter: filter)
         func shouldAttempt(_ label: String) -> Bool {
@@ -659,30 +883,29 @@ struct BaselineBenchRunner {
         }
 
         if shouldAttempt("SkyBridge-Classic") {
-            do {
-                contexts.append(try await prepareSkyBridgeContext(label: "SkyBridge-Classic", providerType: .classic))
-            } catch {
-                print("[BASELINE] Skipping SkyBridge-Classic: \(error)")
-            }
+            contexts.append(try await prepareSkyBridgeContext(
+                label: "SkyBridge-Classic",
+                providerType: .classic
+            ))
         }
 
         if shouldAttempt("SkyBridge-liboqs") {
-            do {
-                contexts.append(try await prepareSkyBridgeContext(label: "SkyBridge-liboqs", providerType: .liboqs))
-            } catch {
-                print("[BASELINE] Skipping SkyBridge-liboqs: \(error)")
-            }
+            contexts.append(try await prepareSkyBridgeContext(
+                label: "SkyBridge-liboqs",
+                providerType: .liboqs
+            ))
         }
 
         if shouldAttempt("SkyBridge-CryptoKit") {
             #if HAS_APPLE_PQC_SDK
-            do {
-                contexts.append(try await prepareSkyBridgeContext(label: "SkyBridge-CryptoKit", providerType: .applePQC))
-            } catch {
-                print("[BASELINE] Skipping SkyBridge-CryptoKit: \(error)")
-            }
+            contexts.append(try await prepareSkyBridgeContext(
+                label: "SkyBridge-CryptoKit",
+                providerType: .applePQC
+            ))
             #else
-            print("[BASELINE] Skipping SkyBridge-CryptoKit: Apple PQC SDK not available")
+            throw NoiseError.handshakeFailed(
+                "SkyBridge-CryptoKit was requested but HAS_APPLE_PQC_SDK is not compiled"
+            )
             #endif
         }
         return contexts
@@ -722,10 +945,19 @@ struct BaselineBenchRunner {
             #endif
         }
 
-        let strategy: HandshakeAttemptStrategy = (providerType == .classic) ? .classicOnly : .pqcOnly
-        let suitesResult = TwoAttemptHandshakeManager.getSuites(for: strategy, cryptoProvider: provider)
-        guard case .suites(let offeredSuites) = suitesResult else {
-            throw NoiseError.handshakeFailed("empty offered suites")
+        let offeredSuites: [CryptoSuite]
+        switch providerType {
+        case .classic:
+            let result = TwoAttemptHandshakeManager.getSuites(
+                for: .classicOnly,
+                cryptoProvider: provider
+            )
+            guard case .suites(let suites) = result else {
+                throw NoiseError.handshakeFailed("empty offered suites")
+            }
+            offeredSuites = suites
+        case .liboqs, .applePQC:
+            offeredSuites = [.mlkem768MLDSA65]
         }
 
         let protocolSignatureProvider = ProtocolSignatureProviderSelector.select(for: provider.tier)
@@ -747,10 +979,11 @@ struct BaselineBenchRunner {
         )
 
         let peer = PeerIdentifier(deviceId: "bench-peer")
-        let peerKEMPublicKeys = try await makeKEMPublicKeysForPeer(
+        let kemIdentityStore = try await BenchmarkHandshakeKEMIdentityStore.make(
             offeredSuites: offeredSuites,
             provider: provider
         )
+        let peerKEMPublicKeys = try kemIdentityStore.trustPublicKeys(for: offeredSuites)
         let trustProviderInitiator: any HandshakeTrustProvider
         let trustProviderResponder: any HandshakeTrustProvider
         if peerKEMPublicKeys.isEmpty {
@@ -767,11 +1000,18 @@ struct BaselineBenchRunner {
             )
         }
 
-        let overrideTimeout = doubleEnv(
+        let overrideTimeout = try doubleEnv(
             ProcessInfo.processInfo.environment,
             "BASELINE_SKYBRIDGE_TIMEOUT_SECONDS",
             defaultValue: 0
         )
+        guard overrideTimeout >= 0, overrideTimeout <= 300 else {
+            throw invalidConfiguration(
+                key: "BASELINE_SKYBRIDGE_TIMEOUT_SECONDS",
+                value: String(overrideTimeout),
+                expected: "a finite number between 0 and 300"
+            )
+        }
         let handshakeTimeout: Duration
         if overrideTimeout > 0 {
             handshakeTimeout = .milliseconds(Int(overrideTimeout * 1000))
@@ -792,30 +1032,10 @@ struct BaselineBenchRunner {
             responderIdentityPublicKey: responderIdentityPublicKey,
             trustProviderInitiator: trustProviderInitiator,
             trustProviderResponder: trustProviderResponder,
+            kemIdentityStore: kemIdentityStore,
             handshakePolicy: handshakePolicy,
             handshakeTimeout: handshakeTimeout
         )
-    }
-
-    @available(macOS 14.0, *)
-    private static func makeKEMPublicKeysForPeer(
-        offeredSuites: [CryptoSuite],
-        provider: any CryptoProvider
-    ) async throws -> [CryptoSuite: Data] {
-        let pqcSuites = offeredSuites.filter { $0.isPQC }
-        guard !pqcSuites.isEmpty else {
-            return [:]
-        }
-
-        var kemPublicKeys: [CryptoSuite: Data] = [:]
-        for suite in pqcSuites {
-            let publicKey = try await DeviceIdentityKeyManager.shared.getKEMPublicKey(
-                for: suite,
-                provider: provider
-            )
-            kemPublicKeys[suite] = publicKey
-        }
-        return kemPublicKeys
     }
 
     private static func encodeIdentityPublicKey(
@@ -884,61 +1104,7 @@ struct BaselineBenchRunner {
         return Double(components.seconds) + (Double(components.attoseconds) / 1_000_000_000_000_000_000.0)
     }
 
-    private static func waitForReady(
-        connection: NWConnection,
-        queue: DispatchQueue,
-        timeoutSeconds: Double,
-        kickoffBytes: Int
-    ) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let timer = DispatchSource.makeTimerSource(queue: queue)
-            let didResume = ManagedAtomic(false)
-            let resumeOnce: @Sendable (Result<Void, Error>) -> Void = { result in
-                if didResume.exchange(true, ordering: .relaxed) { return }
-                timer.cancel()
-                connection.stateUpdateHandler = nil
-                switch result {
-                case .success:
-                    continuation.resume()
-                case .failure(let error):
-                    continuation.resume(throwing: error)
-                }
-            }
-            timer.schedule(deadline: .now() + timeoutSeconds)
-            timer.setEventHandler {
-                connection.cancel()
-                resumeOnce(.failure(NSError(domain: "BaselineBench", code: 2, userInfo: [
-                    NSLocalizedDescriptionKey: "Timed out after \(timeoutSeconds)s"
-                ])))
-            }
-            timer.activate()
-
-            connection.stateUpdateHandler = { state in
-                if debugEnabled() {
-                    print("[BASELINE] connection state: \(state)")
-                }
-                switch state {
-                case .ready:
-                    resumeOnce(.success(()))
-                case .failed(let error):
-                    resumeOnce(.failure(error))
-                case .cancelled:
-                    resumeOnce(.failure(NSError(domain: "BaselineBench", code: 1, userInfo: [
-                        NSLocalizedDescriptionKey: "Connection cancelled"
-                    ])))
-                default:
-                    break
-                }
-            }
-            connection.start(queue: queue)
-            if kickoffBytes > 0 {
-                let payload = Data(repeating: 0x00, count: kickoffBytes)
-                connection.send(content: payload, completion: .contentProcessed { _ in })
-            }
-        }
-    }
-
-    private static func waitForListenerReady(
+    private static func startListenerAndWaitUntilReady(
         listener: NWListener,
         queue: DispatchQueue,
         timeoutSeconds: Double
@@ -983,6 +1149,7 @@ struct BaselineBenchRunner {
                     break
                 }
             }
+            listener.start(queue: queue)
         }
     }
 
@@ -1008,37 +1175,43 @@ struct BaselineBenchRunner {
         }
     }
 
-    private static func waitForNewConnection(
+    private static func makeSingleConnectionStream(
         listener: NWListener,
         queue: DispatchQueue,
         timeoutSeconds: Double
-    ) async throws -> NWConnection {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<NWConnection, Error>) in
+    ) -> AsyncThrowingStream<NWConnection, Error> {
+        AsyncThrowingStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
             let timer = DispatchSource.makeTimerSource(queue: queue)
-            let didResume = ManagedAtomic(false)
-            let resumeOnce: @Sendable (Result<NWConnection, Error>) -> Void = { result in
-                if didResume.exchange(true, ordering: .relaxed) { return }
+            let didFinish = ManagedAtomic(false)
+            let finishOnce: @Sendable (Result<NWConnection, Error>) -> Void = { result in
+                if didFinish.exchange(true, ordering: .relaxed) { return }
                 timer.cancel()
                 listener.newConnectionHandler = nil
                 switch result {
                 case .success(let connection):
-                    continuation.resume(returning: connection)
+                    connection.start(queue: queue)
+                    continuation.yield(connection)
+                    continuation.finish()
                 case .failure(let error):
-                    continuation.resume(throwing: error)
+                    listener.cancel()
+                    continuation.finish(throwing: error)
                 }
             }
             timer.schedule(deadline: .now() + timeoutSeconds)
             timer.setEventHandler {
-                listener.cancel()
-                resumeOnce(.failure(NSError(domain: "BaselineBench", code: 2, userInfo: [
+                finishOnce(.failure(NSError(domain: "BaselineBench", code: 2, userInfo: [
                     NSLocalizedDescriptionKey: "Timed out after \(timeoutSeconds)s"
                 ])))
             }
             timer.activate()
 
             listener.newConnectionHandler = { connection in
-                connection.start(queue: queue)
-                resumeOnce(.success(connection))
+                finishOnce(.success(connection))
+            }
+            continuation.onTermination = { _ in
+                if didFinish.exchange(true, ordering: .relaxed) { return }
+                timer.cancel()
+                listener.newConnectionHandler = nil
             }
         }
     }

@@ -5,6 +5,7 @@ import SkyBridgeCore
 public struct CompactDeviceRow: View {
     let device: DiscoveredDevice
     let connectAction: () -> Void
+    @StateObject private var settingsManager = SettingsManager.shared
     @State private var isConnecting = false
     
     public init(device: DiscoveredDevice, connectAction: @escaping () -> Void) {
@@ -14,10 +15,12 @@ public struct CompactDeviceRow: View {
     
     public var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: deviceIcon)
-                .font(.title3)
-                .foregroundColor(deviceColor)
-                .frame(width: 24, height: 24)
+            if settingsManager.showDeviceIcons {
+                Image(systemName: deviceIcon)
+                    .font(.title3)
+                    .foregroundColor(deviceColor)
+                    .frame(width: 24, height: 24)
+            }
             
             VStack(alignment: .leading, spacing: 2) {
                 Text(device.name)
@@ -83,4 +86,3 @@ public struct CompactDeviceRow: View {
         }
     }
 }
-

@@ -82,6 +82,12 @@ public enum WeatherCondition: String, Codable, Sendable {
 /// SkyBridge天气服务 - 集成多个API并智能降级
 @MainActor
 public final class SkyBridgeWeatherService: ObservableObject {
+    private static let weatherCacheStore = CodablePersistenceStore<WeatherInfo>(
+        location: .protectedApplicationSupport(
+            path: "Weather/last-known-weather.json",
+            legacyUserDefaultsKey: "com.skybridge.lastKnownWeather"
+        )
+    )
  // MARK: - Published Properties
     
     @Published public private(set) var currentWeather: WeatherInfo?
@@ -91,8 +97,9 @@ public final class SkyBridgeWeatherService: ObservableObject {
  // MARK: - Private Properties
     
     private let logger = Logger(subsystem: "com.skybridge.weather", category: "Service")
-    private let cacheKey = "com.skybridge.lastKnownWeather"
     private let cacheValidityDuration: TimeInterval = 1800 // 30分钟缓存
+    private let wttrFailureCooldownSeconds: TimeInterval = 1800 // wttr.in 失败后冷却 30 分钟，避免反复超时刷屏
+    private let wttrCooldownUntilKey = "com.skybridge.weather.wttrCooldownUntil"
     
  // MARK: - Errors
     
@@ -121,11 +128,15 @@ public final class SkyBridgeWeatherService: ObservableObject {
         isLoading = true
         error = nil
         logger.info("🌤️ 获取天气数据: \(location.city ?? "未知")")
+        defer {
+            isLoading = false
+        }
         
         var weatherInfo: WeatherInfo?
         
  // 策略1: 优先使用 wttr.in (免费且功能强大)
-        if let weather = await fetchFromWttr(latitude: location.latitude, longitude: location.longitude, city: location.city) {
+        if shouldAttemptWttr(),
+           let weather = await fetchFromWttr(latitude: location.latitude, longitude: location.longitude, city: location.city) {
             weatherInfo = weather
         }
  // 策略2: 降级到 Open-Meteo (免费无API key)
@@ -138,33 +149,25 @@ public final class SkyBridgeWeatherService: ObservableObject {
             weatherInfo = cached
         }
         
- // 如果获取到天气数据但缺少 AQI，尝试补充 AQI 数据
-        if var weather = weatherInfo {
-            if weather.aqi == nil {
-                logger.info("🔍 天气数据缺少 AQI，尝试获取空气质量数据")
-                if let aqi = await fetchAQIData(latitude: location.latitude, longitude: location.longitude) {
-                    weather = WeatherInfo(
-                        temperature: weather.temperature,
-                        condition: weather.condition,
-                        humidity: weather.humidity,
-                        windSpeed: weather.windSpeed,
-                        visibility: weather.visibility,
-                        aqi: aqi,
-                        description: weather.description,
-                        location: weather.location,
-                        source: weather.source + " + AQI"
-                    )
-                    logger.info("✅ 成功补充 AQI 数据: \(aqi)")
-                }
-            }
-            
+        if let weather = weatherInfo {
             currentWeather = weather
             cacheWeather(weather)
+
+ // 如果获取到天气数据但缺少 AQI，后台补充 AQI 数据，不阻塞首屏天气显示。
+            if weather.aqi == nil {
+                let baseTimestamp = weather.timestamp
+                Task { [weak self] in
+                    await self?.enrichAQIData(
+                        latitude: location.latitude,
+                        longitude: location.longitude,
+                        baseWeather: weather,
+                        baseTimestamp: baseTimestamp
+                    )
+                }
+            }
         } else {
             error = .networkError
         }
-        
-        isLoading = false
     }
     
  // MARK: - API Implementations
@@ -177,15 +180,7 @@ public final class SkyBridgeWeatherService: ObservableObject {
         guard let url = URL(string: urlString) else { return nil }
 
         do {
- // 配置轻量网络超时与不等待网络连接，避免请求阻塞主流程
-            let config = URLSessionConfiguration.ephemeral
-            config.timeoutIntervalForRequest = 5.0
-            config.timeoutIntervalForResource = 5.0
-            config.waitsForConnectivity = false
-            let session = URLSession(configuration: config)
-            var request = URLRequest(url: url)
-            request.timeoutInterval = 5.0
-            let (data, _) = try await session.data(for: request)
+            let data = try await fetchData(from: url, timeout: 5)
             let response = try JSONDecoder().decode(WttrResponse.self, from: data)
 
             guard let current = response.current_condition.first else { return nil }
@@ -215,9 +210,34 @@ public final class SkyBridgeWeatherService: ObservableObject {
             return weather
 
         } catch {
- // 请求失败时不阻塞主流程，记录简洁日志并返回nil以触发降级
+            // 请求失败时不阻塞主流程，记录简洁日志并返回nil以触发降级。
+            // 同时触发“失败冷却”，避免在代理/网络不通时反复触发系统级 NW/CFNetwork 报错刷屏。
+            markWttrFailedIfNeeded(error)
             logger.debug("❌ wttr.in 请求失败(超时或网络不可用): \(error.localizedDescription)")
             return nil
+        }
+    }
+    
+    // MARK: - wttr.in failure cooldown (避免反复超时导致系统刷屏)
+    
+    private func shouldAttemptWttr() -> Bool {
+        let until = UserDefaults.standard.double(forKey: wttrCooldownUntilKey)
+        if until <= 0 { return true }
+        return Date().timeIntervalSince1970 >= until
+    }
+    
+    private func markWttrFailedIfNeeded(_ error: Error) {
+        // 只对典型的“网络不可用/超时/连接丢失”触发冷却，避免把 4xx/JSON 解析等逻辑错误也当成网络问题。
+        let ns = error as NSError
+        if ns.domain == NSURLErrorDomain {
+            switch ns.code {
+            case NSURLErrorTimedOut, NSURLErrorCannotConnectToHost, NSURLErrorNetworkConnectionLost, NSURLErrorNotConnectedToInternet,
+                 NSURLErrorDNSLookupFailed, NSURLErrorCannotFindHost, NSURLErrorInternationalRoamingOff:
+                let until = Date().addingTimeInterval(wttrFailureCooldownSeconds).timeIntervalSince1970
+                UserDefaults.standard.set(until, forKey: wttrCooldownUntilKey)
+            default:
+                break
+            }
         }
     }
 
@@ -228,7 +248,7 @@ public final class SkyBridgeWeatherService: ObservableObject {
         guard let url = URL(string: urlString) else { return nil }
 
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let data = try await fetchData(from: url, timeout: 5)
             let response = try JSONDecoder().decode(OpenMeteoResponse.self, from: data)
 
             let condition = parseWeatherCondition(code: response.current.weather_code, description: nil)
@@ -287,6 +307,27 @@ public final class SkyBridgeWeatherService: ObservableObject {
         
         return nil
     }
+
+    private func enrichAQIData(latitude: Double, longitude: Double, baseWeather: WeatherInfo, baseTimestamp: Date) async {
+        logger.info("🔍 天气数据缺少 AQI，后台尝试获取空气质量数据")
+        guard let aqi = await fetchAQIData(latitude: latitude, longitude: longitude) else { return }
+        guard currentWeather?.timestamp == baseTimestamp else { return }
+
+        let enrichedWeather = WeatherInfo(
+            temperature: baseWeather.temperature,
+            condition: baseWeather.condition,
+            humidity: baseWeather.humidity,
+            windSpeed: baseWeather.windSpeed,
+            visibility: baseWeather.visibility,
+            aqi: aqi,
+            description: baseWeather.description,
+            location: baseWeather.location,
+            source: baseWeather.source + " + AQI"
+        )
+        currentWeather = enrichedWeather
+        cacheWeather(enrichedWeather)
+        logger.info("✅ 成功补充 AQI 数据: \(aqi)")
+    }
     
  /// 从 OpenWeatherMap Air Pollution API 获取 AQI
     private func fetchAQIFromOpenWeatherMap(latitude: Double, longitude: Double) async -> Int? {
@@ -296,7 +337,7 @@ public final class SkyBridgeWeatherService: ObservableObject {
         guard let url = URL(string: urlString) else { return nil }
         
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let data = try await fetchData(from: url, timeout: 3)
             let response = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             
             if let list = response?["list"] as? [[String: Any]],
@@ -321,7 +362,7 @@ public final class SkyBridgeWeatherService: ObservableObject {
         guard let url = URL(string: urlString) else { return nil }
         
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let data = try await fetchData(from: url, timeout: 3)
             let response = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             
             if let data = response?["data"] as? [String: Any],
@@ -334,6 +375,30 @@ public final class SkyBridgeWeatherService: ObservableObject {
         }
         
         return nil
+    }
+
+    private func fetchData(from url: URL, timeout: TimeInterval) async throws -> Data {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = timeout
+        let session = Self.ephemeralURLSession(timeout: timeout)
+        let (data, response) = try await session.data(for: request)
+        try validateHTTPResponse(response)
+        return data
+    }
+
+    private static func ephemeralURLSession(timeout: TimeInterval) -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = timeout
+        configuration.timeoutIntervalForResource = timeout
+        configuration.waitsForConnectivity = false
+        return URLSession(configuration: configuration)
+    }
+
+    private func validateHTTPResponse(_ response: URLResponse) throws {
+        guard let httpResponse = response as? HTTPURLResponse else { return }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            throw WeatherError.apiError("HTTP \(httpResponse.statusCode)")
+        }
     }
     
  /// 基于能见度估算 AQI（备用方案）
@@ -466,14 +531,11 @@ public final class SkyBridgeWeatherService: ObservableObject {
  // MARK: - Cache Management
     
     private func cacheWeather(_ weather: WeatherInfo) {
-        if let encoded = try? JSONEncoder().encode(weather) {
-            UserDefaults.standard.set(encoded, forKey: cacheKey)
-        }
+        try? Self.weatherCacheStore.save(weather)
     }
     
     private func loadCachedWeather() -> WeatherInfo? {
-        guard let data = UserDefaults.standard.data(forKey: cacheKey),
-              let weather = try? JSONDecoder().decode(WeatherInfo.self, from: data) else {
+        guard let weather = Self.weatherCacheStore.load() else {
             return nil
         }
         

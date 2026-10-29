@@ -1,3 +1,8 @@
+// macOS-exclusive: this file is built on frameworks that exist only on macOS
+// (AppKit / IOKit / ScreenCaptureKit / CoreWLAN / MetalFX / ServiceManagement /
+// ApplicationServices). It is excluded from other platforms so SkyBridgeCore can be
+// the single shared core for iOS as well. No behaviour changes on macOS.
+#if os(macOS)
 import Foundation
 import Metal
 import MetalKit
@@ -359,7 +364,12 @@ public class MetalFXProcessor {
         }
         
  // 创建简单的降噪计算着色器
-        guard let library = device.makeDefaultLibrary(),
+        guard let library = SkyBridgeMetalShaderLibrary.loadIfAvailable(
+            device: device,
+            bundle: SkyBridgeResourceBundleLocator.core,
+            sourceResourceNames: SkyBridgeMetalShaderLibrary.coreShaderResourceNames,
+            requiredFunctionNames: ["simple_denoise_compute"]
+        ),
               let denoiseFunction = library.makeFunction(name: "simple_denoise_compute") else {
  // 如果没有降噪着色器，跳过降噪步骤
             return
@@ -433,3 +443,4 @@ public enum MetalFXError: Error, LocalizedError {
         }
     }
 }
+#endif

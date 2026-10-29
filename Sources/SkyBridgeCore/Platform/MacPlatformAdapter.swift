@@ -1,3 +1,8 @@
+// macOS-exclusive: this file is built on frameworks that exist only on macOS
+// (AppKit / IOKit / ScreenCaptureKit / CoreWLAN / MetalFX / ServiceManagement /
+// ApplicationServices). It is excluded from other platforms so SkyBridgeCore can be
+// the single shared core for iOS as well. No behaviour changes on macOS.
+#if os(macOS)
 //
 // MacPlatformAdapter.swift
 // SkyBridgeCore
@@ -34,7 +39,9 @@ public final class MacPlatformAdapter: @unchecked Sendable {
     public init() {}
     
     deinit {
-        screenCaptureStream?.stopCapture()
+        // Snapshot under the same lock that guards currentFrame before tearing down.
+        let stream = frameLock.withLock { screenCaptureStream }
+        stream?.stopCapture()
     }
 }
 
@@ -46,10 +53,13 @@ extension MacPlatformAdapter: PlatformAdapter {
  // MARK: - Screen Capture
     
     public func startScreenCapture(config: ScreenCaptureConfig) async throws {
- // 检查屏幕录制权限
+ // 检查屏幕录制权限（未授权时先触发系统请求）
         let permissionStatus = await checkPermission(.screenRecording)
-        guard permissionStatus == .authorized else {
-            throw PlatformAdapterError.permissionDenied(.screenRecording)
+        if permissionStatus != .authorized {
+            let granted = await requestPermission(.screenRecording)
+            guard granted else {
+                throw PlatformAdapterError.permissionDenied(.screenRecording)
+            }
         }
         
  // 获取可共享内容
@@ -74,24 +84,29 @@ extension MacPlatformAdapter: PlatformAdapter {
         let delegate = ScreenCaptureStreamDelegate { [weak self] frame in
             self?.setCurrentFrame(frame)
         }
-        captureDelegate = delegate
-        
+        // Lifecycle fields share frameLock with currentFrame (set/stop/deinit may race).
+        frameLock.withLock { captureDelegate = delegate }
+
         try stream.addStreamOutput(delegate, type: .screen, sampleHandlerQueue: DispatchQueue(label: "com.skybridge.screencapture"))
         try await stream.startCapture()
-        
-        screenCaptureStream = stream
+
+        frameLock.withLock { screenCaptureStream = stream }
         logger.info("🎥 屏幕捕获已启动: \(streamConfig.width)x\(streamConfig.height)@\(config.frameRate)fps")
     }
     
     public func stopScreenCapture() async {
+        // Snapshot under the lock, stop outside the lock (never hold NSLock across await).
+        let stream = frameLock.withLock { screenCaptureStream }
         do {
-            try await screenCaptureStream?.stopCapture()
+            try await stream?.stopCapture()
         } catch {
             logger.warning("停止屏幕捕获时出错: \(error.localizedDescription)")
         }
-        screenCaptureStream = nil
-        captureDelegate = nil
-        
+        frameLock.withLock {
+            screenCaptureStream = nil
+            captureDelegate = nil
+        }
+
         setCurrentFrame(nil)
         
         logger.info("🛑 屏幕捕获已停止")
@@ -206,7 +221,7 @@ extension MacPlatformAdapter: PlatformAdapter {
         case .accessibility:
             return checkAccessibilityPermission()
         case .localNetwork:
-            return .authorized  // macOS 不需要显式授权本地网络
+            return .notDetermined
         case .camera, .microphone:
             return .notDetermined  // 暂不实现
         }
@@ -217,9 +232,9 @@ extension MacPlatformAdapter: PlatformAdapter {
         case .accessibility:
             return requestAccessibilityPermission()
         case .screenRecording:
- // 触发权限请求（通过尝试获取屏幕内容）
-            _ = await checkScreenRecordingPermission()
-            return false  // 需要用户手动授权
+            return await ScreenCaptureAuthorizationProbe.shared.requestAuthorizationIfNeeded {
+                ScreenCapturePermissionSettingsOpener.open()
+            }
         default:
             return false
         }
@@ -258,12 +273,7 @@ private extension MacPlatformAdapter {
  // MARK: - Permission Checks
     
     func checkScreenRecordingPermission() async -> SBPermissionStatus {
-        do {
-            _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            return .authorized
-        } catch {
-            return .denied
-        }
+        await ScreenCaptureAuthorizationProbe.shared.isAuthorized() ? .authorized : .denied
     }
     
     func checkAccessibilityPermission() -> SBPermissionStatus {
@@ -403,3 +413,4 @@ private final class ScreenCaptureStreamDelegate: NSObject, SCStreamOutput {
         onFrame(frame)
     }
 }
+#endif

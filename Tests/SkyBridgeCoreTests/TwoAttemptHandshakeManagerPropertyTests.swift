@@ -47,6 +47,15 @@ final class TwoAttemptHandshakeManagerPropertyTests: XCTestCase {
         XCTAssertTrue(policy.requirePQC)
         XCTAssertFalse(policy.allowClassicFallback, "requirePQC=true must force allowClassicFallback=false")
     }
+
+    func testRecommendedDefaultIsStrictPQCRegardlessOfCompatibilityMode() {
+        for compatibilityModeEnabled in [false, true] {
+            let policy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
+            XCTAssertTrue(policy.requirePQC)
+            XCTAssertFalse(policy.allowClassicFallback)
+            XCTAssertEqual(policy.minimumTier, .nativePQC)
+        }
+    }
     
  // MARK: - Property 2.1.1: Timeout does NOT trigger fallback
     
@@ -113,26 +122,28 @@ final class TwoAttemptHandshakeManagerPropertyTests: XCTestCase {
         XCTAssertEqual(algorithms[1], .ed25519, "Second attempt should use Ed25519")
     }
     
- // MARK: - Property 2.1.3: Suite not supported DOES trigger fallback
-    
-    func testSuiteNotSupportedTriggersFallback() async throws {
+ // MARK: - Property 2.1.3: Suite not supported is blocked from fallback
+
+    func testSuiteNotSupportedIsBlockedFromFallback() async throws {
         let tracker = AttemptTracker()
-        
-        _ = try await TwoAttemptHandshakeManager.performHandshake(
-            deviceId: "test-device",
-            preferPQC: true
-        ) { strategy, sigAAlgorithm in
-            let count = await tracker.recordAttempt(strategy: strategy, algorithm: sigAAlgorithm)
-            
-            if count == 1 {
+
+        do {
+            _ = try await TwoAttemptHandshakeManager.performHandshake(
+                deviceId: "test-device",
+                preferPQC: true
+            ) { strategy, sigAAlgorithm in
+                _ = await tracker.recordAttempt(strategy: strategy, algorithm: sigAAlgorithm)
                 throw HandshakeError.failed(.suiteNotSupported)
             }
-            
-            return Self.createMockSessionKeys()
+            XCTFail("suiteNotSupported should fail without fallback")
+        } catch let HandshakeError.failed(reason) {
+            XCTAssertEqual(reason, .suiteNotSupported)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
         }
-        
+
         let count = await tracker.getCount()
-        XCTAssertEqual(count, 2, "Suite not supported should trigger fallback")
+        XCTAssertEqual(count, 1, "Suite not supported must not trigger fallback")
     }
     
  // MARK: - Property 2.1.4: preferPQC=false skips PQC attempt
@@ -164,27 +175,30 @@ final class TwoAttemptHandshakeManagerPropertyTests: XCTestCase {
     
     func testStrictPQCBlocksClassicFallbackOnPQCFailure() async throws {
         let tracker = AttemptTracker()
+        let emitter = SecurityEventEmitter.createForTesting()
+        let deviceId = "test-device-strict-\(UUID().uuidString)"
         let noFallbackEvent = expectation(description: "No fallback event should be emitted")
         noFallbackEvent.isInverted = true
         
-        let subscriptionId = await SecurityEventEmitter.shared.subscribe { event in
+        let subscriptionId = await emitter.subscribe { event in
             if event.type == .cryptoDowngrade {
                 noFallbackEvent.fulfill()
             }
         }
         
         defer {
-            Task { await SecurityEventEmitter.shared.unsubscribe(subscriptionId) }
+            Task { await emitter.unsubscribe(subscriptionId) }
         }
         
         do {
             _ = try await TwoAttemptHandshakeManager.performHandshake(
-                deviceId: "test-device",
+                deviceId: deviceId,
                 preferPQC: true,
-                policy: .strictPQC
+                policy: .strictPQC,
+                securityEventEmitter: emitter
             ) { strategy, sigAAlgorithm in
                 _ = await tracker.recordAttempt(strategy: strategy, algorithm: sigAAlgorithm)
-                throw HandshakeError.failed(.suiteNotSupported)
+                throw HandshakeError.failed(.suiteNegotiationFailed)
             }
             XCTFail("Should have thrown with strictPQC policy")
         } catch {
@@ -199,26 +213,31 @@ final class TwoAttemptHandshakeManagerPropertyTests: XCTestCase {
     
     func testDefaultPolicyAllowsFallbackAndEmitsEvent() async throws {
         let tracker = AttemptTracker()
+        let emitter = SecurityEventEmitter.createForTesting()
+        let eventBox = HandshakeDowngradeEventBox()
+        let deviceId = "test-device-default-\(UUID().uuidString)"
         let fallbackEvent = expectation(description: "Fallback event should be emitted")
         
-        let subscriptionId = await SecurityEventEmitter.shared.subscribe { event in
+        let subscriptionId = await emitter.subscribe { event in
             if event.type == .cryptoDowngrade {
+                await eventBox.set(event)
                 fallbackEvent.fulfill()
             }
         }
         
         defer {
-            Task { await SecurityEventEmitter.shared.unsubscribe(subscriptionId) }
+            Task { await emitter.unsubscribe(subscriptionId) }
         }
         
         _ = try await TwoAttemptHandshakeManager.performHandshake(
-            deviceId: "test-device",
+            deviceId: deviceId,
             preferPQC: true,
-            policy: .default
+            policy: .default,
+            securityEventEmitter: emitter
         ) { strategy, sigAAlgorithm in
             let count = await tracker.recordAttempt(strategy: strategy, algorithm: sigAAlgorithm)
             if count == 1 {
-                throw HandshakeError.failed(.suiteNotSupported)
+                throw HandshakeError.failed(.suiteNegotiationFailed)
             }
             return Self.createMockSessionKeys()
         }
@@ -227,17 +246,24 @@ final class TwoAttemptHandshakeManagerPropertyTests: XCTestCase {
         XCTAssertEqual(count, 2, "default policy should allow classic fallback")
         
         await fulfillment(of: [fallbackEvent], timeout: 0.5)
+
+        let capturedEvent = await eventBox.get()
+        XCTAssertEqual(capturedEvent?.context["deviceId"], SkyBridgeDiagnosticRedaction.redacted)
+        XCTAssertNotEqual(capturedEvent?.context["deviceId"], deviceId)
+        XCTAssertEqual(capturedEvent?.context["reason"], HandshakeFailureReason.suiteNegotiationFailed.diagnosticReasonCode)
+        XCTAssertEqual(capturedEvent?.context["fromStrategy"], HandshakeAttemptStrategy.pqcOnly.rawValue)
+        XCTAssertEqual(capturedEvent?.context["toStrategy"], HandshakeAttemptStrategy.classicOnly.rawValue)
     }
     
  // MARK: - Property 2.1.5: isPQCUnavailableError classification
     
     func testIsPQCUnavailableErrorClassification() {
- // Errors that SHOULD trigger fallback
+// Errors that SHOULD trigger fallback
         XCTAssertTrue(TwoAttemptHandshakeManager.isPQCUnavailableError(.pqcProviderUnavailable))
-        XCTAssertTrue(TwoAttemptHandshakeManager.isPQCUnavailableError(.suiteNotSupported))
         XCTAssertTrue(TwoAttemptHandshakeManager.isPQCUnavailableError(.suiteNegotiationFailed))
         
- // Errors that should NOT trigger fallback
+// Errors that should NOT trigger fallback
+        XCTAssertFalse(TwoAttemptHandshakeManager.isPQCUnavailableError(.suiteNotSupported))
         XCTAssertFalse(TwoAttemptHandshakeManager.isPQCUnavailableError(.timeout))
         XCTAssertFalse(TwoAttemptHandshakeManager.isPQCUnavailableError(.cancelled))
         XCTAssertFalse(TwoAttemptHandshakeManager.isPQCUnavailableError(.signatureVerificationFailed))
@@ -287,5 +313,17 @@ final class TwoAttemptHandshakeManagerPropertyTests: XCTestCase {
         case .empty:
             return []
         }
+    }
+}
+
+private actor HandshakeDowngradeEventBox {
+    private var event: SecurityEvent?
+
+    func set(_ value: SecurityEvent) {
+        event = value
+    }
+
+    func get() -> SecurityEvent? {
+        event
     }
 }

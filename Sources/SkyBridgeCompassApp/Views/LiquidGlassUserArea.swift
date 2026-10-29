@@ -16,6 +16,7 @@ struct LiquidGlassUserArea: View {
     @State private var showingQuickMenu = false
     @State private var checkingForUpdates = false
     @State private var showingAbout = false
+    @State private var cachedAvatar: NSImage?
     
  // MARK: - 动画配置
  // 🔧 优化：使用更快的动画，减少延迟感
@@ -66,6 +67,9 @@ struct LiquidGlassUserArea: View {
                 .padding(.bottom, 16)
         }
         .background(.ultraThinMaterial.opacity(0.8))
+        .task(id: authModel.currentSession?.userIdentifier) {
+            await loadCachedAvatar(for: authModel.currentSession?.userIdentifier)
+        }
     }
     
  // MARK: - Liquid Glass分隔线
@@ -107,7 +111,7 @@ struct LiquidGlassUserArea: View {
     private var userAvatar: some View {
         Group {
             if let userId = authModel.currentSession?.userIdentifier,
-               let cachedAvatar = AvatarCacheManager.shared.getAvatar(for: userId) {
+               let cachedAvatar = cachedAvatar ?? AvatarCacheManager.shared.getAvatar(for: userId) {
  // 真实头像
                 Image(nsImage: cachedAvatar)
                     .resizable()
@@ -122,27 +126,56 @@ struct LiquidGlassUserArea: View {
                                 endPoint: .bottomTrailing
                             ), lineWidth: 2)
                     )
+            } else if let avatarURLString = authModel.currentSession?.avatarURL,
+                      let avatarURL = URL(string: avatarURLString) {
+                AsyncImage(url: avatarURL) { phase in
+                    switch phase {
+                    case .empty:
+                        ProgressView()
+                            .frame(width: 36, height: 36)
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: 36, height: 36)
+                            .clipShape(Circle())
+                            .overlay(
+                                Circle()
+                                    .stroke(.linearGradient(
+                                        colors: [.blue.opacity(0.3), .purple.opacity(0.3)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ), lineWidth: 2)
+                            )
+                    default:
+                        defaultAvatar
+                    }
+                }
             } else {
- // 默认头像 - Liquid Glass风格
-                Circle()
-                    .fill(.linearGradient(
-                        colors: [.blue, .purple],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ))
-                    .frame(width: 36, height: 36)
-                    .overlay(
-                        Text(getUserInitials())
-                            .font(.system(size: 16, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white)
-                    )
-                    .overlay(
-                        Circle()
-                            .stroke(.white.opacity(0.2), lineWidth: 1)
-                    )
+                defaultAvatar
             }
         }
         .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
+    }
+
+    private var defaultAvatar: some View {
+ // 默认头像 - Liquid Glass风格
+        Circle()
+            .fill(.linearGradient(
+                colors: [.blue, .purple],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ))
+            .frame(width: 36, height: 36)
+            .overlay(
+                Text(getUserInitials())
+                    .font(.system(size: 16, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+            )
+            .overlay(
+                Circle()
+                    .stroke(.white.opacity(0.2), lineWidth: 1)
+            )
     }
     
  // MARK: - 用户信息文本
@@ -269,6 +302,9 @@ struct LiquidGlassUserArea: View {
  // ✅ 兼容性：.menuIndicator(.hidden) 是 macOS 26+ 的特性
             .modifier(MenuIndicatorHiddenModifier())
             .buttonStyle(LiquidGlassButtonStyle())
+ // 让无边框菜单收缩到齿轮图标的固有宽度，否则它会吃掉 Spacer 让出的空间，
+ // 导致齿轮停在左侧；固定尺寸后 Spacer 才能把齿轮推到尾部（右侧）。
+            .fixedSize()
             .help(LocalizationManager.shared.localizedString("profile.quickActions"))
         }
         .sheet(isPresented: $showingAbout) {
@@ -296,9 +332,10 @@ struct LiquidGlassUserArea: View {
     
  /// 获取简短的用户ID显示
     private func getShortUserID() -> String {
-        guard let userID = authModel.currentSession?.userIdentifier else {
+        guard authModel.currentSession != nil else {
             return "未知ID"
         }
+        let userID = authModel.displayedNebulaId
         
         if userID.count > 12 {
             let prefix = String(userID.prefix(8))
@@ -316,25 +353,10 @@ struct LiquidGlassUserArea: View {
         checkingForUpdates = true
         SkyBridgeLogger.ui.debugOnly("🔄 [LiquidGlassUserArea] 开始检查更新...")
         
- // 模拟网络请求
-        Task {
-            try? await Task.sleep(nanoseconds: 2_000_000_000) // 2秒
-            await MainActor.run {
-                checkingForUpdates = false
- // 这里应该显示更新结果
-                showUpdateAlert()
-            }
+        Task { @MainActor in
+            await SkyBridgeAppUpdateController.checkAndPresent()
+            checkingForUpdates = false
         }
-    }
-    
- /// 显示更新提示
-    private func showUpdateAlert() {
-        let alert = NSAlert()
-        alert.messageText = "已是最新版本"
-        alert.informativeText = "SkyBridge Compass Pro 1.0.0 (Build 2025.10.31)\n您正在使用最新版本。"
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "好的")
-        alert.runModal()
     }
     
  /// 显示系统信息
@@ -372,9 +394,9 @@ struct LiquidGlassUserArea: View {
         芯片型号: \(model)
         系统版本: \(osVersion)
         物理内存: \(physicalMemory) GB
-        应用版本: 1.0.0 (Build 2025.10.31)
+        应用版本: \(SkyBridgeAppVersionInfo.displayVersion())
         Metal 版本: Metal 4
-        Swift 版本: 6.2
+        Swift 版本: 6.3
         """
     }
     
@@ -395,6 +417,16 @@ struct LiquidGlassUserArea: View {
     private func openWebsite() {
         if let url = URL(string: "https://skybridge-compass.vercel.app") {
             NSWorkspace.shared.open(url)
+            }
+        }
+
+    private func loadCachedAvatar(for userId: String?) async {
+        cachedAvatar = nil
+        guard let userId else { return }
+        do {
+            cachedAvatar = try await AvatarCacheManager.shared.loadCachedAvatar(for: userId)
+        } catch {
+            SkyBridgeLogger.ui.error("加载头像缓存失败: \(error.localizedDescription, privacy: .private)")
         }
     }
 }
@@ -419,25 +451,17 @@ struct LiquidGlassButtonStyle: ButtonStyle {
 @available(macOS 14.0, *)
 struct AboutWindow: View {
     @Environment(\.dismiss) private var dismiss
-    
+
     var body: some View {
         VStack(spacing: 24) {
  // 应用图标和名称
             VStack(spacing: 12) {
-                RoundedRectangle(cornerRadius: 24)
-                    .fill(
-                        LinearGradient(
-                            colors: [.blue, .purple],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
+                BrandAppIconView(
+                    contentMode: .fit,
+                    safeInset: 0,
+                    clipCornerRadius: 22
+                )
                     .frame(width: 100, height: 100)
-                    .overlay(
-                        Image(systemName: "network")
-                            .font(.system(size: 48))
-                            .foregroundColor(.white)
-                    )
                     .shadow(color: .blue.opacity(0.3), radius: 20, x: 0, y: 10)
                 
                 VStack(spacing: 4) {
@@ -445,7 +469,7 @@ struct AboutWindow: View {
                         .font(.title)
                         .fontWeight(.bold)
                     
-                    Text("版本 1.0.0 (Build 2025.10.31)")
+                    Text("版本 \(SkyBridgeAppVersionInfo.displayVersion())")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
@@ -461,7 +485,7 @@ struct AboutWindow: View {
                 HStack(spacing: 20) {
                     TechBadge(icon: "cpu", text: "Apple Silicon")
                     TechBadge(icon: "cube.transparent", text: "Metal 4")
-                    TechBadge(icon: "bolt.fill", text: "Swift 6.2")
+                    TechBadge(icon: "bolt.fill", text: "Swift 6.3")
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -506,11 +530,11 @@ struct AboutWindow: View {
             
  // 版权信息
             VStack(spacing: 4) {
-                Text("© 2024-2025 SkyBridge Team")
+                Text("© 2024-2026 SkyBridge Team")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 
-                Text("专为 Apple Silicon 优化 • 采用 Swift 6.2 构建")
+                Text("专为 Apple Silicon 优化 • 采用 Swift 6.3 构建")
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }

@@ -4,8 +4,8 @@
 //
 // 说明：
 // - FreeRDP 3.x 客户端桥接接口
-// - 支持动态加载 FreeRDP 库
-// - Apple Silicon 硬件加速支持
+// - 分开验证并动态加载 FreeRDP core/client 库
+// - 软件 GDI BGRA 渲染与鼠标/键盘输入
 //
 
 #import <Foundation/Foundation.h>
@@ -112,51 +112,19 @@ typedef void (^CBFreeRDPStateCallback)(NSString *status);
 - (void)submitKeyboardEventWithCode:(uint16_t)code
                                down:(BOOL)down;
 
-// MARK: - 配置设置
+// MARK: - 连接期设置
 
-/// 配置显示设置
-/// @param displaySettings 显示设置字典
-/// 支持的键：
-/// - width (NSNumber): 桌面宽度
-/// - height (NSNumber): 桌面高度
-/// - colorDepth (NSNumber): 色深 (8/16/24/32)
-/// - fullScreenMode (NSNumber/BOOL): 是否全屏
-/// - multiMonitorSupport (NSNumber/BOOL): 是否支持多显示器
-/// - preferredCodec (NSNumber): 首选编解码器 (0=H.264, 1=HEVC)
-- (void)configureDisplaySettings:(NSDictionary<NSString *, id> *)displaySettings;
-
-/// 配置交互设置
-/// @param interactionSettings 交互设置字典
-/// 支持的键：
-/// - enableClipboardSync (NSNumber/BOOL): 启用剪贴板同步
-/// - enableAudioRedirection (NSNumber/BOOL): 启用音频重定向
-/// - enablePrinterRedirection (NSNumber/BOOL): 启用打印机重定向
-/// - enableFileTransfer (NSNumber/BOOL): 启用文件传输
-- (void)configureInteractionSettings:(NSDictionary<NSString *, id> *)interactionSettings;
-
-/// 配置网络设置
-/// @param networkSettings 网络设置字典
-/// 支持的键：
-/// - connectionType (NSNumber): 连接类型 (0-7)
-/// - enableEncryption (NSNumber/BOOL): 启用加密
-/// - enableUDPTransport (NSNumber/BOOL): 启用 UDP 传输
-/// - connectionTimeout (NSNumber): 连接超时 (毫秒)
-- (void)configureNetworkSettings:(NSDictionary<NSString *, id> *)networkSettings;
-
-/// 应用所有设置
-/// @param allSettings 包含 displaySettings, interactionSettings, networkSettings 的字典
-- (void)applyAllSettings:(NSDictionary<NSString *, id> *)allSettings;
-
-// MARK: - Apple Silicon 支持
-
-/// 检测是否为 Apple Silicon
-- (BOOL)detectAppleSilicon;
-
-/// 初始化 Apple Silicon 解码器
-- (void)initializeAppleSiliconDecoder;
-
-/// 配置 Apple Silicon 相关设置
-- (void)configureAppleSiliconSettings;
+/// 校验并暂存必须在 FreeRDP connect 前应用的设置。
+///
+/// 只支持已接线且能验证写入结果的字段：
+/// - displaySettings.width + displaySettings.height
+/// - displaySettings.colorDepth (8/16/24/32)
+/// - networkSettings.connectionType
+///
+/// 未接线字段、错误类型、超界值或活跃会话中改参都会显式失败。
+/// 已暂存设置在 context ready 后、freerdp_connect 前严格写入。
+- (BOOL)applyAllSettings:(NSDictionary<NSString *, id> *)allSettings
+                   error:(NSError * _Nullable * _Nullable)error;
 
 @end
 

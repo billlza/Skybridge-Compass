@@ -395,7 +395,11 @@ public actor P2PMetricsCollector {
         collectionTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.collectAndReport()
-                try? await Task.sleep(nanoseconds: UInt64(1_000_000_000))
+                do {
+                    try await Task.sleep(for: .seconds(1))
+                } catch {
+                    return
+                }
             }
         }
     }

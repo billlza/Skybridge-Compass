@@ -223,6 +223,25 @@ struct CoordinateConversionIntegrationTests {
         #expect(x2 == Double(screenWidth))
         #expect(y2 == Double(screenHeight))
     }
+
+    @Test("RemoteControlManager 注入点不应再次翻转 Y 轴")
+    func testRemoteControlMouseInjectionPointDoesNotFlipYAxis() {
+        let event = RemoteMouseEvent(
+            type: .leftMouseDown,
+            x: 320,
+            y: 180,
+            timestamp: 1234567890
+        )
+
+        let point = RemoteControlManager.mouseInjectionPoint(
+            for: event,
+            visibleSize: CGSize(width: 640, height: 360),
+            displayBounds: CGRect(x: 0, y: 0, width: 640, height: 360)
+        )
+
+        #expect(point.x == 320)
+        #expect(point.y == 180)
+    }
 }
 
 // MARK: - Permission Status Tests
@@ -230,13 +249,13 @@ struct CoordinateConversionIntegrationTests {
 @Suite("Permission Status Tests")
 struct PermissionStatusTests {
     
-    @Test("本地网络权限应始终返回已授权")
+    @Test("本地网络权限不应被静态假定为已授权")
     @MainActor
-    func testLocalNetworkPermissionAlwaysAuthorized() async {
+    func testLocalNetworkPermissionIsNotAssumedAuthorized() async {
         if #available(macOS 14.0, *) {
             let adapter = MacPlatformAdapter()
             let status = await adapter.checkPermission(.localNetwork)
-            #expect(status == .authorized)
+            #expect(status == .notDetermined)
         }
     }
 }

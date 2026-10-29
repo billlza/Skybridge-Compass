@@ -23,11 +23,11 @@ public final class SSHClient: RemoteProtocolClient, @unchecked Sendable {
  /// - host: 主机地址
  /// - port: 端口号（默认 22）
     public func probe(host: String, port: UInt16) async throws {
-        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!)
+        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: try NWEndpoint.Port.validated(port))
         let params = NWParameters.tcp
         let connection = NWConnection(to: endpoint, using: params)
         connection.start(queue: queue)
-        
+
  // 使用 Continuation 等待连接就绪或失败，避免并发数据竞争
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             connection.stateUpdateHandler = { state in
@@ -44,16 +44,16 @@ public final class SSHClient: RemoteProtocolClient, @unchecked Sendable {
                 }
             }
         }
-        
+
  // 读取服务器 Banner（SSH-2.0-OpenSSH_x.x）
         let banner = try await readServerBanner(connection: connection)
         if let banner = banner {
             logger.info("SSH 服务器 Banner: \(banner)")
         }
-        
+
         connection.cancel()
     }
-    
+
  /// 读取 SSH 服务器 Banner
     private func readServerBanner(connection: NWConnection) async throws -> String? {
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String?, Error>) in
@@ -62,7 +62,7 @@ public final class SSHClient: RemoteProtocolClient, @unchecked Sendable {
                     continuation.resume(throwing: error)
                     return
                 }
-                
+
                 if let data = data, let banner = String(data: data, encoding: .utf8) {
                     let trimmed = banner.trimmingCharacters(in: .whitespacesAndNewlines)
                     continuation.resume(returning: trimmed)
@@ -72,15 +72,15 @@ public final class SSHClient: RemoteProtocolClient, @unchecked Sendable {
             }
         }
     }
-    
+
  /// 检查 SSH 服务版本
  /// - Returns: SSH 版本信息（如 "SSH-2.0-OpenSSH_8.6"）
     public func checkVersion(host: String, port: UInt16 = 22) async throws -> String? {
-        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!)
+        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: try NWEndpoint.Port.validated(port))
         let params = NWParameters.tcp
         let connection = NWConnection(to: endpoint, using: params)
         connection.start(queue: queue)
-        
+
  // 等待连接
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             connection.stateUpdateHandler = { state in
@@ -96,7 +96,7 @@ public final class SSHClient: RemoteProtocolClient, @unchecked Sendable {
                 }
             }
         }
-        
+
         let banner = try await readServerBanner(connection: connection)
         connection.cancel()
         return banner

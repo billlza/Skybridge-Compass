@@ -135,11 +135,399 @@ final class DeviceIdentityKeyManagerPropertyTests: XCTestCase {
     
  // MARK: - KeyPurpose Enum Tests
     
- /// Test KeyPurpose raw values
+    /// Test KeyPurpose raw values
     func testKeyPurposeRawValues() {
         XCTAssertEqual(KeyPurpose.legacy.rawValue, "legacy")
         XCTAssertEqual(KeyPurpose.protocol.rawValue, "protocol")
         XCTAssertEqual(KeyPurpose.pop.rawValue, "pop")
         XCTAssertEqual(KeyPurpose.unknown.rawValue, "unknown")
+    }
+
+    func testDeviceIdentityKeychainAccessGroupContract() throws {
+        let source = try repositorySource("Sources/SkyBridgeCore/P2P/DeviceIdentityKeyManager.swift")
+        let scopeSource = try repositorySource("Sources/SkyBridgeCore/Security/KeychainGenericPasswordScope.swift")
+        let authoritySource = try repositorySource("Sources/SkyBridgeCore/P2P/DeviceIdentityAuthority.swift")
+
+        XCTAssertTrue(
+            scopeSource.contains("SecTaskCopyValueForEntitlement(") &&
+                scopeSource.contains("\"keychain-access-groups\" as CFString"),
+            "Runtime identity storage must read the signed keychain access groups instead of assuming the process default namespace."
+        )
+        XCTAssertTrue(
+            scopeSource.contains("hasSuffix(\".group.com.skybridge.compass\")") &&
+                scopeSource.contains("resolved = sharedAccessGroup(from: groups)") &&
+                scopeSource.contains(".first { !$0.isEmpty && $0.hasSuffix(\".group.com.skybridge.compass\") }"),
+            "Cross-process identity authority must require the shared signed group and reject an app-only authority."
+        )
+        XCTAssertTrue(
+            scopeSource.contains("func authoritativeOnly() throws") &&
+                authoritySource.contains("let authoritativeScope: KeychainGenericPasswordScope") &&
+                authoritySource.contains("authoritativeScope.writeAccessGroup"),
+            "All authoritative identity material must use the exact resolved shared-group scope."
+        )
+        XCTAssertTrue(
+            scopeSource.contains("readAccessGroups: [accessGroup, nil]") &&
+                authoritySource.contains("persistentReference") &&
+                authoritySource.contains("legacyIdentityConflictsWithAuthority") &&
+                source.contains("inMemorySharedIdentityForTesting"),
+            "Legacy discovery must reconcile by exact persistent reference, while tests use an explicit isolated authority."
+        )
+    }
+
+    func testMacPackageEntitlementsCarryKeychainAccessGroups() throws {
+        let developmentEntitlements = try repositorySource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.entitlements")
+        let webPackagingEntitlements = try repositorySource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.packaging.entitlements")
+        let nativePackagingEntitlements = try repositorySource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.native.packaging.entitlements")
+        let resourceEntitlements = try repositorySource("Sources/SkyBridgeCompassApp/Resources/SkyBridgeCompassApp.entitlements")
+        let signingHelper = try repositorySource("Scripts/signing_entitlements_helpers.sh")
+
+        for entitlements in [
+            developmentEntitlements,
+            webPackagingEntitlements,
+            nativePackagingEntitlements,
+            resourceEntitlements
+        ] {
+            XCTAssertTrue(entitlements.contains("<key>com.apple.application-identifier</key>"))
+            XCTAssertTrue(entitlements.contains("<key>keychain-access-groups</key>"))
+            XCTAssertTrue(entitlements.contains("$(AppIdentifierPrefix)com.skybridge.compass.pro"))
+            XCTAssertTrue(entitlements.contains("$(AppIdentifierPrefix)group.com.skybridge.compass"))
+        }
+
+        XCTAssertTrue(
+            signingHelper.contains("\"com.apple.application-identifier\"") &&
+            signingHelper.contains("\"keychain-access-groups\""),
+            "Signing/profile validation must treat app identity and keychain-access-groups as profile-backed entitlements."
+        )
+    }
+
+    func testIOSEntitlementsCarryIOSKeychainAccessGroups() throws {
+        let debugEntitlements = try repositorySource("SkyBridge Compass iOS/SkyBridgeCompass-iOSDebug.entitlements")
+        let releaseEntitlements = try repositorySource("SkyBridge Compass iOS/SkyBridgeCompass-iOSRelease.entitlements")
+
+        for entitlements in [debugEntitlements, releaseEntitlements] {
+            XCTAssertTrue(entitlements.contains("<key>keychain-access-groups</key>"))
+            XCTAssertTrue(entitlements.contains("$(AppIdentifierPrefix)com.skybridge.compass.ios"))
+            XCTAssertTrue(entitlements.contains("$(AppIdentifierPrefix)group.com.skybridge.compass"))
+            XCTAssertFalse(
+                entitlements.contains("$(AppIdentifierPrefix)com.skybridge.compass.pro"),
+                "iOS must not request the macOS app keychain access group."
+            )
+        }
+    }
+
+    func testPersistentIdentityKeychainFailuresDoNotRegenerateIdentityMaterial() throws {
+        let source = try repositorySource("Sources/SkyBridgeCore/P2P/DeviceIdentityKeyManager.swift")
+        let keychainSource = try repositorySource("Sources/SkyBridgeCore/Security/KeychainManager.swift")
+        let authoritySource = try repositorySource("Sources/SkyBridgeCore/P2P/DeviceIdentityAuthority.swift")
+
+        XCTAssertFalse(
+            source.contains("try? loadKEMKeyRecord"),
+            "KEM identity loading must propagate Keychain/decode failures instead of treating them as missing and generating a new identity key."
+        )
+        XCTAssertTrue(
+            keychainSource.contains("public nonisolated func exportKeyStrict(service: String, account: String) throws -> Data?"),
+            "Generic Keychain service/account reads need a strict API for security-sensitive callers."
+        )
+        XCTAssertTrue(
+            source.contains("public func getOrCreateDeviceIdStrict() async throws -> String"),
+            "Device ID creation needs a throwing path so storage errors do not silently rotate persistent identity."
+        )
+        XCTAssertTrue(
+            source.contains("try saveDeviceIdStrict(newId)") &&
+            source.contains("try await getOrCreateDeviceIdStrict()"),
+            "Identity creation and rotation must persist the device ID through the strict path before publishing new key material."
+        )
+        XCTAssertTrue(
+            source.contains("return try await getOrCreateIdentityKey().deviceId") &&
+                authoritySource.contains("throw DeviceIdentityKeyError.keychainError(status)"),
+            "Production device IDs must come from the immutable identity authority and propagate Data Protection Keychain failures."
+        )
+    }
+
+    func testKEMIdentityRejectsProviderSuiteMismatchBeforeUsingSharedState() async throws {
+        #if HAS_APPLE_PQC_SDK
+        guard #available(macOS 26.0, iOS 26.0, *) else {
+            throw XCTSkip("Apple PQC is unavailable on this OS")
+        }
+
+        do {
+            _ = try await DeviceIdentityKeyManager.shared.getKEMPublicKey(
+                for: .xwingMLDSA,
+                provider: ApplePQCCryptoProvider()
+            )
+            XCTFail("An ML-KEM provider must never populate the X-Wing identity slot")
+        } catch CryptoProviderError.unsupportedAlgorithm(let description) {
+            XCTAssertTrue(description.contains("ApplePQC"))
+            XCTAssertTrue(description.contains(CryptoSuite.xwingMLDSA.rawValue))
+        }
+        #else
+        throw XCTSkip("Apple PQC SDK is unavailable in this build")
+        #endif
+    }
+
+    func testUntieredLiboqsKEMMigratesWithoutBlockingNativeIdentity() async throws {
+        let context = try DeviceIdentityKeychainTestContext()
+        let manager = context.manager
+        addTeardownBlock {
+            try await manager.clearKEMIdentityRecordsForTesting()
+            try context.reset()
+        }
+
+        let legacyRecord = KEMIdentityKeyRecord(
+            suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+            publicKey: Data(repeating: 0x31, count: 1_184),
+            privateKey: Data(repeating: 0x42, count: 2_400),
+            createdAt: Date(timeIntervalSince1970: 1_735_689_600)
+        )
+        try await manager.seedUntieredKEMIdentityRecordForTesting(legacyRecord)
+
+        let generatedKeyPair = try Self.nativeMLKEMKeyPair(
+            publicByte: 0xA5,
+            privateByte: 0x5A
+        )
+        let provider = DeterministicNativeMLKEMProvider(
+            generatedKeyPair: generatedKeyPair
+        )
+        let publicKey = try await manager.getKEMPublicKey(
+            for: .mlkem768MLDSA65,
+            provider: provider
+        )
+        let untieredRecord = try await manager.storedKEMIdentityRecordForTesting(
+            suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+            tier: nil
+        )
+        let migratedLiboqsRecord = try await manager.storedKEMIdentityRecordForTesting(
+            suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+            tier: .liboqsPQC
+        )
+        let nativeRecord = try await manager.storedKEMIdentityRecordForTesting(
+            suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+            tier: .nativePQC
+        )
+
+        XCTAssertEqual(publicKey, generatedKeyPair.publicKey.bytes)
+        XCTAssertNil(untieredRecord)
+        XCTAssertEqual(migratedLiboqsRecord, legacyRecord)
+        XCTAssertEqual(nativeRecord?.publicKey, generatedKeyPair.publicKey.bytes)
+    }
+
+    func testUntieredSameTierKEMConflictStillFailsClosed() async throws {
+        let context = try DeviceIdentityKeychainTestContext()
+        let manager = context.manager
+        addTeardownBlock {
+            try await manager.clearKEMIdentityRecordsForTesting()
+            try context.reset()
+        }
+
+        let generatedKeyPair = try Self.nativeMLKEMKeyPair(
+            publicByte: 0xA5,
+            privateByte: 0x5A
+        )
+        let provider = DeterministicNativeMLKEMProvider(
+            generatedKeyPair: generatedKeyPair
+        )
+        _ = try await manager.getKEMPublicKey(
+            for: .mlkem768MLDSA65,
+            provider: provider
+        )
+        let conflictingLegacyRecord = KEMIdentityKeyRecord(
+            suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+            publicKey: Data(repeating: 0xC3, count: 1_184),
+            privateKey: Data(repeating: 0xD4, count: 96),
+            createdAt: Date(timeIntervalSince1970: 1_735_689_601)
+        )
+        try await manager.seedUntieredKEMIdentityRecordForTesting(
+            conflictingLegacyRecord
+        )
+
+        do {
+            _ = try await manager.getKEMPublicKey(
+                for: .mlkem768MLDSA65,
+                provider: provider
+            )
+            XCTFail("A different untiered identity for the same provider tier must fail closed")
+        } catch DeviceIdentityAuthorityError.immutableGenericPasswordConflict {
+            let survivingLegacyRecord = try await manager
+                .storedKEMIdentityRecordForTesting(
+                    suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+                    tier: nil
+                )
+            XCTAssertEqual(
+                survivingLegacyRecord,
+                conflictingLegacyRecord
+            )
+        }
+    }
+
+    func testAppleKEMIdentitySlotsRemainSuiteCorrectInBothLookupOrders() async throws {
+        #if HAS_APPLE_PQC_SDK
+        guard #available(macOS 26.0, iOS 26.0, *) else {
+            throw XCTSkip("Apple PQC is unavailable on this OS")
+        }
+
+        let manager = DeviceIdentityKeyManager.shared
+        let mlkemProvider = ApplePQCCryptoProvider()
+        let xwingProvider = AppleXWingCryptoProvider()
+        let mlkem = try await manager.getKEMPublicKey(
+            for: .mlkem768MLDSA65,
+            provider: mlkemProvider
+        )
+        let xwing = try await manager.getKEMPublicKey(
+            for: .xwingMLDSA,
+            provider: xwingProvider
+        )
+
+        XCTAssertEqual(mlkem.count, 1_184)
+        XCTAssertEqual(xwing.count, 1_216)
+        let xwingAgain = try await manager.getKEMPublicKey(
+            for: .xwingMLDSA,
+            provider: xwingProvider
+        )
+        let mlkemAgain = try await manager.getKEMPublicKey(
+            for: .mlkem768MLDSA65,
+            provider: mlkemProvider
+        )
+        XCTAssertEqual(xwingAgain, xwing)
+        XCTAssertEqual(mlkemAgain, mlkem)
+        #else
+        throw XCTSkip("Apple PQC SDK is unavailable in this build")
+        #endif
+    }
+
+    func testAppleXWingTypedKeyMaterialUsesCryptoKitCompactLengths() async throws {
+        #if HAS_APPLE_PQC_SDK
+        guard #available(macOS 26.0, iOS 26.0, *) else {
+            throw XCTSkip("Apple X-Wing is unavailable on this OS")
+        }
+
+        let provider = AppleXWingCryptoProvider()
+        let exchange = try await provider.generateKeyPair(for: .keyExchange)
+        let signing = try await provider.generateKeyPair(for: .signing)
+
+        XCTAssertEqual(exchange.publicKey.bytes.count, 1_216)
+        XCTAssertEqual(exchange.privateKey.bytes.count, 64)
+        XCTAssertNoThrow(try exchange.publicKey.validate(isPublic: true))
+        XCTAssertNoThrow(try exchange.privateKey.validate(isPublic: false))
+        XCTAssertEqual(signing.publicKey.bytes.count, 1_952)
+        XCTAssertEqual(signing.privateKey.bytes.count, 64)
+        XCTAssertNoThrow(try signing.publicKey.validate(isPublic: true))
+        XCTAssertNoThrow(try signing.privateKey.validate(isPublic: false))
+        #else
+        throw XCTSkip("Apple PQC SDK is unavailable in this build")
+        #endif
+    }
+
+    func testKEMIdentityRecordsHaveProviderSuiteUsageAndLengthContracts() throws {
+        let source = try repositorySource("Sources/SkyBridgeCore/P2P/DeviceIdentityKeyManager.swift")
+
+        XCTAssertTrue(source.contains("guard provider.supportsSuite(storageSuite)"))
+        XCTAssertTrue(source.contains("keyPair.publicKey.usage == .keyExchange"))
+        XCTAssertTrue(source.contains("keyPair.privateKey.usage == .keyExchange"))
+        XCTAssertTrue(
+            source.contains("keyPair.publicKey.suite.canonicalKEMSuite.wireId == storageSuite.wireId")
+        )
+        XCTAssertTrue(source.contains("try validateKEMRecord(record"))
+        XCTAssertTrue(source.contains("record.suiteWireId == suiteWireId"))
+    }
+
+    func testPartialPersistentIdentityMaterialFailsClosed() throws {
+        let source = try repositorySource("Sources/SkyBridgeCore/P2P/DeviceIdentityKeyManager.swift")
+        let authoritySource = try repositorySource("Sources/SkyBridgeCore/P2P/DeviceIdentityAuthority.swift")
+
+        XCTAssertTrue(
+            source.contains("case incompleteKeyMaterial(String)"),
+            "Persistent identity stores need an explicit partial-material error for public/private split keypairs."
+        )
+        XCTAssertTrue(
+            authoritySource.contains("the committed legacy keyInfo has no matching private key")
+                && authoritySource.contains("uniqueCommittedMigrationPrivateKey("),
+            "A committed legacy identity without one exact matching private key must not be treated as absent or regenerated."
+        )
+        XCTAssertTrue(
+            source.contains("ML-DSA-65 public/private keypair is incomplete"),
+            "ML-DSA identity loading must distinguish full absence from a corrupt half-present keypair."
+        )
+    }
+
+    private static func nativeMLKEMKeyPair(
+        publicByte: UInt8,
+        privateByte: UInt8
+    ) throws -> KeyPair {
+        try KeyPair(
+            publicKey: KeyMaterial(
+                suite: .mlkem768MLDSA65,
+                usage: .keyExchange,
+                bytes: Data(repeating: publicByte, count: 1_184)
+            ),
+            privateKey: KeyMaterial(
+                suite: .mlkem768MLDSA65,
+                usage: .keyExchange,
+                bytes: Data(repeating: privateByte, count: 96)
+            )
+        )
+    }
+
+    private func repositorySource(_ relativePath: String) throws -> String {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        return try String(
+            contentsOf: repoRoot.appendingPathComponent(relativePath),
+            encoding: .utf8
+        )
+    }
+}
+
+@available(macOS 14.0, iOS 17.0, *)
+private struct DeterministicNativeMLKEMProvider: CryptoProvider, Sendable {
+    let providerName = "DeterministicNativeMLKEM"
+    let tier: CryptoTier = .nativePQC
+    let activeSuite: CryptoSuite = .mlkem768MLDSA65
+    let supportedSuites: [CryptoSuite] = [.mlkem768MLDSA65]
+    let generatedKeyPair: KeyPair
+
+    func supportsSuite(_ suite: CryptoSuite) -> Bool {
+        supportedSuites.contains { $0.wireId == suite.wireId }
+    }
+
+    func hpkeSeal(
+        plaintext: Data,
+        recipientPublicKey: Data,
+        info: Data
+    ) async throws -> HPKESealedBox {
+        throw CryptoProviderError.notImplemented(
+            "DeterministicNativeMLKEMProvider.hpkeSeal"
+        )
+    }
+
+    func hpkeOpen(
+        sealedBox: HPKESealedBox,
+        privateKey: SecureBytes,
+        info: Data
+    ) async throws -> Data {
+        throw CryptoProviderError.notImplemented(
+            "DeterministicNativeMLKEMProvider.hpkeOpen"
+        )
+    }
+
+    func sign(data: Data, using keyHandle: SigningKeyHandle) async throws -> Data {
+        throw CryptoProviderError.notImplemented(
+            "DeterministicNativeMLKEMProvider.sign"
+        )
+    }
+
+    func verify(
+        data: Data,
+        signature: Data,
+        publicKey: Data
+    ) async throws -> Bool {
+        throw CryptoProviderError.notImplemented(
+            "DeterministicNativeMLKEMProvider.verify"
+        )
+    }
+
+    func generateKeyPair(for usage: KeyUsage) async throws -> KeyPair {
+        generatedKeyPair
     }
 }

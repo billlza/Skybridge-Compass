@@ -13,71 +13,7 @@
 //
 
 import Foundation
-
-// MARK: - SignatureAlignmentError
-
-/// 签名对齐错误
-///
-/// **Requirements: 5.1, 5.3, 7.4, 7.5**
-public enum SignatureAlignmentError: Error, LocalizedError, Sendable {
-    case protocolKeyGenerationFailed(String)
-    case protocolKeyNotFound
-    case signatureAlgorithmMismatch(expected: SignatureAlgorithm, actual: SignatureAlgorithm)
-    case suiteSignatureMismatch(selectedSuite: String, sigAAlgorithm: String)
-    case legacySignatureRejected
-    case migrationFailed(String)
-    
- // Protocol Signature Invariants ( 3.4) - 新增 cases
- /// Provider 算法不匹配（provider 与 sigAAlgorithm 不一致）
-    case providerAlgorithmMismatch(expected: ProtocolSigningAlgorithm, actual: ProtocolSigningAlgorithm)
- /// Wire 层算法与 sigAAlgorithm 不一致
-    case wireAlgorithmMismatch(wireAlgorithm: SignatureAlgorithm, sigAAlgorithm: ProtocolSigningAlgorithm)
- /// offeredSuites 与 sigAAlgorithm 同质性违反
-    case homogeneityViolation(sigAAlgorithm: ProtocolSigningAlgorithm, offeredSuites: [CryptoSuite])
- /// offeredSuites 为空
-    case emptyOfferedSuites
- /// Legacy fallback 不允许（无安全前置条件）
-    case legacyFallbackNotAllowed(reason: String)
- /// Transcript 不匹配
-    case transcriptMismatch
- /// 算法不允许用于协议签名（P-256）
-    case invalidAlgorithmForProtocolSigning(algorithm: SignatureAlgorithm)
- /// 无效的 Provider 类型（CryptoProvider 被当签名 provider）
-    case invalidProviderType(message: String)
-    
-    public var errorDescription: String? {
-        switch self {
-        case .protocolKeyGenerationFailed(let reason):
-            return "Protocol signing key generation failed: \(reason)"
-        case .protocolKeyNotFound:
-            return "Protocol signing key not found"
-        case .signatureAlgorithmMismatch(let expected, let actual):
-            return "Signature algorithm mismatch: expected \(expected.rawValue), got \(actual.rawValue)"
-        case .suiteSignatureMismatch(let selectedSuite, let sigAAlgorithm):
-            return "Suite-signature mismatch: selectedSuite \(selectedSuite) incompatible with sigA algorithm \(sigAAlgorithm)"
-        case .legacySignatureRejected:
-            return "Legacy signature rejected (transition period ended)"
-        case .migrationFailed(let reason):
-            return "Key migration failed: \(reason)"
-        case .providerAlgorithmMismatch(let expected, let actual):
-            return "Provider algorithm mismatch: expected \(expected.rawValue), got \(actual.rawValue)"
-        case .wireAlgorithmMismatch(let wireAlgorithm, let sigAAlgorithm):
-            return "Wire algorithm \(wireAlgorithm.rawValue) does not match sigAAlgorithm \(sigAAlgorithm.rawValue)"
-        case .homogeneityViolation(let sigAAlgorithm, let offeredSuites):
-            return "Homogeneity violation: sigAAlgorithm=\(sigAAlgorithm.rawValue), offeredSuites count=\(offeredSuites.count)"
-        case .emptyOfferedSuites:
-            return "offeredSuites cannot be empty"
-        case .legacyFallbackNotAllowed(let reason):
-            return "Legacy fallback not allowed: \(reason)"
-        case .transcriptMismatch:
-            return "Transcript mismatch detected"
-        case .invalidAlgorithmForProtocolSigning(let algorithm):
-            return "Algorithm \(algorithm.rawValue) is not allowed for protocol signing (sigA/sigB)"
-        case .invalidProviderType(let message):
-            return "Invalid provider type: \(message)"
-        }
-    }
-}
+import SkyBridgeProtocolCore
 
 // MARK: - MultiAlgorithmSignatureVerifier
 
@@ -200,8 +136,11 @@ public struct MultiAlgorithmSignatureVerifier: Sendable {
         case .ed25519:
             let provider = ClassicSignatureProvider()
             return try await provider.verify(data, signature: signature, publicKey: publicKey)
-        case .mlDSA65:
-            let provider = PQCSignatureProvider(backend: .auto)
+        case .mlDSA65, .mlDSA87:
+            guard let protocolAlgorithm = ProtocolSigningAlgorithm(from: algorithm) else {
+                throw SignatureAlignmentError.legacySignatureRejected
+            }
+            let provider = ProtocolSignatureProviderSelector.select(for: protocolAlgorithm)
             return try await provider.verify(data, signature: signature, publicKey: publicKey)
         case .p256ECDSA:
  // P-256 只用于 legacy 验证，使用 LegacySignatureVerifier

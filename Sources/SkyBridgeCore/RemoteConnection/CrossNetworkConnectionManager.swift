@@ -3,6 +3,114 @@ import Network
 import CryptoKit
 import Combine
 import OSLog
+import SkyBridgeAppleTransport
+import SkyBridgeProtocolCore
+import SkyBridgeRealtimeMedia
+import CoreGraphics
+import ImageIO
+#if os(macOS)
+// Only the macOS host path injects input events through ApplicationServices.
+import ApplicationServices
+#endif
+import UniformTypeIdentifiers
+import VideoToolbox
+#if canImport(WebRTCAudioDeviceBridge)
+import WebRTCAudioDeviceBridge
+#endif
+#if os(iOS)
+import UIKit
+#endif
+
+struct WebRTCSessionStartGate: Sendable {
+    struct AdmissionWitness: Equatable, Sendable {
+        fileprivate let generation: UInt64
+    }
+
+    struct SuspensionOwner: Hashable, Sendable {
+        fileprivate let generation: UInt64
+        fileprivate let id: UUID
+    }
+
+    private var tokensBySessionID: [String: UUID] = [:]
+    private var admissionGeneration: UInt64 = 0
+    private var suspensionOwners: Set<SuspensionOwner> = []
+
+    func captureAdmissionWitness() -> AdmissionWitness? {
+        guard suspensionOwners.isEmpty else { return nil }
+        return AdmissionWitness(generation: admissionGeneration)
+    }
+
+    func isCurrent(_ witness: AdmissionWitness) -> Bool {
+        suspensionOwners.isEmpty && witness.generation == admissionGeneration
+    }
+
+    mutating func begin(
+        sessionID: String,
+        admissionWitness: AdmissionWitness
+    ) -> UUID? {
+        guard isCurrent(admissionWitness) else { return nil }
+        guard tokensBySessionID[sessionID] == nil else { return nil }
+        let token = UUID()
+        tokensBySessionID[sessionID] = token
+        return token
+    }
+
+    func isCurrent(_ token: UUID, sessionID: String) -> Bool {
+        tokensBySessionID[sessionID] == token
+    }
+
+    @discardableResult
+    mutating func finish(_ token: UUID, sessionID: String) -> Bool {
+        guard isCurrent(token, sessionID: sessionID) else { return false }
+        tokensBySessionID.removeValue(forKey: sessionID)
+        return true
+    }
+
+    mutating func invalidate(sessionID: String) {
+        tokensBySessionID.removeValue(forKey: sessionID)
+    }
+
+    mutating func suspendAndInvalidateAll() -> SuspensionOwner {
+        admissionGeneration &+= 1
+        let owner = SuspensionOwner(
+            generation: admissionGeneration,
+            id: UUID()
+        )
+        suspensionOwners.insert(owner)
+        tokensBySessionID.removeAll()
+        return owner
+    }
+
+    mutating func resumeAdmission(ifOwnedBy owner: SuspensionOwner) {
+        suspensionOwners.remove(owner)
+    }
+
+    func hasPendingStart(sessionID: String) -> Bool {
+        tokensBySessionID[sessionID] != nil
+    }
+}
+
+/// Mutable state shared by the screen-stream loop and its asynchronous audio
+/// attachment task. Keeping this state MainActor-owned avoids sharing mutable
+/// task-local capture boxes between independently escaping tasks.
+@MainActor
+private final class WebRTCScreenStreamingRuntimeState {
+    var strictMediaValidationFailureReason: String?
+
+#if os(macOS)
+    var directRealtimeAudioSender: RemoteRealtimeMediaAudioSender?
+    var directRealtimeAudioSenderRelayEndpoint: SkyBridgeMediaEndpoint?
+    var directRealtimeAudioSenderRelayExpiresAt: TimeInterval?
+    var directRealtimeAudioContinuityState: RemoteRealtimeMediaAudioSender.ContinuityState?
+    var directRealtimeAudioAttachTask: Task<Void, Never>?
+    var directRealtimeAudioAttachGeneration: UInt64 = 0
+    var directRealtimeAudioRetryAfter = Date.distantPast
+    var directRealtimeAudioStrictFirstAttachFailureAt: Date?
+    var directRealtimeAudioRenewalRetryAfter = Date.distantPast
+    var directRealtimePCMSubmissionPipe: RemoteRealtimePCM16SubmissionPipe?
+    var directSyntheticAudioToneSource: RemoteRealtimeSyntheticPCM16ToneSource?
+#endif
+}
 
 /// 跨网络连接管理器 - 2025年创新架构
 ///
@@ -12,397 +120,13560 @@ import OSLog
 /// 3. 智能连接码 + P2P 穿透（通用方案）
 @MainActor
 public final class CrossNetworkConnectionManager: ObservableObject {
-    
+    /// Shared instance so multiple views (connection + file transfer) can operate on the same active WebRTC session.
+    public static let shared = CrossNetworkConnectionManager()
+
  // MARK: - 发布属性
-    
+
     @Published public var connectionCode: String?
+    @Published public private(set) var connectionCodeExpiresAt: Date?
+    @Published public var connectionCodeLeaseMode: ConnectionCodeLeaseMode = .shortLived {
+        didSet {
+            UserDefaults.standard.set(connectionCodeLeaseMode.rawValue, forKey: Self.connectionCodeLeaseModeDefaultsKey)
+        }
+    }
     @Published public var qrCodeData: Data?
     @Published public var availableCloudDevices: [CloudDevice] = []
     @Published public var connectionStatus: CrossNetworkConnectionStatus = .idle
+    @Published public private(set) var readiness: CrossNetworkReadiness = .idle
+    @Published public private(set) var lastRekeyEvent: String?
+    @Published public private(set) var protocolIdentityStatus: CrossNetworkProtocolIdentityStatus?
     @Published public var currentConnection: RemoteConnection?
-    
+    @Published public private(set) var activeSessionSnapshot: ActiveSessionSnapshot?
+    @Published public private(set) var signalingHealth: SignalingSessionHealth = .healthy
+    @Published public private(set) var signalingLifecyclePhase: WebSocketSignalingClient.SignalingLifecyclePhase = .idle
+
  // MARK: - 私有属性
-    
+
     private let logger = Logger(subsystem: "com.skybridge.connection", category: "CrossNetwork")
+    private let webRTCControlCryptoQueue = DispatchQueue(
+        label: "com.skybridge.webrtc.control-crypto",
+        qos: .userInitiated
+    )
+    nonisolated private static let smokeLogger = Logger(
+        subsystem: "com.skybridge.connection",
+        category: "CrossNetworkSmoke"
+    )
     private let signalServer: SignalServerClient
-    private let stunServers: [String] = [
-        // SkyBridge 自建服务器 (首选)
-        "stun:54.92.79.99:3478",
-        // 公共备用服务器
-        "stun:stun.l.google.com:19302",
-        "stun:stun1.l.google.com:19302"
-    ]
+    private let iceServers: [String] = [SkyBridgeServerConfig.stunURL]
+        + SkyBridgeServerConfig.turnURLs
+        + [
+            "stun:stun.l.google.com:19302",
+            "stun:stun1.l.google.com:19302"
+        ]
     private var activeListeners: [ConnectionListener] = []
-    private var deviceFingerprint: String
-    
- // MARK: - 连接状态
-    
- /// 跨网络连接状态 - 符合Swift 6.2.1的Sendable要求和严格并发控制
- /// 注意：这是CrossNetworkConnectionManager专用的连接状态，与全局ConnectionStatus不同
-    public enum CrossNetworkConnectionStatus: Sendable {
-        case idle
-        case generating
-        case waiting(code: String)
-        case connecting
-        case connected
-        case failed(String) // 使用String而不是Error，以符合Sendable要求
+    nonisolated static let qrCodeGenerationWatchdogTimeoutSeconds: TimeInterval = 30
+    nonisolated static let qrCodeScanBootstrapWatchdogTimeoutSeconds: TimeInterval = 90
+    nonisolated static let qrCodeConnectLinkMaximumByteCount = 1_800
+    nonisolated static let webRTCStartupJoinHeartbeatAttempts = 60
+    nonisolated private static let protocolIdentityLogRedaction = "<redacted>"
+    nonisolated private static var isSmokeRuntimeEnabled: Bool {
+#if DEBUG || SKYBRIDGE_TESTING
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil
+#else
+        false
+#endif
     }
-    
- // 为了向后兼容，保留类型别名（但建议使用 CrossNetworkConnectionStatus）
-    @available(*, deprecated, renamed: "CrossNetworkConnectionStatus", message: "使用 CrossNetworkConnectionStatus 以避免与全局 ConnectionStatus 冲突")
-    public typealias ConnectionStatus = CrossNetworkConnectionStatus
-    
+    nonisolated private static var shouldForceRelayOnlyForSmoke: Bool {
+#if DEBUG || SKYBRIDGE_TESTING
+        isSmokeRuntimeEnabled
+            && ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_FORCE_RELAY_ICE"] == "1"
+#else
+        false
+#endif
+    }
+    nonisolated private static var shouldUseSyntheticScreenForSmoke: Bool {
+#if DEBUG || SKYBRIDGE_TESTING
+        isSmokeRuntimeEnabled
+            && ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_SYNTHETIC_SCREEN"] == "1"
+#else
+        false
+#endif
+    }
+    nonisolated private static var shouldUseSyntheticOpusToneForSmoke: Bool {
+#if DEBUG || SKYBRIDGE_TESTING
+        isSmokeRuntimeEnabled
+            && ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_SYNTHETIC_OPUS_TONE"] == "1"
+#else
+        false
+#endif
+    }
+    nonisolated private static var hostPQCRekeySmokeDelaySeconds: Double? {
+#if DEBUG || SKYBRIDGE_TESTING
+        guard isSmokeRuntimeEnabled,
+              let rawDelay = ProcessInfo.processInfo.environment[
+                "SKYBRIDGE_SMOKE_DELAY_HOST_PQC_REKEY_SECONDS"
+              ],
+              let delaySeconds = Double(rawDelay.trimmingCharacters(in: .whitespacesAndNewlines)),
+              delaySeconds > 0 else {
+            return nil
+        }
+        return delaySeconds
+#else
+        nil
+#endif
+    }
+    nonisolated private static func emitSmokeLog(_ message: String) {
+        guard isSmokeRuntimeEnabled else { return }
+        smokeLogger.info("\(message, privacy: .public)")
+    }
+    nonisolated private static func streamRefreshTokenLogState(_ token: UInt64?) -> String {
+        token == nil ? "missing" : "present"
+    }
+    private static let connectionCodeLeaseModeDefaultsKey = "cross_network_connection_code_lease_mode.macos"
+    private var activeSessionReconnectTimeoutTask: Task<Void, Never>?
+    private var activeConnectionCodeLeaseMode: ConnectionCodeLeaseMode?
+    private var activeConnectionCodeSessionID: String?
+    private var activeConnectionCodeAuthorityDeviceId: String?
+    private var activeConnectionCodeAuthorityFingerprint: String?
+    private var authorityBoundWebRTCBootstrapSessionIds = Set<String>()
+    private var strictPQCClassicBootstrapOnlySessionIds = Set<String>()
+    private var connectionCodeExpiryTask: Task<Void, Never>?
+
+    // MARK: - WebRTC (ICE / DataChannel)
+
+    private var signalingClient: WebSocketSignalingClient?
+    private var signalingShardKey: String?
+    private let signalingLifecycle = CrossNetworkSignalingLifecycleCoordinator()
+    private var webrtcSignalingAuthTokenBySessionId: [String: String] = [:]
+    private var webrtcTurnAdmissionLeaseBySessionId: [String: SignalServerClient.TurnAdmissionLease] = [:]
+    private var webrtcMediaAdmissionLeaseBySessionId: [String: SignalServerClient.MediaAdmissionLease] = [:]
+    private var webrtcMediaAdmissionLeaseExpiresAtBySessionId: [String: Date] = [:]
+    private var webrtcSessionsBySessionId: [String: WebRTCSession] = [:]
+
+    /// Session-level ICE route probe.
+    ///
+    /// Path detection used to live only inside the remote-desktop interaction/screen loops, which
+    /// are macOS-gated and specific to that feature — so file transfer, clipboard and messaging
+    /// sessions had no route attribution at all and could sit on the relay unnoticed. One probe
+    /// covering every registered session is the single owner of that signal.
+    private var routeAttributionProbeTask: Task<Void, Never>?
+    private var routeAttributionPathStateBySessionId: [String: StableICETransportPathState] = [:]
+    private static let routeAttributionProbeInterval: Duration = .seconds(5)
+    private var webRTCSessionStartGate = WebRTCSessionStartGate()
+    private var resolvedSessionIDByConnectionCode: [String: String] = [:]
+    private var connectionCodeConnectTasks: [String: Task<RemoteConnection, Error>] = [:]
+    private var connectionCodeConnectTaskTokens: [String: UUID] = [:]
+    var webrtcRemoteIdBySessionId: [String: String] = [:]
+    private var currentPathLocalIdentityBySessionId: [String: CurrentPathLocalProtocolIdentitySnapshot] = [:]
+    private var currentPathExpectedRemoteAuthorityBySessionId: [String: CurrentPathRemoteAuthority] = [:]
+    private var currentPathAdditionalProtocolFingerprintsBySessionId: [String: Set<String>] = [:]
+    private var currentPathSignalingOriginBySessionId: [String: String] = [:]
+    private var currentPathSignalingWebSocketPathBySessionId: [String: String] = [:]
+    private var webrtcLatestOfferBySessionId: [String: String] = [:]
+    private var webrtcLatestAnswerBySessionId: [String: String] = [:]
+    private var webrtcLocalICECandidatesBySessionId: [String: [WebRTCSignalingEnvelope.Payload]] = [:]
+    private var webrtcJoinBootstrapPayloadBySessionId: [String: WebRTCSignalingEnvelope.Payload] = [:]
+    private struct PendingWebRTCJoinBootstrap {
+        let from: String
+        let payload: WebRTCSignalingEnvelope.Payload?
+        let sourceClient: WebSocketSignalingClient
+        let admissionWitness: WebRTCSessionStartGate.AdmissionWitness
+    }
+    private enum WebRTCJoinBootstrapIngestError: Error, LocalizedError {
+        case missingPayload
+        case invalidRemoteDeviceID
+        case authorityMismatch
+        case invalidAuthority
+        case missingKEM
+        case storeFailure(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .missingPayload:
+                return "WebRTC join bootstrap payload is missing"
+            case .invalidRemoteDeviceID:
+                return "WebRTC join bootstrap remote device identifier is invalid"
+            case .authorityMismatch:
+                return "WebRTC join bootstrap authority does not match the current path"
+            case .invalidAuthority:
+                return "WebRTC join bootstrap authority is invalid"
+            case .missingKEM:
+                return "WebRTC join bootstrap has no valid PQC KEM public key"
+            case .storeFailure(let detail):
+                return "WebRTC join bootstrap KEM store failed: \(detail)"
+            }
+        }
+    }
+    private var pendingWebRTCJoinBootstrapBySessionId: [String: PendingWebRTCJoinBootstrap] = [:]
+    private struct PendingPreSessionSignalingEnvelope {
+        let envelope: WebRTCSignalingEnvelope
+        let sourceClient: WebSocketSignalingClient
+        let admissionWitness: WebRTCSessionStartGate.AdmissionWitness
+    }
+    private var pendingPreSessionSignalingEnvelopesBySessionId:
+        [String: [PendingPreSessionSignalingEnvelope]] = [:]
+    /// FIFO insertion order of pendingWebRTCJoinBootstrapBySessionId keys, used to bound the cache against
+    /// adversarial peers sending join frames for many distinct sessionIds that never materialize into a session.
+    private var pendingWebRTCJoinBootstrapOrder: [String] = []
+    private static let pendingWebRTCJoinBootstrapCap = 32
+    private static let maxPendingPreSessionSignalingEnvelopes = 32
+    private static let maxTotalPendingPreSessionSignalingEnvelopes = 128
+    private static let maxPendingPreSessionSignalingEnvelopeBytes = 768 * 1024
+    private static let maxTotalPendingPreSessionSignalingEnvelopeBytes = 4 * 1024 * 1024
+    private var sessionSnapshotMetadataBySessionId: [String: SessionSnapshotMetadata] = [:]
+    private var webrtcJoinHeartbeatTasksBySessionId: [String: Task<Void, Never>] = [:]
+    private var webrtcOfferResendTasksBySessionId: [String: Task<Void, Never>] = [:]
+    private var webrtcConnectionTimeoutTasksBySessionId: [String: Task<Void, Never>] = [:]
+    private struct WebRTCControlTaskRecord {
+        let token: UUID
+        let sessionObjectIdentifier: ObjectIdentifier
+        let inboundFileTransferReceiver: WebRTCInboundFileTransferReceiver
+        let task: Task<Void, Never>
+    }
+
+    private var webrtcControlTasksBySessionId: [String: WebRTCControlTaskRecord] = [:]
+    private var webrtcInboundQueuesBySessionId: [String: InboundChunkQueue] = [:]
+    private var webrtcOutboundHeartbeatTasksBySessionId: [String: Task<Void, Never>] = [:]
+    private struct WebRTCScreenStreamingTaskRecord {
+        let token: UUID
+        let sessionObjectIdentifier: ObjectIdentifier
+        let callbackLease: WebRTCScreenCaptureCallbackLease
+        let nativeAudioOwnerToken: UUID
+        let task: Task<Void, Never>
+    }
+
+    private var webrtcScreenStreamingTasksBySessionId:
+        [String: WebRTCScreenStreamingTaskRecord] = [:]
+    private var webrtcInteractionStreamingTasksBySessionId: [String: Task<Void, Never>] = [:]
+    private var webrtcInteractionStreamingTaskTokensBySessionId: [String: UUID] = [:]
+    private var webrtcInteractionStreamingAllowedSessionIds: Set<String> = []
+    private var webrtcRemoteLivenessWatchdogTasksBySessionId: [String: Task<Void, Never>] = [:]
+    private var webrtcRekeyInProgressSessionIds: Set<String> = []
+    private var webrtcRemoteDesktopHeartbeatAtBySessionId: [String: Date] = [:]
+    private var webrtcRemoteVideoFormatsBySessionId: [String: Set<String>] = [:]
+    private var webrtcRemoteStreamConfigurationBySessionId: [String: RemoteDesktopStreamConfiguration] = [:]
+    private var webrtcLastAcceptedRawStreamConfigurationBySessionId:
+        [String: RemoteDesktopStreamConfiguration] = [:]
+    private var webrtcPendingRemoteStreamConfigurationBySessionId: [String: RemoteDesktopStreamConfiguration] = [:]
+    private var webrtcPendingStreamRefreshSessionIds: Set<String> = []
+    private var webrtcAwaitingStreamConfigurationSessionIds: Set<String> = []
+    private var webrtcSessionReadyDiagnosticSessionIds: Set<String> = []
+    private var webrtcRemoteControlNoticeApprovedSessionOwners: [String: ObjectIdentifier] = [:]
+    private var webrtcRemoteControlNoticePendingSessionOwners: [String: ObjectIdentifier] = [:]
+    private var webrtcProductEvidenceOwnersBySessionId:
+        [String: ProductReleaseEvidenceSessionOwner] = [:]
+    private var webrtcProductEvidenceMediaTasksBySessionId:
+        [String: Task<Void, Never>] = [:]
+    private var webrtcRemoteSecurityIdentityBySessionId: [String: RemoteControlSecurityIdentity] = [:]
+    private var webrtcBootstrapReplyFingerprintBySessionId: [String: String] = [:]
+    var webrtcSessionKeysBySessionId: [String: SessionKeys] = [:]
+    var webrtcSecureEnvelopeSendCounterBySessionId: [String: UInt64] = [:]
+    var webrtcSecureEnvelopeReplayWindowBySessionId: [String: WebRTCAppSecureReplayWindow] = [:]
+    var webrtcSecureEnvelopeKeyFingerprintBySessionId: [String: String] = [:]
+    private var webrtcBoundSessionConsumerGatesBySessionId:
+        [String: WebRTCBoundSessionConsumerGate] = [:]
+    private var activeWebRTCClipboardSessionId: String?
+    private var activeWebRTCClipboardToken: UUID?
+    private var trustInvalidationCancellables = Set<AnyCancellable>()
+
+    struct WebRTCFileTransferOperationOwner {
+        let sessionID: String
+        let session: WebRTCSession
+        let sessionObjectIdentifier: ObjectIdentifier
+        let controlTaskToken: UUID
+        let keys: SessionKeys
+    }
+
+    struct WebRTCFileTransferWaiter {
+        let token: UUID
+        let owner: WebRTCFileTransferOperationOwner
+        let continuation: CheckedContinuation<CrossNetworkFileTransferMessage, Error>
+        let timeoutTask: Task<Void, Never>
+        var sendTask: Task<Void, Error>?
+    }
+
+    // Typed keys prevent attacker-controlled identifiers from colliding with
+    // delimiter-based prefix matching in waiter cancellation/error routing.
+    var webrtcFileTransferWaiters: [WebRTCOutboundFileTransferWaiterKey: WebRTCFileTransferWaiter] = [:]
+
  // MARK: - 初始化
-    
+
+    public static func makeAuthenticatedSignalServerClient() -> SignalServerClient {
+        SignalServerClient(
+            authenticatedRequestContextProvider: { @MainActor in
+                try await Self.currentAuthenticatedSignalServerRequestContext()
+            },
+            tenantIDProvider: { @MainActor in
+                try await Self.currentAuthenticatedSignalServerRequestContext().tenantID
+            }
+        )
+    }
+
+    public static func makeAuthenticatedSignalServerClientSnapshot() async throws -> (
+        client: SignalServerClient,
+        authenticationScope: SignalServerClient.IdentityRotationAuthenticationScope
+    ) {
+        let context = try await currentAuthenticatedSignalServerRequestContext()
+        let client = SignalServerClient(
+            authenticatedRequestContextProvider: { context },
+            tenantIDProvider: { context.tenantID }
+        )
+        return (
+            client: client,
+            authenticationScope: SignalServerClient.IdentityRotationAuthenticationScope(
+                tenantID: context.tenantID,
+                userID: context.userID
+            )
+        )
+    }
+
+    static func currentAudioAccountContext() throws -> AudioAccountContext {
+        let authorization = try AuthenticationService.shared.currentAudioAuthorization()
+        let snapshot = currentSignalServerAuthoritySnapshot()
+        let identity = try CrossNetworkTenantIdentifierPolicy.resolveAuthenticatedIdentity(
+            accessToken: snapshot.accessToken,
+            explicitTenantID: ProcessInfo.processInfo.environment["SKYBRIDGE_TENANT_ID"],
+            sessionTenantID: snapshot.sessionTenantID, sessionUserIdentifier: snapshot.sessionUserIdentifier)
+        return AudioAccountContext(authorization: authorization, account: try AudioAccountIdentity(
+            authority: SkyBridgeServerConfig.signalingServerURL, tenantID: identity.tenantID, userID: identity.userID))
+    }
+
+    /// Freeze one authority and credential for this GET, with epoch checks around
+    /// refresh. A later login/configuration change cannot lend its token to this request.
+    static func makeAudioAccountClient(_ expected: AudioAccountContext) async throws -> SignalServerClient {
+        func check() throws {
+            let current = try currentAudioAccountContext()
+            guard current.authorization === expected.authorization, expected.authorization.isCurrent,
+                  current.account == expected.account else { throw AudioMembershipLeaseFailure.accountChanged }
+        }
+        try check()
+        let context = try await currentAuthenticatedSignalServerRequestContext()
+        try check()
+        guard context.tenantID == expected.account.tenantID, context.userID == expected.account.userID else {
+            throw AudioMembershipError.scopeMismatch
+        }
+        return SignalServerClient(baseURLProvider: { expected.account.authority },
+            authenticatedRequestContextProvider: { context }, tenantIDProvider: { context.tenantID })
+    }
+
+    /// Freeze the ordinary presence request too. A nil audio epoch is not an
+    /// authentication-operation witness, but it must remain absent across the
+    /// credential await rather than borrowing a newly published audio epoch.
+    private static func makePresenceAccountClient(expected: AudioAccountContext?) async throws -> SignalServerClient {
+        if let expected { return try await makeAudioAccountClient(expected) }
+        let authority = SkyBridgeServerConfig.signalingServerURL
+        func check() throws {
+            guard AuthenticationService.shared.audioAuthorizationSnapshot == nil,
+                  SkyBridgeServerConfig.signalingServerURL == authority else {
+                throw AudioMembershipLeaseFailure.accountChanged
+            }
+        }
+        try check()
+        let context = try await currentAuthenticatedSignalServerRequestContext()
+        try check()
+        return SignalServerClient(baseURLProvider: { authority },
+            authenticatedRequestContextProvider: { context }, tenantIDProvider: { context.tenantID })
+    }
+
     public init() {
-        self.signalServer = SignalServerClient()
-        self.deviceFingerprint = Self.generateDeviceFingerprint()
-        
+        self.signalServer = Self.makeAuthenticatedSignalServerClient()
+        if let rawMode = UserDefaults.standard.string(forKey: Self.connectionCodeLeaseModeDefaultsKey),
+           let mode = ConnectionCodeLeaseMode(rawValue: rawMode) {
+            self.connectionCodeLeaseMode = mode
+        }
+        TrustSyncService.shared.trustInvalidationPublisher
+            .sink { [weak self] event in
+                MainActor.assumeIsolated { [weak self] in
+                    self?.handleTrustInvalidation(event)
+                }
+            }
+            .store(in: &trustInvalidationCancellables)
+
         logger.info("跨网络连接管理器初始化完成")
     }
-    
+
+    private func handleTrustInvalidation(_ event: TrustInvalidationEvent) {
+        let targets = webrtcSessionsBySessionId.compactMap {
+            sessionID,
+            session -> (String, WebRTCSession, CurrentPathRemoteAuthority)? in
+            guard let authority = currentPathExpectedRemoteAuthorityBySessionId[sessionID],
+                  event.matches(
+                    protocolSigningAlgorithm: authority.protocolSigningAlgorithm,
+                    protocolPublicKeyFingerprint: authority.protocolPublicKeyFingerprint
+                  ) else {
+                return nil
+            }
+            return (sessionID, session, authority)
+        }
+
+        for (sessionID, session, authority) in targets {
+            // Session object + exact authority form the current owner. A stale
+            // event snapshot cannot tear down a replacement that reused the
+            // same public session identifier.
+            guard webrtcSessionsBySessionId[sessionID] === session,
+                  currentPathExpectedRemoteAuthorityBySessionId[sessionID] == authority else {
+                continue
+            }
+            cleanupWebRTCSession(
+                sessionID,
+                reason: "trust_invalidated",
+                disconnectKind: .explicit
+            )
+        }
+        guard !targets.isEmpty else { return }
+        connectionStatus = .failed("设备信任已撤销，连接已终止")
+        readiness = .idle
+    }
+
+    private func recordWebRTCStrictMediaValidationFailure(
+        runtimeState: WebRTCScreenStreamingRuntimeState,
+        sessionID: String,
+        session: WebRTCSession,
+        screenStreamingTaskToken: UUID,
+        keys: SessionKeys,
+        reason: String,
+        probable: String,
+        config: RemoteDesktopStreamConfiguration?
+    ) {
+        guard isCurrentWebRTCScreenStreamingOwner(
+            sessionID: sessionID,
+            session: session,
+            screenStreamingTaskToken: screenStreamingTaskToken,
+            keys: keys
+        ), runtimeState.strictMediaValidationFailureReason == nil else {
+            return
+        }
+        let effectiveConfig = config ?? webrtcRemoteStreamConfigurationBySessionId[sessionID]
+        let mode = effectiveConfig?.normalizedPerformanceValidationMode ?? "strict"
+        runtimeState.strictMediaValidationFailureReason = reason
+        logger.error(
+            "⛔️ WebRTC strict media validation failed: session=\(sessionID, privacy: .public) mode=\(mode, privacy: .public) reason=\(reason, privacy: .public) probable=\(probable, privacy: .public)"
+        )
+        appendSmokeStatus(
+            "strict-media-failed session=\(sessionID) mode=\(mode) reason=\(reason) probable=\(probable)"
+        )
+        appendWebRTCSessionDiagnostic(
+            "strict-media-failed session=\(sessionID) mode=\(mode) reason=\(reason) probable=\(probable)",
+            sessionID: sessionID
+        )
+        WebRTCMediaDiagnosticWriter.append(
+            WebRTCMediaDiagnosticEvent(
+                sessionId: sessionID,
+                kind: "strictMediaFailure",
+                probable: probable,
+                validationMode: mode,
+                failureReason: reason
+            )
+        )
+        cleanupWebRTCSession(
+            sessionID,
+            reason: "strict_media_validation_failed_\(reason)",
+            disconnectKind: .explicit
+        )
+        connectionStatus = .failed("WebRTC strict media validation failed: \(reason)")
+        readiness = .idle
+    }
+
+    public static func currentSignalServerAuthoritySnapshot() -> (
+        accessToken: String?,
+        sessionTenantID: String?,
+        sessionUserIdentifier: String?
+    ) {
+        func normalized(_ value: String?) -> String? {
+            guard let value else { return nil }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        let session = AuthenticationService.shared.currentSessionSnapshot()
+        if let sessionAccessToken = normalized(session?.accessToken) {
+            return (
+                accessToken: sessionAccessToken,
+                sessionTenantID: nil,
+                sessionUserIdentifier: session?.userIdentifier
+            )
+        }
+        return (
+            accessToken: nil,
+            sessionTenantID: nil,
+            sessionUserIdentifier: nil
+        )
+    }
+
+    private static func currentAuthenticatedSignalServerRequestContext() async throws
+        -> SignalServerClient.AuthenticatedRequestContext {
+        _ = try await AuthenticationService.shared.validAccessToken()
+        let snapshot = currentSignalServerAuthoritySnapshot()
+        guard let bearerToken = snapshot.accessToken else {
+            throw SignalServerClient.ClientError.missingAuthentication
+        }
+        let identity = try CrossNetworkTenantIdentifierPolicy.resolveAuthenticatedIdentity(
+            accessToken: snapshot.accessToken,
+            explicitTenantID: ProcessInfo.processInfo.environment["SKYBRIDGE_TENANT_ID"],
+            sessionTenantID: snapshot.sessionTenantID,
+            sessionUserIdentifier: snapshot.sessionUserIdentifier
+        )
+        return SignalServerClient.AuthenticatedRequestContext(
+            bearerToken: bearerToken,
+            tenantID: identity.tenantID,
+            userID: identity.userID
+        )
+    }
+
+    static func currentAuthenticatedIdentityRotationScope() async throws
+        -> SignalServerClient.IdentityRotationAuthenticationScope {
+        let context = try await currentAuthenticatedSignalServerRequestContext()
+        return SignalServerClient.IdentityRotationAuthenticationScope(
+            tenantID: context.tenantID,
+            userID: context.userID
+        )
+    }
+
+    public var isTransportReady: Bool {
+        switch readiness {
+        case .transportReady, .handshakeComplete:
+            return true
+        case .idle:
+            return false
+        }
+    }
+
+    public var isHandshakeComplete: Bool {
+        if case .handshakeComplete = readiness { return true }
+        return false
+    }
+
+    private func signalingGeneration(for sessionID: String) -> Int {
+        signalingLifecycle.generation(for: sessionID)
+    }
+
+    private func nextSignalingGeneration(for sessionID: String) -> Int {
+        signalingLifecycle.nextGeneration(for: sessionID)
+    }
+
+    private func isTransportEstablished(for sessionID: String) -> Bool {
+        switch readiness {
+        case .transportReady(let activeSessionID):
+            return activeSessionID == sessionID
+        case .handshakeComplete(let activeSessionID, _):
+            return activeSessionID == sessionID
+        case .idle:
+            return false
+        }
+    }
+
+    private func isHandshakeComplete(for sessionID: String) -> Bool {
+        if case .handshakeComplete(let activeSessionID, _) = readiness {
+            return activeSessionID == sessionID
+        }
+        return false
+    }
+
+    private func noteDetachedSignalingAfterTransportEstablished(
+        for sessionID: String,
+        source: String,
+        failure: String? = nil,
+        fatal: Bool = false
+    ) {
+        let previousHealth = signalingHealth
+        signalingHealth = fatal ? .degradedFatal : .degradedRecoverable
+
+        let failureSuffix: String
+        if let failure,
+           !failure.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            failureSuffix = " failure=\(failure)"
+        } else {
+            failureSuffix = ""
+        }
+
+        if previousHealth == .healthy {
+            logger.info(
+                "ℹ️ signaling detached after transport establishment: session=\(sessionID, privacy: .public) source=\(source, privacy: .public) fatal=\(fatal ? 1 : 0, privacy: .public)\(failureSuffix)"
+            )
+        } else {
+            logger.debug(
+                "ℹ️ signaling detached after transport establishment: session=\(sessionID, privacy: .public) source=\(source, privacy: .public) fatal=\(fatal ? 1 : 0, privacy: .public)\(failureSuffix)"
+            )
+        }
+    }
+
+    private func resetSignalingState(to phase: WebSocketSignalingClient.SignalingLifecyclePhase = .idle) {
+        signalingLifecyclePhase = phase
+        signalingHealth = .healthy
+        signalingLifecycle.resetActiveHandle()
+    }
+
+    private func shouldAllowSignalingOperation(for sessionID: String) throws {
+        try signalingLifecycle.shouldAllowOperation(
+            for: sessionID,
+            activeShardKey: signalingShardKey,
+            health: signalingHealth
+        )
+    }
+
+    private func scheduleSignalingRecovery(for sessionID: String, tokenExpired: Bool = false) {
+        let networkSettings = RemoteDesktopSettingsManager.shared.settings.networkSettings
+        signalingLifecycle.scheduleRecovery(
+            for: sessionID,
+            tokenExpired: tokenExpired,
+            maxAttempts: networkSettings.boundedMaxReconnectAttempts,
+            reconnectDelayMilliseconds: { attempt in
+                RemoteDesktopSettingsManager.shared.settings.networkSettings
+                    .reconnectBackoffDelayMilliseconds(forAttempt: attempt)
+            },
+            currentShardKey: { [weak self] in self?.signalingShardKey },
+            isHandshakeComplete: { [weak self] sessionID in
+                self?.isHandshakeComplete(for: sessionID) ?? false
+            },
+            ensureConnected: { [weak self] sessionID in
+                guard let self else { throw WebSocketSignalingClient.SignalingError.notConnected }
+                try await self.ensureSignalingConnected(shardKey: sessionID)
+            },
+            setHealth: { [weak self] health in
+                self?.signalingHealth = health
+            },
+            logCancellation: { [weak self] sessionID, attempt in
+                self?.logger.debug(
+                    "ℹ️ signaling recovery cancelled: session=\(sessionID, privacy: .public) attempt=\(attempt, privacy: .public)"
+                )
+            },
+            logFailure: { [weak self] sessionID, attempt, error in
+                self?.logger.error(
+                    "⚠️ signaling recovery failed: session=\(sessionID, privacy: .public) attempt=\(attempt, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                )
+            }
+        )
+    }
+
+    func handleSignalingLifecycleEvent(_ event: WebSocketSignalingClient.SignalingLifecycleEvent) {
+        applySignalingLifecycleEvent(event, expectedSourceClient: nil)
+    }
+
+    private func applySignalingLifecycleEvent(
+        _ event: WebSocketSignalingClient.SignalingLifecycleEvent,
+        expectedSourceClient: WebSocketSignalingClient?
+    ) {
+        signalingLifecycle.handleLifecycleEvent(
+            event,
+            activeShardKey: signalingShardKey,
+            isHandshakeComplete: { [weak self] sessionID in
+                self?.isHandshakeComplete(for: sessionID) ?? false
+            },
+            setPhase: { [weak self] phase in
+                self?.signalingLifecyclePhase = phase
+            },
+            setHealth: { [weak self] health in
+                self?.signalingHealth = health
+            },
+            noteDetached: { [weak self] sessionID, source, failure, fatal in
+                self?.noteDetachedSignalingAfterTransportEstablished(
+                    for: sessionID,
+                    source: source,
+                    failure: failure,
+                    fatal: fatal
+                )
+            },
+            failPreTransport: { [weak self] sessionID, failureClass in
+                self?.failPreTransportSignalingSessionIfCurrent(
+                    sessionID: sessionID,
+                    failureClass: failureClass,
+                    expectedSourceClient: expectedSourceClient
+                )
+            }
+        )
+    }
+
+    private func failPreTransportSignalingSessionIfCurrent(
+        sessionID: String,
+        failureClass: WebSocketSignalingClient.SignalingFailureClass,
+        expectedSourceClient: WebSocketSignalingClient?
+    ) {
+        if let expectedSourceClient {
+            guard signalingClient === expectedSourceClient else { return }
+        }
+        guard signalingShardKey == sessionID else { return }
+        let sourceSession = webrtcSessionsBySessionId[sessionID]
+        let shouldCommitGlobalFailure = isCurrentGlobalWebRTCSetup(
+            sessionID: sessionID,
+            session: sourceSession
+        )
+        let failureCode = Self.publicSignalingFailureCode(failureClass)
+        cleanupWebRTCSession(
+            sessionID,
+            reason: "signaling_lifecycle_failed:\(failureCode)",
+            disconnectKind: .explicit
+        )
+        if shouldCommitGlobalFailure {
+            connectionStatus = .failed("Signaling error: \(failureCode)")
+            readiness = .idle
+        }
+    }
+
+    private func handleSignalingLifecycleEvent(
+        _ event: WebSocketSignalingClient.SignalingLifecycleEvent,
+        sourceClient: WebSocketSignalingClient
+    ) {
+        guard signalingClient === sourceClient,
+              webRTCSessionStartGate.captureAdmissionWitness() != nil,
+              signalingShardKey == event.handleId.sessionId else {
+            return
+        }
+        applySignalingLifecycleEvent(event, expectedSourceClient: sourceClient)
+    }
+
+#if DEBUG || SKYBRIDGE_TESTING
+    func testingSeedSignalingState(
+        sessionID: String,
+        generation: Int,
+        handle: WebSocketSignalingClient.SignalingHandleID? = nil,
+        health: SignalingSessionHealth = .healthy,
+        phase: WebSocketSignalingClient.SignalingLifecyclePhase = .idle
+    ) {
+        signalingShardKey = sessionID
+        signalingLifecycle.seed(sessionID: sessionID, generation: generation, handle: handle)
+        signalingHealth = health
+        signalingLifecyclePhase = phase
+    }
+
+    func testingSetReadiness(_ readiness: CrossNetworkReadiness) {
+        self.readiness = readiness
+    }
+
+    func testingCurrentSignalingHandle() -> WebSocketSignalingClient.SignalingHandleID? {
+        signalingLifecycle.currentHandle()
+    }
+
+    func testingCanPerformSignalingOperation(sessionID: String) -> Bool {
+        (try? shouldAllowSignalingOperation(for: sessionID)) != nil
+    }
+#endif
+
+    private static func hasUsableTURNCredentials(_ ice: WebRTCSession.ICEConfig) -> Bool {
+        let hasTurnURL = ice.turnURLs.contains {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        let username = ice.turnUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        let password = ice.turnPassword.trimmingCharacters(in: .whitespacesAndNewlines)
+        return hasTurnURL && !username.isEmpty && !password.isEmpty
+    }
+
+    private func logICEPlan(_ ice: WebRTCSession.ICEConfig, context: String) {
+        if Self.hasUsableTURNCredentials(ice) {
+            logger.info(
+                "📡 \(context, privacy: .public) 使用 TURN+STUN: credentialsPresent=1 turnURLs=\(ice.turnURLs.count, privacy: .public)"
+            )
+        } else {
+            logger.error("❌ \(context, privacy: .public) 缺少可用 TURN 凭据")
+        }
+    }
+
+    #if os(macOS)
+    // macOS-exclusive: 远程桌面宿主能力（屏幕捕获 / 视频策略 / 输入注入 / 剪贴板重定向）。
+    private func webrtcVideoRequest(from settings: DisplaySettings) -> WebRTCRemoteDesktopVideoRequest {
+        WebRTCRemoteDesktopVideoRequestFactory.request(
+            from: settings,
+            isAppleSiliconRuntime: Self.isAppleSiliconRuntime
+        )
+    }
+    #endif
+
+    #if os(macOS)
+    // macOS-exclusive: 远程桌面宿主能力（屏幕捕获 / 视频策略 / 输入注入 / 剪贴板重定向）。
+    private func webrtcVideoRequest(
+        for sessionID: String,
+        from settings: DisplaySettings,
+        transportPath: WebRTCSession.ICETransportPath
+    ) -> WebRTCRemoteDesktopVideoRequest {
+        WebRTCRemoteDesktopVideoRequestFactory.request(
+            from: settings,
+            remoteStreamConfiguration: webrtcRemoteStreamConfigurationBySessionId[sessionID],
+            transportPath: transportPath,
+            isAppleSiliconRuntime: Self.isAppleSiliconRuntime
+        )
+    }
+    #endif
+
+    private func effectiveWebRTCRemoteVideoFormats(for sessionID: String) -> Set<String> {
+        WebRTCRemoteDesktopVideoFormatPolicy.effectiveRemoteVideoFormats(
+            advertisedFormats: webrtcRemoteVideoFormatsBySessionId[sessionID] ?? [],
+            streamConfiguration: webrtcRemoteStreamConfigurationBySessionId[sessionID]
+        )
+    }
+
+    private func effectiveWebRTCNativeCaptureVideoFormats(for sessionID: String) -> Set<String> {
+        WebRTCRemoteDesktopVideoFormatPolicy.effectiveNativeCaptureVideoFormats(
+            localSupportedFormats: Self.supportedRemoteVideoFormats(),
+            streamConfiguration: webrtcRemoteStreamConfigurationBySessionId[sessionID]
+        )
+    }
+
+    private func consumePendingWebRTCStreamRefresh(for sessionID: String) -> Bool {
+        webrtcPendingStreamRefreshSessionIds.remove(sessionID) != nil
+    }
+
+    #if os(macOS)
+    // macOS-exclusive: 远程桌面宿主能力（屏幕捕获 / 视频策略 / 输入注入 / 剪贴板重定向）。
+    private func configureWebRTCClipboardSyncIfNeeded(
+        for sessionID: String,
+        session: WebRTCSession
+    ) {
+        guard isWebRTCRemoteControlSecurityApproved(
+            sessionID: sessionID,
+            session: session
+        ) else {
+            stopWebRTCClipboardSyncIfNeeded(for: sessionID)
+            appendSmokeStatus(
+                "remoteControlClipboardBlocked session=\(sessionID) transport=webrtc reason=awaiting_security_notice"
+            )
+            return
+        }
+
+        let shouldEnable = webrtcRemoteStreamConfigurationBySessionId[sessionID]?.clipboardSyncEnabled ?? false
+        let clipboard = ClipboardRedirectionManager.shared
+
+        if shouldEnable {
+            if activeWebRTCClipboardSessionId != sessionID {
+                if let activeSession = activeWebRTCClipboardSessionId {
+                    stopWebRTCClipboardSyncIfNeeded(for: activeSession)
+                }
+                activeWebRTCClipboardSessionId = sessionID
+                activeWebRTCClipboardToken = UUID()
+            }
+
+            guard let token = activeWebRTCClipboardToken else { return }
+            clipboard.enable(for: token) { [weak self] data, mimeType in
+                guard let self else { return }
+                Task { @MainActor [weak self] in
+                    guard let self,
+                          self.activeWebRTCClipboardSessionId == sessionID,
+                          self.activeWebRTCClipboardToken == token,
+                          self.webrtcSessionsBySessionId[sessionID] === session else { return }
+                    await self.sendWebRTCClipboardPayload(
+                        data: data,
+                        mimeType: mimeType,
+                        sessionID: sessionID,
+                        session: session
+                    )
+                }
+            }
+        } else {
+            stopWebRTCClipboardSyncIfNeeded(for: sessionID)
+        }
+    }
+    #endif
+
+    #if os(macOS)
+    // macOS-exclusive: 远程桌面宿主能力（屏幕捕获 / 视频策略 / 输入注入 / 剪贴板重定向）。
+    private func stopWebRTCClipboardSyncIfNeeded(for sessionID: String) {
+        guard activeWebRTCClipboardSessionId == sessionID else { return }
+        let clipboard = ClipboardRedirectionManager.shared
+        if let token = activeWebRTCClipboardToken { clipboard.disable(for: token) }
+        activeWebRTCClipboardSessionId = nil
+        activeWebRTCClipboardToken = nil
+    }
+    #endif
+
+    private func noteWebRTCRemoteSecurityIdentity(
+        sessionID: String,
+        accountDisplayName: String?,
+        nebulaId: String?,
+        deviceId: String?,
+        deviceName: String?
+    ) {
+        let identity = RemoteControlSecurityIdentity(
+            accountDisplayName: accountDisplayName,
+            nebulaId: nebulaId,
+            deviceId: deviceId,
+            deviceName: deviceName
+        )
+        guard identity.accountDisplayName != nil
+            || identity.nebulaId != nil
+            || identity.deviceId != nil
+            || identity.deviceName != nil else {
+            return
+        }
+        webrtcRemoteSecurityIdentityBySessionId[sessionID] = identity
+    }
+
+    private func waitForWebRTCRemoteControlNoticeMetadata(
+        sessionID: String,
+        session: WebRTCSession,
+        timeout: Duration = .seconds(5)
+    ) async -> (identity: RemoteControlSecurityIdentity?, remoteIPAddress: String?) {
+        let clock = ContinuousClock()
+        let deadline = clock.now + timeout
+        var lastRemoteIPAddress = await session.currentObservedRemoteCandidateAddress()
+
+        while clock.now < deadline {
+            let identity = webrtcRemoteSecurityIdentityBySessionId[sessionID]
+            lastRemoteIPAddress = await session.currentObservedRemoteCandidateAddress()
+            if Self.noticeMetadataPresent(identity?.accountDisplayName),
+               Self.noticeMetadataPresent(identity?.nebulaId),
+               Self.noticeMetadataPresent(lastRemoteIPAddress) {
+                return (identity, lastRemoteIPAddress)
+            }
+            do {
+                try await Task.sleep(for: .milliseconds(100))
+            } catch {
+                return (webrtcRemoteSecurityIdentityBySessionId[sessionID], lastRemoteIPAddress)
+            }
+        }
+
+        return (webrtcRemoteSecurityIdentityBySessionId[sessionID], lastRemoteIPAddress)
+    }
+
+    private static func noticeMetadataPresent(_ value: String?) -> Bool {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            return false
+        }
+        return !trimmed.isEmpty && trimmed != "missing" && trimmed != "-"
+    }
+
+    private func isWebRTCRemoteControlSecurityApproved(
+        sessionID: String,
+        session: WebRTCSession
+    ) -> Bool {
+        webrtcRemoteControlNoticeApprovedSessionOwners[sessionID]
+            == ObjectIdentifier(session)
+    }
+
+    private func isWebRTCRemoteControlSecurityPending(
+        sessionID: String,
+        session: WebRTCSession
+    ) -> Bool {
+        webrtcRemoteControlNoticePendingSessionOwners[sessionID]
+            == ObjectIdentifier(session)
+    }
+
+    private func beginWebRTCProductEvidenceSessionIfPossible(
+        sessionID: String,
+        session: WebRTCSession,
+        keys: SessionKeys
+    ) async {
+        guard isCurrentWebRTCRemoteControlSession(
+            sessionID: sessionID,
+            session: session,
+            keys: keys
+        ) else {
+            return
+        }
+        let sessionReference = P2PEvidenceReference.sessionIncarnation(
+            sessionID: keys.sessionId,
+            transcriptHash: keys.transcriptHash
+        )
+        guard let sessionReference else { return }
+        if let existing = webrtcProductEvidenceOwnersBySessionId[sessionID] {
+            guard existing.sessionReference != sessionReference else { return }
+            webrtcProductEvidenceMediaTasksBySessionId.removeValue(forKey: sessionID)?.cancel()
+            webrtcProductEvidenceOwnersBySessionId.removeValue(forKey: sessionID)
+            _ = ProductReleaseEvidenceRecorder.shared.endSession(
+                owner: existing,
+                reason: .sessionReplaced
+            )
+        }
+
+        let transportPath = await session.currentICETransportPath()
+        guard isCurrentWebRTCRemoteControlSession(
+            sessionID: sessionID,
+            session: session,
+            keys: keys
+        ) else {
+            return
+        }
+        let selectedTransport: ProductReleaseEvidenceSelectedTransport
+        switch transportPath {
+        case .direct:
+            selectedTransport = .direct
+        case .relay:
+            selectedTransport = .relay
+        case .unknown:
+            return
+        }
+        guard let owner = ProductReleaseEvidenceRecorder.shared.beginSession(
+            product: .macOSApp,
+            transport: .webrtc,
+            sessionReference: sessionReference,
+            selectedTransport: selectedTransport
+        ) else {
+            return
+        }
+        guard ProductReleaseEvidenceRecorder.shared.recordWebRTCPQCRekeyAuthenticated(
+            owner: owner,
+            negotiatedSuite: keys.negotiatedSuite
+        ) else {
+            _ = ProductReleaseEvidenceRecorder.shared.endSession(
+                owner: owner,
+                reason: .protocolFailure
+            )
+            return
+        }
+        webrtcProductEvidenceOwnersBySessionId[sessionID] = owner
+        beginWebRTCProductEvidenceMediaSampling(
+            sessionID: sessionID,
+            session: session,
+            keys: keys,
+            owner: owner
+        )
+    }
+
+    /// Samples only cumulative WebRTC RTP counters from the exact live product
+    /// session. Missing video or audio flow remains an evidence failure; this
+    /// observer never synthesizes counters or changes the media pipeline.
+    private func beginWebRTCProductEvidenceMediaSampling(
+        sessionID: String,
+        session: WebRTCSession,
+        keys: SessionKeys,
+        owner: ProductReleaseEvidenceSessionOwner
+    ) {
+        webrtcProductEvidenceMediaTasksBySessionId.removeValue(forKey: sessionID)?.cancel()
+        webrtcProductEvidenceMediaTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let deadline = ContinuousClock.now.advanced(by: .seconds(115))
+            var recordedSamples = 0
+            while !Task.isCancelled, ContinuousClock.now < deadline, recordedSamples < 2 {
+                guard self.isCurrentWebRTCRemoteControlSession(
+                    sessionID: sessionID,
+                    session: session,
+                    keys: keys
+                ), self.webrtcProductEvidenceOwnersBySessionId[sessionID] == owner else {
+                    return
+                }
+                let stats = await session.outgoingNativeScreenVideoRTCStats()
+                guard !Task.isCancelled else { return }
+                let counters = ProductReleaseEvidenceMediaCounters(
+                    videoFrames: stats.framesSent,
+                    videoBytes: stats.bytesSent,
+                    audioUnits: stats.audioPacketsSent,
+                    audioBytes: stats.audioBytesSent
+                )
+                if ProductReleaseEvidenceRecorder.shared.recordWebRTCMediaSample(
+                    owner: owner,
+                    role: .sender,
+                    counters: counters
+                ) {
+                    recordedSamples += 1
+                    if recordedSamples == 1 {
+                        do {
+                            try await Task.sleep(nanoseconds: 31_000_000_000)
+                        } catch {
+                            return
+                        }
+                        continue
+                    }
+                }
+                do {
+                    try await Task.sleep(nanoseconds: 2_000_000_000)
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    private static func productEvidenceDisconnectReason(
+        forWebRTCReason reason: String
+    ) -> ProductReleaseEvidenceDisconnectReason {
+        switch reason {
+        case "trust_invalidated":
+            return .trustInvalidated
+        case "remote_control_notice_disconnect", "explicit_disconnect":
+            return .user
+        case let value where value.contains("replace") || value.contains("supersed"):
+            return .sessionReplaced
+        case let value where value.contains("peer_closed") || value.contains("remote_closed"):
+            return .peer
+        default:
+            return .protocolFailure
+        }
+    }
+
+    /// The iOS viewer sets `nativeVideoTrackReady=true` only after its real
+    /// WebRTC renderer has presented a native frame. Pair that authenticated
+    /// receipt with this exact session's non-zero outbound RTP counters before
+    /// recording a presented-frame effect; sender-side submission alone is not
+    /// sufficient release evidence.
+    private func recordWebRTCProductFrameIfRemoteRenderConfirmed(
+        sessionID: String,
+        session: WebRTCSession,
+        keys: SessionKeys,
+        configuration: RemoteDesktopStreamConfiguration
+    ) async {
+        guard configuration.nativeVideoTrackReady == true,
+              isCurrentWebRTCRemoteControlSession(
+                sessionID: sessionID,
+                session: session,
+                keys: keys
+              ),
+              let owner = webrtcProductEvidenceOwnersBySessionId[sessionID] else {
+            return
+        }
+        let sendSnapshot = session.nativeScreenVideoSendSnapshot()
+        let rtcStats = await session.outgoingNativeScreenVideoRTCStats()
+        guard isCurrentWebRTCRemoteControlSession(
+            sessionID: sessionID,
+            session: session,
+            keys: keys
+        ),
+        webrtcProductEvidenceOwnersBySessionId[sessionID] == owner,
+        rtcStats.framesSent > 0,
+        let bytes = Int(exactly: rtcStats.bytesSent), bytes > 0,
+        sendSnapshot.lastFrameWidth > 0,
+        sendSnapshot.lastFrameHeight > 0 else {
+            return
+        }
+        _ = ProductReleaseEvidenceRecorder.shared.recordPeerFramePresented(
+            owner: owner,
+            proof: .webrtcRendererReceipt,
+            bytes: bytes,
+            width: sendSnapshot.lastFrameWidth,
+            height: sendSnapshot.lastFrameHeight
+        )
+    }
+
+    static func isSameWebRTCSecureSession(
+        _ lhs: SessionKeys,
+        _ rhs: SessionKeys
+    ) -> Bool {
+        lhs.sessionId == rhs.sessionId
+            && lhs.negotiatedSuite.rawValue == rhs.negotiatedSuite.rawValue
+            && lhs.role.rawValue == rhs.role.rawValue
+            && lhs.transcriptHash == rhs.transcriptHash
+            && lhs.sendKey == rhs.sendKey
+            && lhs.receiveKey == rhs.receiveKey
+    }
+
+    func currentWebRTCFileTransferOperationOwner(
+        sessionID: String,
+        session: WebRTCSession,
+        keys: SessionKeys,
+        controlTaskToken: UUID? = nil
+    ) -> WebRTCFileTransferOperationOwner? {
+        guard webrtcSessionsBySessionId[sessionID] === session,
+              let currentKeys = webrtcSessionKeysBySessionId[sessionID],
+              Self.isSameWebRTCSecureSession(currentKeys, keys),
+              let controlRecord = webrtcControlTasksBySessionId[sessionID],
+              controlRecord.sessionObjectIdentifier == ObjectIdentifier(session),
+              controlTaskToken == nil || controlRecord.token == controlTaskToken else {
+            return nil
+        }
+        return WebRTCFileTransferOperationOwner(
+            sessionID: sessionID,
+            session: session,
+            sessionObjectIdentifier: ObjectIdentifier(session),
+            controlTaskToken: controlRecord.token,
+            keys: keys
+        )
+    }
+
+    func isCurrentWebRTCFileTransferOperationOwner(
+        _ owner: WebRTCFileTransferOperationOwner
+    ) -> Bool {
+        guard let currentOwner = currentWebRTCFileTransferOperationOwner(
+            sessionID: owner.sessionID,
+            session: owner.session,
+            keys: owner.keys,
+            controlTaskToken: owner.controlTaskToken
+        ) else {
+            return false
+        }
+        return Self.isSameWebRTCFileTransferOperationOwner(currentOwner, owner)
+    }
+
+    func requireCurrentWebRTCFileTransferOperationOwner(
+        _ owner: WebRTCFileTransferOperationOwner
+    ) throws {
+        guard isCurrentWebRTCFileTransferOperationOwner(owner) else {
+            throw CancellationError()
+        }
+        try Task.checkCancellation()
+    }
+
+    static func isSameWebRTCFileTransferOperationOwner(
+        _ lhs: WebRTCFileTransferOperationOwner,
+        _ rhs: WebRTCFileTransferOperationOwner
+    ) -> Bool {
+        lhs.sessionID == rhs.sessionID
+            && lhs.session === rhs.session
+            && lhs.sessionObjectIdentifier == rhs.sessionObjectIdentifier
+            && lhs.controlTaskToken == rhs.controlTaskToken
+            && isSameWebRTCSecureSession(lhs.keys, rhs.keys)
+    }
+
+    func currentWebRTCBoundSessionOperationOwner(
+        sessionID: String
+    ) -> WebRTCBoundSessionOperationOwner? {
+        guard let session = webrtcSessionsBySessionId[sessionID],
+              let keys = webrtcSessionKeysBySessionId[sessionID],
+              let controlRecord = webrtcControlTasksBySessionId[sessionID],
+              controlRecord.sessionObjectIdentifier == ObjectIdentifier(session) else {
+            return nil
+        }
+        return WebRTCBoundSessionOperationOwner(
+            identity: WebRTCBoundSessionSecureOwnerIdentity(
+                sessionID: sessionID,
+                sessionObjectIdentifier: ObjectIdentifier(session),
+                controlTaskToken: controlRecord.token,
+                keyIncarnationDigest: Self.webRTCBoundSessionKeyIncarnationDigest(for: keys)
+            ),
+            session: session,
+            keys: keys
+        )
+    }
+
+    func isCurrentWebRTCBoundSessionOperationOwner(
+        _ owner: WebRTCBoundSessionOperationOwner
+    ) -> Bool {
+        guard let currentOwner = currentWebRTCBoundSessionOperationOwner(
+            sessionID: owner.identity.sessionID
+        ) else {
+            return false
+        }
+        return currentOwner.identity == owner.identity
+            && currentOwner.session === owner.session
+            && Self.isSameWebRTCSecureSession(currentOwner.keys, owner.keys)
+    }
+
+    func armWebRTCBoundSessionConsumer(
+        owner: WebRTCBoundSessionOperationOwner,
+        expectedRecordKind: BoundSessionWebRTCRecordKindV1,
+        consumer: @escaping WebRTCBoundSessionConsumerGate.Consumer
+    ) throws {
+        try requireCurrentWebRTCBoundSessionOperationOwner(owner)
+        var gate = webrtcBoundSessionConsumerGatesBySessionId[owner.identity.sessionID]
+            ?? WebRTCBoundSessionConsumerGate()
+        try gate.arm(
+            ownerIdentity: owner.identity,
+            expectedRecordKind: expectedRecordKind,
+            consumer: consumer
+        )
+        webrtcBoundSessionConsumerGatesBySessionId[owner.identity.sessionID] = gate
+    }
+
+    func invalidateWebRTCBoundSessionConsumer(
+        owner: WebRTCBoundSessionOperationOwner
+    ) throws {
+        try requireCurrentWebRTCBoundSessionOperationOwner(owner)
+        guard var gate = webrtcBoundSessionConsumerGatesBySessionId[owner.identity.sessionID]
+        else {
+            return
+        }
+        gate.invalidate()
+        webrtcBoundSessionConsumerGatesBySessionId[owner.identity.sessionID] = gate
+    }
+
+    func sendWebRTCBoundSessionRecord(
+        _ exactRecord: Data,
+        recordKind: BoundSessionWebRTCRecordKindV1,
+        owner: WebRTCBoundSessionOperationOwner
+    ) async throws {
+        try requireCurrentWebRTCBoundSessionOperationOwner(owner)
+        try BoundSessionWebRTCCarrierPolicyV1.validateRecordEnvelope(
+            exactRecord,
+            expectedRecordKind: recordKind
+        )
+        let counter = try reserveWebRTCSecurePayloadCounter(
+            with: owner.keys,
+            sessionID: owner.identity.sessionID
+        )
+        let carrierPayload = try WebRTCControlChannelCodec.encryptBoundSessionRecord(
+            exactRecord,
+            recordKind: recordKind,
+            with: owner.keys,
+            counter: counter
+        )
+        try requireCurrentWebRTCBoundSessionOperationOwner(owner)
+        try await owner.session.sendFramedPayloadAsync(
+            carrierPayload,
+            maxChunkBytes: 1_024,
+            maxBufferedAmountBytes: 256 * 1_024
+        )
+        try requireCurrentWebRTCBoundSessionOperationOwner(owner)
+    }
+
+    func sendWebRTCBoundSessionRecord(
+        _ record: BoundSessionOutboundRecord,
+        owner: WebRTCBoundSessionOperationOwner
+    ) async throws {
+        try await sendWebRTCBoundSessionRecord(
+            record.exactBytes,
+            recordKind: record.kind,
+            owner: owner
+        )
+    }
+
+    private func requireCurrentWebRTCBoundSessionOperationOwner(
+        _ owner: WebRTCBoundSessionOperationOwner
+    ) throws {
+        guard isCurrentWebRTCBoundSessionOperationOwner(owner) else {
+            throw CancellationError()
+        }
+        try Task.checkCancellation()
+    }
+
+    private func consumeWebRTCBoundSessionRecord(
+        _ exactRecord: Data,
+        header: BoundSessionWebRTCCarrierHeaderV1,
+        owner: WebRTCBoundSessionOperationOwner
+    ) async throws {
+        try requireCurrentWebRTCBoundSessionOperationOwner(owner)
+        guard var gate = webrtcBoundSessionConsumerGatesBySessionId[owner.identity.sessionID]
+        else {
+            throw WebRTCBoundSessionCarrierIntegrationError.consumerNotArmed
+        }
+        let consumer = try gate.takeConsumer(
+            ownerIdentity: owner.identity,
+            recordKind: header.recordKind
+        )
+        // Commit the one-shot removal before invoking the product adapter.
+        // The awaited callback may arm the next Rust typestate. Remove this
+        // one-shot registration first so concurrent duplicate delivery cannot
+        // re-enter the transition while the actor is suspended.
+        webrtcBoundSessionConsumerGatesBySessionId[owner.identity.sessionID] = gate
+        try await consumer(header.recordKind, exactRecord)
+        try requireCurrentWebRTCBoundSessionOperationOwner(owner)
+    }
+
+    private func isCurrentWebRTCRemoteControlSession(
+        sessionID: String,
+        session: WebRTCSession,
+        keys: SessionKeys
+    ) -> Bool {
+        guard webrtcSessionsBySessionId[sessionID] === session,
+              let currentKeys = webrtcSessionKeysBySessionId[sessionID] else {
+            return false
+        }
+        return Self.isSameWebRTCSecureSession(currentKeys, keys)
+    }
+
+    private func ensureWebRTCRemoteControlSecurityApproved(
+        sessionID: String,
+        session: WebRTCSession,
+        keys: SessionKeys
+    ) async -> Bool {
+        guard isCurrentWebRTCRemoteControlSession(
+            sessionID: sessionID,
+            session: session,
+            keys: keys
+        ) else {
+            return false
+        }
+        await beginWebRTCProductEvidenceSessionIfPossible(
+            sessionID: sessionID,
+            session: session,
+            keys: keys
+        )
+        guard isCurrentWebRTCRemoteControlSession(
+            sessionID: sessionID,
+            session: session,
+            keys: keys
+        ) else {
+            return false
+        }
+        if isWebRTCRemoteControlSecurityApproved(
+            sessionID: sessionID,
+            session: session
+        ) {
+            RemoteControlSecurityNoticeCenter.shared.updateCryptoSuite(
+                webRTCSecurityCryptoSuite(keys),
+                sessionId: sessionID,
+                transportKind: .webrtc
+            )
+            return true
+        }
+        let sessionOwner = ObjectIdentifier(session)
+        guard webrtcRemoteControlNoticePendingSessionOwners[sessionID] == nil else {
+            appendSmokeStatus(
+                "remoteControlStartBlocked session=\(sessionID) transport=webrtc reason=security_notice_pending"
+            )
+            return false
+        }
+        webrtcRemoteControlNoticePendingSessionOwners[sessionID] = sessionOwner
+        defer {
+            if webrtcRemoteControlNoticePendingSessionOwners[sessionID] == sessionOwner {
+                webrtcRemoteControlNoticePendingSessionOwners.removeValue(forKey: sessionID)
+            }
+        }
+
+        let noticeCenter = RemoteControlSecurityNoticeCenter.shared
+        let localIdentity = noticeCenter.localIdentitySnapshot()
+        let noticeMetadata = await waitForWebRTCRemoteControlNoticeMetadata(
+            sessionID: sessionID,
+            session: session
+        )
+        guard isCurrentWebRTCRemoteControlSession(
+            sessionID: sessionID,
+            session: session,
+            keys: keys
+        ) else {
+            return false
+        }
+        let remoteIdentity = noticeMetadata.identity
+        let remoteDeviceId = remoteIdentity?.deviceId
+            ?? webrtcRemoteIdBySessionId[sessionID]
+            ?? sessionID
+        let descriptor = RemoteControlSecurityDescriptor(
+            sessionId: sessionID,
+            sessionEvidenceReference: P2PEvidenceReference.sessionIncarnation(
+                sessionID: keys.sessionId,
+                transcriptHash: keys.transcriptHash
+            ),
+            transportKind: .webrtc,
+            remoteIPAddress: noticeMetadata.remoteIPAddress,
+            remoteDeviceId: remoteDeviceId,
+            remoteDeviceName: remoteIdentity?.deviceName,
+            remoteAccountDisplayName: remoteIdentity?.accountDisplayName,
+            remoteNebulaId: remoteIdentity?.nebulaId,
+            localAccountDisplayName: localIdentity?.accountDisplayName,
+            localNebulaId: localIdentity?.nebulaId,
+            cryptoSuite: webRTCSecurityCryptoSuite(keys)
+        )
+        let disconnectHandler: RemoteControlSecurityNoticeCenter.DisconnectHandler = {
+            [weak self, weak session] in
+            guard let self, let session,
+                  self.webrtcSessionsBySessionId[sessionID] === session else {
+                return
+            }
+            self.cleanupWebRTCSession(
+                sessionID,
+                reason: "remote_control_notice_disconnect",
+                disconnectKind: .explicit
+            )
+        }
+        noticeCenter.setDisconnectHandler(
+            for: descriptor.id,
+            handler: disconnectHandler
+        )
+
+        let decision = await noticeCenter.requestApproval(descriptor)
+        guard isCurrentWebRTCRemoteControlSession(
+            sessionID: sessionID,
+            session: session,
+            keys: keys
+        ) else {
+            return false
+        }
+        guard decision == .approved else {
+            webrtcRemoteControlNoticeApprovedSessionOwners.removeValue(forKey: sessionID)
+            cleanupWebRTCSession(
+                sessionID,
+                reason: "remote_control_notice_\(decision.rawValue)",
+                disconnectKind: .explicit
+            )
+            return false
+        }
+        if let activeNotice = noticeCenter.currentNotice,
+           activeNotice.descriptor.sessionId == sessionID,
+           activeNotice.descriptor.transportKind == .webrtc {
+            // requestApproval may reuse an already-active notice with the same
+            // authenticated identity. Rebind that visible notice to the exact
+            // current WebRTC incarnation so the UI cannot retain an old
+            // same-ID disconnect handler.
+            noticeCenter.setDisconnectHandler(
+                for: activeNotice.id,
+                handler: disconnectHandler
+            )
+        }
+        webrtcRemoteControlNoticeApprovedSessionOwners[sessionID] = sessionOwner
+        if let pendingConfiguration = webrtcPendingRemoteStreamConfigurationBySessionId.removeValue(forKey: sessionID) {
+            await applyApprovedWebRTCStreamConfiguration(
+                pendingConfiguration,
+                sessionID: sessionID,
+                session: session,
+                keys: keys
+            )
+            guard isCurrentWebRTCRemoteControlSession(
+                sessionID: sessionID,
+                session: session,
+                keys: keys
+            ) else {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func webRTCSecurityCryptoSuite(_ keys: SessionKeys) -> String {
+        guard keys.negotiatedSuite.isKnown else { return "" }
+        let rawValue = keys.negotiatedSuite.rawValue
+        return keys.negotiatedSuite.isPQCGroup ? "\(rawValue) PQC" : "\(rawValue) secure channel"
+    }
+
+    private func sendWebRTCStreamConfigurationAcknowledgement(
+        _ acknowledgement: RemoteDesktopStreamConfigurationAcknowledgement,
+        sessionID: String,
+        session: WebRTCSession,
+        keys: SessionKeys
+    ) async throws {
+        guard isCurrentWebRTCRemoteControlSession(
+            sessionID: sessionID,
+            session: session,
+            keys: keys
+        ) else {
+            throw CancellationError()
+        }
+        let encodedPayload = try JSONEncoder().encode(acknowledgement)
+        let message = RemoteMessageWire(
+            type: .streamConfigurationAck,
+            payload: encodedPayload
+        )
+        let plaintext = try JSONEncoder().encode(message)
+        let ciphertext = try sealWebRTCSecurePayload(
+            plaintext,
+            with: keys,
+            sessionID: sessionID,
+            packetType: .remoteControl
+        )
+        let padded = try TrafficPadding.wrapIfEnabled(
+            ciphertext,
+            label: "tx/webrtc-stream-config-ack"
+        )
+        guard isCurrentWebRTCRemoteControlSession(
+            sessionID: sessionID,
+            session: session,
+            keys: keys
+        ) else {
+            throw CancellationError()
+        }
+        try await session.sendFramedPayloadAsync(
+            padded,
+            maxChunkBytes: 16 * 1024,
+            maxBufferedAmountBytes: 96 * 1024
+        )
+        guard isCurrentWebRTCRemoteControlSession(
+            sessionID: sessionID,
+            session: session,
+            keys: keys
+        ) else {
+            throw CancellationError()
+        }
+    }
+
+    private func commitWebRTCStreamConfigurationIngressState(
+        _ rawConfiguration: RemoteDesktopStreamConfiguration,
+        plan: WebRTCStreamConfigurationIngressPlan,
+        sessionID: String
+    ) {
+        webrtcLastAcceptedRawStreamConfigurationBySessionId[sessionID] = rawConfiguration
+        webrtcRemoteStreamConfigurationBySessionId[sessionID] = plan.effectiveConfig
+        webrtcRemoteVideoFormatsBySessionId[sessionID] = plan.remoteVideoFormats
+        if plan.shouldClearPendingStreamRefresh {
+            webrtcPendingStreamRefreshSessionIds.remove(sessionID)
+        }
+        if plan.shouldClearAwaitingStreamConfiguration {
+            webrtcAwaitingStreamConfigurationSessionIds.remove(sessionID)
+        }
+    }
+
+    /// Exact stop is the one WebRTC stream operation whose established wire
+    /// contract is fire-and-forget. Commit it before the normal ACK gate while
+    /// keeping transaction validation and session ownership in the callers.
+    private func commitExactWebRTCStreamStop(
+        _ rawConfiguration: RemoteDesktopStreamConfiguration,
+        plan: WebRTCStreamConfigurationIngressPlan,
+        previousConfiguration: RemoteDesktopStreamConfiguration?,
+        sessionID: String,
+        session: WebRTCSession
+    ) {
+#if os(macOS)
+        if let record = webrtcControlTasksBySessionId[sessionID],
+           record.sessionObjectIdentifier == ObjectIdentifier(session) {
+            releaseWebRTCRemoteInput(
+                sessionID: sessionID,
+                controlTaskToken: record.token,
+                reason: "webrtc_stream_stop"
+            )
+        }
+#endif
+        commitWebRTCStreamConfigurationIngressState(
+            rawConfiguration,
+            plan: plan,
+            sessionID: sessionID
+        )
+        stopWebRTCScreenStreaming(sessionID: sessionID)
+#if os(macOS)
+        if plan.shouldConfigureClipboard {
+            configureWebRTCClipboardSyncIfNeeded(for: sessionID, session: session)
+        }
+#endif
+        logger.info(
+            "⏹️ WebRTC viewer 请求停止远控推流: session=\(sessionID, privacy: .public) previousTransport=\(previousConfiguration?.screenFrameTransport ?? "none", privacy: .public)"
+        )
+    }
+
+    private func applyApprovedWebRTCStreamConfiguration(
+        _ config: RemoteDesktopStreamConfiguration,
+        sessionID: String,
+        session: WebRTCSession,
+        keys: SessionKeys
+    ) async {
+        guard isCurrentWebRTCRemoteControlSession(
+            sessionID: sessionID,
+            session: session,
+            keys: keys
+        ), isWebRTCRemoteControlSecurityApproved(
+            sessionID: sessionID,
+            session: session
+        ) else {
+            return
+        }
+        let previousConfig = webrtcRemoteStreamConfigurationBySessionId[sessionID]
+        let previousRawConfig = webrtcLastAcceptedRawStreamConfigurationBySessionId[sessionID]
+        let plan = Self.planWebRTCStreamConfigurationIngress(
+            config,
+            previousConfig: previousConfig,
+            previousRawConfig: previousRawConfig,
+            advertisedFormats: webrtcRemoteVideoFormatsBySessionId[sessionID] ?? [],
+            hasSessionKeys: true
+        )
+        let coordination = Self.coordinateWebRTCStreamConfigurationIngress(
+            plan,
+            commitExactStop: {
+                self.commitExactWebRTCStreamStop(
+                    config,
+                    plan: plan,
+                    previousConfiguration: previousConfig,
+                    sessionID: sessionID,
+                    session: session
+                )
+            },
+            reject: { rejection in
+                guard self.isCurrentWebRTCRemoteControlSession(
+                    sessionID: sessionID,
+                    session: session,
+                    keys: keys
+                ) else {
+                    return
+                }
+                let reason: String
+                switch rejection {
+                case .invalidTransaction:
+                    reason = "invalid_stream_configuration_transaction"
+                case .missingAcknowledgement:
+                    reason = "missing_stream_configuration_acknowledgement"
+                }
+                self.cleanupWebRTCSession(
+                    sessionID,
+                    reason: reason,
+                    disconnectKind: .explicit
+                )
+            }
+        )
+        let acknowledgementAction: WebRTCStreamConfigurationIngressAcknowledgementAction
+        switch coordination {
+        case .handled:
+            return
+        case .rejected:
+            return
+        case .acknowledgementRequired(let action):
+            acknowledgementAction = action
+        }
+        switch acknowledgementAction.purpose {
+        case .duplicate:
+            let ack = acknowledgementAction.acknowledgement.payload(
+                acceptedAt: Date().timeIntervalSince1970
+            )
+            do {
+                try await sendWebRTCStreamConfigurationAcknowledgement(
+                    ack,
+                    sessionID: sessionID,
+                    session: session,
+                    keys: keys
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                guard isCurrentWebRTCRemoteControlSession(
+                    sessionID: sessionID,
+                    session: session,
+                    keys: keys
+                ) else {
+                    return
+                }
+                logger.warning(
+                    "⚠️ WebRTC duplicate streamConfiguration ACK 发送失败"
+                )
+            }
+            return
+        case .commitAfterAcknowledgement:
+            break
+        }
+        if plan.audioEndpointPreservedForVideoRefresh {
+            appendWebRTCSessionDiagnostic(
+                "audioEndpointPreservedForVideoRefresh session=\(sessionID) refreshTokenState=\(Self.streamRefreshTokenLogState(config.streamRefreshToken))",
+                sessionID: sessionID
+            )
+        }
+        let effectiveConfig = plan.effectiveConfig
+        if plan.shouldEnsureScreenDataChannel {
+            do {
+                try session.ensureScreenDataChannel()
+            } catch {
+                cleanupWebRTCSession(
+                    sessionID,
+                    reason: "screen_data_channel_configuration_failed",
+                    disconnectKind: .explicit
+                )
+                return
+            }
+        }
+        appendWebRTCSessionDiagnostic(
+            """
+            streamConfigReceived session=\(sessionID) transport=\(effectiveConfig.screenFrameTransport ?? "legacy") \
+            screenWire=\(effectiveConfig.screenChannelWireFormat ?? "length-framed") \
+            nativeReady=\(effectiveConfig.nativeVideoTrackReady == true) \
+            audioRequested=\(effectiveConfig.requestsRealtimeMediaAudio) \
+            audioEndpoint=\(effectiveConfig.mediaAudioEndpoint == nil ? "missing" : "present") \
+            audioRelayToken=\(effectiveConfig.mediaAudioEndpoint?.relayToken == nil ? "missing" : "present") \
+            refreshTokenState=\(Self.streamRefreshTokenLogState(effectiveConfig.streamRefreshToken))
+            """,
+            sessionID: sessionID
+        )
+        let ack = acknowledgementAction.acknowledgement.payload(
+            acceptedAt: Date().timeIntervalSince1970
+        )
+        do {
+            try await sendWebRTCStreamConfigurationAcknowledgement(
+                ack,
+                sessionID: sessionID,
+                session: session,
+                keys: keys
+            )
+            appendWebRTCSessionDiagnostic(
+                "streamConfigurationAckSent session=\(sessionID) refreshTokenState=\(Self.streamRefreshTokenLogState(effectiveConfig.streamRefreshToken)) audioEndpoint=\(effectiveConfig.mediaAudioEndpoint == nil ? "missing" : "present")",
+                sessionID: sessionID
+            )
+        } catch is CancellationError {
+            return
+        } catch {
+            guard isCurrentWebRTCRemoteControlSession(
+                sessionID: sessionID,
+                session: session,
+                keys: keys
+            ) else {
+                return
+            }
+            logger.warning(
+                "⚠️ WebRTC streamConfigurationAck 发送失败: session=\(sessionID, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+            )
+            appendWebRTCSessionDiagnostic(
+                "streamConfigurationAckFailed session=\(sessionID) error=\(error.localizedDescription)",
+                sessionID: sessionID
+            )
+            return
+        }
+        guard isCurrentWebRTCRemoteControlSession(
+            sessionID: sessionID,
+            session: session,
+            keys: keys
+        ) else {
+            return
+        }
+        commitWebRTCStreamConfigurationIngressState(
+            config,
+            plan: plan,
+            sessionID: sessionID
+        )
+        if plan.shouldMarkPendingStreamRefresh {
+            webrtcPendingStreamRefreshSessionIds.insert(sessionID)
+        }
+        if plan.shouldConfigureClipboard {
+#if os(macOS)
+            configureWebRTCClipboardSyncIfNeeded(for: sessionID, session: session)
+#endif
+        }
+    }
+
+    private func sendWebRTCClipboardPayload(
+        data: Data,
+        mimeType: String,
+        sessionID: String,
+        session: WebRTCSession
+    ) async {
+        guard isWebRTCRemoteControlSecurityApproved(
+            sessionID: sessionID,
+            session: session
+        ) else {
+#if os(macOS)
+            stopWebRTCClipboardSyncIfNeeded(for: sessionID)
+#endif
+            appendSmokeStatus(
+                "remoteControlClipboardSendBlocked session=\(sessionID) transport=webrtc reason=awaiting_security_notice"
+            )
+            return
+        }
+        do {
+            guard let keys = webrtcSessionKeysBySessionId[sessionID] else { return }
+            let clipboardPayload = RemoteClipboardPayload(mimeType: mimeType, data: data)
+            let remoteMessage = RemoteMessageWire(
+                type: .clipboard,
+                payload: try JSONEncoder().encode(clipboardPayload)
+            )
+            let plaintext = try JSONEncoder().encode(remoteMessage)
+            let ciphertext = try sealWebRTCSecurePayload(
+                plaintext,
+                with: keys,
+                sessionID: sessionID,
+                packetType: .remoteControl
+            )
+            let padded = try TrafficPadding.wrapIfEnabled(ciphertext, label: "tx/webrtc-clipboard")
+            try await sendFramed(padded, over: session)
+        } catch {
+            logger.error("❌ WebRTC 会话剪贴板发送失败: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func localProtocolIdentityPublicKeysForPairing(
+        sessionID: String
+    ) async throws -> [AppMessage.ProtocolIdentityPublicKeyInfo] {
+        let active = try requiredCurrentPathLocalIdentity(for: sessionID).identity
+        var identities = [active]
+        for algorithm in [ProtocolSigningAlgorithm.mlDSA65, .ed25519]
+        where algorithm != active.algorithm {
+            if let identity = try? await CommittedLocalProtocolIdentitySnapshot.load(
+                algorithm: algorithm,
+                protection: .softwareKeychain,
+                keyManager: .shared
+            ) {
+                identities.append(identity)
+            }
+        }
+        let keys = identities.map {
+            AppMessage.ProtocolIdentityPublicKeyInfo(
+                protocolSigningAlgorithm: $0.algorithm.rawValue,
+                publicKey: $0.publicKey
+            )
+        }
+        guard let normalized = AppMessage.ProtocolIdentityPublicKeyInfo
+            .normalizedValidKeys(keys),
+              normalized.contains(where: {
+                $0.normalizedAlgorithm == active.algorithm
+                    && $0.publicKey == active.publicKey
+              }) else {
+            throw NSError(
+                domain: "CrossNetworkConnectionManager",
+                code: 8453,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "The admission-bound protocol identity is missing from the pairing advertisement"
+                ]
+            )
+        }
+        return normalized
+    }
+
+    private func additionalProtocolFingerprints(for sessionID: String) -> Set<String> {
+        currentPathAdditionalProtocolFingerprintsBySessionId[sessionID] ?? []
+    }
+
+    /// Returns only exact raw-key identities that were authenticated and persisted before this
+    /// handshake. This permits an already trusted ML-DSA-65 identity to authorize a compatibility
+    /// handshake while a peer migrates its current-path authority to ML-DSA-87. A fingerprint merely
+    /// advertised by the current signaling session is deliberately insufficient for this bridge.
+    private func durableCurrentPathProtocolFingerprints(
+        for candidateDeviceIds: [String]
+    ) -> Set<String> {
+        let algorithms: [ProtocolSigningAlgorithm] = [.ed25519, .mlDSA65, .mlDSA87]
+        var fingerprints = Set<String>()
+        var seenDeviceIds = Set<String>()
+
+        for rawDeviceId in candidateDeviceIds {
+            let deviceId = rawDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !deviceId.isEmpty, seenDeviceIds.insert(deviceId).inserted else { continue }
+
+            for algorithm in algorithms {
+                guard let binding = TrustSyncService.shared.authenticatedProtocolIdentityBinding(
+                    deviceId: deviceId,
+                    algorithm: algorithm
+                ) else {
+                    continue
+                }
+                guard binding.protocolSigningAlgorithm == algorithm,
+                      binding.state == ProtocolIdentityBindingV2.activeState,
+                      (try? ProtocolIdentityBinding.validateKeyEncoding(
+                        bytes: binding.publicKey,
+                        algorithm: algorithm
+                      )) != nil else {
+                    continue
+                }
+                let fingerprint = binding.fingerprint
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                let computedFingerprint = ProtocolIdentityBinding.computeFingerprint(
+                    algorithm: algorithm,
+                    publicKeyBytes: binding.publicKey
+                ).lowercased()
+                if !fingerprint.isEmpty, fingerprint == computedFingerprint {
+                    fingerprints.insert(fingerprint)
+                }
+            }
+        }
+        return fingerprints
+    }
+
+    private func handshakeTrustedProtocolFingerprints(
+        for sessionID: String,
+        candidateDeviceIds: [String]
+    ) -> Set<String> {
+        var fingerprints = additionalProtocolFingerprints(for: sessionID)
+        fingerprints.formUnion(
+            durableCurrentPathProtocolFingerprints(for: candidateDeviceIds)
+        )
+        return fingerprints
+    }
+
+    /// Validates a self-asserted protocol identity carried in a WebRTC `.join` bootstrap and returns the
+    /// canonical lowercase fingerprint when the bytes encode correctly AND hash to the claimed fingerprint.
+    ///
+    /// This is the same binding check the answerer/QR trust path performs
+    /// (`ProtocolIdentityBinding.validateKeyEncoding` + `computeFingerprint`). It does NOT by itself prove
+    /// possession of the private key — the join carries no signature — but the resulting pin is only ever
+    /// used to scope the strict-PQC handshake, whose transcript-bound MessageB signature provides the
+    /// end-to-end proof-of-possession against this exact fingerprint.
+    private func validatedJoinBootstrapAuthority(
+        from payload: WebRTCSignalingEnvelope.Payload
+    ) -> (algorithm: ProtocolSigningAlgorithm, fingerprint: String, publicKeyBytes: Data)? {
+        guard let algorithm = payload.protocolSigningAlgorithm,
+              let publicKeyBytes = payload.protocolPublicKeyBytes,
+              !publicKeyBytes.isEmpty,
+              let claimedFingerprint = payload.protocolPublicKeyFingerprint?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased(),
+              !claimedFingerprint.isEmpty else {
+            return nil
+        }
+        do {
+            try ProtocolIdentityBinding.validateKeyEncoding(bytes: publicKeyBytes, algorithm: algorithm)
+        } catch {
+            return nil
+        }
+        let computedFingerprint = ProtocolIdentityBinding.computeFingerprint(
+            algorithm: algorithm,
+            publicKeyBytes: publicKeyBytes
+        ).lowercased()
+        guard computedFingerprint == claimedFingerprint else {
+            return nil
+        }
+        return (algorithm: algorithm, fingerprint: claimedFingerprint, publicKeyBytes: publicKeyBytes)
+    }
+
+    private func outboundWebRTCProtocolIdentity(
+        for candidateDeviceIds: [String],
+        sessionID: String,
+        configuration: ProtocolIdentityConfigurationRecord
+    ) -> WebRTCOutboundProtocolIdentitySelection {
+        let candidates = WebRTCControlChannelCodec.orderedUniqueCandidateIds(candidateDeviceIds)
+        let currentPathAuthority = currentPathExpectedRemoteAuthorityBySessionId[sessionID]
+        let currentPathHasExactMLDSA87Authority = currentPathAuthority.map { authority in
+            candidates.contains(authority.deviceId)
+                && Self.isExactMLDSA87Authority(authority)
+        } ?? false
+        let trustStoreHasExactMLDSA87Authority = candidates.first.map { selectedCandidateDeviceId in
+            TrustSyncService.shared.hasAuthenticatedProtocolIdentity(
+                deviceId: selectedCandidateDeviceId,
+                algorithm: .mlDSA87
+            )
+        } ?? false
+        return Self.selectWebRTCOutboundProtocolIdentity(
+            requestedAlgorithm: configuration.algorithm,
+            requestedProtection: configuration.protection,
+            remoteHasExactMLDSA87Authority: currentPathHasExactMLDSA87Authority
+                || trustStoreHasExactMLDSA87Authority
+        )
+    }
+
+    private func publishProtocolIdentityStatus(
+        _ selection: WebRTCOutboundProtocolIdentitySelection,
+        configured configuration: ProtocolIdentityConfigurationRecord,
+        sessionID: String
+    ) {
+        let mode: CrossNetworkProtocolIdentityStatus.Mode = selection.mode == .configuredAuthority
+            ? .configuredAuthority
+            : .peerCompatibilityIdentity
+        protocolIdentityStatus = CrossNetworkProtocolIdentityStatus(
+            sessionID: sessionID,
+            configuredAlgorithm: configuration.algorithm,
+            configuredProtection: configuration.protection,
+            sessionAlgorithm: selection.algorithm,
+            sessionProtection: selection.protection,
+            mode: mode
+        )
+        appendWebRTCSessionDiagnostic(
+            "protocol-identity-selection session=\(sessionID) configured=\(configuration.algorithm.rawValue)/\(configuration.protection.rawValue) selected=\(selection.algorithm.rawValue)/\(selection.protection.rawValue) mode=\(mode.rawValue)",
+            sessionID: sessionID
+        )
+        if mode == .peerCompatibilityIdentity {
+            logger.notice(
+                "Peer compatibility identity selected; active authority remains \(configuration.algorithm.rawValue, privacy: .public)/\(configuration.protection.rawValue, privacy: .public), session identity is \(selection.algorithm.rawValue, privacy: .public)/\(selection.protection.rawValue, privacy: .public)"
+            )
+        }
+    }
+
+    private func rejectWebRTCRemoteControlHostPayload(
+        sessionID: String,
+        type: RemoteMessageTypeWire,
+        reason: String
+    ) {
+        let message = "WebRTC 远控宿主消息已拒绝: type=\(type.rawValue) reason=\(reason)"
+        logger.error("⛔️ \(message, privacy: .public) session=\(sessionID, privacy: .public)")
+        appendWebRTCSessionDiagnostic(
+            "remoteControlHostPayloadRejected session=\(sessionID) type=\(type.rawValue) reason=\(reason)",
+            sessionID: sessionID
+        )
+        appendSmokeStatus(
+            "remoteControlHostPayloadRejected session=\(sessionID) transport=webrtc type=\(type.rawValue) reason=\(reason)"
+        )
+        let wasCurrentConnection = currentConnection?.id == sessionID
+        cleanupWebRTCSession(
+            sessionID,
+            reason: "remote_control_host_payload_rejected",
+            disconnectKind: .explicit
+        )
+        if wasCurrentConnection {
+            connectionStatus = .failed(message)
+            readiness = .idle
+        }
+    }
+
+    private func currentPathTrustedProtocolFingerprints(for sessionID: String) -> Set<String> {
+        var fingerprints = additionalProtocolFingerprints(for: sessionID)
+        if let expected = currentPathExpectedRemoteAuthorityBySessionId[sessionID]?.protocolPublicKeyFingerprint
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+           !expected.isEmpty {
+            fingerprints.insert(expected)
+        }
+        return fingerprints
+    }
+
+    private func trustedSignedRefreshKEMPublicKeys(
+        forCandidates candidates: [String],
+        sessionID: String
+    ) async -> [UInt16: Data] {
+        let pinnedFingerprints = currentPathTrustedProtocolFingerprints(for: sessionID)
+        guard !pinnedFingerprints.isEmpty else { return [:] }
+        // Tier 1 (preferred): signed LAN KEM refresh material bound to the pinned protocol identity.
+        var merged = await PeerKEMBootstrapStore.shared.signedRefreshKEMPublicKeys(
+            forCandidates: candidates,
+            pinnedProtocolFingerprints: pinnedFingerprints
+        )
+        // Tier 2: pairing-identity-exchange KEM bound to the pinned current-path authority. This makes
+        // the verified join KEM usable for the strict-PQC initial handshake gate without weakening the
+        // 701 reject for genuinely-untrusted peers (an empty pin set still yields nothing). Signed
+        // refresh keys win on suite-id conflicts.
+        let authorityBound = await PeerKEMBootstrapStore.shared.authorityBoundPairingKEMPublicKeys(
+            forCandidates: candidates,
+            pinnedProtocolFingerprints: pinnedFingerprints
+        )
+        for (suiteWireId, publicKey) in authorityBound where merged[suiteWireId] == nil {
+            merged[suiteWireId] = publicKey
+        }
+        return merged
+    }
+
+    private func stopJoinHeartbeat(for sessionID: String) {
+        webrtcJoinHeartbeatTasksBySessionId[sessionID]?.cancel()
+        webrtcJoinHeartbeatTasksBySessionId.removeValue(forKey: sessionID)
+    }
+
+    private typealias CurrentPathSignalingEndpoint = (origin: String, wsPath: String)
+
+    private func validatedCurrentPathSignalingEndpoint(
+        origin: String,
+        wsPath: String?
+    ) throws -> CurrentPathSignalingEndpoint {
+        (
+            origin: try validateCurrentPathOrigin(origin),
+            wsPath: try Self.validatedSignalingWebSocketPath(wsPath)
+        )
+    }
+
+    private func storeCurrentPathSignalingEndpoint(
+        sessionID: String,
+        endpoint: CurrentPathSignalingEndpoint
+    ) {
+        currentPathSignalingOriginBySessionId[sessionID] = endpoint.origin
+        currentPathSignalingWebSocketPathBySessionId[sessionID] = endpoint.wsPath
+    }
+
+    private var remoteDesktopNetworkStatsEnabled: Bool {
+        RemoteDesktopSettingsManager.shared.settings.networkSettings.enableNetworkStats
+            || Self.isSmokeRuntimeEnabled
+    }
+
+    private func remoteDesktopReconnectBackoffDelayMilliseconds(forAttempt attempt: Int) -> Int {
+        RemoteDesktopSettingsManager.shared.settings.networkSettings
+            .reconnectBackoffDelayMilliseconds(forAttempt: attempt)
+    }
+
+    private func startWebRTCConnectionTimeoutWatchdog(
+        for sessionID: String,
+        session: WebRTCSession,
+        source: String,
+        snapshotToken: UUID?
+    ) {
+        guard webrtcSessionsBySessionId[sessionID] === session else { return }
+        stopWebRTCConnectionTimeoutWatchdog(for: sessionID)
+        let timeoutSeconds = RemoteDesktopSettingsManager.shared.settings.networkSettings.boundedConnectionTimeoutSeconds
+        webrtcConnectionTimeoutTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(for: .seconds(timeoutSeconds))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled,
+                  self.webrtcSessionsBySessionId[sessionID] === session else {
+                return
+            }
+            if case .transportReady(let activeSessionID) = self.readiness, activeSessionID == sessionID {
+                return
+            }
+            if case .handshakeComplete(let activeSessionID, _) = self.readiness, activeSessionID == sessionID {
+                return
+            }
+            self.logger.error(
+                "⏱️ WebRTC 连接超时: session=\(sessionID, privacy: .public) source=\(source, privacy: .public) timeoutSeconds=\(timeoutSeconds, privacy: .public)"
+            )
+            self.appendSmokeStatus(
+                "webrtc-connection-timeout session=\(sessionID) source=\(source) timeoutSeconds=\(timeoutSeconds)"
+            )
+            guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
+            self.cleanupWebRTCSession(
+                sessionID,
+                reason: "connection_timeout_\(timeoutSeconds)s",
+                disconnectKind: .explicit,
+                snapshotToken: snapshotToken
+            )
+            self.connectionStatus = .failed("WebRTC connection timed out after \(timeoutSeconds) seconds")
+            self.readiness = .idle
+        }
+    }
+
+    private func stopWebRTCConnectionTimeoutWatchdog(for sessionID: String) {
+        if let task = webrtcConnectionTimeoutTasksBySessionId.removeValue(forKey: sessionID) {
+            task.cancel()
+        }
+    }
+
+    private func stopAllWebRTCConnectionTimeoutWatchdogs() {
+        for (_, task) in webrtcConnectionTimeoutTasksBySessionId {
+            task.cancel()
+        }
+        webrtcConnectionTimeoutTasksBySessionId.removeAll()
+    }
+
+    private func startJoinHeartbeat(for sessionID: String, attempts: Int = 30) {
+        stopJoinHeartbeat(for: sessionID)
+        webrtcJoinHeartbeatTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var remaining = max(0, attempts)
+            let totalAttempts = remaining
+            while remaining > 0, !Task.isCancelled, self.webrtcSessionsBySessionId[sessionID] != nil {
+                if case .handshakeComplete(let activeSessionID, _) = self.readiness, activeSessionID == sessionID {
+                    break
+                }
+                // The initial join is sent by the caller. Delay the heartbeat loop so we
+                // do not immediately duplicate the bootstrap frame burst on fresh sessions.
+                if remaining == attempts {
+                    do {
+                        try await Task.sleep(for: .milliseconds(self.remoteDesktopReconnectBackoffDelayMilliseconds(forAttempt: 1)))
+                    } catch {
+                        return
+                    }
+                    guard !Task.isCancelled, self.webrtcSessionsBySessionId[sessionID] != nil else { return }
+                }
+                guard let session = self.webrtcSessionsBySessionId[sessionID] else {
+                    return
+                }
+                do {
+                    try await self.sendWebRTCJoinSignal(
+                        session: session,
+                        retries: 2
+                    )
+                } catch is CancellationError {
+                    return
+                } catch {
+                    self.logger.warning(
+                        "WebRTC join heartbeat failed: session=\(sessionID, privacy: .private) errorClass=\(String(reflecting: Swift.type(of: error)), privacy: .public)"
+                    )
+                }
+                remaining -= 1
+                if remaining == 0 { break }
+                let attemptIndex = max(0, totalAttempts - remaining)
+                do {
+                    try await Task.sleep(
+                        for: .milliseconds(self.remoteDesktopReconnectBackoffDelayMilliseconds(forAttempt: attemptIndex))
+                    )
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    private func strictPQCHandshakeRequested(sessionID: String) throws -> Bool {
+        try requiredCurrentPathLocalIdentity(for: sessionID).handshakePolicy.requirePQC
+    }
+
+    private func webRTCJoinBootstrapPayload(
+        for session: WebRTCSession
+    ) async throws -> WebRTCSignalingEnvelope.Payload {
+        let sessionID = session.sessionId
+        try requireCurrentWebRTCSession(session, sessionID: sessionID)
+        if let cached = webrtcJoinBootstrapPayloadBySessionId[sessionID] {
+            return cached
+        }
+
+        let localBinding = try requiredCurrentPathLocalIdentity(for: sessionID).binding
+        let provider = CryptoProviderFactory.make(policy: .preferPQC)
+        let kemKeys = KEMPublicKeyInfo.normalizedValidKeys(
+            try await DeviceIdentityKeyManager.shared.pairingIdentityKEMPublicKeys(using: provider)
+        )
+        try requireCurrentWebRTCSession(session, sessionID: sessionID)
+        guard !kemKeys.isEmpty else {
+            throw NSError(
+                domain: "CrossNetworkConnectionManager",
+                code: 8450,
+                userInfo: [NSLocalizedDescriptionKey: "本机没有可用于 WebRTC strict-PQC join bootstrap 的 KEM 公钥"]
+            )
+        }
+
+        let payload = WebRTCSignalingEnvelope.Payload(
+            protocolSigningAlgorithm: localBinding.protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: localBinding.protocolPublicKeyFingerprint,
+            protocolPublicKeyBytes: localBinding.protocolPublicKeyBytes,
+            kemPublicKeys: kemKeys.map {
+                WebRTCSignalingEnvelope.Payload.BootstrapKEMPublicKey(
+                    suiteWireId: $0.suiteWireId,
+                    publicKey: $0.publicKey
+                )
+            },
+            platform: QPeriaptPlatformPolicy.localPlatformName(),
+            osVersion: QPeriaptPlatformPolicy.localOSVersionString()
+        )
+        try requireCurrentWebRTCSession(session, sessionID: sessionID)
+        webrtcJoinBootstrapPayloadBySessionId[sessionID] = payload
+        return payload
+    }
+
+    @discardableResult
+    private func sendWebRTCJoinSignal(
+        session: WebRTCSession,
+        retries: Int
+    ) async throws -> RequiredSetupSignalOutcome {
+        let sessionID = session.sessionId
+        let localDeviceId = session.localDeviceId.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !localDeviceId.isEmpty else {
+            throw CrossNetworkConnectionError.invalidDevice
+        }
+        try requireCurrentWebRTCSession(session, sessionID: sessionID)
+        let payload: WebRTCSignalingEnvelope.Payload?
+        do {
+            payload = try await webRTCJoinBootstrapPayload(for: session)
+        } catch {
+            try requireCurrentWebRTCSession(session, sessionID: sessionID)
+            if shouldDeferCurrentSignalingSend(
+                sessionID: sessionID,
+                messageType: .join
+            ) {
+                if isCurrentGlobalWebRTCSession(session) {
+                    noteDetachedSignalingAfterTransportEstablished(
+                        for: sessionID,
+                        source: "join_bootstrap_superseded",
+                        failure: "handshake_complete"
+                    )
+                }
+                appendWebRTCSessionDiagnostic(
+                    "signal-required-send-superseded session=\(sessionID) type=join phase=bootstrap reason=handshake-complete",
+                    sessionID: sessionID
+                )
+                return .supersededByHandshakeCompletion
+            }
+            logger.error("❌ WebRTC join bootstrap material unavailable: session=\(sessionID, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            appendWebRTCSessionDiagnostic(
+                "join-bootstrap-unavailable session=\(sessionID) error=\(sanitizeStatus(error.localizedDescription))",
+                sessionID: sessionID
+            )
+            if try strictPQCHandshakeRequested(sessionID: sessionID) {
+                throw error
+            }
+            payload = nil
+        }
+
+        let outcome = try await sendRequiredSetupSignal(
+            .init(sessionId: sessionID, from: localDeviceId, type: .join, payload: payload),
+            ownerSession: session,
+            retries: retries
+        )
+        if outcome == .supersededByHandshakeCompletion {
+            appendWebRTCSessionDiagnostic(
+                "signal-required-send-superseded session=\(sessionID) type=join reason=handshake-complete",
+                sessionID: sessionID
+            )
+        }
+        return outcome
+    }
+
+    private func isCurrentWebRTCJoinBootstrapOwner(
+        sessionID: String,
+        sourceClient: WebSocketSignalingClient,
+        admissionWitness: WebRTCSessionStartGate.AdmissionWitness,
+        ownerSession: WebRTCSession?
+    ) -> Bool {
+        guard signalingClient === sourceClient,
+              signalingShardKey == sessionID,
+              webRTCSessionStartGate.isCurrent(admissionWitness) else {
+            return false
+        }
+        if let ownerSession {
+            return webrtcSessionsBySessionId[sessionID] === ownerSession
+        }
+        return webrtcSessionsBySessionId[sessionID] == nil
+    }
+
+    private func ingestWebRTCJoinBootstrapPayload(
+        _ payload: WebRTCSignalingEnvelope.Payload?,
+        from remoteDeviceId: String,
+        sessionID: String,
+        sourceClient: WebSocketSignalingClient,
+        admissionWitness: WebRTCSessionStartGate.AdmissionWitness,
+        ownerSession: WebRTCSession?
+    ) async throws {
+        guard isCurrentWebRTCJoinBootstrapOwner(
+            sessionID: sessionID,
+            sourceClient: sourceClient,
+            admissionWitness: admissionWitness,
+            ownerSession: ownerSession
+        ) else {
+            throw CancellationError()
+        }
+        guard let payload else { throw WebRTCJoinBootstrapIngestError.missingPayload }
+        let normalizedRemoteId = remoteDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedRemoteId.isEmpty else {
+            throw WebRTCJoinBootstrapIngestError.invalidRemoteDeviceID
+        }
+
+        let authorityBeforeMutation = currentPathExpectedRemoteAuthorityBySessionId[sessionID]
+        let authorityToCommit: CurrentPathRemoteAuthority
+        let verifiedAuthorityFingerprint: String
+        if let expected = authorityBeforeMutation {
+            let incomingAlgorithm = payload.protocolSigningAlgorithm
+            let incomingFingerprint = payload.protocolPublicKeyFingerprint?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            let expectedFingerprint = expected.protocolPublicKeyFingerprint
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            guard normalizedRemoteId == expected.deviceId,
+                  incomingAlgorithm == expected.protocolSigningAlgorithm,
+                  incomingFingerprint == expectedFingerprint else {
+                logger.error("❌ rejecting mismatched WebRTC join bootstrap: session=\(sessionID, privacy: .public) remote=\(normalizedRemoteId, privacy: .public)")
+                appendWebRTCSessionDiagnostic(
+                    "join-bootstrap-rejected session=\(sessionID) remote=\(normalizedRemoteId)",
+                    sessionID: sessionID
+                )
+                throw WebRTCJoinBootstrapIngestError.authorityMismatch
+            }
+            authorityToCommit = CurrentPathRemoteAuthority(
+                deviceId: expected.deviceId,
+                protocolSigningAlgorithm: expected.protocolSigningAlgorithm,
+                protocolPublicKeyFingerprint: expected.protocolPublicKeyFingerprint,
+                protocolPublicKeyBytes: expected.protocolPublicKeyBytes ?? payload.protocolPublicKeyBytes,
+                deviceName: expected.deviceName
+            )
+            verifiedAuthorityFingerprint = expectedFingerprint
+        } else if let authority = validatedJoinBootstrapAuthority(from: payload) {
+            authorityToCommit = CurrentPathRemoteAuthority(
+                deviceId: normalizedRemoteId,
+                protocolSigningAlgorithm: authority.algorithm,
+                protocolPublicKeyFingerprint: authority.fingerprint,
+                protocolPublicKeyBytes: authority.publicKeyBytes,
+                deviceName: nil
+            )
+            verifiedAuthorityFingerprint = authority.fingerprint
+        } else {
+            appendWebRTCSessionDiagnostic(
+                "join-bootstrap-rejected session=\(sessionID) remote=\(normalizedRemoteId) reason=invalid_authority",
+                sessionID: sessionID
+            )
+            throw WebRTCJoinBootstrapIngestError.invalidAuthority
+        }
+
+        let kemKeys = KEMPublicKeyInfo.normalizedValidKeys(
+            (payload.kemPublicKeys ?? []).map {
+                KEMPublicKeyInfo(suiteWireId: $0.suiteWireId, publicKey: $0.publicKey)
+            },
+            platform: payload.platform,
+            osVersion: payload.osVersion
+        )
+        guard !kemKeys.isEmpty else { throw WebRTCJoinBootstrapIngestError.missingKEM }
+
+        let receipt: PeerKEMBootstrapStore.AuthorityBoundPairingKEMMutationReceipt
+        do {
+            receipt = try await PeerKEMBootstrapStore.shared.upsertAuthorityBoundPairingKEM(
+                deviceIds: [normalizedRemoteId],
+                kemPublicKeys: kemKeys,
+                platform: payload.platform,
+                osVersion: payload.osVersion,
+                verifiedProtocolFingerprint: verifiedAuthorityFingerprint
+            )
+        } catch let error as WebRTCJoinBootstrapIngestError {
+            throw error
+        } catch {
+            guard isCurrentWebRTCJoinBootstrapOwner(
+                sessionID: sessionID,
+                sourceClient: sourceClient,
+                admissionWitness: admissionWitness,
+                ownerSession: ownerSession
+            ) else {
+                throw CancellationError()
+            }
+            logger.error(
+                "❌ WebRTC join bootstrap KEM mutation failed: session=\(sessionID, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+            )
+            appendWebRTCSessionDiagnostic(
+                "join-bootstrap-rejected session=\(sessionID) remote=\(normalizedRemoteId) reason=kem_store_failure",
+                sessionID: sessionID
+            )
+            throw WebRTCJoinBootstrapIngestError.storeFailure(error.localizedDescription)
+        }
+
+        guard !Task.isCancelled,
+              isCurrentWebRTCJoinBootstrapOwner(
+                sessionID: sessionID,
+                sourceClient: sourceClient,
+                admissionWitness: admissionWitness,
+                ownerSession: ownerSession
+              ),
+              currentPathExpectedRemoteAuthorityBySessionId[sessionID] == authorityBeforeMutation else {
+            _ = await PeerKEMBootstrapStore.shared
+                .rollbackAuthorityBoundPairingKEMMutation(receipt)
+            throw CancellationError()
+        }
+
+        currentPathExpectedRemoteAuthorityBySessionId[sessionID] = authorityToCommit
+        if authorityBeforeMutation == nil {
+            appendWebRTCSessionDiagnostic(
+                "join-bootstrap-authority-seeded session=\(sessionID) remote=\(normalizedRemoteId)",
+                sessionID: sessionID
+            )
+        }
+        appendWebRTCSessionDiagnostic(
+            "join-bootstrap-accepted session=\(sessionID) remote=\(normalizedRemoteId) kemKeys=\(kemKeys.count) bound=1",
+            sessionID: sessionID
+        )
+    }
+
+    /// Stores an early-arriving join bootstrap, evicting the oldest entry when the cache is at capacity so an
+    /// adversarial peer cannot grow it without bound via distinct sessionIds that never become sessions.
+    private func storePendingWebRTCJoinBootstrap(
+        sessionID: String,
+        from: String,
+        payload: WebRTCSignalingEnvelope.Payload?,
+        sourceClient: WebSocketSignalingClient,
+        admissionWitness: WebRTCSessionStartGate.AdmissionWitness
+    ) {
+        if pendingWebRTCJoinBootstrapBySessionId[sessionID] == nil {
+            while pendingWebRTCJoinBootstrapOrder.count >= Self.pendingWebRTCJoinBootstrapCap,
+                  let oldest = pendingWebRTCJoinBootstrapOrder.first {
+                pendingWebRTCJoinBootstrapOrder.removeFirst()
+                pendingWebRTCJoinBootstrapBySessionId.removeValue(forKey: oldest)
+            }
+            pendingWebRTCJoinBootstrapOrder.append(sessionID)
+        }
+        pendingWebRTCJoinBootstrapBySessionId[sessionID] = PendingWebRTCJoinBootstrap(
+            from: from,
+            payload: payload,
+            sourceClient: sourceClient,
+            admissionWitness: admissionWitness
+        )
+    }
+
+    @discardableResult
+    private func removePendingWebRTCJoinBootstrap(
+        sessionID: String
+    ) -> PendingWebRTCJoinBootstrap? {
+        if let index = pendingWebRTCJoinBootstrapOrder.firstIndex(of: sessionID) {
+            pendingWebRTCJoinBootstrapOrder.remove(at: index)
+        }
+        return pendingWebRTCJoinBootstrapBySessionId.removeValue(forKey: sessionID)
+    }
+
+    private func removeAllPendingWebRTCJoinBootstraps() {
+        pendingWebRTCJoinBootstrapBySessionId.removeAll()
+        pendingWebRTCJoinBootstrapOrder.removeAll()
+    }
+
+    private func adoptPendingWebRTCJoinBootstrapIfPresent(
+        sessionID: String,
+        session: WebRTCSession
+    ) async throws {
+        guard let pending = removePendingWebRTCJoinBootstrap(sessionID: sessionID) else {
+            return
+        }
+        guard pending.from != session.localDeviceId,
+              isCurrentWebRTCJoinBootstrapOwner(
+                sessionID: sessionID,
+                sourceClient: pending.sourceClient,
+                admissionWitness: pending.admissionWitness,
+                ownerSession: session
+              ) else {
+            return
+        }
+
+        if webrtcRemoteIdBySessionId[sessionID] == nil {
+            webrtcRemoteIdBySessionId[sessionID] = pending.from
+            if let snapshot = activeSessionSnapshot, snapshot.sessionId == sessionID {
+                updatePreparedSessionSnapshot(
+                    sessionID: sessionID,
+                    phase: snapshot.phase,
+                    deviceId: pending.from
+                )
+            }
+        }
+        try await ingestWebRTCJoinBootstrapPayload(
+            pending.payload,
+            from: pending.from,
+            sessionID: sessionID,
+            sourceClient: pending.sourceClient,
+            admissionWitness: pending.admissionWitness,
+            ownerSession: session
+        )
+        guard isCurrentWebRTCJoinBootstrapOwner(
+            sessionID: sessionID,
+            sourceClient: pending.sourceClient,
+            admissionWitness: pending.admissionWitness,
+            ownerSession: session
+        ) else {
+            return
+        }
+        appendWebRTCSessionDiagnostic(
+            "join-bootstrap-adopted session=\(sessionID) remote=\(pending.from)",
+            sessionID: sessionID
+        )
+    }
+
+    private func isPreSessionSignalingEnvelope(_ env: WebRTCSignalingEnvelope) -> Bool {
+        switch env.type {
+        case .offer, .answer, .iceCandidate:
+            return true
+        case .join, .leave:
+            return false
+        }
+    }
+
+    private static func preSessionSignalingEnvelopeByteCount(_ env: WebRTCSignalingEnvelope) -> Int? {
+        try? JSONEncoder().encode(env).count
+    }
+
+    private func pendingPreSessionSignalingQueueMetrics() -> (count: Int, bytes: Int)? {
+        var count = 0
+        var bytes = 0
+        for pending in pendingPreSessionSignalingEnvelopesBySessionId.values {
+            count += pending.count
+            for record in pending {
+                guard let encodedBytes = Self.preSessionSignalingEnvelopeByteCount(
+                    record.envelope
+                ) else {
+                    return nil
+                }
+                bytes += encodedBytes
+            }
+        }
+        return (count, bytes)
+    }
+
+    private func rejectPreSessionSignalingEnvelope(
+        _ env: WebRTCSignalingEnvelope,
+        sourceClient: WebSocketSignalingClient,
+        admissionWitness: WebRTCSessionStartGate.AdmissionWitness,
+        message: String,
+        diagnosticReason: String,
+        cleanupReason: String
+    ) {
+        guard isCurrentWebRTCJoinBootstrapOwner(
+            sessionID: env.sessionId,
+            sourceClient: sourceClient,
+            admissionWitness: admissionWitness,
+            ownerSession: nil
+        ) else {
+            return
+        }
+        logger.error("⛔️ \(message): session=\(env.sessionId, privacy: .public) type=\(env.type.rawValue, privacy: .public)")
+        appendWebRTCSessionDiagnostic(
+            "pre-session-drop session=\(env.sessionId) type=\(env.type.rawValue) reason=\(diagnosticReason)",
+            sessionID: env.sessionId
+        )
+        cleanupWebRTCSession(
+            env.sessionId,
+            reason: cleanupReason,
+            disconnectKind: .explicit
+        )
+        connectionStatus = .failed(message)
+        readiness = .idle
+    }
+
+    private func enqueuePreSessionSignalingEnvelope(
+        _ env: WebRTCSignalingEnvelope,
+        sourceClient: WebSocketSignalingClient,
+        admissionWitness: WebRTCSessionStartGate.AdmissionWitness
+    ) {
+        guard isPreSessionSignalingEnvelope(env),
+              isCurrentWebRTCJoinBootstrapOwner(
+                sessionID: env.sessionId,
+                sourceClient: sourceClient,
+                admissionWitness: admissionWitness,
+                ownerSession: nil
+              ) else {
+            return
+        }
+
+        guard let envelopeBytes = Self.preSessionSignalingEnvelopeByteCount(env) else {
+            rejectPreSessionSignalingEnvelope(
+                env,
+                sourceClient: sourceClient,
+                admissionWitness: admissionWitness,
+                message: "pre-session signaling envelope cannot be encoded",
+                diagnosticReason: "encode-failed",
+                cleanupReason: "pre_session_signaling_envelope_encode_failed"
+            )
+            return
+        }
+        guard envelopeBytes <= Self.maxPendingPreSessionSignalingEnvelopeBytes else {
+            rejectPreSessionSignalingEnvelope(
+                env,
+                sourceClient: sourceClient,
+                admissionWitness: admissionWitness,
+                message: "pre-session signaling envelope too large",
+                diagnosticReason: "envelope-too-large bytes=\(envelopeBytes) max=\(Self.maxPendingPreSessionSignalingEnvelopeBytes)",
+                cleanupReason: "pre_session_signaling_envelope_too_large"
+            )
+            return
+        }
+        guard let metrics = pendingPreSessionSignalingQueueMetrics() else {
+            rejectPreSessionSignalingEnvelope(
+                env,
+                sourceClient: sourceClient,
+                admissionWitness: admissionWitness,
+                message: "pre-session signaling queue state is not encodable",
+                diagnosticReason: "queue-state-invalid",
+                cleanupReason: "pre_session_signaling_queue_state_invalid"
+            )
+            return
+        }
+        guard metrics.count < Self.maxTotalPendingPreSessionSignalingEnvelopes,
+              metrics.bytes + envelopeBytes <= Self.maxTotalPendingPreSessionSignalingEnvelopeBytes else {
+            rejectPreSessionSignalingEnvelope(
+                env,
+                sourceClient: sourceClient,
+                admissionWitness: admissionWitness,
+                message: "pre-session signaling global queue overflow",
+                diagnosticReason: "global-queue-overflow pending=\(metrics.count) bytes=\(metrics.bytes) nextBytes=\(envelopeBytes) max=\(Self.maxTotalPendingPreSessionSignalingEnvelopes) maxBytes=\(Self.maxTotalPendingPreSessionSignalingEnvelopeBytes)",
+                cleanupReason: "pre_session_signaling_global_queue_overflow"
+            )
+            return
+        }
+
+        var pending = pendingPreSessionSignalingEnvelopesBySessionId[env.sessionId] ?? []
+        guard pending.count < Self.maxPendingPreSessionSignalingEnvelopes else {
+            rejectPreSessionSignalingEnvelope(
+                env,
+                sourceClient: sourceClient,
+                admissionWitness: admissionWitness,
+                message: "pre-session signaling queue overflow",
+                diagnosticReason: "queue-overflow max=\(Self.maxPendingPreSessionSignalingEnvelopes)",
+                cleanupReason: "pre_session_signaling_queue_overflow"
+            )
+            return
+        }
+
+        pending.append(PendingPreSessionSignalingEnvelope(
+            envelope: env,
+            sourceClient: sourceClient,
+            admissionWitness: admissionWitness
+        ))
+        pendingPreSessionSignalingEnvelopesBySessionId[env.sessionId] = pending
+        appendWebRTCSessionDiagnostic(
+            "pre-session-queued session=\(env.sessionId) type=\(env.type.rawValue) pending=\(pending.count)",
+            sessionID: env.sessionId
+        )
+    }
+
+    private func drainPendingPreSessionSignalingEnvelopes(
+        sessionID: String,
+        session: WebRTCSession
+    ) async {
+        guard let pending = pendingPreSessionSignalingEnvelopesBySessionId.removeValue(forKey: sessionID),
+              !pending.isEmpty else { return }
+
+        appendWebRTCSessionDiagnostic(
+            "pre-session-drain session=\(sessionID) count=\(pending.count)",
+            sessionID: sessionID
+        )
+        for record in pending {
+            guard isCurrentWebRTCJoinBootstrapOwner(
+                sessionID: sessionID,
+                sourceClient: record.sourceClient,
+                admissionWitness: record.admissionWitness,
+                ownerSession: session
+            ) else {
+                continue
+            }
+            await handleSignalingEnvelope(
+                record.envelope,
+                sourceClient: record.sourceClient
+            )
+        }
+    }
+
+    private func stopOfferResendLoop(for sessionID: String) {
+        webrtcOfferResendTasksBySessionId[sessionID]?.cancel()
+        webrtcOfferResendTasksBySessionId.removeValue(forKey: sessionID)
+    }
+
+    private func canReuseWebRTCSession(_ sessionID: String) -> Bool {
+        if currentConnection?.id == sessionID {
+            return true
+        }
+
+        switch readiness {
+        case .transportReady(let activeSessionID):
+            return activeSessionID == sessionID
+        case .handshakeComplete(let activeSessionID, _):
+            return activeSessionID == sessionID
+        case .idle:
+            return false
+        }
+    }
+
+    private func storeWebRTCMediaAdmissionLease(
+        _ lease: SignalServerClient.MediaAdmissionLease?,
+        for sessionID: String,
+        now: Date = Date()
+    ) {
+        guard let lease else {
+            webrtcMediaAdmissionLeaseBySessionId.removeValue(forKey: sessionID)
+            webrtcMediaAdmissionLeaseExpiresAtBySessionId.removeValue(forKey: sessionID)
+            return
+        }
+        webrtcMediaAdmissionLeaseBySessionId[sessionID] = lease
+        webrtcMediaAdmissionLeaseExpiresAtBySessionId[sessionID] = now.addingTimeInterval(max(0, lease.expiresIn))
+    }
+
+    private func usableWebRTCMediaAdmissionLease(for sessionID: String, now: Date = Date()) -> SignalServerClient.MediaAdmissionLease? {
+        guard let lease = webrtcMediaAdmissionLeaseBySessionId[sessionID],
+              Self.isReusableMediaAdmissionLease(
+                expiresAt: webrtcMediaAdmissionLeaseExpiresAtBySessionId[sessionID],
+                now: now
+              ) else {
+            return nil
+        }
+        return lease
+    }
+
+    private func cacheLocalICECandidate(_ payload: WebRTCSignalingEnvelope.Payload, for sessionID: String) {
+        guard let candidate = payload.candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !candidate.isEmpty else {
+            return
+        }
+
+        var cached = webrtcLocalICECandidatesBySessionId[sessionID] ?? []
+        if let existingIndex = cached.firstIndex(where: {
+            $0.candidate == candidate &&
+            $0.sdpMid == payload.sdpMid &&
+            $0.sdpMLineIndex == payload.sdpMLineIndex
+        }) {
+            cached[existingIndex] = payload
+        } else {
+            cached.append(payload)
+            let maxCachedCandidates = 32
+            if cached.count > maxCachedCandidates {
+                cached.removeFirst(cached.count - maxCachedCandidates)
+            }
+        }
+        webrtcLocalICECandidatesBySessionId[sessionID] = cached
+    }
+
+    private func cleanupWebRTCSession(
+        _ sessionID: String,
+        reason: String,
+        disconnectKind: SessionDisconnectKind = .explicit,
+        snapshotToken: UUID? = nil,
+        closeSession: Bool = true
+    ) {
+        logger.info("🧹 清理 WebRTC 会话: session=\(sessionID, privacy: .public) reason=\(reason, privacy: .public)")
+
+        // Detach the exact signaling incarnation before any other teardown.
+        // A same-ID replacement must never observe or reuse the old client's
+        // URL, authentication headers, callbacks, or bound lifecycle handle.
+        signalingLifecycle.teardown(sessionID: sessionID)
+        let signalingClientToClose: WebSocketSignalingClient?
+        if signalingShardKey == sessionID {
+            signalingClientToClose = signalingClient
+            signalingClient = nil
+            signalingShardKey = nil
+            resetSignalingState()
+        } else {
+            signalingClientToClose = nil
+        }
+        if let signalingClientToClose {
+            Task {
+                await signalingClientToClose.close()
+            }
+        }
+
+        notifyWebRTCTerminalSessionIfNeeded(
+            sessionID: sessionID,
+            reason: reason,
+            disconnectKind: disconnectKind
+        )
+
+        RemoteControlSecurityNoticeCenter.shared.endNotice(
+            sessionId: sessionID,
+            transportKind: .webrtc
+        )
+        if let productEvidenceOwner = webrtcProductEvidenceOwnersBySessionId
+            .removeValue(forKey: sessionID) {
+            webrtcProductEvidenceMediaTasksBySessionId.removeValue(forKey: sessionID)?.cancel()
+            _ = ProductReleaseEvidenceRecorder.shared.endSession(
+                owner: productEvidenceOwner,
+                reason: Self.productEvidenceDisconnectReason(forWebRTCReason: reason)
+            )
+        }
+        stopJoinHeartbeat(for: sessionID)
+        stopOfferResendLoop(for: sessionID)
+        stopWebRTCConnectionTimeoutWatchdog(for: sessionID)
+        webRTCSessionStartGate.invalidate(sessionID: sessionID)
+        webrtcLatestOfferBySessionId.removeValue(forKey: sessionID)
+        webrtcLatestAnswerBySessionId.removeValue(forKey: sessionID)
+        webrtcLocalICECandidatesBySessionId.removeValue(forKey: sessionID)
+        webrtcJoinBootstrapPayloadBySessionId.removeValue(forKey: sessionID)
+        removePendingWebRTCJoinBootstrap(sessionID: sessionID)
+        pendingPreSessionSignalingEnvelopesBySessionId.removeValue(forKey: sessionID)
+        webrtcSignalingAuthTokenBySessionId.removeValue(forKey: sessionID)
+        let removedTurnAdmissionLease = webrtcTurnAdmissionLeaseBySessionId.removeValue(
+            forKey: sessionID
+        )
+        webrtcMediaAdmissionLeaseBySessionId.removeValue(forKey: sessionID)
+        webrtcMediaAdmissionLeaseExpiresAtBySessionId.removeValue(forKey: sessionID)
+        webrtcRemoteIdBySessionId.removeValue(forKey: sessionID)
+        currentPathLocalIdentityBySessionId.removeValue(forKey: sessionID)
+        currentPathExpectedRemoteAuthorityBySessionId.removeValue(forKey: sessionID)
+        currentPathAdditionalProtocolFingerprintsBySessionId.removeValue(forKey: sessionID)
+        authorityBoundWebRTCBootstrapSessionIds.remove(sessionID)
+        strictPQCClassicBootstrapOnlySessionIds.remove(sessionID)
+        currentPathSignalingOriginBySessionId.removeValue(forKey: sessionID)
+        currentPathSignalingWebSocketPathBySessionId.removeValue(forKey: sessionID)
+        webrtcSessionKeysBySessionId.removeValue(forKey: sessionID)
+        clearWebRTCSecureEnvelopeState(for: sessionID)
+        webrtcBoundSessionConsumerGatesBySessionId.removeValue(forKey: sessionID)
+        webrtcRekeyInProgressSessionIds.remove(sessionID)
+        webrtcRemoteDesktopHeartbeatAtBySessionId.removeValue(forKey: sessionID)
+        webrtcRemoteVideoFormatsBySessionId.removeValue(forKey: sessionID)
+        webrtcRemoteStreamConfigurationBySessionId.removeValue(forKey: sessionID)
+        webrtcLastAcceptedRawStreamConfigurationBySessionId.removeValue(forKey: sessionID)
+        webrtcPendingRemoteStreamConfigurationBySessionId.removeValue(forKey: sessionID)
+        webrtcPendingStreamRefreshSessionIds.remove(sessionID)
+        webrtcAwaitingStreamConfigurationSessionIds.remove(sessionID)
+        webrtcSessionReadyDiagnosticSessionIds.remove(sessionID)
+        webrtcInteractionStreamingAllowedSessionIds.remove(sessionID)
+        webrtcRemoteControlNoticeApprovedSessionOwners.removeValue(forKey: sessionID)
+        webrtcRemoteControlNoticePendingSessionOwners.removeValue(forKey: sessionID)
+        webrtcRemoteSecurityIdentityBySessionId.removeValue(forKey: sessionID)
+        webrtcBootstrapReplyFingerprintBySessionId.removeValue(forKey: sessionID)
+#if os(macOS)
+        stopWebRTCClipboardSyncIfNeeded(for: sessionID)
+#endif
+        stopWebRTCLivenessWatchdog(for: sessionID)
+        markCrossNetworkPresenceDisconnected(sessionID: sessionID)
+
+        if let controlTask = webrtcControlTasksBySessionId.removeValue(forKey: sessionID) {
+#if os(macOS)
+            releaseWebRTCRemoteInput(
+                sessionID: sessionID,
+                controlTaskToken: controlTask.token,
+                reason: reason
+            )
+#endif
+            _ = controlTask.inboundFileTransferReceiver.cleanupOnChannelClosed()
+            controlTask.task.cancel()
+        }
+        if let outboundHeartbeatTask = webrtcOutboundHeartbeatTasksBySessionId.removeValue(forKey: sessionID) {
+            outboundHeartbeatTask.cancel()
+        }
+        stopWebRTCScreenStreaming(sessionID: sessionID)
+        if let inboundQueue = webrtcInboundQueuesBySessionId.removeValue(forKey: sessionID) {
+            Task { await inboundQueue.finish() }
+        }
+        failAllFileTransferWaitersForSession(sessionID: sessionID, message: "会话已结束")
+
+        if closeSession, let session = webrtcSessionsBySessionId.removeValue(forKey: sessionID) {
+            session.close()
+        } else {
+            webrtcSessionsBySessionId.removeValue(forKey: sessionID)
+        }
+        endRouteAttribution(sessionID: sessionID)
+
+        if currentConnection?.id == sessionID {
+            currentConnection = nil
+            readiness = .idle
+        }
+        if protocolIdentityStatus?.sessionID == sessionID {
+            protocolIdentityStatus = nil
+        }
+        applyActiveSessionDisconnect(
+            sessionID: sessionID,
+            kind: disconnectKind,
+            snapshotToken: snapshotToken
+        )
+        if let removedTurnAdmissionLease {
+            Task {
+                await TURNCredentialService.shared.clearCache(
+                    sessionID: sessionID,
+                    ifBoundTo: removedTurnAdmissionLease
+                )
+            }
+        }
+    }
+
+    func sealWebRTCSecurePayload(
+        _ plaintext: Data,
+        with keys: SessionKeys,
+        sessionID: String,
+        packetType: WebRTCAppSecurePacketType
+    ) throws -> Data {
+        let counter = try reserveWebRTCSecurePayloadCounter(
+            with: keys,
+            sessionID: sessionID
+        )
+        return try WebRTCControlChannelCodec.encryptAppPayload(
+            plaintext,
+            with: keys,
+            packetType: packetType,
+            counter: counter
+        )
+    }
+
+    /// Reserves a unique secure-envelope counter on the manager's MainActor.
+    /// CPU-heavy wire encoding and AEAD may then run off-main using immutable
+    /// `SessionKeys`, while all packet producers still share one ordered counter.
+    private func reserveWebRTCSecurePayloadCounter(
+        with keys: SessionKeys,
+        sessionID: String
+    ) throws -> UInt64 {
+        resetWebRTCSecureEnvelopeStateIfNeeded(sessionID: sessionID, keys: keys)
+        return try nextWebRTCSecureEnvelopeCounter(for: sessionID)
+    }
+
+    func openWebRTCSecurePayload(
+        _ ciphertext: Data,
+        with keys: SessionKeys,
+        sessionID: String,
+        allowedPacketTypes: Set<WebRTCAppSecurePacketType> =
+            WebRTCAppSecurePacketType.genericApplicationTypes
+    ) throws -> WebRTCAppSecureOpenedPayload {
+        let opened = try WebRTCControlChannelCodec.decryptAppPayload(
+            ciphertext,
+            with: keys,
+            allowedPacketTypes: allowedPacketTypes
+        )
+        return try validateWebRTCSecureOpenedPayload(
+            opened,
+            with: keys,
+            sessionID: sessionID
+        )
+    }
+
+    private func validateWebRTCSecureOpenedPayload(
+        _ opened: WebRTCAppSecureOpenedPayload,
+        with keys: SessionKeys,
+        sessionID: String
+    ) throws -> WebRTCAppSecureOpenedPayload {
+        resetWebRTCSecureEnvelopeStateIfNeeded(sessionID: sessionID, keys: keys)
+        var replayWindow = webrtcSecureEnvelopeReplayWindowBySessionId[sessionID] ?? WebRTCAppSecureReplayWindow()
+        try replayWindow.validateAndRecord(opened)
+        webrtcSecureEnvelopeReplayWindowBySessionId[sessionID] = replayWindow
+        return opened
+    }
+
+    func clearWebRTCSecureEnvelopeState(for sessionID: String) {
+        webrtcSecureEnvelopeSendCounterBySessionId.removeValue(forKey: sessionID)
+        webrtcSecureEnvelopeReplayWindowBySessionId.removeValue(forKey: sessionID)
+        webrtcSecureEnvelopeKeyFingerprintBySessionId.removeValue(forKey: sessionID)
+    }
+
+    func clearAllWebRTCSecureEnvelopeState() {
+        webrtcSecureEnvelopeSendCounterBySessionId.removeAll()
+        webrtcSecureEnvelopeReplayWindowBySessionId.removeAll()
+        webrtcSecureEnvelopeKeyFingerprintBySessionId.removeAll()
+    }
+
+    private func resetWebRTCSecureEnvelopeStateIfNeeded(sessionID: String, keys: SessionKeys) {
+        let fingerprint = Self.webRTCSecureEnvelopeKeyFingerprint(for: keys)
+        guard webrtcSecureEnvelopeKeyFingerprintBySessionId[sessionID] != fingerprint else { return }
+        webrtcSecureEnvelopeSendCounterBySessionId[sessionID] = 0
+        webrtcSecureEnvelopeReplayWindowBySessionId[sessionID] = WebRTCAppSecureReplayWindow()
+        webrtcSecureEnvelopeKeyFingerprintBySessionId[sessionID] = fingerprint
+    }
+
+    private func nextWebRTCSecureEnvelopeCounter(for sessionID: String) throws -> UInt64 {
+        let current = webrtcSecureEnvelopeSendCounterBySessionId[sessionID] ?? 0
+        guard current < UInt64.max else {
+            throw WebRTCAppSecureEnvelopeError.counterExhausted
+        }
+        let next = current + 1
+        webrtcSecureEnvelopeSendCounterBySessionId[sessionID] = next
+        return next
+    }
+
+    nonisolated private static func webRTCSecureEnvelopeKeyFingerprint(for keys: SessionKeys) -> String {
+        webRTCSecureKeyIncarnationDigest(
+            for: keys,
+            domain: "SkyBridge-WebRTC-App-State-v2"
+        ).map { String(format: "%02x", $0) }.joined()
+    }
+
+    nonisolated private static func webRTCBoundSessionKeyIncarnationDigest(
+        for keys: SessionKeys
+    ) -> Data {
+        webRTCSecureKeyIncarnationDigest(
+            for: keys,
+            domain: "SkyBridge-WebRTC-BoundSession-Owner-v1"
+        )
+    }
+
+    nonisolated private static func webRTCSecureKeyIncarnationDigest(
+        for keys: SessionKeys,
+        domain: String
+    ) -> Data {
+        var hasher = SHA256()
+        func updateLengthPrefixed(_ field: Data) {
+            var byteCount = UInt64(field.count).bigEndian
+            withUnsafeBytes(of: &byteCount) { bytes in
+                hasher.update(bufferPointer: bytes)
+            }
+            hasher.update(data: field)
+        }
+        updateLengthPrefixed(Data(domain.utf8))
+        updateLengthPrefixed(Data(keys.sessionId.utf8))
+        updateLengthPrefixed(Data(keys.negotiatedSuite.rawValue.utf8))
+        updateLengthPrefixed(Data(keys.role.rawValue.utf8))
+        updateLengthPrefixed(keys.transcriptHash)
+        updateLengthPrefixed(keys.sendKey)
+        updateLengthPrefixed(keys.receiveKey)
+        return Data(hasher.finalize())
+    }
+
+    private func resolvedCrossNetworkDisplayName(
+        sessionID: String,
+        fallbackDeviceName: String? = nil
+    ) -> String {
+        if let trimmed = fallbackDeviceName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !trimmed.isEmpty {
+            return trimmed
+        }
+        if let trimmed = sessionSnapshotMetadataBySessionId[sessionID]?.deviceName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !trimmed.isEmpty {
+            return trimmed
+        }
+        if let trimmed = currentPathExpectedRemoteAuthorityBySessionId[sessionID]?.deviceName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !trimmed.isEmpty {
+            return trimmed
+        }
+        if let trimmed = currentConnection?.deviceName.trimmingCharacters(in: .whitespacesAndNewlines),
+           currentConnection?.id == sessionID,
+           !trimmed.isEmpty,
+           trimmed != "Remote Device" {
+            return trimmed
+        }
+        if let trimmed = currentPathExpectedRemoteAuthorityBySessionId[sessionID]?.deviceId.trimmingCharacters(in: .whitespacesAndNewlines),
+           !trimmed.isEmpty {
+            return trimmed
+        }
+        return "Remote Device"
+    }
+
+    private func remoteDesktopNotificationDeviceName(sessionID: String) -> String? {
+        let fallback = activeSessionSnapshot?.sessionId == sessionID
+            ? activeSessionSnapshot?.deviceName
+            : nil
+        let resolved = resolvedCrossNetworkDisplayName(
+            sessionID: sessionID,
+            fallbackDeviceName: fallback
+        )
+        let trimmed = resolved.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != "Remote Device" else { return nil }
+        return trimmed
+    }
+
+    private func hasUserVisibleWebRTCRemoteDesktopSession(sessionID: String) -> Bool {
+        if currentConnection?.id == sessionID {
+            return true
+        }
+        if let snapshot = activeSessionSnapshot, snapshot.sessionId == sessionID {
+            switch snapshot.phase {
+            case .connecting:
+                break
+            case .transportReady, .handshakeComplete, .reconnecting, .disconnecting:
+                return true
+            }
+        }
+        if webrtcSessionKeysBySessionId[sessionID] != nil {
+            return true
+        }
+        if webrtcRemoteDesktopHeartbeatAtBySessionId[sessionID] != nil {
+            return true
+        }
+        if webrtcScreenStreamingTasksBySessionId[sessionID] != nil {
+            return true
+        }
+        if webrtcInteractionStreamingAllowedSessionIds.contains(sessionID) {
+            return true
+        }
+        if webrtcRemoteControlNoticeApprovedSessionOwners[sessionID] != nil {
+            return true
+        }
+        return false
+    }
+
+    private func beginWebRTCTerminalNotificationTracking(sessionID: String) {
+        RemoteDesktopSessionNotificationService.shared.beginSession(
+            sessionID: sessionID,
+            transport: "webrtc"
+        )
+    }
+
+    private func notifyWebRTCTerminalSessionIfNeeded(
+        sessionID: String,
+        reason: String,
+        disconnectKind: SessionDisconnectKind
+    ) {
+        guard let kind = RemoteDesktopSessionTerminationPolicy.notificationKind(
+            disconnectKind: disconnectKind,
+            reason: reason,
+            hadUserVisibleSession: hasUserVisibleWebRTCRemoteDesktopSession(sessionID: sessionID)
+        ) else {
+            return
+        }
+
+        RemoteDesktopSessionNotificationService.shared.sendTerminalNotificationIfNeeded(
+            sessionID: sessionID,
+            deviceName: remoteDesktopNotificationDeviceName(sessionID: sessionID),
+            transport: "webrtc",
+            kind: kind,
+            reason: reason
+        )
+    }
+
+    private func updateCrossNetworkRemoteMetadata(
+        sessionID: String,
+        authenticatedDeviceId: String,
+        deviceName: String?
+    ) {
+        let trimmedDeviceId = authenticatedDeviceId
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedDeviceName = deviceName?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !trimmedDeviceId.isEmpty else { return }
+
+        if let current = currentPathExpectedRemoteAuthorityBySessionId[sessionID] {
+            currentPathExpectedRemoteAuthorityBySessionId[sessionID] = CurrentPathRemoteAuthority(
+                // The authority's device ID is an immutable trust input. App-level
+                // heartbeat/pairing metadata may refine presentation only after a
+                // separate authority validator accepts it.
+                deviceId: current.deviceId,
+                protocolSigningAlgorithm: current.protocolSigningAlgorithm,
+                protocolPublicKeyFingerprint: current.protocolPublicKeyFingerprint,
+                protocolPublicKeyBytes: current.protocolPublicKeyBytes,
+                deviceName: (trimmedDeviceName?.isEmpty == false) ? trimmedDeviceName : current.deviceName
+            )
+        }
+
+        if let metadata = sessionSnapshotMetadataBySessionId[sessionID] {
+            sessionSnapshotMetadataBySessionId[sessionID] = SessionSnapshotMetadata(
+                snapshotToken: metadata.snapshotToken,
+                source: metadata.source,
+                deviceId: trimmedDeviceId,
+                deviceName: (trimmedDeviceName?.isEmpty == false) ? trimmedDeviceName : metadata.deviceName
+            )
+        }
+
+        if currentConnection?.id == sessionID,
+           let session = webrtcSessionsBySessionId[sessionID] {
+            currentConnection = RemoteConnection(
+                id: sessionID,
+                deviceName: resolvedCrossNetworkDisplayName(
+                    sessionID: sessionID,
+                    fallbackDeviceName: trimmedDeviceName
+                ),
+                transport: .webrtc(session)
+            )
+        }
+
+        if let snapshot = activeSessionSnapshot, snapshot.sessionId == sessionID {
+            updatePreparedSessionSnapshot(
+                sessionID: sessionID,
+                phase: snapshot.phase,
+                deviceId: trimmedDeviceId,
+                deviceName: (trimmedDeviceName?.isEmpty == false) ? trimmedDeviceName : nil
+            )
+        }
+    }
+
+    private func authenticatedCrossNetworkDeviceId(
+        sessionID: String,
+        claimedDeviceId: String?
+    ) -> String? {
+        guard let authorityDeviceId = currentPathExpectedRemoteAuthorityBySessionId[sessionID]?
+            .deviceId.trimmingCharacters(in: .whitespacesAndNewlines),
+            !authorityDeviceId.isEmpty
+        else {
+            return nil
+        }
+        if let claimed = claimedDeviceId?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !claimed.isEmpty,
+            claimed != authorityDeviceId {
+            return nil
+        }
+        return authorityDeviceId
+    }
+
+    // Cross-network presence is shared control-plane state. Only the macOS online-device
+    // aggregation side effect below is platform-specific.
+    private func markCrossNetworkPresenceConnected(
+        sessionID: String,
+        negotiatedSuite: String,
+        deviceName: String? = nil
+    ) {
+        let displayName = resolvedCrossNetworkDisplayName(
+            sessionID: sessionID,
+            fallbackDeviceName: deviceName
+        )
+        let cryptoKind = ConnectionCryptoPresentation.modeLabel(
+            kind: nil,
+            suite: negotiatedSuite
+        ) ?? "Current Path"
+        let stablePeerId = resolvedStableCrossNetworkPresencePeerID(sessionID: sessionID)
+        let peerId = stablePeerId ?? Self.crossNetworkPresencePeerID(sessionID: sessionID)
+        let sessionRoutePeerId = Self.crossNetworkPresencePeerID(sessionID: sessionID)
+
+        if peerId != sessionRoutePeerId {
+            ConnectionPresenceService.shared.markDisconnected(peerId: sessionRoutePeerId)
+        }
+
+        ConnectionPresenceService.shared.markConnected(
+            peerId: peerId,
+            displayName: displayName,
+            address: nil,
+            cryptoKind: cryptoKind,
+            suite: negotiatedSuite
+        )
+#if os(macOS)
+        if let stablePeerId {
+            UnifiedOnlineDeviceManager.shared.markDeviceAsConnected(
+                peerId: stablePeerId,
+                displayName: displayName,
+                cryptoKind: cryptoKind,
+                suite: negotiatedSuite,
+                guardStatus: "跨网已连接"
+            )
+        } else {
+            logger.debug(
+                "↪️ cross-network presence skipped UnifiedOnlineDevice recent persistence for session route \(sessionID, privacy: .public)"
+            )
+        }
+#endif
+    }
+
+    // Keep the shared connection-presence lifecycle available on every platform.
+    private func markCrossNetworkPresenceDisconnected(sessionID: String) {
+        let stablePeerId = resolvedStableCrossNetworkPresencePeerID(sessionID: sessionID)
+        let peerId = stablePeerId ?? Self.crossNetworkPresencePeerID(sessionID: sessionID)
+        let sessionRoutePeerId = Self.crossNetworkPresencePeerID(sessionID: sessionID)
+        let displayName = currentConnection?.deviceName
+        ConnectionPresenceService.shared.markDisconnected(
+            peerId: sessionRoutePeerId
+        )
+        ConnectionPresenceService.shared.markDisconnected(
+            peerId: peerId
+        )
+#if os(macOS)
+        if let stablePeerId {
+            UnifiedOnlineDeviceManager.shared.markDeviceAsDisconnected(
+                peerId: stablePeerId,
+                displayName: displayName
+            )
+        }
+#endif
+    }
+
+    private func applyAuthenticatedRouteBinding(
+        _ payload: AppMessage.AuthenticatedRouteBindingPayload,
+        sessionID: String,
+        localDeviceId: String,
+        keys: SessionKeys
+    ) {
+        let localFingerprint: String
+        do {
+            localFingerprint = try requiredCurrentPathLocalIdentity(for: sessionID)
+                .identity
+                .authoritativeFingerprint
+        } catch {
+            logger.error(
+                "❌ Authenticated route binding rejected because local identity is unavailable: \(error.localizedDescription, privacy: .public)"
+            )
+            return
+        }
+        let context = WebRTCAuthenticatedRouteBindingPolicy.Context(
+            localDeviceId: localDeviceId,
+            localProtocolPublicKeyFingerprint: localFingerprint,
+            expectedRemoteAuthority: currentPathExpectedRemoteAuthorityBySessionId[sessionID],
+            sessionBinding: WebRTCControlChannelCodec.sessionBindingDescriptor(for: keys),
+            now: Date()
+        )
+
+        switch WebRTCAuthenticatedRouteBindingPolicy.evaluate(payload, context: context) {
+        case .fileTransfer(let route):
+            let peerId = Self.crossNetworkPresencePeerID(sessionID: sessionID, deviceId: route.peerId)
+            let descriptor = ConnectionPresenceService.PresenceRouteDescriptor(
+                peerId: peerId,
+                deviceName: route.deviceName,
+                displayAddress: route.displayAddress,
+                transferAddress: route.transferAddress,
+                transferPort: route.transferPort,
+                routeSource: .webrtc
+            )
+            let displayName = resolvedCrossNetworkDisplayName(
+                sessionID: sessionID,
+                fallbackDeviceName: route.deviceName
+            )
+            let cryptoKind = ConnectionCryptoPresentation.modeLabel(
+                kind: nil,
+                suite: keys.negotiatedSuite.rawValue
+            ) ?? "Current Path"
+            let didPublish = ConnectionPresenceService.shared.publishConnectedAtomically(
+                peerId: peerId,
+                displayName: displayName,
+                address: route.displayAddress,
+                cryptoKind: cryptoKind,
+                suite: keys.negotiatedSuite.rawValue,
+                routeDescriptor: descriptor
+            )
+            appendWebRTCSessionDiagnostic(
+                "authenticated-route-binding-applied session=\(sessionID) kind=fileTransfer published=\(didPublish ? 1 : 0)",
+                sessionID: sessionID
+            )
+        case .verifiedButUnsupported(let kind):
+            appendWebRTCSessionDiagnostic(
+                "authenticated-route-binding-verified-unsupported session=\(sessionID) kind=\(kind)",
+                sessionID: sessionID
+            )
+        case .rejected(let reason):
+            appendWebRTCSessionDiagnostic(
+                "authenticated-route-binding-rejected session=\(sessionID) reason=\(sanitizeStatus(reason))",
+                sessionID: sessionID
+            )
+        }
+    }
+
+    private func resolvedStableCrossNetworkPresencePeerID(sessionID: String) -> String? {
+        let candidates = [
+            currentPathExpectedRemoteAuthorityBySessionId[sessionID]?.deviceId,
+            sessionSnapshotMetadataBySessionId[sessionID]?.deviceId,
+            activeSessionSnapshot?.sessionId == sessionID ? activeSessionSnapshot?.deviceId : nil
+        ]
+        for candidate in candidates {
+            if let stablePeerId = Self.stableCrossNetworkPresencePeerID(deviceId: candidate) {
+                return stablePeerId
+            }
+        }
+        return nil
+    }
+
+    private func startWebRTCLivenessWatchdogIfNeeded(
+        for sessionID: String,
+        session: WebRTCSession
+    ) {
+        guard webrtcSessionsBySessionId[sessionID] === session,
+              webrtcRemoteLivenessWatchdogTasksBySessionId[sessionID] == nil else {
+            return
+        }
+        webrtcRemoteDesktopHeartbeatAtBySessionId[sessionID] = Date()
+        webrtcRemoteLivenessWatchdogTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let heartbeatTimeoutSeconds: TimeInterval = 12.0
+            let handshakeGraceTimeoutSeconds: TimeInterval = 30.0
+            let transportReadyAt = Date()
+
+            defer {
+                if self.webrtcSessionsBySessionId[sessionID] === session {
+                    self.webrtcRemoteLivenessWatchdogTasksBySessionId.removeValue(forKey: sessionID)
+                }
+            }
+
+            while !Task.isCancelled {
+                guard self.webrtcSessionsBySessionId[sessionID] === session else { break }
+                let hasSessionKeys = self.webrtcSessionKeysBySessionId[sessionID] != nil
+                let rekeyInProgress = self.webrtcRekeyInProgressSessionIds.contains(sessionID)
+                let strictBootstrapOnly = self.strictPQCClassicBootstrapOnlySessionIds.contains(sessionID)
+
+                if !hasSessionKeys || rekeyInProgress || strictBootstrapOnly {
+                    if Date().timeIntervalSince(transportReadyAt) <= handshakeGraceTimeoutSeconds {
+                        do {
+                            try await Task.sleep(for: .seconds(1))
+                        } catch {
+                            return
+                        }
+                        continue
+                    }
+
+                    let reason = hasSessionKeys ? "rekey_timeout" : "app_handshake_timeout"
+                    let message = hasSessionKeys ? "WebRTC rekey timed out" : "WebRTC app handshake timed out"
+                    self.logger.warning(
+                        "⚠️ WebRTC 握手宽限期超时: session=\(sessionID, privacy: .public) reason=\(reason, privacy: .public)"
+                    )
+                    guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
+                    self.cleanupWebRTCSession(
+                        sessionID,
+                        reason: reason,
+                        disconnectKind: strictBootstrapOnly ? .explicit : .transient
+                    )
+                    self.connectionStatus = .failed(message)
+                    self.readiness = .idle
+                    break
+                }
+
+                if let lastHeartbeatAt = self.webrtcRemoteDesktopHeartbeatAtBySessionId[sessionID],
+                   Date().timeIntervalSince(lastHeartbeatAt) > heartbeatTimeoutSeconds {
+                    let reason = "remote_heartbeat_timeout"
+                    self.logger.warning(
+                        "⚠️ WebRTC 当前路径远端心跳超时: session=\(sessionID, privacy: .public)"
+                    )
+                    guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
+                    self.cleanupWebRTCSession(
+                        sessionID,
+                        reason: reason,
+                        disconnectKind: .transient
+                    )
+                    self.connectionStatus = .failed("WebRTC remote heartbeat timed out")
+                    self.readiness = .idle
+                    break
+                }
+                do {
+                    try await Task.sleep(for: .seconds(1))
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    private func stopWebRTCLivenessWatchdog(for sessionID: String) {
+        if let task = webrtcRemoteLivenessWatchdogTasksBySessionId.removeValue(forKey: sessionID) {
+            task.cancel()
+        }
+    }
+
+    @discardableResult
+    private func prepareSessionSnapshotMetadata(
+        sessionID: String,
+        source: ActiveSessionSnapshotSource,
+        deviceId: String?,
+        deviceName: String?
+    ) -> SessionSnapshotMetadata {
+        let metadata = SessionSnapshotMetadata(
+            snapshotToken: UUID(),
+            source: source,
+            deviceId: deviceId,
+            deviceName: deviceName
+        )
+        sessionSnapshotMetadataBySessionId[sessionID] = metadata
+        return metadata
+    }
+
+    @discardableResult
+    private func activatePreparedSessionSnapshot(
+        sessionID: String,
+        phase: ActiveSessionSnapshotPhase,
+        negotiatedSuite: String? = nil
+    ) -> UUID? {
+        guard let metadata = sessionSnapshotMetadataBySessionId[sessionID] else { return nil }
+        activeSessionReconnectTimeoutTask?.cancel()
+        activeSessionSnapshot = ActiveSessionSnapshotContract.activate(
+            sessionId: sessionID,
+            source: metadata.source,
+            phase: phase,
+            deviceId: metadata.deviceId,
+            deviceName: metadata.deviceName,
+            negotiatedSuite: negotiatedSuite,
+            snapshotToken: metadata.snapshotToken
+        )
+        return metadata.snapshotToken
+    }
+
+    private func updatePreparedSessionSnapshot(
+        sessionID: String,
+        phase: ActiveSessionSnapshotPhase,
+        deviceId: String? = nil,
+        deviceName: String? = nil,
+        negotiatedSuite: String? = nil,
+        snapshotToken: UUID? = nil
+    ) {
+        let token = snapshotToken ?? sessionSnapshotMetadataBySessionId[sessionID]?.snapshotToken
+        guard let token else { return }
+        activeSessionReconnectTimeoutTask?.cancel()
+        activeSessionSnapshot = ActiveSessionSnapshotContract.update(
+            current: activeSessionSnapshot,
+            sessionId: sessionID,
+            snapshotToken: token,
+            phase: phase,
+            deviceId: deviceId,
+            deviceName: deviceName,
+            negotiatedSuite: negotiatedSuite
+        )
+    }
+
+    private func applyActiveSessionDisconnect(
+        sessionID: String,
+        kind: SessionDisconnectKind,
+        snapshotToken: UUID? = nil
+    ) {
+        let token = snapshotToken ?? sessionSnapshotMetadataBySessionId[sessionID]?.snapshotToken
+        guard let token else { return }
+
+        let nextSnapshot = ActiveSessionSnapshotContract.disconnect(
+            current: activeSessionSnapshot,
+            sessionId: sessionID,
+            snapshotToken: token,
+            kind: kind
+        )
+        activeSessionSnapshot = nextSnapshot
+
+        switch kind {
+        case .transient:
+            if let nextSnapshot {
+                scheduleActiveSessionReconnectTimeout(for: nextSnapshot)
+            }
+        case .explicit, .remoteLeave:
+            activeSessionReconnectTimeoutTask?.cancel()
+            sessionSnapshotMetadataBySessionId.removeValue(forKey: sessionID)
+        }
+    }
+
+    private func scheduleActiveSessionReconnectTimeout(for snapshot: ActiveSessionSnapshot) {
+        activeSessionReconnectTimeoutTask?.cancel()
+        activeSessionReconnectTimeoutTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(for: .seconds(5))
+            } catch {
+                return
+            }
+            guard let current = self.activeSessionSnapshot,
+                  current.snapshotToken == snapshot.snapshotToken,
+                  current.phase == .reconnecting else {
+                return
+            }
+            self.activeSessionSnapshot = nil
+            self.sessionSnapshotMetadataBySessionId.removeValue(forKey: snapshot.sessionId)
+        }
+    }
+
+    private enum CachedOfferResendResult {
+        case noCachedOffer
+        case sent
+        case blocked
+    }
+
+    @discardableResult
+    private func resendCachedOfferIfNeeded(
+        for sessionID: String,
+        reason: String
+    ) async -> CachedOfferResendResult {
+        guard let sdp = webrtcLatestOfferBySessionId[sessionID] else {
+            return .noCachedOffer
+        }
+        guard let authority = sessionBoundSignalingAuthority(
+            for: sessionID,
+            operation: "offer-resend"
+        ) else {
+            return .blocked
+        }
+        let enrichedSDP = sdpWithCachedLocalICECandidates(sessionID: sessionID, sdp: sdp)
+        logger.info("🔁 重发本地 offer: session=\(sessionID, privacy: .public) reason=\(reason, privacy: .public)")
+        await sendSignal(
+            .init(sessionId: sessionID, from: authority.deviceId, type: .offer, payload: .init(sdp: enrichedSDP)),
+            ownerSession: authority.session,
+            retries: 2
+        )
+        return .sent
+    }
+
+    private func resendOrRecoverLocalOfferForRemoteJoin(sessionID: String, session: WebRTCSession) async {
+        switch await resendCachedOfferIfNeeded(for: sessionID, reason: "remote-join") {
+        case .sent, .blocked:
+            return
+        case .noCachedOffer:
+            break
+        }
+        guard shouldRecoverMissingOfferCacheFromRemoteJoin(sessionID: sessionID, session: session) else {
+            return
+        }
+
+        let requested = session.requestLocalOfferEmission(reason: "remote-join-cache-miss")
+        if requested {
+            logger.warning(
+                "⚠️ remote join found missing local offer cache; requested offer re-emit/regeneration: session=\(sessionID, privacy: .public)"
+            )
+        } else {
+            logger.error(
+                "❌ remote join found missing local offer cache, but no local offerer description was available: session=\(sessionID, privacy: .public)"
+            )
+        }
+    }
+
+    private func resendCachedAnswerIfNeeded(for sessionID: String, reason: String) async {
+        guard let sdp = webrtcLatestAnswerBySessionId[sessionID] else { return }
+        guard let authority = sessionBoundSignalingAuthority(
+            for: sessionID,
+            operation: "answer-resend"
+        ) else {
+            return
+        }
+        let enrichedSDP = sdpWithCachedLocalICECandidates(sessionID: sessionID, sdp: sdp)
+        logger.info("🔁 重发本地 answer: session=\(sessionID, privacy: .public) reason=\(reason, privacy: .public)")
+        await sendSignal(
+            .init(sessionId: sessionID, from: authority.deviceId, type: .answer, payload: .init(sdp: enrichedSDP)),
+            ownerSession: authority.session,
+            retries: 2
+        )
+    }
+
+    private func sdpWithCachedLocalICECandidates(sessionID: String, sdp: String) -> String {
+        guard let candidates = webrtcLocalICECandidatesBySessionId[sessionID], !candidates.isEmpty else {
+            return sdp
+        }
+        return WebRTCSDPCandidateInjector.injectLocalICECandidates(candidates, into: sdp)
+    }
+
+    private func resendCachedLocalICECandidatesIfNeeded(for sessionID: String, reason: String) async {
+        guard let candidates = webrtcLocalICECandidatesBySessionId[sessionID], !candidates.isEmpty else { return }
+        guard webrtcRemoteIdBySessionId[sessionID] != nil else {
+            logger.debug("ℹ️ skip cached ICE resend before remote peer is known: session=\(sessionID, privacy: .public) reason=\(reason, privacy: .public)")
+            return
+        }
+        guard let authority = sessionBoundSignalingAuthority(
+            for: sessionID,
+            operation: "ice-resend"
+        ) else {
+            return
+        }
+        logger.info("🔁 重发本地 ICE candidates: session=\(sessionID, privacy: .public) count=\(candidates.count, privacy: .public) reason=\(reason, privacy: .public)")
+        for payload in candidates {
+            await sendSignal(
+                .init(sessionId: sessionID, from: authority.deviceId, type: .iceCandidate, payload: payload),
+                ownerSession: authority.session,
+                retries: 2
+            )
+        }
+    }
+
+    /// Preserve the authority ID captured when the WebRTC session was created.
+    /// A missing session binding blocks the resend; host-derived presentation
+    /// data must never enter the authenticated signaling namespace.
+    private func sessionBoundSignalingAuthority(
+        for sessionID: String,
+        operation: String
+    ) -> (session: WebRTCSession, deviceId: String)? {
+        guard let session = webrtcSessionsBySessionId[sessionID] else {
+            logger.error(
+                "❌ Signaling \(operation, privacy: .public) blocked: missing WebRTC session for \(sessionID, privacy: .public)"
+            )
+            return nil
+        }
+        let localDeviceId = session.localDeviceId.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !localDeviceId.isEmpty else {
+            logger.error(
+                "❌ Signaling \(operation, privacy: .public) blocked: session has no authority device ID"
+            )
+            return nil
+        }
+        return (session, localDeviceId)
+    }
+
+    private func startOfferResendLoop(for sessionID: String, attempts: Int = 40) {
+        stopOfferResendLoop(for: sessionID)
+        webrtcOfferResendTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var remaining = max(0, attempts)
+            while remaining > 0, !Task.isCancelled, self.webrtcSessionsBySessionId[sessionID] != nil {
+                // The original offer/ICE burst is sent by the session callbacks. Wait one
+                // interval before the first best-effort resend so startup does not double-send.
+                if remaining == attempts {
+                    do {
+                        try await Task.sleep(for: .milliseconds(self.remoteDesktopReconnectBackoffDelayMilliseconds(forAttempt: 1)))
+                    } catch {
+                        return
+                    }
+                    guard !Task.isCancelled, self.webrtcSessionsBySessionId[sessionID] != nil else { return }
+                }
+                if case .connected = self.connectionStatus { break }
+                await self.resendCachedOfferIfNeeded(for: sessionID, reason: "periodic")
+                await self.resendCachedLocalICECandidatesIfNeeded(for: sessionID, reason: "periodic")
+                remaining -= 1
+                if remaining == 0 { break }
+                let attemptIndex = max(0, attempts - remaining)
+                do {
+                    try await Task.sleep(
+                        for: .milliseconds(self.remoteDesktopReconnectBackoffDelayMilliseconds(forAttempt: attemptIndex))
+                    )
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    // MARK: - 连接生命周期管理
+
+    /// 断开当前跨网连接，释放所有 WebRTC / Signaling 资源。
+    ///
+    /// 符合 IEEE TDSC 安全生命周期要求：
+    /// - 关闭所有 DataChannel / PeerConnection / SSL 上下文
+    /// - 取消控制/屏幕推流任务
+    /// - 清空会话密钥（防止密钥残留）
+    public func disconnect() async {
+        // Retire every pre-install offer owner before the first suspension.
+        // Otherwise an offer task that is awaiting signaling/TURN could resume
+        // while disconnect is stopping listeners and publish a new session into
+        // the just-cleared manager.
+        let sessionStartSuspension = webRTCSessionStartGate.suspendAndInvalidateAll()
+        defer {
+            webRTCSessionStartGate.resumeAdmission(ifOwnedBy: sessionStartSuspension)
+        }
+        signalingLifecycle.invalidateSetup()
+        signalingLifecycle.cancelAllRecovery()
+
+        // Revoke capture publishers before the first suspension. A queued SCK
+        // callback or pacing tick from the old owner must not reach a same-ID
+        // replacement while listener/control teardown awaits below.
+        let screenStreamingRecords = Array(webrtcScreenStreamingTasksBySessionId.values)
+        webrtcScreenStreamingTasksBySessionId.removeAll()
+        for record in screenStreamingRecords {
+            record.callbackLease.revoke(token: record.token)
+#if canImport(WebRTCAudioDeviceBridge)
+            SBWebRTCSystemAudioDevice.shared().retireRecordedAudioOwner(
+                withToken: record.nativeAudioOwnerToken
+            )
+#endif
+            record.task.cancel()
+        }
+
+        let pendingConnectionCodeTasks = Array(connectionCodeConnectTasks.values)
+        connectionCodeConnectTasks.removeAll()
+        connectionCodeConnectTaskTokens.removeAll()
+        pendingConnectionCodeTasks.forEach { $0.cancel() }
+
+        let securityNoticeSessionIDs = Set(webrtcSessionsBySessionId.keys)
+            .union(webrtcRemoteControlNoticeApprovedSessionOwners.keys)
+            .union(webrtcRemoteControlNoticePendingSessionOwners.keys)
+        for sessionID in securityNoticeSessionIDs {
+            RemoteControlSecurityNoticeCenter.shared.endNotice(
+                sessionId: sessionID,
+                transportKind: .webrtc
+            )
+        }
+        for productEvidenceOwner in webrtcProductEvidenceOwnersBySessionId.values {
+            _ = ProductReleaseEvidenceRecorder.shared.endSession(
+                owner: productEvidenceOwner,
+                reason: .user
+            )
+        }
+        for task in webrtcProductEvidenceMediaTasksBySessionId.values {
+            task.cancel()
+        }
+        webrtcProductEvidenceMediaTasksBySessionId.removeAll()
+        webrtcProductEvidenceOwnersBySessionId.removeAll()
+        for sessionID in webrtcSessionsBySessionId.keys where hasUserVisibleWebRTCRemoteDesktopSession(sessionID: sessionID) {
+            RemoteDesktopSessionNotificationService.shared.sendTerminalNotificationIfNeeded(
+                sessionID: sessionID,
+                deviceName: remoteDesktopNotificationDeviceName(sessionID: sessionID),
+                transport: "webrtc",
+                kind: .normal,
+                reason: "explicit_disconnect"
+            )
+        }
+
+#if os(macOS)
+        for (sessionID, record) in webrtcControlTasksBySessionId {
+            releaseWebRTCRemoteInput(
+                sessionID: sessionID,
+                controlTaskToken: record.token,
+                reason: "explicit_disconnect"
+            )
+        }
+#endif
+
+        // 1) 关闭所有 WebRTC 会话
+        for (_, session) in webrtcSessionsBySessionId {
+            session.close()
+        }
+        webrtcSessionsBySessionId.removeAll()
+        endAllRouteAttribution()
+        let controlTaskRecords = Array(webrtcControlTasksBySessionId.values)
+        webrtcControlTasksBySessionId.removeAll()
+        for record in controlTaskRecords {
+            _ = record.inboundFileTransferReceiver.cleanupOnChannelClosed()
+            record.task.cancel()
+        }
+
+        let listeners = activeListeners
+        activeListeners.removeAll()
+        for listener in listeners {
+            await listener.stop()
+        }
+
+        // 2) 结束入站队列，唤醒控制通道等待
+        for (_, queue) in webrtcInboundQueuesBySessionId {
+            await queue.finish()
+        }
+        webrtcInboundQueuesBySessionId.removeAll()
+
+        // 3) 取消控制通道任务
+        for record in controlTaskRecords {
+            await record.task.value
+        }
+
+        // 4) Join the already-revoked screen-streaming owners.
+        for record in screenStreamingRecords {
+            await record.task.value
+        }
+
+        let interactionStreamingTasks = Array(webrtcInteractionStreamingTasksBySessionId.values)
+        webrtcInteractionStreamingTaskTokensBySessionId.removeAll()
+        for task in interactionStreamingTasks {
+            task.cancel()
+        }
+        for task in interactionStreamingTasks {
+            await task.value
+        }
+        webrtcInteractionStreamingTasksBySessionId.removeAll()
+
+        // 5) 清空会话密钥
+        webrtcSessionKeysBySessionId.removeAll()
+        clearAllWebRTCSecureEnvelopeState()
+        webrtcSignalingAuthTokenBySessionId.removeAll()
+        webrtcTurnAdmissionLeaseBySessionId.removeAll()
+        webrtcMediaAdmissionLeaseBySessionId.removeAll()
+        webrtcMediaAdmissionLeaseExpiresAtBySessionId.removeAll()
+        webrtcRemoteIdBySessionId.removeAll()
+        currentPathLocalIdentityBySessionId.removeAll()
+        currentPathExpectedRemoteAuthorityBySessionId.removeAll()
+        currentPathAdditionalProtocolFingerprintsBySessionId.removeAll()
+        authorityBoundWebRTCBootstrapSessionIds.removeAll()
+        strictPQCClassicBootstrapOnlySessionIds.removeAll()
+        currentPathSignalingOriginBySessionId.removeAll()
+        currentPathSignalingWebSocketPathBySessionId.removeAll()
+        webrtcLatestOfferBySessionId.removeAll()
+        webrtcLatestAnswerBySessionId.removeAll()
+        webrtcLocalICECandidatesBySessionId.removeAll()
+        webrtcJoinBootstrapPayloadBySessionId.removeAll()
+        pendingPreSessionSignalingEnvelopesBySessionId.removeAll()
+        webrtcRemoteDesktopHeartbeatAtBySessionId.removeAll()
+        webrtcRemoteVideoFormatsBySessionId.removeAll()
+        webrtcRemoteStreamConfigurationBySessionId.removeAll()
+        webrtcLastAcceptedRawStreamConfigurationBySessionId.removeAll()
+        webrtcPendingRemoteStreamConfigurationBySessionId.removeAll()
+        webrtcRemoteSecurityIdentityBySessionId.removeAll()
+        webrtcBootstrapReplyFingerprintBySessionId.removeAll()
+        webrtcBoundSessionConsumerGatesBySessionId.removeAll()
+        webrtcRekeyInProgressSessionIds.removeAll()
+        webrtcPendingStreamRefreshSessionIds.removeAll()
+        webrtcAwaitingStreamConfigurationSessionIds.removeAll()
+        webrtcSessionReadyDiagnosticSessionIds.removeAll()
+        webrtcInteractionStreamingAllowedSessionIds.removeAll()
+        webrtcRemoteControlNoticeApprovedSessionOwners.removeAll()
+        webrtcRemoteControlNoticePendingSessionOwners.removeAll()
+        removeAllPendingWebRTCJoinBootstraps()
+        for (_, task) in webrtcJoinHeartbeatTasksBySessionId {
+            task.cancel()
+        }
+        webrtcJoinHeartbeatTasksBySessionId.removeAll()
+
+        for (_, task) in webrtcOfferResendTasksBySessionId {
+            task.cancel()
+        }
+        webrtcOfferResendTasksBySessionId.removeAll()
+
+        for (_, task) in webrtcOutboundHeartbeatTasksBySessionId {
+            task.cancel()
+        }
+        webrtcOutboundHeartbeatTasksBySessionId.removeAll()
+
+        for (_, task) in webrtcRemoteLivenessWatchdogTasksBySessionId {
+            task.cancel()
+        }
+        webrtcRemoteLivenessWatchdogTasksBySessionId.removeAll()
+        stopAllWebRTCConnectionTimeoutWatchdogs()
+
+        // 6) 关闭 WebSocket 信令
+        if let sc = signalingClient {
+            await sc.close()
+        }
+        signalingClient = nil
+        signalingShardKey = nil
+        signalingLifecycle.resetAll()
+        resetSignalingState()
+        await TURNCredentialService.shared.clearCache()
+
+        // 7) 取消所有文件传输等待
+        let waiters = webrtcFileTransferWaiters
+        webrtcFileTransferWaiters.removeAll()
+        for (_, waiter) in waiters {
+            waiter.timeoutTask.cancel()
+            waiter.sendTask?.cancel()
+            waiter.continuation.resume(throwing: CancellationError())
+        }
+
+        // 8) 重置状态
+        currentConnection = nil
+        protocolIdentityStatus = nil
+        connectionCode = nil
+        connectionCodeExpiresAt = nil
+        activeConnectionCodeLeaseMode = nil
+        activeConnectionCodeSessionID = nil
+        activeConnectionCodeAuthorityDeviceId = nil
+        activeConnectionCodeAuthorityFingerprint = nil
+        authorityBoundWebRTCBootstrapSessionIds.removeAll()
+        strictPQCClassicBootstrapOnlySessionIds.removeAll()
+        Self.removeConnectionCodeSnapshot()
+        connectionCodeExpiryTask?.cancel()
+        connectionCodeExpiryTask = nil
+        resolvedSessionIDByConnectionCode.removeAll()
+        qrCodeData = nil
+        activeSessionReconnectTimeoutTask?.cancel()
+        activeSessionReconnectTimeoutTask = nil
+        activeSessionSnapshot = nil
+        sessionSnapshotMetadataBySessionId.removeAll()
+        connectionStatus = .idle
+        readiness = .idle
+
+        logger.info("✅ CrossNetworkConnectionManager disconnected; all resources released")
+    }
+
+    private func startQRCodeWatchdog(
+        operation: String,
+        timeoutSeconds: Double,
+        timeoutMessage: String,
+        admissionWitness: WebRTCSessionStartGate.AdmissionWitness
+    ) -> Task<Void, Never> {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(for: .seconds(timeoutSeconds))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled,
+                  self.webRTCSessionStartGate.isCurrent(admissionWitness) else {
+                return
+            }
+            self.logger.error("⌛️ QR watchdog fired: operation=\(operation, privacy: .public)")
+            self.connectionStatus = .failed(timeoutMessage)
+            self.readiness = .idle
+        }
+    }
+
+    private struct CurrentPathLocalProtocolIdentitySnapshot {
+        let identity: CommittedLocalProtocolIdentitySnapshot
+        let binding: ProtocolIdentityBinding
+        let handshakePolicy: HandshakePolicy
+    }
+
+    // MARK: - Route Attribution
+
+    /// Registers a session for route attribution and starts the shared probe if idle.
+    private func beginRouteAttribution(sessionID: String) {
+        routeAttributionPathStateBySessionId[sessionID] = StableICETransportPathState()
+        // Publish the session immediately as inconclusive. Recording it only once a candidate pair
+        // resolves would make a session that never resolves invisible instead of visibly unknown.
+        ConnectionRouteAttributionRecorder.shared.record(sessionKey: sessionID, route: .unknown)
+        startRouteAttributionProbeIfNeeded()
+    }
+
+    private func endRouteAttribution(sessionID: String) {
+        routeAttributionPathStateBySessionId.removeValue(forKey: sessionID)
+        ConnectionRouteAttributionRecorder.shared.forget(sessionKey: sessionID)
+    }
+
+    private func endAllRouteAttribution() {
+        for sessionID in routeAttributionPathStateBySessionId.keys {
+            ConnectionRouteAttributionRecorder.shared.forget(sessionKey: sessionID)
+        }
+        routeAttributionPathStateBySessionId.removeAll()
+    }
+
+    private func startRouteAttributionProbeIfNeeded() {
+        guard routeAttributionProbeTask == nil else { return }
+
+        routeAttributionProbeTask = Task { @MainActor [weak self] in
+            defer { self?.routeAttributionProbeTask = nil }
+
+            while let self, !Task.isCancelled {
+                // Exits as soon as no session remains, so an idle app carries no timer.
+                let sessions = self.webrtcSessionsBySessionId
+                guard !sessions.isEmpty else { return }
+
+                for (sessionID, session) in sessions {
+                    guard !Task.isCancelled else { return }
+                    let probedPath = await session.currentICETransportPath()
+                    // Reuse the existing stabiliser so a transient `unknown` probe does not
+                    // erase an already-established attribution.
+                    var pathState = self.routeAttributionPathStateBySessionId[sessionID]
+                        ?? StableICETransportPathState()
+                    pathState.recordProbe(probedPath)
+                    self.routeAttributionPathStateBySessionId[sessionID] = pathState
+
+                    ConnectionRouteAttributionRecorder.shared.record(
+                        sessionKey: sessionID,
+                        route: ConnectionTransportRoute(pathState.effectivePath)
+                    )
+                }
+
+                do {
+                    try await Task.sleep(for: Self.routeAttributionProbeInterval)
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    private func currentPathLocalIdentitySnapshot() async throws
+        -> CurrentPathLocalProtocolIdentitySnapshot {
+        _ = try await CurrentPathAuthorityReadinessGate.shared.ensureReady()
+        let identity = try await CommittedLocalProtocolIdentitySnapshot.loadActive()
+        let selfIdentity = try await SelfIdentityProvider.shared
+            .snapshotEnsuringProtocolDeviceId(allowCreate: true)
+        let binding = try ProtocolIdentityBinding(
+            deviceId: selfIdentity.deviceId,
+            protocolSigningAlgorithm: identity.algorithm,
+            protocolPublicKeyBytes: identity.publicKey
+        )
+        return CurrentPathLocalProtocolIdentitySnapshot(
+            identity: identity,
+            binding: binding,
+            handshakePolicy: HandshakePolicy.recommendedDefault(
+                compatibilityModeEnabled: UserDefaults.standard.bool(
+                    forKey: "Settings.EnableCompatibilityMode"
+                )
+            )
+        )
+    }
+
+    private func currentPathLocalBinding() async throws -> ProtocolIdentityBinding {
+        try await currentPathLocalIdentitySnapshot().binding
+    }
+
+    private func bindCurrentPathLocalIdentity(
+        _ snapshot: CurrentPathLocalProtocolIdentitySnapshot,
+        to sessionID: String
+    ) throws {
+        if let existing = currentPathLocalIdentityBySessionId[sessionID] {
+            guard existing.binding.deviceId == snapshot.binding.deviceId,
+                  existing.identity.algorithm == snapshot.identity.algorithm,
+                  existing.identity.protection == snapshot.identity.protection,
+                  existing.identity.publicKey == snapshot.identity.publicKey,
+                  existing.handshakePolicy == snapshot.handshakePolicy,
+                  existing.binding.protocolPublicKeyFingerprint
+                    == snapshot.binding.protocolPublicKeyFingerprint else {
+                throw NSError(
+                    domain: "CrossNetworkConnectionManager",
+                    code: 8451,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "The WebRTC session is already bound to a different local protocol identity"
+                    ]
+                )
+            }
+            return
+        }
+        currentPathLocalIdentityBySessionId[sessionID] = snapshot
+        webrtcJoinBootstrapPayloadBySessionId.removeValue(forKey: sessionID)
+    }
+
+    private func requiredCurrentPathLocalIdentity(
+        for sessionID: String
+    ) throws -> CurrentPathLocalProtocolIdentitySnapshot {
+        guard let snapshot = currentPathLocalIdentityBySessionId[sessionID] else {
+            throw NSError(
+                domain: "CrossNetworkConnectionManager",
+                code: 8452,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "The WebRTC session has no admission-bound local protocol identity"
+                ]
+            )
+        }
+        return snapshot
+    }
+
+    private func currentPathProtocolIdentityConfiguration(
+        for sessionID: String
+    ) throws -> ProtocolIdentityConfigurationRecord {
+        let identity = try requiredCurrentPathLocalIdentity(for: sessionID).identity
+        return ProtocolIdentityConfigurationRecord(
+            algorithm: identity.algorithm,
+            protection: identity.protection
+        )
+    }
+
+    // MARK: - 跨网在线 presence（F2-B）：复用已配置的 signalServer（含 bearer/tenant 鉴权）与本机绑定。
+
+    /// 向信令服务器注册/续约本设备在线状态（心跳），并上报本机元数据。
+    @discardableResult
+    public func registerDevicePresence(
+        report: AccountDevicePresenceReport
+    ) async throws -> SignalServerClient.PresenceRegisterResponseBody {
+        // Capture before identity loading can suspend. A request without an audio
+        // epoch must never borrow one published while that request is in flight.
+        let context = AuthenticationService.shared.audioAuthorizationSnapshot != nil
+            ? try Self.currentAudioAccountContext() : nil
+        let binding = try await presenceLocalBinding()
+        let provider = AudioAccountMembershipProvider.shared
+        return try await provider.observeOptionalRequest(context: context, allowTemporaryFailure: true) { observation in
+            let response: SignalServerClient.PresenceRegisterResponseBody
+            do {
+                let client = try await Self.makePresenceAccountClient(expected: context)
+                response = try await client.registerPresence(binding: binding, report: report)
+            } catch {
+                if let context, case .deviceNotActive = SignalServerClient.presenceFailure(for: error) {
+                    guard let observation else { throw ProtectedAccountSessionError.invalidRecord }
+                    try await provider.revoke(identity: AudioProtocolIdentity(binding), context: context,
+                                              observation: observation)
+                }
+                throw error
+            }
+            if let context {
+                guard let observation else { throw ProtectedAccountSessionError.invalidRecord }
+                // Apply the completed fact before presentation cancellation.
+                try await provider.observeHeartbeat(response, context: context, caller: AudioProtocolIdentity(binding),
+                                                    observation: observation)
+            }
+            return response
+        }
+    }
+
+    /// 拉取本账号（JWT 的 tenant+user）下的全部设备及实时在线状态。
+    public func listAccountDevices() async throws -> AccountDeviceListSnapshot {
+        // Capture even when no audio request exists yet: one can start while
+        // this GET is suspended, and must observe this request's negative reply.
+        let context = AuthenticationService.shared.audioAuthorizationSnapshot != nil
+            ? try Self.currentAudioAccountContext() : nil
+        let binding = try await presenceLocalBinding()
+        let provider = AudioAccountMembershipProvider.shared
+        return try await provider.observeOptionalRequest(context: context, allowTemporaryFailure: true) { observation in
+            let startedWall = Int64(Date().timeIntervalSince1970 * 1_000)
+            let startedMonotonic = ContinuousClock.now
+            let response: AccountDeviceListSnapshot
+            do {
+                let client = try await Self.makePresenceAccountClient(expected: context)
+                response = try await client.listAccountDevices(binding: binding)
+            } catch {
+                if let context, case .deviceNotActive = SignalServerClient.presenceFailure(for: error) {
+                    guard let observation else { throw ProtectedAccountSessionError.invalidRecord }
+                    try await provider.revoke(identity: AudioProtocolIdentity(binding), context: context,
+                                              observation: observation)
+                }
+                throw error
+            }
+            if let context {
+                guard let observation else { throw ProtectedAccountSessionError.invalidRecord }
+                try await provider.observeFreshRegistry(response, context: context, caller: AudioProtocolIdentity(binding),
+                    startedWall: startedWall, receivedWall: Int64(Date().timeIntervalSince1970 * 1_000),
+                    startedMonotonic: startedMonotonic, receivedMonotonic: .now, observation: observation)
+            }
+            return response
+        }
+    }
+
+    public func removeAccountDevice(_ target: AccountDeviceRecord, expectedAccountScope: String) async throws {
+        let context = AuthenticationService.shared.audioAuthorizationSnapshot != nil
+            ? try Self.currentAudioAccountContext() : nil
+        let binding = try await presenceLocalBinding()
+        let provider = AudioAccountMembershipProvider.shared
+        // A lost removal response cannot establish that the side effect did not occur.
+        try await provider.observeOptionalRequest(context: context, allowTemporaryFailure: false) { observation in
+            do {
+                let client = try await Self.makePresenceAccountClient(expected: context)
+                try await client.removeAccountDevice(binding: binding, target: target, expectedAccountScope: expectedAccountScope)
+            } catch {
+                if let context, case .deviceNotActive = SignalServerClient.presenceFailure(for: error) {
+                    guard let observation else { throw ProtectedAccountSessionError.invalidRecord }
+                    try await provider.revoke(identity: AudioProtocolIdentity(binding), context: context,
+                                              observation: observation)
+                }
+                throw error
+            }
+            if let context, let algorithm = ProtocolSigningAlgorithm(rawValue: target.protocolSigningAlgorithm) {
+                guard let observation else { throw ProtectedAccountSessionError.invalidRecord }
+                // The client has validated the exact removal receipt.
+                try await provider.revoke(identity: AudioProtocolIdentity(
+                    deviceID: target.deviceId, algorithm: algorithm, fingerprint: target.protocolPublicKeyFingerprint),
+                    context: context, observation: observation)
+            }
+        }
+    }
+
+    /// 身份未就绪是一种独立的失败类别（不是网络故障，也不是未登录）。
+    private func presenceLocalBinding() async throws -> ProtocolIdentityBinding {
+        do {
+            return try await currentPathLocalBinding()
+        } catch {
+            throw AccountPresenceClientError.localIdentityUnavailable(
+                underlying: String(reflecting: type(of: error))
+            )
+        }
+    }
+
+    private func activeConnectionCodeMatchesCurrentAuthority(_ binding: ProtocolIdentityBinding) -> Bool {
+        guard let activeConnectionCodeAuthorityDeviceId,
+              let activeConnectionCodeAuthorityFingerprint else {
+            return false
+        }
+        return activeConnectionCodeAuthorityDeviceId == binding.deviceId
+            && activeConnectionCodeAuthorityFingerprint == binding.protocolPublicKeyFingerprint
+    }
+
+    private func requestAdmissionLease(
+        for snapshot: CurrentPathLocalProtocolIdentitySnapshot
+    ) async throws -> SignalServerClient.AdmissionLease {
+        let challenge = try await signalServer.requestAdmissionChallenge(binding: snapshot.binding)
+        let signatureProvider = ProtocolSignatureProviderSelector.select(
+            for: snapshot.identity.algorithm
+        )
+        let signature = try await signatureProvider.sign(
+            challenge.signaturePayload(),
+            key: snapshot.identity.keyHandle
+        )
+        return try await signalServer.completeAdmission(
+            challenge: challenge,
+            binding: snapshot.binding,
+            signature: signature
+        )
+    }
+
+    nonisolated static func isQRCodeConnectLinkWithinCapacity(_ data: Data) -> Bool {
+        data.count <= qrCodeConnectLinkMaximumByteCount
+    }
+
  // MARK: - 1️⃣ 动态二维码连接
-    
- /// 生成动态加密二维码
- /// 包含：设备指纹 + 临时密钥 + ICE 候选信息 + 过期时间
+
+    /// 生成动态加密二维码
+    /// 包含：设备指纹 + 临时密钥 + ICE 候选信息 + 过期时间
     public func generateDynamicQRCode(validDuration: TimeInterval = 300) async throws -> Data {
+        let admissionWitness = try captureWebRTCSessionStartAdmission()
         logger.info("生成动态二维码，有效期: \(validDuration)秒")
         connectionStatus = .generating
-        
- // 1. 生成会话密钥对（Curve25519 用于密钥协商）
- // 会话密钥用于后续P2P加密握手，独立于签名密钥
-        let agreementPrivateKey = Curve25519.KeyAgreement.PrivateKey()
-        let agreementPublicKey = agreementPrivateKey.publicKey
+        readiness = .idle
+        let watchdog = startQRCodeWatchdog(
+            operation: "generate",
+            timeoutSeconds: Self.qrCodeGenerationWatchdogTimeoutSeconds,
+            timeoutMessage: "二维码生成超时",
+            admissionWitness: admissionWitness
+        )
+        defer { watchdog.cancel() }
 
- // 1.1 生成签名密钥对（P256 ECDSA 用于二维码内容签名）
- // 统一采用 P256.Signing 以适配安全管理器的验签逻辑
-        let signingPrivateKey = P256.Signing.PrivateKey()
-        let signingPublicKey = signingPrivateKey.publicKey
-        let signingPublicKeyData = signingPublicKey.rawRepresentation
-        let signingFingerprintHex = SHA256.hash(data: signingPublicKeyData)
-            .compactMap { String(format: "%02x", $0) }
-            .joined()
- // 签名时间戳，用于时效与重放保护
-        let signatureTimestamp = Date().timeIntervalSince1970
-        
- // 2. 注册到信号服务器
-        let sessionID = UUID().uuidString
-        _ = try await signalServer.registerSession(
-            sessionID: sessionID,
-            deviceFingerprint: deviceFingerprint,
-            publicKey: agreementPublicKey.rawRepresentation,
-            validDuration: validDuration
-        )
-        
- // 3. 构建 QR 码数据结构
- // 为统一验签，签名覆盖规范化负载（参照 P2PSecurityManager）
- // 规范化负载包含：设备ID/名称/类型/地址/端口/系统版本/能力列表/时间戳/指纹
-        let canonicalPayload = Self.buildCanonicalSignaturePayload(
-            id: deviceFingerprint,
-            name: Host.current().localizedName ?? "Mac",
-            type: .macOS,
-            address: "0.0.0.0",
-            port: 0,
-            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
-            capabilities: ["p2p", "cross-network"],
-            timestamp: signatureTimestamp,
-            fingerprintHex: signingFingerprintHex
-        )
-        let signature = try signingPrivateKey.signature(for: canonicalPayload)
-        
-        let qrData = DynamicQRCodeData(
-            version: 2,
-            sessionID: sessionID,
-            deviceName: Host.current().localizedName ?? "Mac",
-            deviceFingerprint: deviceFingerprint,
-            publicKey: agreementPublicKey.rawRepresentation, // 用于密钥协商的公钥
-            signingPublicKey: signingPublicKeyData,           // 用于验签的公钥
-            signature: signature.rawRepresentation,           // P256 ECDSA 原始签名
-            signatureTimestamp: signatureTimestamp,
-            iceServers: stunServers,
-            expiresAt: Date().addingTimeInterval(validDuration)
-        )
-        
- // 4. 编码为 JSON + Base64
-        let encoder = JSONEncoder()
-        let jsonData = try encoder.encode(qrData)
-        let base64String = jsonData.base64EncodedString()
-        
- // 5. 添加协议前缀（用于识别）
-        let qrString = "skybridge://connect/\(base64String)"
-        
-        self.qrCodeData = qrString.data(using: .utf8)
-        self.connectionStatus = .waiting(code: sessionID)
-        
- // 6. 启动监听
-        startListeningForConnection(sessionID: sessionID, privateKey: agreementPrivateKey)
-        
-        logger.info("✅ 动态二维码生成成功，会话ID: \(sessionID)")
-        return qrCodeData!
+        var currentStage = "entered"
+        do {
+            logQRCodeStage("generate", stage: currentStage)
+            await Task.yield()
+
+            currentStage = "resolve_local_binding"
+            logQRCodeStage("generate", stage: currentStage)
+            let localIdentity = try await currentPathLocalIdentitySnapshot()
+            let localBinding = localIdentity.binding
+            logQRCodeStage("generate", stage: "local_binding_resolved")
+
+            currentStage = "register_session"
+            logQRCodeStage("generate", stage: "\(currentStage)_started")
+            let admissionLease = try await requestAdmissionLease(for: localIdentity)
+            let sessionLease = try await signalServer.registerSession(
+                admissionToken: admissionLease.token,
+                validDuration: validDuration
+            )
+            try requireCurrentWebRTCSessionStartAdmission(admissionWitness)
+            let sessionID = sessionLease.sessionID
+            let signalingEndpoint = try validatedCurrentPathSignalingEndpoint(
+                origin: sessionLease.signalingServerOrigin,
+                wsPath: sessionLease.wsPath
+            )
+            webrtcSignalingAuthTokenBySessionId[sessionLease.sessionID] = sessionLease.sessionToken
+            webrtcTurnAdmissionLeaseBySessionId[sessionLease.sessionID] = sessionLease.turnAdmissionLease
+            storeWebRTCMediaAdmissionLease(sessionLease.mediaAdmissionLease, for: sessionLease.sessionID)
+            try bindCurrentPathLocalIdentity(localIdentity, to: sessionLease.sessionID)
+            storeCurrentPathSignalingEndpoint(
+                sessionID: sessionLease.sessionID,
+                endpoint: signalingEndpoint
+            )
+            authorityBoundWebRTCBootstrapSessionIds.insert(sessionID)
+            logQRCodeStage("generate", stage: "\(currentStage)_finished", sessionID: sessionID)
+
+            let expiresAt = Date().addingTimeInterval(validDuration)
+            let localPresentation = LocalDevicePresentation.current()
+            let invite = ServerBackedDynamicQRCodeInvite(
+                version: 8,
+                sessionID: sessionID,
+                qrBootstrapToken: sessionLease.qrBootstrapToken,
+                signalingServerOrigin: sessionLease.signalingServerOrigin,
+                deviceID: localBinding.deviceId,
+                deviceName: localPresentation.deviceName ?? localPresentation.modelName ?? "Mac",
+                deviceType: P2PDeviceType.macOS.rawValue,
+                osVersion: localPresentation.osVersion,
+                protocolSigningAlgorithm: localBinding.protocolSigningAlgorithm,
+                protocolPublicKeyFingerprint: localBinding.protocolPublicKeyFingerprint,
+                expiresAt: expiresAt
+            )
+
+            currentStage = "assign_payload"
+            let connectLink = try Self.encodeQRCodeConnectLink(invite)
+            guard Self.isQRCodeConnectLinkWithinCapacity(connectLink) else {
+                throw CrossNetworkConnectionError.invalidQRCode
+            }
+            self.qrCodeData = connectLink
+            self.connectionStatus = .waiting(code: sessionID)
+            self.readiness = .idle
+            logQRCodeStage("generate", stage: "payload_assigned", sessionID: sessionID)
+
+            guard startWebRTCOfferSession(
+                sessionID: sessionID,
+                admissionWitness: admissionWitness
+            ) else {
+                throw CancellationError()
+            }
+
+            logger.info("✅ 动态二维码生成成功，会话ID: \(sessionID)")
+            guard let qrCodeData else {
+                throw CrossNetworkConnectionError.invalidQRCode
+            }
+            return qrCodeData
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            guard webRTCSessionStartGate.isCurrent(admissionWitness) else {
+                throw CancellationError()
+            }
+            logger.error("❌ generateDynamicQRCode failed: stage=\(currentStage, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            connectionStatus = .failed(error.localizedDescription)
+            readiness = .idle
+            throw error
+        }
     }
-    
- /// 扫描并解析动态二维码
+
+    /// 扫描并解析动态二维码
     public func scanDynamicQRCode(_ data: Data) async throws -> RemoteConnection {
+        let admissionWitness = try captureWebRTCSessionStartAdmission()
         logger.info("扫描动态二维码")
-        
-        guard let qrString = String(data: data, encoding: .utf8),
-              qrString.hasPrefix("skybridge://connect/") else {
-            throw CrossNetworkConnectionError.invalidQRCode
-        }
-        
- // 1. 解析 QR 码
-        let base64Part = qrString.replacingOccurrences(of: "skybridge://connect/", with: "")
-        guard let jsonData = Data(base64Encoded: base64Part) else {
-            throw CrossNetworkConnectionError.invalidQRCode
-        }
-        
-        let decoder = JSONDecoder()
-        let qrData = try decoder.decode(DynamicQRCodeData.self, from: jsonData)
-        
- // 2. 验证有效期
-        guard qrData.expiresAt > Date() else {
-            throw CrossNetworkConnectionError.qrCodeExpired
-        }
-        
- // 3. 验证签名（统一接入 P2PSecurityManager）
- // 基于二维码中的签名公钥与签名，对规范化负载进行验签
-        let securityManager = P2PSecurityManager()
- // 兼容老版本二维码（v1），若缺少签名字段则直接判为无效
-        guard let signingKeyData = qrData.signingPublicKey, let signatureData = qrData.signature else {
-            logger.error("二维码缺少签名或签名公钥字段")
-            throw CrossNetworkConnectionError.invalidSignature
-        }
-        let deviceForVerify = P2PDevice(
-            id: qrData.deviceFingerprint,
-            name: qrData.deviceName,
-            type: .macOS,
-            address: "0.0.0.0",
-            port: 0,
-            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
-            capabilities: ["p2p", "cross-network"],
-            publicKey: signingKeyData,
-            lastSeen: Date(),
-            endpoints: [],
-            lastMessageTimestamp: nil,
-            isVerified: false,
-            verificationFailedReason: nil
+        connectionStatus = .connecting
+        readiness = .idle
+        let watchdog = startQRCodeWatchdog(
+            operation: "scan",
+            timeoutSeconds: Self.qrCodeScanBootstrapWatchdogTimeoutSeconds,
+            timeoutMessage: "二维码连接超时",
+            admissionWitness: admissionWitness
         )
-        let verifyResult = securityManager.verifyQRCodeSignature(
-            for: deviceForVerify,
-            publicKeyBase64: signingKeyData.base64EncodedString(),
-            signatureBase64: signatureData.base64EncodedString(),
-            timestamp: qrData.signatureTimestamp,
-            fingerprintHex: nil
-        )
-        guard verifyResult.ok else {
-            logger.error("二维码验签失败：\(verifyResult.reason ?? "未知原因")")
-            throw CrossNetworkConnectionError.invalidSignature
+        defer { watchdog.cancel() }
+
+        var currentStage = "entered"
+        do {
+            logQRCodeStage("scan", stage: currentStage)
+            guard let qrString = String(data: data, encoding: .utf8),
+                  let payload = Self.extractConnectPayload(from: qrString) else {
+                throw CrossNetworkConnectionError.invalidQRCode
+            }
+
+            currentStage = "payload_decoded"
+            logQRCodeStage("scan", stage: currentStage)
+            guard let jsonData = Self.decodeBase64Payload(payload) else {
+                throw CrossNetworkConnectionError.invalidQRCode
+            }
+
+            if let invite = try? Self.decodeServerBackedQRCodeInvite(from: jsonData),
+               invite.version >= 8 {
+                let connection = try await scanServerBackedQRCodeInvite(
+                    invite,
+                    admissionWitness: admissionWitness
+                )
+                try requireCurrentWebRTCSessionStartAdmission(admissionWitness)
+                return connection
+            }
+
+            let qrData = try Self.decodeDynamicQRCodePayload(from: jsonData)
+            guard qrData.expiresAt > Date() else {
+                throw CrossNetworkConnectionError.qrCodeExpired
+            }
+            _ = try validateCurrentPathOrigin(qrData.signalingServerOrigin)
+
+            currentStage = "verify_qr"
+            logQRCodeStage("scan", stage: "\(currentStage)_started", sessionID: qrData.sessionID)
+            let verifyResult = await Self.verifyDynamicQRCode(qrData)
+            try requireCurrentWebRTCSessionStartAdmission(admissionWitness)
+            guard verifyResult.ok else {
+                logger.error("二维码校验失败：\(verifyResult.reason ?? "未知原因")")
+                throw CrossNetworkConnectionError.invalidSignature
+            }
+            logQRCodeStage("scan", stage: "qr_signature_verified", sessionID: qrData.sessionID)
+            guard !Self.isP2PKEMBootstrapCapability(qrData.normalizedCapabilities) else {
+                logger.error("❌ QR scan rejected: P2P KEM QR bootstrap has been removed; use PIB-1 SAS plus SKR-1 signed LAN KEM refresh")
+                throw CrossNetworkConnectionError.invalidQRCode
+            }
+            switch verifyResult.source {
+            case .trustedDevice:
+                logger.info("✅ 二维码来源已命中本地 trust store: \(qrData.deviceID, privacy: .public)")
+            case .selfAsserted:
+                logger.notice("ℹ️ 二维码仅完成完整性校验，未命中外部信任锚；后续身份认证仍依赖握手/pinning")
+            }
+            logVerifiedQRCodeKEMIgnored(qrData)
+
+            currentStage = "redeem_session"
+            logQRCodeStage("scan", stage: "\(currentStage)_started", sessionID: qrData.sessionID)
+            let localIdentity = try await currentPathLocalIdentitySnapshot()
+            try requireCurrentWebRTCSessionStartAdmission(admissionWitness)
+            let localBinding = localIdentity.binding
+            let admissionLease = try await requestAdmissionLease(for: localIdentity)
+            try requireCurrentWebRTCSessionStartAdmission(admissionWitness)
+            let redeemed = try await signalServer.redeemSession(
+                admissionToken: admissionLease.token,
+                sessionID: qrData.sessionID,
+                qrBootstrapToken: qrData.qrBootstrapToken,
+                idempotencyKey: "qr-redeem-\(qrData.sessionID)-\(localBinding.deviceId)"
+            )
+            try requireCurrentWebRTCSessionStartAdmission(admissionWitness)
+            guard redeemed.initiatorDeviceId == qrData.deviceID,
+                  redeemed.initiatorProtocolSigningAlgorithm == qrData.protocolSigningAlgorithm,
+                  redeemed.initiatorProtocolPublicKeyFingerprint == qrData.protocolPublicKeyFingerprint else {
+                throw CrossNetworkConnectionError.invalidSignature
+            }
+            let signalingEndpoint = try validatedCurrentPathSignalingEndpoint(
+                origin: redeemed.signalingServerOrigin,
+                wsPath: redeemed.wsPath
+            )
+            webrtcSignalingAuthTokenBySessionId[qrData.sessionID] = redeemed.sessionToken
+            webrtcTurnAdmissionLeaseBySessionId[qrData.sessionID] = redeemed.turnAdmissionLease
+            storeWebRTCMediaAdmissionLease(redeemed.mediaAdmissionLease, for: qrData.sessionID)
+            try bindCurrentPathLocalIdentity(localIdentity, to: qrData.sessionID)
+            storeCurrentPathSignalingEndpoint(
+                sessionID: qrData.sessionID,
+                endpoint: signalingEndpoint
+            )
+            currentPathExpectedRemoteAuthorityBySessionId[qrData.sessionID] = CurrentPathRemoteAuthority(
+                deviceId: qrData.deviceID,
+                protocolSigningAlgorithm: qrData.protocolSigningAlgorithm,
+                protocolPublicKeyFingerprint: qrData.protocolPublicKeyFingerprint,
+                protocolPublicKeyBytes: qrData.protocolPublicKeyBytes,
+                deviceName: qrData.deviceName
+            )
+            webrtcRemoteIdBySessionId[qrData.sessionID] = qrData.deviceID
+            logQRCodeStage("scan", stage: "\(currentStage)_finished", sessionID: qrData.sessionID)
+
+            currentStage = "start_webrtc_answerer"
+            logQRCodeStage("scan", stage: "\(currentStage)_started", sessionID: qrData.sessionID)
+            let connection = try await establishWebRTCConnection(
+                with: qrData,
+                admissionWitness: admissionWitness
+            )
+            try requireCurrentWebRTCSessionStartAdmission(admissionWitness)
+            logQRCodeStage("scan", stage: "webrtc_answerer_started", sessionID: qrData.sessionID)
+
+            if self.currentConnection?.id != connection.id {
+                self.currentConnection = connection
+            }
+            logQRCodeStage("scan", stage: "join_sent", sessionID: qrData.sessionID)
+
+            logger.info("✅ 通过二维码连接成功")
+            return connection
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            guard webRTCSessionStartGate.isCurrent(admissionWitness) else {
+                throw CancellationError()
+            }
+            logger.error("❌ scanDynamicQRCode failed: stage=\(currentStage, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            connectionStatus = .failed(error.localizedDescription)
+            readiness = .idle
+            throw error
         }
-        
- // 4. 建立 P2P 连接
-        let connection = try await establishP2PConnection(with: qrData)
-        
-        self.currentConnection = connection
-        self.connectionStatus = .connected
-        
-        logger.info("✅ 通过二维码连接成功")
-        return connection
     }
-    
+
  // MARK: - 2️⃣ iCloud 设备链连接
-    
+
+    #if os(macOS)
+    // macOS-exclusive: 远程桌面宿主能力（屏幕捕获 / 视频策略 / 输入注入 / 剪贴板重定向）。
  /// 发现同 Apple ID 下的所有设备
     public func discoverCloudDevices() async throws {
         logger.info("🔍 发现 iCloud 设备链")
-        
+
  // 使用 CloudKitService 获取设备列表
         await CloudKitService.shared.refreshDevices()
-        
+
  // 获取设备列表（排除当前设备）
-        let currentDeviceId = Self.generateDeviceFingerprint()
+        let currentDeviceId = try await SelfIdentityProvider.shared
+            .protocolIdentityDeviceId(allowCreate: true)
         let allDevices = CloudKitService.shared.devices
-        
+
  // 过滤掉当前设备和离线设备（1小时内活跃）
         let activeDevices = allDevices.filter { device in
             device.id != currentDeviceId &&
             device.lastSeenAt.timeIntervalSinceNow > -3600
         }
-        
+
         self.availableCloudDevices = activeDevices
         logger.info("✅ 发现 \(activeDevices.count) 台 iCloud 设备")
     }
-    
+    #endif
+
  /// 通过 iCloud 设备链连接
     public func connectToCloudDevice(_ device: CloudDevice) async throws -> RemoteConnection {
         logger.info("连接到 iCloud 设备: \(device.name)")
+        let localAuthorityDeviceId = try await SelfIdentityProvider.shared
+            .protocolIdentityDeviceId(allowCreate: true)
         connectionStatus = .connecting
-        
+        readiness = .idle
+
  // 1. 通过 iCloud KV Store 交换 ICE 候选
         let sessionID = UUID().uuidString
-        let offer = try await createConnectionOffer(sessionID: sessionID)
-        
- // 2. 写入 offer 到 iCloud
-        let kvStore = NSUbiquitousKeyValueStore.default
-        if let offerData = try? JSONEncoder().encode(offer) {
+        let snapshotMetadata = prepareSessionSnapshotMetadata(
+            sessionID: sessionID,
+            source: .icloud,
+            deviceId: device.id,
+            deviceName: device.name
+        )
+        activatePreparedSessionSnapshot(sessionID: sessionID, phase: .connecting)
+        do {
+            let offer = createConnectionOffer(
+                sessionID: sessionID,
+                localAuthorityDeviceId: localAuthorityDeviceId
+            )
+
+    // 2. 写入 offer 到 iCloud
+            let kvStore = NSUbiquitousKeyValueStore.default
+            let offerData = try JSONEncoder().encode(offer)
+            // `device.id` is a compatibility route key, not local authority.
             kvStore.set(offerData, forKey: "skybridge.offer.\(device.id)")
             kvStore.synchronize()
+
+    // 3. 等待 answer（轮询或推送）
+            let answer = try await waitForAnswer(
+                localAuthorityDeviceId: localAuthorityDeviceId,
+                timeout: 30
+            )
+
+    // 4. 建立连接
+            let connection = try await finalizeConnection(offer: offer, answer: answer)
+
+            self.currentConnection = connection
+            self.connectionStatus = .connected
+            self.readiness = .handshakeComplete(
+                sessionId: connection.id,
+                negotiatedSuite: "quic-transport"
+            )
+            updatePreparedSessionSnapshot(
+                sessionID: connection.id,
+                phase: .handshakeComplete,
+                deviceId: device.id,
+                deviceName: device.name,
+                negotiatedSuite: "quic-transport",
+                snapshotToken: snapshotMetadata.snapshotToken
+            )
+
+            logger.info("✅ 通过 iCloud 连接成功")
+            return connection
+        } catch {
+            cleanupWebRTCSession(
+                sessionID,
+                reason: "icloud_connect_failed",
+                disconnectKind: .explicit,
+                snapshotToken: snapshotMetadata.snapshotToken,
+                closeSession: false
+            )
+            throw error
         }
-        
- // 3. 等待 answer（轮询或推送）
-        let answer = try await waitForAnswer(deviceID: device.id, timeout: 30)
-        
- // 4. 建立连接
-        let connection = try await finalizeConnection(offer: offer, answer: answer)
-        
-        self.currentConnection = connection
-        self.connectionStatus = .connected
-        
-        logger.info("✅ 通过 iCloud 连接成功")
-        return connection
     }
-    
+
  // MARK: - 3️⃣ 智能连接码
-    
- /// 生成智能连接码（6位字母数字）
+
+    /// 生成服务器签发的智能连接码（当前默认 8 位）
     public func generateConnectionCode() async throws -> String {
-        logger.info("生成智能连接码")
-        connectionStatus = .generating
-        
- // 1. 生成短码
-        let code = Self.generateShortCode()
-        
- // 2. 生成密钥对
-        let privateKey = Curve25519.KeyAgreement.PrivateKey()
-        let publicKey = privateKey.publicKey
-        
- // 3. 注册到信号服务器
-        _ = try await signalServer.registerConnectionCode(
-            code: code,
-            deviceFingerprint: deviceFingerprint,
-            deviceName: Host.current().localizedName ?? "Mac",
-            publicKey: publicKey.rawRepresentation,
-            validDuration: 600 // 10分钟有效期
-        )
-        
-        self.connectionCode = code
-        self.connectionStatus = .waiting(code: code)
-        
- // 4. 启动监听
-        startListeningForCodeConnection(code: code, privateKey: privateKey)
-        
-        logger.info("✅ 连接码生成成功: \(code)")
-        return code
+        let issued = try await issueConnectionCode(leaseMode: connectionCodeLeaseMode)
+        try requireCurrentIssuedConnectionCode(issued)
+        return issued.code
     }
-    
- /// 通过连接码连接
-    public func connectWithCode(_ code: String) async throws -> RemoteConnection {
-        logger.info("使用连接码连接: \(code)")
-        connectionStatus = .connecting
-        
- // 1. 从信号服务器查询设备信息
-        let deviceInfo = try await signalServer.queryConnectionCode(code: code)
-        
- // 2. 验证设备指纹
-        guard Self.isValidDeviceFingerprint(deviceInfo.deviceFingerprint) else {
-            throw CrossNetworkConnectionError.invalidDevice
+
+    /// 生成服务器签发的智能连接码，并使用调用方显式传入的 lease。
+    ///
+    /// GUI 默认入口仍由 `generateConnectionCode()` 读取 `connectionCodeLeaseMode`；
+    /// Operator/CLI 入口必须传入 lease，避免通过写入 GUI UserDefaults 偏好来表达一次性命令参数。
+    public func issueConnectionCode(leaseMode requestedLeaseMode: ConnectionCodeLeaseMode) async throws -> IssuedConnectionCode {
+        var admissionWitness = try captureWebRTCSessionStartAdmission()
+        logger.info("生成智能连接码")
+        let localIdentity = try await currentPathLocalIdentitySnapshot()
+        try requireCurrentWebRTCSessionStartAdmission(admissionWitness)
+        let localBinding = localIdentity.binding
+        let canReuseCurrentAuthority = activeConnectionCodeMatchesCurrentAuthority(localBinding)
+        if let existing = connectionCode,
+           let activeSessionID = activeConnectionCodeSessionID,
+           !activeSessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           activeConnectionCodeLeaseMode == requestedLeaseMode,
+           case .waiting(let activeCode) = connectionStatus,
+           activeCode == existing,
+           Self.isReusableConnectionCodeLease(expiresAt: connectionCodeExpiresAt),
+           canReuseCurrentAuthority,
+           hasCurrentConnectionCodeSessionOwner(activeSessionID) {
+            let issued = IssuedConnectionCode(
+                code: existing,
+                sessionID: activeSessionID,
+                expiresAt: connectionCodeExpiresAt,
+                leaseMode: requestedLeaseMode
+            )
+            try requireCurrentIssuedConnectionCode(issued)
+            return issued
         }
-        
- // 3. 建立 P2P 连接（STUN/TURN）
-        let connection = try await establishP2PConnectionWithCode(
-            code: code,
-            deviceInfo: deviceInfo
-        )
-        
-        self.currentConnection = connection
-        self.connectionStatus = .connected
-        
-        logger.info("✅ 通过连接码连接成功")
+        if let existing = connectionCode,
+           activeConnectionCodeLeaseMode == requestedLeaseMode,
+           case .waiting(let activeCode) = connectionStatus,
+           activeCode == existing {
+            let reason = canReuseCurrentAuthority ? "connection_code_lease_not_reusable" : "connection_code_authority_changed"
+            logger.info("ℹ️ 本地连接码不可复用，重新向信令服务注册: reason=\(reason, privacy: .public) code=<redacted>")
+            connectionCode = nil
+            connectionCodeExpiresAt = nil
+            activeConnectionCodeLeaseMode = nil
+            activeConnectionCodeSessionID = nil
+            activeConnectionCodeAuthorityDeviceId = nil
+            activeConnectionCodeAuthorityFingerprint = nil
+            Self.removeConnectionCodeSnapshot()
+            connectionCodeExpiryTask?.cancel()
+            connectionCodeExpiryTask = nil
+        }
+        if connectionCode != nil,
+           activeConnectionCodeLeaseMode != requestedLeaseMode {
+            await disconnect()
+            admissionWitness = try captureWebRTCSessionStartAdmission()
+        }
+        connectionStatus = .generating
+        readiness = .idle
+
+        do {
+            let admissionLease = try await requestAdmissionLease(for: localIdentity)
+            let localPresentation = LocalDevicePresentation.current()
+            let lease = try await signalServer.registerConnectionCode(
+                admissionToken: admissionLease.token,
+                deviceName: localPresentation.deviceName ?? localPresentation.modelName ?? "Mac",
+                validDuration: requestedLeaseMode.validDuration
+            )
+            try requireCurrentWebRTCSessionStartAdmission(admissionWitness)
+            let code = lease.code
+            let signalingEndpoint = try validatedCurrentPathSignalingEndpoint(
+                origin: lease.signalingServerOrigin,
+                wsPath: lease.wsPath
+            )
+            webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.sessionToken
+            webrtcTurnAdmissionLeaseBySessionId[lease.sessionID] = lease.turnAdmissionLease
+            storeWebRTCMediaAdmissionLease(lease.mediaAdmissionLease, for: lease.sessionID)
+            try bindCurrentPathLocalIdentity(localIdentity, to: lease.sessionID)
+            storeCurrentPathSignalingEndpoint(
+                sessionID: lease.sessionID,
+                endpoint: signalingEndpoint
+            )
+
+            // 2) 当前主路径由服务端发放短期 code + initiator token，code 同时作为 WebRTC sessionId。
+            self.connectionCode = code
+            self.connectionCodeExpiresAt = Date().addingTimeInterval(lease.expiresIn)
+            self.activeConnectionCodeLeaseMode = requestedLeaseMode
+            self.activeConnectionCodeSessionID = lease.sessionID
+            self.activeConnectionCodeAuthorityDeviceId = localBinding.deviceId
+            self.activeConnectionCodeAuthorityFingerprint = localBinding.protocolPublicKeyFingerprint
+            writeConnectionCodeSnapshot(
+                code: code,
+                sessionID: lease.sessionID,
+                expiresAt: self.connectionCodeExpiresAt,
+                leaseMode: requestedLeaseMode,
+                binding: localBinding
+            )
+            self.authorityBoundWebRTCBootstrapSessionIds.insert(lease.sessionID)
+            self.connectionStatus = .waiting(code: code)
+            self.readiness = .idle
+            if let expiresAt = self.connectionCodeExpiresAt {
+                scheduleConnectionCodeLeaseInvalidation(
+                    code: code,
+                    sessionID: lease.sessionID,
+                    expiresAt: expiresAt
+                )
+            }
+
+            // 3) 启动 WebRTC offerer（等待对端输入同一 code 后 join，同会话完成 SDP/ICE，DataChannel ready）
+            guard startWebRTCOfferSession(
+                sessionID: lease.sessionID,
+                admissionWitness: admissionWitness
+            ) else {
+                throw CancellationError()
+            }
+
+            logger.info("✅ 连接码生成成功: code=<redacted>")
+            let issued = IssuedConnectionCode(
+                code: code,
+                sessionID: lease.sessionID,
+                expiresAt: self.connectionCodeExpiresAt,
+                leaseMode: requestedLeaseMode
+            )
+            try requireCurrentIssuedConnectionCode(issued)
+            return issued
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            guard webRTCSessionStartGate.isCurrent(admissionWitness) else {
+                throw CancellationError()
+            }
+            logger.error("❌ 生成连接码失败: \(error.localizedDescription, privacy: .public)")
+            connectionStatus = .failed(error.localizedDescription)
+            readiness = .idle
+            throw error
+        }
+    }
+
+    private func requireCurrentIssuedConnectionCode(_ issued: IssuedConnectionCode) throws {
+        guard Self.issuedConnectionCodeMatchesCurrentState(
+            issued,
+            admissionAvailable: webRTCSessionStartGate.captureAdmissionWitness() != nil,
+            currentCode: connectionCode,
+            currentExpiresAt: connectionCodeExpiresAt,
+            currentLeaseMode: activeConnectionCodeLeaseMode,
+            currentSessionID: activeConnectionCodeSessionID,
+            hasCurrentSessionOwner: hasCurrentConnectionCodeSessionOwner(issued.sessionID)
+        ) else {
+            throw CancellationError()
+        }
+    }
+
+    private func hasCurrentConnectionCodeSessionOwner(_ sessionID: String) -> Bool {
+        webRTCSessionStartGate.hasPendingStart(sessionID: sessionID)
+            || webrtcSessionsBySessionId[sessionID] != nil
+    }
+
+    nonisolated static func issuedConnectionCodeMatchesCurrentState(
+        _ issued: IssuedConnectionCode,
+        admissionAvailable: Bool,
+        currentCode: String?,
+        currentExpiresAt: Date?,
+        currentLeaseMode: ConnectionCodeLeaseMode?,
+        currentSessionID: String?,
+        hasCurrentSessionOwner: Bool
+    ) -> Bool {
+        admissionAvailable
+            && currentCode == issued.code
+            && currentExpiresAt == issued.expiresAt
+            && currentLeaseMode == issued.leaseMode
+            && currentSessionID == issued.sessionID
+            && hasCurrentSessionOwner
+    }
+
+    /// 通过连接码连接
+    public func connectWithCode(_ code: String) async throws -> RemoteConnection {
+        let admissionWitness = try captureWebRTCSessionStartAdmission()
+        guard let normalized = Self.normalizeConnectionCode(code) else {
+            let error = CrossNetworkConnectionError.invalidDevice
+            connectionStatus = .failed(error.localizedDescription)
+            readiness = .idle
+            throw error
+        }
+
+        if let sessionID = resolvedSessionIDByConnectionCode[normalized] {
+            if let existing = currentConnection, existing.id == sessionID {
+                return existing
+            }
+            if let existingSession = webrtcSessionsBySessionId[sessionID],
+               canReuseWebRTCSession(sessionID) {
+                return RemoteConnection(
+                    id: sessionID,
+                    deviceName: currentConnection?.deviceName ?? "Remote Device",
+                    transport: .webrtc(existingSession)
+                )
+            }
+            resolvedSessionIDByConnectionCode.removeValue(forKey: normalized)
+        }
+
+        while let existingEntry = connectionCodeConnectTasks.first {
+            if existingEntry.key == normalized {
+                let connection = try await existingEntry.value.value
+                try requireCurrentWebRTCSessionStartAdmission(admissionWitness)
+                try Task.checkCancellation()
+                return connection
+            }
+            let existingToken = connectionCodeConnectTaskTokens[existingEntry.key]
+            do {
+                _ = try await existingEntry.value.value
+            } catch is CancellationError {
+                logger.info("Previous connection-code attempt was cancelled before the next request")
+            } catch {
+                logger.warning(
+                    "Previous connection-code attempt failed before the next request: errorClass=\(String(reflecting: Swift.type(of: error)), privacy: .public)"
+                )
+            }
+            try requireCurrentWebRTCSessionStartAdmission(admissionWitness)
+            try Task.checkCancellation()
+            if connectionCodeConnectTaskTokens[existingEntry.key] == existingToken {
+                connectionCodeConnectTasks.removeValue(forKey: existingEntry.key)
+                connectionCodeConnectTaskTokens.removeValue(forKey: existingEntry.key)
+            }
+        }
+        let token = UUID()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { throw CancellationError() }
+            return try await self.performConnectWithCode(
+                normalized,
+                admissionWitness: admissionWitness
+            )
+        }
+        connectionCodeConnectTasks[normalized] = task
+        connectionCodeConnectTaskTokens[normalized] = token
+        defer {
+            if connectionCodeConnectTaskTokens[normalized] == token {
+                connectionCodeConnectTasks.removeValue(forKey: normalized)
+                connectionCodeConnectTaskTokens.removeValue(forKey: normalized)
+            }
+        }
+        let connection = try await task.value
+        try requireCurrentWebRTCSessionStartAdmission(admissionWitness)
+        try Task.checkCancellation()
         return connection
     }
-    
+
+    private func performConnectWithCode(
+        _ normalized: String,
+        admissionWitness: WebRTCSessionStartGate.AdmissionWitness
+    ) async throws -> RemoteConnection {
+        try requireCurrentWebRTCSessionStartAdmission(admissionWitness)
+        logger.info("使用连接码连接: code=<redacted>")
+
+        connectionStatus = .connecting
+        readiness = .idle
+        var sessionIDForRollback: String?
+        var snapshotTokenForRollback: UUID?
+        var sessionForRollback: WebRTCSession?
+        var sessionStartTokenForRollback: UUID?
+
+        do {
+            let localIdentity = try await currentPathLocalIdentitySnapshot()
+            try requireCurrentWebRTCSessionStartAdmission(admissionWitness)
+            let localBinding = localIdentity.binding
+            try Task.checkCancellation()
+            let admissionLease = try await requestAdmissionLease(for: localIdentity)
+            try requireCurrentWebRTCSessionStartAdmission(admissionWitness)
+            try Task.checkCancellation()
+            let lookup = try await signalServer.lookupConnectionCode(
+                admissionToken: admissionLease.token,
+                code: normalized
+            )
+            try requireCurrentWebRTCSessionStartAdmission(admissionWitness)
+            try Task.checkCancellation()
+            // The short connection code is only a lookup credential. The
+            // server-issued identifier is authoritative for all transport,
+            // signaling and cache state.
+            let sessionID = lookup.sessionID
+            sessionIDForRollback = sessionID
+
+            if let existing = currentConnection, existing.id == sessionID {
+                resolvedSessionIDByConnectionCode[normalized] = sessionID
+                logger.info("复用已有连接码会话: session=\(sessionID, privacy: .public)")
+                return existing
+            }
+            if let existingSession = webrtcSessionsBySessionId[sessionID], canReuseWebRTCSession(sessionID) {
+                resolvedSessionIDByConnectionCode[normalized] = sessionID
+                logger.info("复用已有会话（避免重复创建）: \(sessionID, privacy: .public)")
+                prepareSessionSnapshotMetadata(
+                    sessionID: sessionID,
+                    source: .reused,
+                    deviceId: currentPathExpectedRemoteAuthorityBySessionId[sessionID]?.deviceId,
+                    deviceName: currentConnection?.deviceName ?? currentPathExpectedRemoteAuthorityBySessionId[sessionID]?.deviceName
+                )
+                let phase: ActiveSessionSnapshotPhase
+                let negotiatedSuite: String?
+                switch readiness {
+                case .handshakeComplete(let activeSessionID, let suite):
+                    phase = activeSessionID == sessionID ? .handshakeComplete : .transportReady
+                    negotiatedSuite = activeSessionID == sessionID ? suite : nil
+                case .transportReady(let activeSessionID):
+                    phase = activeSessionID == sessionID ? .transportReady : .connecting
+                    negotiatedSuite = nil
+                case .idle:
+                    phase = .transportReady
+                    negotiatedSuite = nil
+                }
+                activatePreparedSessionSnapshot(sessionID: sessionID, phase: phase, negotiatedSuite: negotiatedSuite)
+                return RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(existingSession))
+            }
+            if webrtcSessionsBySessionId[sessionID] != nil {
+                cleanupWebRTCSession(sessionID, reason: "replace_stale_answerer_session")
+            }
+            guard let sessionStartToken = webRTCSessionStartGate.begin(
+                sessionID: sessionID,
+                admissionWitness: admissionWitness
+            ) else {
+                throw CancellationError()
+            }
+            sessionStartTokenForRollback = sessionStartToken
+            resolvedSessionIDByConnectionCode[normalized] = sessionID
+
+            let signalingEndpoint = try validatedCurrentPathSignalingEndpoint(
+                origin: lookup.signalingServerOrigin,
+                wsPath: lookup.wsPath
+            )
+            try enforceCurrentPathTrustBinding(
+                deviceId: lookup.initiatorDeviceId,
+                protocolPublicKeyFingerprint: lookup.initiatorProtocolPublicKeyFingerprint,
+                authenticatedConnectionCodeRebindAllowed: true
+            )
+            webrtcSignalingAuthTokenBySessionId[lookup.sessionID] = lookup.sessionToken
+            webrtcTurnAdmissionLeaseBySessionId[lookup.sessionID] = lookup.turnAdmissionLease
+            storeWebRTCMediaAdmissionLease(lookup.mediaAdmissionLease, for: lookup.sessionID)
+            try bindCurrentPathLocalIdentity(localIdentity, to: lookup.sessionID)
+            storeCurrentPathSignalingEndpoint(
+                sessionID: lookup.sessionID,
+                endpoint: signalingEndpoint
+            )
+            currentPathExpectedRemoteAuthorityBySessionId[lookup.sessionID] = CurrentPathRemoteAuthority(
+                deviceId: lookup.initiatorDeviceId,
+                protocolSigningAlgorithm: lookup.initiatorProtocolSigningAlgorithm,
+                protocolPublicKeyFingerprint: lookup.initiatorProtocolPublicKeyFingerprint,
+                protocolPublicKeyBytes: nil,
+                deviceName: lookup.initiatorDeviceName
+            )
+            webrtcRemoteIdBySessionId[lookup.sessionID] = lookup.initiatorDeviceId
+            let snapshotMetadata = prepareSessionSnapshotMetadata(
+                sessionID: sessionID,
+                source: .code,
+                deviceId: lookup.initiatorDeviceId,
+                deviceName: lookup.initiatorDeviceName
+            )
+            snapshotTokenForRollback = snapshotMetadata.snapshotToken
+            activatePreparedSessionSnapshot(sessionID: sessionID, phase: .connecting)
+
+            try await ensureSignalingConnected(shardKey: sessionID)
+            guard webRTCSessionStartGate.isCurrent(sessionStartToken, sessionID: sessionID) else {
+                throw CancellationError()
+            }
+
+            // 动态获取 TURN 凭据（带缓存和回退）
+            let ice = try await SkyBridgeServerConfig.dynamicICEConfig(
+                sessionID: sessionID,
+                turnAdmissionLease: webrtcTurnAdmissionLeaseBySessionId[sessionID]
+            )
+            guard webRTCSessionStartGate.isCurrent(sessionStartToken, sessionID: sessionID) else {
+                throw CancellationError()
+            }
+            logICEPlan(ice, context: "连接码模式")
+
+            let localDeviceId = localBinding.deviceId
+            let signalingAuthToken = webrtcSignalingAuthTokenBySessionId[sessionID]
+            let session = WebRTCSession(sessionId: sessionID, localDeviceId: localDeviceId, role: .answerer, ice: ice)
+            sessionForRollback = session
+            session.onTrace = { [weak self] line in
+                guard let self else { return }
+                Task { @MainActor in
+                    self.appendWebRTCSessionDiagnostic(line, sessionID: sessionID)
+                }
+            }
+
+            session.onLocalAnswer = { [weak self] sdp in
+                guard let self else { return }
+                Task { @MainActor in
+                    guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
+                    self.webrtcLatestAnswerBySessionId[sessionID] = sdp
+                    await self.sendSignal(.init(
+                        sessionId: sessionID,
+                        from: localDeviceId,
+                        type: .answer,
+                        payload: .init(sdp: sdp),
+                        authToken: signalingAuthToken
+                    ), ownerSession: session)
+                }
+            }
+            session.onLocalICECandidate = { [weak self] payload in
+                guard let self else { return }
+                Task { @MainActor in
+                    guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
+                    self.cacheLocalICECandidate(payload, for: sessionID)
+                    guard self.webrtcRemoteIdBySessionId[sessionID] != nil else {
+                        self.logger.debug("ℹ️ defer local ICE until remote peer is known: session=\(sessionID, privacy: .public)")
+                        return
+                    }
+                    await self.sendSignal(.init(
+                        sessionId: sessionID,
+                        from: localDeviceId,
+                        type: .iceCandidate,
+                        payload: payload,
+                        authToken: signalingAuthToken
+                    ), ownerSession: session)
+                }
+            }
+            session.onDisconnected = { [weak self] reason in
+                guard let self else { return }
+                Task { @MainActor in
+                    guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
+                    self.cleanupWebRTCSession(
+                        sessionID,
+                        reason: "transport_disconnected:\(reason)",
+                        disconnectKind: .transient,
+                        snapshotToken: snapshotMetadata.snapshotToken
+                    )
+                    self.connectionStatus = .failed("WebRTC transport disconnected: \(reason)")
+                    self.readiness = .idle
+                }
+            }
+            session.onReady = { [weak self] in
+                guard let self else { return }
+                Task { @MainActor in
+                    guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
+                    self.logger.info("✅ WebRTC answerer ready: session=\(sessionID, privacy: .public)")
+                    self.stopWebRTCConnectionTimeoutWatchdog(for: sessionID)
+                    self.currentConnection = RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(session))
+                    self.connectionStatus = .connecting
+                    self.readiness = .transportReady(sessionId: sessionID)
+                    self.startWebRTCLivenessWatchdogIfNeeded(for: sessionID, session: session)
+                    self.updatePreparedSessionSnapshot(
+                        sessionID: sessionID,
+                        phase: .transportReady,
+                        deviceId: lookup.initiatorDeviceId,
+                        deviceName: lookup.initiatorDeviceName,
+                        snapshotToken: snapshotMetadata.snapshotToken
+                    )
+                    self.startWebRTCInboundHandshakeAndControlLoop(sessionID: sessionID, session: session, endpointDescription: "webrtc:\(sessionID)")
+                }
+            }
+
+            guard webRTCSessionStartGate.isCurrent(sessionStartToken, sessionID: sessionID),
+                  webrtcSessionsBySessionId[sessionID] == nil else {
+                session.close()
+                throw CancellationError()
+            }
+            beginWebRTCTerminalNotificationTracking(sessionID: sessionID)
+            webrtcSessionsBySessionId[sessionID] = session
+            beginRouteAttribution(sessionID: sessionID)
+            try await adoptPendingWebRTCJoinBootstrapIfPresent(sessionID: sessionID, session: session)
+            guard webRTCSessionStartGate.isCurrent(sessionStartToken, sessionID: sessionID),
+                  webrtcSessionsBySessionId[sessionID] === session else {
+                throw CancellationError()
+            }
+
+            startWebRTCConnectionTimeoutWatchdog(
+                for: sessionID,
+                session: session,
+                source: "connection-code-answerer",
+                snapshotToken: snapshotMetadata.snapshotToken
+            )
+            try await session.startAsync()
+            try Task.checkCancellation()
+            guard webRTCSessionStartGate.isCurrent(sessionStartToken, sessionID: sessionID),
+                  webrtcSessionsBySessionId[sessionID] === session else {
+                throw CancellationError()
+            }
+            await drainPendingPreSessionSignalingEnvelopes(
+                sessionID: sessionID,
+                session: session
+            )
+            guard webRTCSessionStartGate.isCurrent(sessionStartToken, sessionID: sessionID),
+                  webrtcSessionsBySessionId[sessionID] === session else {
+                throw CancellationError()
+            }
+
+            // 主动加入会话并在短时间内心跳重发，避免 WS 时序抖动导致 offer 丢失。
+            let joinOutcome = try await sendWebRTCJoinSignal(session: session, retries: 2)
+            if joinOutcome == .supersededByHandshakeCompletion {
+                appendWebRTCSessionDiagnostic(
+                    "connection-code-setup-superseded session=\(sessionID) reason=handshake-complete",
+                    sessionID: sessionID
+                )
+            }
+            guard webRTCSessionStartGate.isCurrent(sessionStartToken, sessionID: sessionID),
+                  webrtcSessionsBySessionId[sessionID] === session else {
+                throw CancellationError()
+            }
+            guard webrtcSessionsBySessionId[sessionID] === session,
+                  webRTCSessionStartGate.finish(sessionStartToken, sessionID: sessionID) else {
+                session.close()
+                throw CancellationError()
+            }
+            startJoinHeartbeat(for: sessionID, attempts: Self.webRTCStartupJoinHeartbeatAttempts)
+            let connection = RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(session))
+            logger.info("✅ 通过连接码开始连接（等待对端 offer）")
+            return connection
+        } catch {
+            if let sessionIDForRollback,
+               let sessionForRollback,
+               Self.webRTCSetupFailureDisposition(
+                    exactSessionIsCurrent: webrtcSessionsBySessionId[sessionIDForRollback] === sessionForRollback,
+                    isHandshakeComplete: isHandshakeComplete(for: sessionIDForRollback)
+               ) == .preserveCompletedSession {
+                if let sessionStartTokenForRollback {
+                    _ = webRTCSessionStartGate.finish(
+                        sessionStartTokenForRollback,
+                        sessionID: sessionIDForRollback
+                    )
+                }
+                appendWebRTCSessionDiagnostic(
+                    "connection-code-setup-failure-superseded session=\(sessionIDForRollback) reason=handshake-complete",
+                    sessionID: sessionIDForRollback
+                )
+                return RemoteConnection(
+                    id: sessionIDForRollback,
+                    deviceName: "Remote Device",
+                    transport: .webrtc(sessionForRollback)
+                )
+            }
+            guard webRTCSessionStartGate.isCurrent(admissionWitness) else {
+                sessionForRollback?.close()
+                throw CancellationError()
+            }
+            var shouldCommitGlobalFailure = false
+            if let sessionIDForRollback, let sessionStartTokenForRollback {
+                guard webRTCSessionStartGate.finish(
+                    sessionStartTokenForRollback,
+                    sessionID: sessionIDForRollback
+                ) else {
+                    sessionForRollback?.close()
+                    throw CancellationError()
+                }
+
+                if let installedSession = webrtcSessionsBySessionId[sessionIDForRollback] {
+                    guard let sessionForRollback, installedSession === sessionForRollback else {
+                        sessionForRollback?.close()
+                        throw CancellationError()
+                    }
+                } else {
+                    sessionForRollback?.close()
+                }
+
+                shouldCommitGlobalFailure = isCurrentGlobalWebRTCSetup(
+                    sessionID: sessionIDForRollback,
+                    session: sessionForRollback
+                )
+
+                if resolvedSessionIDByConnectionCode[normalized] == sessionIDForRollback {
+                    resolvedSessionIDByConnectionCode.removeValue(forKey: normalized)
+                }
+                cleanupWebRTCSession(
+                    sessionIDForRollback,
+                    reason: error is CancellationError
+                        ? "connection_code_setup_cancelled"
+                        : "connection_code_setup_failed",
+                    disconnectKind: .explicit,
+                    snapshotToken: snapshotTokenForRollback
+                )
+            }
+            if error is CancellationError {
+                throw CancellationError()
+            }
+            logger.error("❌ 连接码连接失败: \(error.localizedDescription, privacy: .public)")
+            if shouldCommitGlobalFailure {
+                connectionStatus = .failed(error.localizedDescription)
+                readiness = .idle
+            }
+            throw error
+        }
+    }
+
+    private func scheduleConnectionCodeLeaseInvalidation(
+        code: String,
+        sessionID: String,
+        expiresAt: Date
+    ) {
+        connectionCodeExpiryTask?.cancel()
+        let delay = max(
+            0,
+            expiresAt
+                .addingTimeInterval(-Self.connectionCodeMinimumReusableTime)
+                .timeIntervalSinceNow
+        )
+        connectionCodeExpiryTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(delay))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                guard let self,
+                      self.connectionCode == code,
+                      self.activeConnectionCodeSessionID == sessionID,
+                      !Self.isReusableConnectionCodeLease(expiresAt: self.connectionCodeExpiresAt) else {
+                    return
+                }
+                self.logger.info("ℹ️ 本地连接码租约到期，已清理旧码: reason=connection_code_lease_expired code=<redacted>")
+                self.connectionCode = nil
+                self.connectionCodeExpiresAt = nil
+                self.activeConnectionCodeLeaseMode = nil
+                self.activeConnectionCodeSessionID = nil
+                self.activeConnectionCodeAuthorityDeviceId = nil
+                self.activeConnectionCodeAuthorityFingerprint = nil
+                Self.removeConnectionCodeSnapshot()
+                self.authorityBoundWebRTCBootstrapSessionIds.remove(sessionID)
+                self.connectionCodeExpiryTask = nil
+                if case .waiting(let waitingCode) = self.connectionStatus, waitingCode == code {
+                    self.connectionStatus = .idle
+                }
+            }
+        }
+    }
+
+    private func scanServerBackedQRCodeInvite(
+        _ invite: ServerBackedDynamicQRCodeInvite,
+        admissionWitness: WebRTCSessionStartGate.AdmissionWitness
+    ) async throws -> RemoteConnection {
+        try requireCurrentWebRTCSessionStartAdmission(admissionWitness)
+        guard invite.expiresAt > Date() else {
+            throw CrossNetworkConnectionError.qrCodeExpired
+        }
+        _ = try validateCurrentPathOrigin(invite.signalingServerOrigin)
+
+        logQRCodeStage("scan", stage: "server_backed_invite_redeem_started", sessionID: invite.sessionID)
+        let localIdentity = try await currentPathLocalIdentitySnapshot()
+        try requireCurrentWebRTCSessionStartAdmission(admissionWitness)
+        let localBinding = localIdentity.binding
+        let admissionLease = try await requestAdmissionLease(for: localIdentity)
+        try requireCurrentWebRTCSessionStartAdmission(admissionWitness)
+        let redeemed = try await signalServer.redeemSession(
+            admissionToken: admissionLease.token,
+            sessionID: invite.sessionID,
+            qrBootstrapToken: invite.qrBootstrapToken,
+            idempotencyKey: "qr-redeem-\(invite.sessionID)-\(localBinding.deviceId)"
+        )
+        try requireCurrentWebRTCSessionStartAdmission(admissionWitness)
+        guard redeemed.initiatorDeviceId == invite.deviceID,
+              redeemed.initiatorProtocolSigningAlgorithm == invite.protocolSigningAlgorithm,
+              redeemed.initiatorProtocolPublicKeyFingerprint == invite.protocolPublicKeyFingerprint else {
+            throw CrossNetworkConnectionError.invalidSignature
+        }
+        let signalingEndpoint = try validatedCurrentPathSignalingEndpoint(
+            origin: redeemed.signalingServerOrigin,
+            wsPath: redeemed.wsPath
+        )
+
+        webrtcSignalingAuthTokenBySessionId[invite.sessionID] = redeemed.sessionToken
+        webrtcTurnAdmissionLeaseBySessionId[invite.sessionID] = redeemed.turnAdmissionLease
+        storeWebRTCMediaAdmissionLease(redeemed.mediaAdmissionLease, for: invite.sessionID)
+        try bindCurrentPathLocalIdentity(localIdentity, to: invite.sessionID)
+        storeCurrentPathSignalingEndpoint(
+            sessionID: invite.sessionID,
+            endpoint: signalingEndpoint
+        )
+        currentPathExpectedRemoteAuthorityBySessionId[invite.sessionID] = CurrentPathRemoteAuthority(
+            deviceId: invite.deviceID,
+            protocolSigningAlgorithm: invite.protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: invite.protocolPublicKeyFingerprint,
+            protocolPublicKeyBytes: nil,
+            deviceName: invite.deviceName
+        )
+        webrtcRemoteIdBySessionId[invite.sessionID] = invite.deviceID
+        logQRCodeStage("scan", stage: "server_backed_invite_redeemed", sessionID: invite.sessionID)
+
+        let connection = try await establishWebRTCConnection(
+            sessionID: invite.sessionID,
+            remoteDeviceID: invite.deviceID,
+            remoteDeviceName: invite.deviceName,
+            admissionWitness: admissionWitness
+        )
+        try requireCurrentWebRTCSessionStartAdmission(admissionWitness)
+        logger.info("✅ 通过服务端背书二维码连接成功")
+        return connection
+    }
+
  // MARK: - 私有方法 - P2P 连接建立
-    
+
     private func establishP2PConnection(with qrData: DynamicQRCodeData) async throws -> RemoteConnection {
         logger.info("建立 P2P 连接（二维码模式）")
-        
+
  // 1. 创建 NWConnection（QUIC over UDP for P2P）
         let parameters = NWParameters.quic(alpn: ["skybridge-p2p"])
-        
+
  // 2. ICE 候选协商
         let iceCandidate = try await negotiateICE(
             sessionID: qrData.sessionID,
-            remotePublicKey: qrData.publicKey
+            remotePublicKey: qrData.protocolPublicKeyBytes
         )
-        
+
  // 3. 建立连接
         let endpoint = NWEndpoint.hostPort(
             host: NWEndpoint.Host(iceCandidate.host),
             port: NWEndpoint.Port(integerLiteral: iceCandidate.port)
         )
-        
+
         let connection = NWConnection(to: endpoint, using: parameters)
-        connection.start(queue: .global(qos: .userInitiated))
-        
+        connection.start(queue: DispatchQueue.global(qos: .userInitiated))
+
  // 4. 等待连接就绪
-        try await waitForConnection(connection)
-        
+        try await CrossNetworkConnectionRuntimeSupport.waitForConnection(connection)
+
         return RemoteConnection(
             id: qrData.sessionID,
             deviceName: qrData.deviceName,
-            connection: connection,
-            encryptionKey: try Self.deriveSharedSecret(
-                localPrivateKey: Curve25519.KeyAgreement.PrivateKey(), // 简化示例，真实实现应与会话密钥匹配
-                remotePublicKey: qrData.publicKey
+            transport: .nw(connection)
+        )
+    }
+
+    // MARK: - WebRTC Connection
+
+    private func establishWebRTCConnection(
+        with qrData: DynamicQRCodeData,
+        admissionWitness: WebRTCSessionStartGate.AdmissionWitness
+    ) async throws -> RemoteConnection {
+        try await establishWebRTCConnection(
+            sessionID: qrData.sessionID,
+            remoteDeviceID: qrData.deviceID,
+            remoteDeviceName: qrData.deviceName,
+            admissionWitness: admissionWitness
+        )
+    }
+
+    private func signalingWebSocketURL(shardKey: String? = nil) throws -> URL {
+        guard let shardKey = shardKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !shardKey.isEmpty else {
+            throw WebSocketSignalingClient.SignalingError.invalidSignalingEndpoint("missing current-path session id")
+        }
+        guard let sessionToken = webrtcSignalingAuthTokenBySessionId[shardKey]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !sessionToken.isEmpty else {
+            throw WebSocketSignalingClient.SignalingError.invalidSignalingEndpoint("missing current-path session token")
+        }
+        let clientVersion = ProcessInfo.processInfo.environment["SKYBRIDGE_CLIENT_VERSION"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedClientVersion = (clientVersion?.isEmpty == false)
+            ? clientVersion!
+            : (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0")
+        let protocolVersion = ProcessInfo.processInfo.environment["SKYBRIDGE_PROTOCOL_VERSION"] ?? "1"
+
+        guard let origin = currentPathSignalingOriginBySessionId[shardKey]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !origin.isEmpty else {
+            throw WebSocketSignalingClient.SignalingError.invalidSignalingEndpoint("missing current-path signaling origin")
+        }
+        do {
+            _ = try Self.validatedSignalingWebSocketPath(currentPathSignalingWebSocketPathBySessionId[shardKey])
+        } catch {
+            throw WebSocketSignalingClient.SignalingError.invalidSignalingEndpoint(error.localizedDescription)
+        }
+        guard let url = CurrentPathSignalingWebSocketPolicy.webSocketURL(
+            signalingServerOrigin: origin,
+            wsPath: currentPathSignalingWebSocketPathBySessionId[shardKey],
+            sessionID: shardKey,
+            sessionToken: sessionToken,
+            clientVersion: resolvedClientVersion,
+            protocolVersion: protocolVersion,
+            credentialTransport: .headers
+        ) else {
+            throw WebSocketSignalingClient.SignalingError.invalidSignalingEndpoint("invalid current-path signaling origin")
+        }
+        return url
+    }
+
+    private func signalingWebSocketHeaders(shardKey: String) throws -> [String: String] {
+        guard let sessionToken = webrtcSignalingAuthTokenBySessionId[shardKey]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !sessionToken.isEmpty else {
+            throw WebSocketSignalingClient.SignalingError.invalidSignalingEndpoint("missing current-path session token")
+        }
+        let clientVersion = ProcessInfo.processInfo.environment["SKYBRIDGE_CLIENT_VERSION"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedClientVersion = (clientVersion?.isEmpty == false)
+            ? clientVersion!
+            : (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0")
+        let protocolVersion = ProcessInfo.processInfo.environment["SKYBRIDGE_PROTOCOL_VERSION"] ?? "1"
+        guard let headers = CurrentPathSignalingWebSocketPolicy.webSocketHeaders(
+            sessionID: shardKey,
+            sessionToken: sessionToken,
+            clientVersion: resolvedClientVersion,
+            protocolVersion: protocolVersion,
+            credentialTransport: .headers
+        ) else {
+            throw WebSocketSignalingClient.SignalingError.invalidSignalingEndpoint("invalid current-path signaling headers")
+        }
+        return headers
+    }
+
+    private func ensureSignalingConnected(shardKey: String) async throws {
+        let sessionID = shardKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !sessionID.isEmpty else {
+            throw WebSocketSignalingClient.SignalingError.invalidSignalingEndpoint("missing current-path session id")
+        }
+        guard let setupOwner = signalingLifecycle.beginSetup(for: sessionID) else {
+            throw CancellationError()
+        }
+        defer {
+            signalingLifecycle.finishSetup(setupOwner)
+        }
+
+        if let client = signalingClient, signalingShardKey != sessionID {
+            signalingClient = nil
+            signalingShardKey = nil
+            resetSignalingState()
+            await client.close()
+            guard signalingLifecycle.isCurrentSetup(setupOwner) else {
+                throw CancellationError()
+            }
+        }
+
+        if let client = signalingClient {
+            do {
+                try await client.connectOrThrow()
+            } catch {
+                guard signalingLifecycle.isCurrentSetup(setupOwner),
+                      signalingClient === client,
+                      signalingShardKey == sessionID else {
+                    await client.close()
+                    throw CancellationError()
+                }
+                throw error
+            }
+            try await requireCurrentSignalingClient(
+                client,
+                setupOwner: setupOwner
+            )
+            return
+        }
+        let url = try signalingWebSocketURL(shardKey: sessionID)
+        let headers = try signalingWebSocketHeaders(shardKey: sessionID)
+        let generation = nextSignalingGeneration(for: sessionID)
+        let client = WebSocketSignalingClient(
+            url: url,
+            sessionId: sessionID,
+            generation: generation,
+            additionalHeaders: headers
+        )
+        await client.setOnEnvelope { [weak self, weak client] env in
+            guard let client else { return }
+            await self?.handleSignalingEnvelope(env, sourceClient: client)
+        }
+        try await requireCurrentPendingSignalingSetup(
+            client,
+            setupOwner: setupOwner
+        )
+        await client.setOnServerFrame { [weak self, weak client] frame in
+            Task { @MainActor in
+                guard let client else { return }
+                self?.handleSignalingServerFrame(frame, sourceClient: client)
+            }
+        }
+        try await requireCurrentPendingSignalingSetup(
+            client,
+            setupOwner: setupOwner
+        )
+        await client.setOnLifecycleEvent { [weak self, weak client] event in
+            Task { @MainActor in
+                guard let client else { return }
+                self?.handleSignalingLifecycleEvent(event, sourceClient: client)
+            }
+        }
+        try await requireCurrentPendingSignalingSetup(
+            client,
+            setupOwner: setupOwner
+        )
+
+        guard signalingClient == nil,
+              signalingLifecycle.isCurrentSetup(setupOwner) else {
+            await client.close()
+            throw CancellationError()
+        }
+        signalingClient = client
+        signalingShardKey = sessionID
+        resetSignalingState()
+        do {
+            try await client.connectOrThrow()
+        } catch {
+            guard signalingLifecycle.isCurrentSetup(setupOwner),
+                  signalingClient === client,
+                  signalingShardKey == sessionID else {
+                await client.close()
+                throw CancellationError()
+            }
+            throw error
+        }
+        try await requireCurrentSignalingClient(
+            client,
+            setupOwner: setupOwner
+        )
+    }
+
+    private func requireCurrentPendingSignalingSetup(
+        _ client: WebSocketSignalingClient,
+        setupOwner: CrossNetworkSignalingLifecycleCoordinator.SetupOwner
+    ) async throws {
+        guard signalingLifecycle.isCurrentSetup(setupOwner),
+              signalingClient == nil else {
+            await client.close()
+            throw CancellationError()
+        }
+    }
+
+    private func requireCurrentSignalingClient(
+        _ client: WebSocketSignalingClient,
+        setupOwner: CrossNetworkSignalingLifecycleCoordinator.SetupOwner
+    ) async throws {
+        guard signalingLifecycle.isCurrentSetup(setupOwner),
+              signalingClient === client,
+              signalingShardKey == setupOwner.sessionID else {
+            await client.close()
+            throw CancellationError()
+        }
+    }
+
+    private func captureWebRTCSessionStartAdmission() throws
+        -> WebRTCSessionStartGate.AdmissionWitness {
+        guard let witness = webRTCSessionStartGate.captureAdmissionWitness() else {
+            throw CancellationError()
+        }
+        return witness
+    }
+
+    private func requireCurrentWebRTCSessionStartAdmission(
+        _ witness: WebRTCSessionStartGate.AdmissionWitness
+    ) throws {
+        guard webRTCSessionStartGate.isCurrent(witness) else {
+            throw CancellationError()
+        }
+    }
+
+    @discardableResult
+    private func startWebRTCOfferSession(
+        sessionID: String,
+        admissionWitness: WebRTCSessionStartGate.AdmissionWitness
+    ) -> Bool {
+        guard webRTCSessionStartGate.isCurrent(admissionWitness) else {
+            return false
+        }
+        guard webrtcSignalingAuthTokenBySessionId[sessionID]?.isEmpty == false else {
+            logger.error("❌ startWebRTCOfferSession 缺少 signaling token: session=\(sessionID, privacy: .public)")
+            cleanupWebRTCSession(sessionID, reason: "offerer_missing_signaling_token")
+            connectionStatus = .failed("Missing signaling token")
+            readiness = .idle
+            return false
+        }
+        if webrtcSessionsBySessionId[sessionID] != nil, !canReuseWebRTCSession(sessionID) {
+            cleanupWebRTCSession(sessionID, reason: "replace_stale_offerer_session")
+        }
+        guard webrtcSessionsBySessionId[sessionID] == nil else { return true }
+        guard let offerStartToken = webRTCSessionStartGate.begin(
+            sessionID: sessionID,
+            admissionWitness: admissionWitness
+        ) else {
+            return webRTCSessionStartGate.isCurrent(admissionWitness)
+                && webRTCSessionStartGate.hasPendingStart(sessionID: sessionID)
+        }
+
+        // 异步获取动态 TURN 凭据
+        Task { @MainActor in
+            await self.startWebRTCOfferSessionWithDynamicCredentials(
+                sessionID: sessionID,
+                offerStartToken: offerStartToken
+            )
+        }
+        return true
+    }
+
+    private func startWebRTCOfferSessionWithDynamicCredentials(
+        sessionID: String,
+        offerStartToken: UUID
+    ) async {
+        defer {
+            webRTCSessionStartGate.finish(offerStartToken, sessionID: sessionID)
+        }
+        guard webRTCSessionStartGate.isCurrent(offerStartToken, sessionID: sessionID),
+              webrtcSessionsBySessionId[sessionID] == nil else { return }
+        let snapshotMetadata = prepareSessionSnapshotMetadata(
+            sessionID: sessionID,
+            source: .qr,
+            deviceId: currentPathExpectedRemoteAuthorityBySessionId[sessionID]?.deviceId,
+            deviceName: currentPathExpectedRemoteAuthorityBySessionId[sessionID]?.deviceName
+        )
+        do {
+            try await ensureSignalingConnected(shardKey: sessionID)
+        } catch {
+            guard webRTCSessionStartGate.isCurrent(
+                offerStartToken,
+                sessionID: sessionID
+            ) else {
+                return
+            }
+            logger.error("❌ offerer signaling setup failed: \(error.localizedDescription, privacy: .public)")
+            cleanupWebRTCSession(
+                sessionID,
+                reason: "offerer_signaling_setup_failed",
+                disconnectKind: .explicit,
+                snapshotToken: snapshotMetadata.snapshotToken
+            )
+            connectionStatus = .failed(error.localizedDescription)
+            readiness = .idle
+            return
+        }
+        guard webRTCSessionStartGate.isCurrent(offerStartToken, sessionID: sessionID),
+              webrtcSessionsBySessionId[sessionID] == nil else { return }
+        let localBinding: ProtocolIdentityBinding
+        do {
+            localBinding = try requiredCurrentPathLocalIdentity(for: sessionID).binding
+        } catch {
+            logger.error("❌ failed to resolve local current-path identity: \(error.localizedDescription, privacy: .public)")
+            cleanupWebRTCSession(
+                sessionID,
+                reason: "offerer_identity_setup_failed",
+                disconnectKind: .explicit,
+                snapshotToken: snapshotMetadata.snapshotToken
+            )
+            connectionStatus = .failed(error.localizedDescription)
+            readiness = .idle
+            return
+        }
+        let localDeviceId = localBinding.deviceId
+
+        let ice: SkyBridgeICEConfiguration
+        do {
+            ice = try await SkyBridgeServerConfig.dynamicICEConfig(
+                sessionID: sessionID,
+                turnAdmissionLease: webrtcTurnAdmissionLeaseBySessionId[sessionID]
+            )
+        } catch {
+            guard webRTCSessionStartGate.isCurrent(
+                offerStartToken,
+                sessionID: sessionID
+            ) else {
+                return
+            }
+            logger.error("dynamic TURN credential acquisition failed: \(error.localizedDescription, privacy: .public)")
+            cleanupWebRTCSession(
+                sessionID,
+                reason: "offerer_turn_setup_failed",
+                disconnectKind: .explicit,
+                snapshotToken: snapshotMetadata.snapshotToken
+            )
+            connectionStatus = .failed(error.localizedDescription)
+            readiness = .idle
+            return
+        }
+        guard webRTCSessionStartGate.isCurrent(offerStartToken, sessionID: sessionID),
+              webrtcSessionsBySessionId[sessionID] == nil else { return }
+        logICEPlan(ice, context: "连接码发起方")
+        if Self.isSmokeRuntimeEnabled {
+            let relayOnly = Self.shouldForceRelayOnlyForSmoke
+            appendSmokeStatus(
+                "webrtc-config session=\(sessionID) role=offerer relayOnly=\(relayOnly) turn=\(ice.hasUsableTURNCredentials) turnUrls=\(ice.turnURLs.count)"
+            )
+        }
+
+        let signalingAuthToken = webrtcSignalingAuthTokenBySessionId[sessionID]
+        let session = WebRTCSession(sessionId: sessionID, localDeviceId: localDeviceId, role: .offerer, ice: ice)
+        session.onTrace = { [weak self] line in
+            guard let self else { return }
+            Task { @MainActor in
+                self.appendWebRTCSessionDiagnostic(line, sessionID: sessionID)
+            }
+        }
+        session.onLocalOffer = { [weak self] sdp in
+            guard let self else { return }
+            Task { @MainActor in
+                guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
+                self.webrtcLatestOfferBySessionId[sessionID] = sdp
+                await self.sendSignal(.init(
+                    sessionId: sessionID,
+                    from: localDeviceId,
+                    type: .offer,
+                    payload: .init(sdp: sdp),
+                    authToken: signalingAuthToken
+                ), ownerSession: session, retries: 2)
+            }
+        }
+        session.onLocalICECandidate = { [weak self] payload in
+            guard let self else { return }
+            Task { @MainActor in
+                guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
+                self.cacheLocalICECandidate(payload, for: sessionID)
+                guard self.webrtcRemoteIdBySessionId[sessionID] != nil else {
+                    self.logger.debug("ℹ️ defer local ICE until remote peer is known: session=\(sessionID, privacy: .public)")
+                    return
+                }
+                await self.sendSignal(.init(
+                    sessionId: sessionID,
+                    from: localDeviceId,
+                    type: .iceCandidate,
+                    payload: payload,
+                    authToken: signalingAuthToken
+                ), ownerSession: session)
+            }
+        }
+        session.onDisconnected = { [weak self] reason in
+            guard let self else { return }
+            Task { @MainActor in
+                guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
+                self.cleanupWebRTCSession(
+                    sessionID,
+                    reason: "transport_disconnected:\(reason)",
+                    disconnectKind: .transient,
+                    snapshotToken: snapshotMetadata.snapshotToken
+                )
+                self.connectionStatus = .failed("WebRTC transport disconnected: \(reason)")
+                self.readiness = .idle
+            }
+        }
+        session.onReady = { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
+                self.logger.info("✅ WebRTC offerer ready: session=\(sessionID, privacy: .public)")
+                self.stopWebRTCConnectionTimeoutWatchdog(for: sessionID)
+                self.currentConnection = RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(session))
+                self.connectionStatus = .connecting
+                self.readiness = .transportReady(sessionId: sessionID)
+                self.startWebRTCLivenessWatchdogIfNeeded(for: sessionID, session: session)
+                self.activatePreparedSessionSnapshot(sessionID: sessionID, phase: .transportReady)
+
+                // 启动“握手/控制通道”消费者：把 DataChannel 当作一条 length-framed byte stream，复用现有 HandshakeDriver / AppMessage 逻辑。
+                self.startWebRTCInboundHandshakeAndControlLoop(sessionID: sessionID, session: session, endpointDescription: "webrtc:\(sessionID)")
+            }
+        }
+
+        guard webRTCSessionStartGate.isCurrent(offerStartToken, sessionID: sessionID),
+              webrtcSessionsBySessionId[sessionID] == nil else { return }
+        beginWebRTCTerminalNotificationTracking(sessionID: sessionID)
+        webrtcSessionsBySessionId[sessionID] = session
+        beginRouteAttribution(sessionID: sessionID)
+        do {
+            try await adoptPendingWebRTCJoinBootstrapIfPresent(
+                sessionID: sessionID,
+                session: session
+            )
+            guard webRTCSessionStartGate.isCurrent(offerStartToken, sessionID: sessionID),
+                  webrtcSessionsBySessionId[sessionID] === session else {
+                throw CancellationError()
+            }
+            startWebRTCConnectionTimeoutWatchdog(
+                for: sessionID,
+                session: session,
+                source: "connection-code-offerer",
+                snapshotToken: snapshotMetadata.snapshotToken
+            )
+            try await session.startAsync()
+            try Task.checkCancellation()
+            guard webRTCSessionStartGate.isCurrent(offerStartToken, sessionID: sessionID),
+                  webrtcSessionsBySessionId[sessionID] === session else {
+                throw CancellationError()
+            }
+            await drainPendingPreSessionSignalingEnvelopes(
+                sessionID: sessionID,
+                session: session
+            )
+            guard webRTCSessionStartGate.isCurrent(offerStartToken, sessionID: sessionID),
+                  webrtcSessionsBySessionId[sessionID] === session else {
+                throw CancellationError()
+            }
+            let joinOutcome = try await sendWebRTCJoinSignal(session: session, retries: 2)
+            if joinOutcome == .supersededByHandshakeCompletion {
+                appendWebRTCSessionDiagnostic(
+                    "offerer-setup-superseded session=\(sessionID) reason=handshake-complete",
+                    sessionID: sessionID
+                )
+            }
+            guard webRTCSessionStartGate.isCurrent(offerStartToken, sessionID: sessionID),
+                  webrtcSessionsBySessionId[sessionID] === session else {
+                throw CancellationError()
+            }
+            startJoinHeartbeat(for: sessionID, attempts: Self.webRTCStartupJoinHeartbeatAttempts)
+            startOfferResendLoop(for: sessionID)
+        } catch {
+            logger.error("❌ startWebRTCOfferSession failed: \(error.localizedDescription, privacy: .public)")
+            if Self.webRTCSetupFailureDisposition(
+                exactSessionIsCurrent: webrtcSessionsBySessionId[sessionID] === session,
+                isHandshakeComplete: isHandshakeComplete(for: sessionID)
+            ) == .preserveCompletedSession {
+                appendWebRTCSessionDiagnostic(
+                    "offerer-setup-failure-superseded session=\(sessionID) reason=handshake-complete",
+                    sessionID: sessionID
+                )
+                return
+            }
+            if webrtcSessionsBySessionId[sessionID] === session {
+                let shouldCommitGlobalFailure = isCurrentGlobalWebRTCSetup(
+                    sessionID: sessionID,
+                    session: session
+                )
+                cleanupWebRTCSession(
+                    sessionID,
+                    reason: "offerer_start_failed",
+                    disconnectKind: .explicit,
+                    snapshotToken: snapshotMetadata.snapshotToken
+                )
+                if shouldCommitGlobalFailure {
+                    connectionStatus = .failed(error.localizedDescription)
+                    readiness = .idle
+                }
+            }
+        }
+    }
+
+    private func establishWebRTCConnection(
+        sessionID: String,
+        remoteDeviceID: String,
+        remoteDeviceName: String,
+        admissionWitness: WebRTCSessionStartGate.AdmissionWitness
+    ) async throws -> RemoteConnection {
+        try requireCurrentWebRTCSessionStartAdmission(admissionWitness)
+        guard webrtcSignalingAuthTokenBySessionId[sessionID]?.isEmpty == false else {
+            throw CrossNetworkConnectionError.missingSignalingToken
+        }
+        if webrtcSessionsBySessionId[sessionID] != nil, !canReuseWebRTCSession(sessionID) {
+            cleanupWebRTCSession(sessionID, reason: "replace_stale_qr_answerer_session")
+        }
+        guard let sessionStartToken = webRTCSessionStartGate.begin(
+            sessionID: sessionID,
+            admissionWitness: admissionWitness
+        ) else {
+            throw CancellationError()
+        }
+        var sessionForRollback: WebRTCSession?
+        var snapshotTokenForRollback: UUID?
+
+        do {
+        try await ensureSignalingConnected(shardKey: sessionID)
+        guard webRTCSessionStartGate.isCurrent(sessionStartToken, sessionID: sessionID) else {
+            throw CancellationError()
+        }
+
+        let snapshotMetadata = prepareSessionSnapshotMetadata(
+            sessionID: sessionID,
+            source: .qr,
+            deviceId: remoteDeviceID,
+            deviceName: remoteDeviceName
+        )
+        snapshotTokenForRollback = snapshotMetadata.snapshotToken
+        activatePreparedSessionSnapshot(sessionID: sessionID, phase: .connecting)
+
+        // 动态获取 TURN 凭据（带缓存和回退）
+        let ice = try await SkyBridgeServerConfig.dynamicICEConfig(
+            sessionID: sessionID,
+            turnAdmissionLease: webrtcTurnAdmissionLeaseBySessionId[sessionID]
+        )
+        guard webRTCSessionStartGate.isCurrent(sessionStartToken, sessionID: sessionID) else {
+            throw CancellationError()
+        }
+        logICEPlan(ice, context: "二维码应答方")
+        if Self.isSmokeRuntimeEnabled {
+            let relayOnly = Self.shouldForceRelayOnlyForSmoke
+            appendSmokeStatus(
+                "webrtc-config session=\(sessionID) role=answerer relayOnly=\(relayOnly) turn=\(ice.hasUsableTURNCredentials) turnUrls=\(ice.turnURLs.count)"
+            )
+        }
+
+        let localBinding = try requiredCurrentPathLocalIdentity(for: sessionID).binding
+        let localDeviceId = localBinding.deviceId
+        let signalingAuthToken = webrtcSignalingAuthTokenBySessionId[sessionID]
+        let session = WebRTCSession(sessionId: sessionID, localDeviceId: localDeviceId, role: .answerer, ice: ice)
+        sessionForRollback = session
+        session.onTrace = { [weak self] line in
+            guard let self else { return }
+            Task { @MainActor in
+                self.appendWebRTCSessionDiagnostic(line, sessionID: sessionID)
+            }
+        }
+
+        session.onLocalAnswer = { [weak self] sdp in
+            guard let self else { return }
+            Task { @MainActor in
+                guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
+                self.webrtcLatestAnswerBySessionId[sessionID] = sdp
+                await self.sendSignal(.init(
+                    sessionId: sessionID,
+                    from: localDeviceId,
+                    type: .answer,
+                    payload: .init(sdp: sdp),
+                    authToken: signalingAuthToken
+                ), ownerSession: session)
+            }
+        }
+        session.onLocalICECandidate = { [weak self] payload in
+            guard let self else { return }
+            Task { @MainActor in
+                guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
+                self.cacheLocalICECandidate(payload, for: sessionID)
+                guard self.webrtcRemoteIdBySessionId[sessionID] != nil else {
+                    self.logger.debug("ℹ️ defer local ICE until remote peer is known: session=\(sessionID, privacy: .public)")
+                    return
+                }
+                await self.sendSignal(.init(
+                    sessionId: sessionID,
+                    from: localDeviceId,
+                    type: .iceCandidate,
+                    payload: payload,
+                    authToken: signalingAuthToken
+                ), ownerSession: session)
+            }
+        }
+        session.onDisconnected = { [weak self] reason in
+            guard let self else { return }
+            Task { @MainActor in
+                guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
+                self.cleanupWebRTCSession(
+                    sessionID,
+                    reason: "transport_disconnected:\(reason)",
+                    disconnectKind: .transient,
+                    snapshotToken: snapshotMetadata.snapshotToken
+                )
+                self.connectionStatus = .failed("WebRTC transport disconnected: \(reason)")
+                self.readiness = .idle
+            }
+        }
+        session.onReady = { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
+                self.logger.info("✅ WebRTC QR answerer ready: session=\(sessionID, privacy: .public)")
+                self.stopWebRTCConnectionTimeoutWatchdog(for: sessionID)
+                self.currentConnection = RemoteConnection(id: sessionID, deviceName: remoteDeviceName, transport: .webrtc(session))
+                self.connectionStatus = .connecting
+                self.readiness = .transportReady(sessionId: sessionID)
+                self.startWebRTCLivenessWatchdogIfNeeded(for: sessionID, session: session)
+                self.updatePreparedSessionSnapshot(
+                    sessionID: sessionID,
+                    phase: .transportReady,
+                    deviceId: remoteDeviceID,
+                    deviceName: remoteDeviceName,
+                    snapshotToken: snapshotMetadata.snapshotToken
+                )
+                self.startWebRTCInboundHandshakeAndControlLoop(sessionID: sessionID, session: session, endpointDescription: "webrtc:\(sessionID)")
+            }
+        }
+
+        guard webRTCSessionStartGate.isCurrent(sessionStartToken, sessionID: sessionID),
+              webrtcSessionsBySessionId[sessionID] == nil else {
+            session.close()
+            throw CancellationError()
+        }
+        beginWebRTCTerminalNotificationTracking(sessionID: sessionID)
+        webrtcSessionsBySessionId[sessionID] = session
+        beginRouteAttribution(sessionID: sessionID)
+        try await adoptPendingWebRTCJoinBootstrapIfPresent(sessionID: sessionID, session: session)
+        guard webRTCSessionStartGate.isCurrent(sessionStartToken, sessionID: sessionID),
+              webrtcSessionsBySessionId[sessionID] === session else {
+            throw CancellationError()
+        }
+
+        startWebRTCConnectionTimeoutWatchdog(
+            for: sessionID,
+            session: session,
+            source: "qr-answerer",
+            snapshotToken: snapshotMetadata.snapshotToken
+        )
+        try await session.startAsync()
+        try Task.checkCancellation()
+        guard webRTCSessionStartGate.isCurrent(sessionStartToken, sessionID: sessionID),
+              webrtcSessionsBySessionId[sessionID] === session else {
+            throw CancellationError()
+        }
+        await drainPendingPreSessionSignalingEnvelopes(
+            sessionID: sessionID,
+            session: session
+        )
+        guard webRTCSessionStartGate.isCurrent(sessionStartToken, sessionID: sessionID),
+              webrtcSessionsBySessionId[sessionID] === session else {
+            throw CancellationError()
+        }
+
+        // 主动发送 join，帮助服务端/对端建立“同会话订阅”的心智模型（服务端可忽略）
+        let joinOutcome = try await sendWebRTCJoinSignal(session: session, retries: 2)
+        if joinOutcome == .supersededByHandshakeCompletion {
+            appendWebRTCSessionDiagnostic(
+                "qr-answerer-setup-superseded session=\(sessionID) reason=handshake-complete",
+                sessionID: sessionID
+            )
+        }
+        guard webRTCSessionStartGate.isCurrent(sessionStartToken, sessionID: sessionID),
+              webrtcSessionsBySessionId[sessionID] === session else {
+            throw CancellationError()
+        }
+        guard webrtcSessionsBySessionId[sessionID] === session,
+              webRTCSessionStartGate.finish(sessionStartToken, sessionID: sessionID) else {
+            session.close()
+            throw CancellationError()
+        }
+        startJoinHeartbeat(for: sessionID, attempts: Self.webRTCStartupJoinHeartbeatAttempts)
+
+        return RemoteConnection(id: sessionID, deviceName: remoteDeviceName, transport: .webrtc(session))
+        } catch {
+            if let sessionForRollback,
+               Self.webRTCSetupFailureDisposition(
+                    exactSessionIsCurrent: webrtcSessionsBySessionId[sessionID] === sessionForRollback,
+                    isHandshakeComplete: isHandshakeComplete(for: sessionID)
+               ) == .preserveCompletedSession {
+                _ = webRTCSessionStartGate.finish(
+                    sessionStartToken,
+                    sessionID: sessionID
+                )
+                appendWebRTCSessionDiagnostic(
+                    "qr-answerer-setup-failure-superseded session=\(sessionID) reason=handshake-complete",
+                    sessionID: sessionID
+                )
+                return RemoteConnection(
+                    id: sessionID,
+                    deviceName: remoteDeviceName,
+                    transport: .webrtc(sessionForRollback)
+                )
+            }
+            guard webRTCSessionStartGate.isCurrent(admissionWitness),
+                  webRTCSessionStartGate.finish(sessionStartToken, sessionID: sessionID) else {
+                sessionForRollback?.close()
+                throw CancellationError()
+            }
+
+            if let installedSession = webrtcSessionsBySessionId[sessionID] {
+                guard let sessionForRollback, installedSession === sessionForRollback else {
+                    sessionForRollback?.close()
+                    throw CancellationError()
+                }
+            } else {
+                sessionForRollback?.close()
+            }
+
+            let shouldCommitGlobalFailure = isCurrentGlobalWebRTCSetup(
+                sessionID: sessionID,
+                session: sessionForRollback
+            )
+
+            cleanupWebRTCSession(
+                sessionID,
+                reason: error is CancellationError
+                    ? "qr_answerer_setup_cancelled"
+                    : "qr_answerer_setup_failed",
+                disconnectKind: .explicit,
+                snapshotToken: snapshotTokenForRollback
+            )
+            if error is CancellationError {
+                throw CancellationError()
+            }
+            if shouldCommitGlobalFailure {
+                connectionStatus = .failed(error.localizedDescription)
+                readiness = .idle
+            }
+            throw error
+        }
+    }
+
+    private func authenticatedEnvelope(_ env: WebRTCSignalingEnvelope) -> WebRTCSignalingEnvelope? {
+        let authToken = env.authToken?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? webrtcSignalingAuthTokenBySessionId[env.sessionId]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let authToken, !authToken.isEmpty else {
+            logger.error("❌ missing signaling auth token for session=\(env.sessionId, privacy: .public) type=\(env.type.rawValue, privacy: .public)")
+            return nil
+        }
+        return WebRTCSignalingEnvelope(
+            sessionId: env.sessionId,
+            from: env.from,
+            to: env.to,
+            type: env.type,
+            payload: env.payload,
+            authToken: authToken,
+            sentAt: env.sentAt
+        )
+    }
+
+    private enum RequiredSetupSignalOutcome: Equatable {
+        case sent
+        case supersededByHandshakeCompletion
+    }
+
+    private func sendRequiredSetupSignal(
+        _ env: WebRTCSignalingEnvelope,
+        ownerSession: WebRTCSession,
+        retries: Int
+    ) async throws -> RequiredSetupSignalOutcome {
+        try requireCurrentWebRTCSession(ownerSession, sessionID: env.sessionId)
+        guard let authorizedEnvelope = authenticatedEnvelope(env) else {
+            throw CrossNetworkConnectionError.missingSignalingToken
+        }
+        var attemptsLeft = max(0, retries)
+        while true {
+            do {
+                try Task.checkCancellation()
+                try requireCurrentWebRTCSession(
+                    ownerSession,
+                    sessionID: authorizedEnvelope.sessionId
+                )
+                try shouldAllowSignalingOperation(for: authorizedEnvelope.sessionId)
+                let client = try await connectedSignalingClient(
+                    for: authorizedEnvelope.sessionId
+                )
+                try requireCurrentWebRTCSession(
+                    ownerSession,
+                    sessionID: authorizedEnvelope.sessionId
+                )
+                try await client.send(authorizedEnvelope)
+                try requireCurrentSignalingClient(
+                    client,
+                    sessionID: authorizedEnvelope.sessionId
+                )
+                try requireCurrentWebRTCSession(
+                    ownerSession,
+                    sessionID: authorizedEnvelope.sessionId
+                )
+                if isCurrentGlobalWebRTCSession(ownerSession) {
+                    signalingHealth = .healthy
+                }
+                appendSmokeStatus(
+                    "signal-required-send session=\(authorizedEnvelope.sessionId) type=\(authorizedEnvelope.type.rawValue)"
+                )
+                return .sent
+            } catch {
+                if Task.isCancelled {
+                    throw CancellationError()
+                }
+                try requireCurrentWebRTCSession(
+                    ownerSession,
+                    sessionID: authorizedEnvelope.sessionId
+                )
+                if shouldDeferCurrentSignalingSend(
+                    sessionID: authorizedEnvelope.sessionId,
+                    messageType: authorizedEnvelope.type
+                ) {
+                    if isCurrentGlobalWebRTCSession(ownerSession) {
+                        noteDetachedSignalingAfterTransportEstablished(
+                            for: authorizedEnvelope.sessionId,
+                            source: "required_setup_superseded",
+                            failure: "handshake_complete"
+                        )
+                    }
+                    return .supersededByHandshakeCompletion
+                }
+                guard attemptsLeft > 0 else { throw error }
+                attemptsLeft -= 1
+                try await Task.sleep(for: .milliseconds(350))
+                try requireCurrentWebRTCSession(
+                    ownerSession,
+                    sessionID: authorizedEnvelope.sessionId
+                )
+                if shouldDeferCurrentSignalingSend(
+                    sessionID: authorizedEnvelope.sessionId,
+                    messageType: authorizedEnvelope.type
+                ) {
+                    return .supersededByHandshakeCompletion
+                }
+            }
+        }
+    }
+
+    private func connectedSignalingClient(
+        for sessionID: String
+    ) async throws -> WebSocketSignalingClient {
+        if signalingClient == nil || signalingShardKey != sessionID {
+            try await ensureSignalingConnected(shardKey: sessionID)
+        }
+        guard let client = signalingClient, signalingShardKey == sessionID else {
+            throw WebSocketSignalingClient.SignalingError.notConnected
+        }
+        try await client.connectOrThrow()
+        try requireCurrentSignalingClient(client, sessionID: sessionID)
+        return client
+    }
+
+    private func requireCurrentSignalingClient(
+        _ client: WebSocketSignalingClient,
+        sessionID: String
+    ) throws {
+        guard signalingClient === client, signalingShardKey == sessionID else {
+            throw CancellationError()
+        }
+    }
+
+    private func requireCurrentWebRTCSession(
+        _ session: WebRTCSession,
+        sessionID: String
+    ) throws {
+        guard session.sessionId == sessionID,
+              webrtcSessionsBySessionId[sessionID] === session else {
+            throw CancellationError()
+        }
+    }
+
+    private func isCurrentGlobalWebRTCSession(_ session: WebRTCSession) -> Bool {
+        if let currentConnection {
+            guard case .webrtc(let currentSession) = currentConnection.transport else {
+                return false
+            }
+            return currentSession === session
+        }
+        return webrtcSessionsBySessionId.count == 1
+            && webrtcSessionsBySessionId[session.sessionId] === session
+    }
+
+    private func isCurrentGlobalWebRTCSetup(
+        sessionID: String,
+        session: WebRTCSession?
+    ) -> Bool {
+        if let session {
+            return session.sessionId == sessionID
+                && isCurrentGlobalWebRTCSession(session)
+        }
+        guard currentConnection == nil, webrtcSessionsBySessionId.isEmpty else {
+            return false
+        }
+        if let activeSessionSnapshot {
+            return activeSessionSnapshot.sessionId == sessionID
+        }
+        return false
+    }
+
+    private func shouldDeferCurrentSignalingSend(
+        sessionID: String,
+        messageType: WebRTCSignalingEnvelope.MessageType
+    ) -> Bool {
+        Self.shouldDeferSignalingSendRecovery(
+            isHandshakeComplete: isHandshakeComplete(for: sessionID),
+            messageType: messageType
+        )
+    }
+
+    private func sendSignal(
+        _ env: WebRTCSignalingEnvelope,
+        ownerSession: WebRTCSession,
+        retries: Int = 2
+    ) async {
+        guard ownerSession.sessionId == env.sessionId,
+              webrtcSessionsBySessionId[env.sessionId] === ownerSession else {
+            return
+        }
+        let directedEnvelope: WebRTCSignalingEnvelope = {
+            guard env.to == nil,
+                  let remoteId = webrtcRemoteIdBySessionId[env.sessionId]?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !remoteId.isEmpty,
+                  remoteId != env.from else {
+                return env
+            }
+            return WebRTCSignalingEnvelope(
+                sessionId: env.sessionId,
+                from: env.from,
+                to: remoteId,
+                type: env.type,
+                payload: env.payload,
+                authToken: env.authToken,
+                sentAt: env.sentAt
+            )
+        }()
+
+        let shouldDeferRecoveryAtStart = shouldDeferCurrentSignalingSend(
+            sessionID: directedEnvelope.sessionId,
+            messageType: directedEnvelope.type
+        )
+        guard let authorizedEnvelope = authenticatedEnvelope(directedEnvelope) else {
+            if shouldDeferRecoveryAtStart {
+                if isCurrentGlobalWebRTCSession(ownerSession) {
+                    noteDetachedSignalingAfterTransportEstablished(
+                        for: directedEnvelope.sessionId,
+                        source: "missing_signaling_authorization",
+                        failure: "missing_auth"
+                    )
+                }
+                return
+            }
+            appendSmokeStatus(
+                "signal-send-skipped session=\(directedEnvelope.sessionId) type=\(directedEnvelope.type.rawValue) reason=missing_auth activeSession=\(webrtcSessionsBySessionId[directedEnvelope.sessionId] == nil ? 0 : 1)"
+            )
+            let shouldCommitGlobalFailure = isCurrentGlobalWebRTCSession(ownerSession)
+            if webrtcSessionsBySessionId[directedEnvelope.sessionId] === ownerSession {
+                cleanupWebRTCSession(
+                    directedEnvelope.sessionId,
+                    reason: "missing_signaling_authorization",
+                    disconnectKind: .explicit
+                )
+            }
+            if shouldCommitGlobalFailure {
+                connectionStatus = .failed("Missing signaling authorization")
+                readiness = .idle
+            }
+            return
+        }
+
+        if shouldDeferRecoveryAtStart {
+            guard let client = signalingClient,
+                  signalingShardKey == authorizedEnvelope.sessionId else {
+                if isCurrentGlobalWebRTCSession(ownerSession) {
+                    signalingHealth = .degradedRecoverable
+                }
+                logger.debug(
+                    "ℹ️ suppress detached post-transport signaling send: session=\(authorizedEnvelope.sessionId, privacy: .public) type=\(authorizedEnvelope.type.rawValue, privacy: .public) phase=missing_client"
+                )
+                return
+            }
+
+            let lifecyclePhase = await client.currentLifecyclePhase()
+            guard webrtcSessionsBySessionId[authorizedEnvelope.sessionId] === ownerSession,
+                  signalingClient === client,
+                  signalingShardKey == authorizedEnvelope.sessionId else {
+                return
+            }
+            guard lifecyclePhase == .bound else {
+                if isCurrentGlobalWebRTCSession(ownerSession) {
+                    signalingHealth = .degradedRecoverable
+                }
+                logger.debug(
+                    "ℹ️ suppress detached post-transport signaling send: session=\(authorizedEnvelope.sessionId, privacy: .public) type=\(authorizedEnvelope.type.rawValue, privacy: .public) phase=\(lifecyclePhase.rawValue, privacy: .public)"
+                )
+                return
+            }
+
+            do {
+                try await client.send(authorizedEnvelope)
+                try requireCurrentSignalingClient(
+                    client,
+                    sessionID: authorizedEnvelope.sessionId
+                )
+                try requireCurrentWebRTCSession(
+                    ownerSession,
+                    sessionID: authorizedEnvelope.sessionId
+                )
+                if isCurrentGlobalWebRTCSession(ownerSession) {
+                    signalingHealth = .healthy
+                }
+                appendSmokeStatus(
+                    "signal-send session=\(authorizedEnvelope.sessionId) type=\(authorizedEnvelope.type.rawValue)"
+                )
+            } catch {
+                guard webrtcSessionsBySessionId[authorizedEnvelope.sessionId] === ownerSession,
+                      signalingClient === client,
+                      signalingShardKey == authorizedEnvelope.sessionId else {
+                    return
+                }
+                if isCurrentGlobalWebRTCSession(ownerSession) {
+                    signalingHealth = .degradedRecoverable
+                }
+                logger.debug(
+                    "ℹ️ suppress detached post-transport signaling send: session=\(authorizedEnvelope.sessionId, privacy: .public) type=\(authorizedEnvelope.type.rawValue, privacy: .public) phase=\(lifecyclePhase.rawValue, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                )
+            }
+            return
+        }
+        var attemptsLeft = max(0, retries)
+        while true {
+            if shouldDeferCurrentSignalingSend(
+                sessionID: authorizedEnvelope.sessionId,
+                messageType: authorizedEnvelope.type
+            ) {
+                if isCurrentGlobalWebRTCSession(ownerSession) {
+                    noteDetachedSignalingAfterTransportEstablished(
+                        for: authorizedEnvelope.sessionId,
+                        source: "send_retry_superseded",
+                        failure: "handshake_complete"
+                    )
+                }
+                return
+            }
+            var attemptedClient: WebSocketSignalingClient?
+            do {
+                try Task.checkCancellation()
+                try requireCurrentWebRTCSession(
+                    ownerSession,
+                    sessionID: authorizedEnvelope.sessionId
+                )
+                try shouldAllowSignalingOperation(for: authorizedEnvelope.sessionId)
+                let client = try await connectedSignalingClient(
+                    for: authorizedEnvelope.sessionId
+                )
+                attemptedClient = client
+                try requireCurrentWebRTCSession(
+                    ownerSession,
+                    sessionID: authorizedEnvelope.sessionId
+                )
+                try await client.send(authorizedEnvelope)
+                try requireCurrentSignalingClient(
+                    client,
+                    sessionID: authorizedEnvelope.sessionId
+                )
+                try requireCurrentWebRTCSession(
+                    ownerSession,
+                    sessionID: authorizedEnvelope.sessionId
+                )
+                if isCurrentGlobalWebRTCSession(ownerSession) {
+                    signalingHealth = .healthy
+                }
+                appendSmokeStatus(
+                    "signal-send session=\(authorizedEnvelope.sessionId) type=\(authorizedEnvelope.type.rawValue)"
+                )
+                return
+            } catch {
+                if Task.isCancelled {
+                    return
+                }
+                guard webrtcSessionsBySessionId[authorizedEnvelope.sessionId] === ownerSession else {
+                    return
+                }
+                if shouldDeferCurrentSignalingSend(
+                    sessionID: authorizedEnvelope.sessionId,
+                    messageType: authorizedEnvelope.type
+                ) {
+                    if isCurrentGlobalWebRTCSession(ownerSession) {
+                        noteDetachedSignalingAfterTransportEstablished(
+                            for: authorizedEnvelope.sessionId,
+                            source: "send_failure_superseded",
+                            failure: "handshake_complete"
+                        )
+                    }
+                    return
+                }
+                if error is SignalingOperationRejection {
+                    do {
+                        try shouldAllowSignalingOperation(for: authorizedEnvelope.sessionId)
+                    } catch is SignalingOperationRejection {
+                        logger.error("❌ signaling operation rejected: session=\(authorizedEnvelope.sessionId, privacy: .public) type=\(authorizedEnvelope.type.rawValue, privacy: .public) err=\(error.localizedDescription, privacy: .public)")
+                        let shouldCommitGlobalFailure = isCurrentGlobalWebRTCSession(ownerSession)
+                        cleanupWebRTCSession(
+                            authorizedEnvelope.sessionId,
+                            reason: "signaling_operation_rejected",
+                            disconnectKind: .explicit
+                        )
+                        if shouldCommitGlobalFailure {
+                            connectionStatus = .failed("Signaling operation rejected")
+                            readiness = .idle
+                        }
+                        return
+                    } catch {
+                        return
+                    }
+                }
+                guard let attemptedClient,
+                      signalingClient === attemptedClient,
+                      signalingShardKey == authorizedEnvelope.sessionId else {
+                    guard attemptsLeft > 0 else { return }
+                    attemptsLeft -= 1
+                    do {
+                        try await Task.sleep(for: .milliseconds(350))
+                    } catch {
+                        return
+                    }
+                    guard webrtcSessionsBySessionId[authorizedEnvelope.sessionId] === ownerSession else {
+                        return
+                    }
+                    continue
+                }
+                if attemptsLeft == 0 {
+                    logger.error("❌ signaling send failed: type=\(authorizedEnvelope.type.rawValue, privacy: .public) session=\(authorizedEnvelope.sessionId, privacy: .public) err=\(error.localizedDescription, privacy: .public)")
+                    appendSmokeStatus(
+                        "signal-send-failed session=\(authorizedEnvelope.sessionId) type=\(authorizedEnvelope.type.rawValue) error=\(error.localizedDescription)"
+                    )
+                    let shouldCommitGlobalFailure = isCurrentGlobalWebRTCSession(ownerSession)
+                    if webrtcSessionsBySessionId[authorizedEnvelope.sessionId] === ownerSession {
+                        cleanupWebRTCSession(
+                            authorizedEnvelope.sessionId,
+                            reason: "signaling_send_failed",
+                            disconnectKind: .explicit
+                        )
+                    }
+                    if shouldCommitGlobalFailure {
+                        signalingHealth = .degradedFatal
+                        connectionStatus = .failed("Signaling send failed")
+                        readiness = .idle
+                    }
+                    return
+                }
+                attemptsLeft -= 1
+                do {
+                    try await Task.sleep(for: .milliseconds(350))
+                } catch is CancellationError {
+                    return
+                } catch {
+                    return
+                }
+                guard webrtcSessionsBySessionId[authorizedEnvelope.sessionId] === ownerSession else {
+                    return
+                }
+            }
+        }
+    }
+
+    private func handleSignalingServerFrame(
+        _ frame: WebSocketSignalingClient.SignalingServerFrame,
+        sourceClient: WebSocketSignalingClient
+    ) {
+        guard signalingClient === sourceClient,
+              webRTCSessionStartGate.captureAdmissionWitness() != nil,
+              let sourceShard = signalingShardKey else {
+            return
+        }
+        let sourceSession = webrtcSessionsBySessionId[sourceShard]
+        let sourceOwnsGlobalState = isCurrentGlobalWebRTCSetup(
+            sessionID: sourceShard,
+            session: sourceSession
+        )
+        if frame.type == "bound" {
+            if sourceOwnsGlobalState {
+                signalingHealth = .healthy
+                signalingLifecyclePhase = .bound
+            }
+            return
+        }
+        guard frame.isError else { return }
+        let declaredSessionID = frame.sessionId?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let failureClass = Self.classifySignalingFailure(from: frame)
+        let failureCode = Self.publicSignalingFailureCode(failureClass)
+        let publicFailureClass = Self.publicSignalingFailureClass(failureClass)
+        let sessionLabel = Self.publicSignalingSessionLabel(declaredSessionID)
+        appendSmokeStatus(
+            "signal-server-error session=\(sessionLabel) failure_code=\(failureCode) failure_class=\(publicFailureClass)"
+        )
+
+        if let declaredSessionID,
+           !declaredSessionID.isEmpty,
+           declaredSessionID != sourceShard {
+            logger.error(
+                "❌ signaling server frame rejected: reason=session_shard_mismatch"
+            )
+            return
+        }
+        let sessionID = declaredSessionID.flatMap { $0.isEmpty ? nil : $0 }
+            ?? sourceShard
+
+        if Self.shouldUseOnDemandSignalingAfterTransportFailure(
+            isHandshakeComplete: isHandshakeComplete(for: sessionID)
+        ) {
+            if sourceOwnsGlobalState {
+                noteDetachedSignalingAfterTransportEstablished(
+                    for: sessionID,
+                    source: "server_frame",
+                    failure: failureCode,
+                    fatal: Self.isFatalPostTransportFailure(failureClass)
+                )
+            }
+            return
+        }
+
+        logger.error("❌ signaling server rejected frame: session=present failure_code=\(failureCode, privacy: .public) failure_class=\(publicFailureClass, privacy: .public)")
+        if Self.isFatalPreTransportFailure(failureClass) {
+            let shouldCommitGlobalFailure = sourceOwnsGlobalState
+            cleanupWebRTCSession(
+                sessionID,
+                reason: "signaling_server_error:\(failureCode)",
+                disconnectKind: .explicit
+            )
+            if shouldCommitGlobalFailure {
+                connectionStatus = .failed("Signaling error: \(failureCode)")
+                readiness = .idle
+            }
+            return
+        }
+
+        if sourceOwnsGlobalState {
+            signalingHealth = .degradedRecoverable
+        }
+        scheduleSignalingRecovery(for: sessionID, tokenExpired: failureClass == .tokenExpired)
+    }
+
+    private func handleSignalingEnvelope(
+        _ env: WebRTCSignalingEnvelope,
+        sourceClient: WebSocketSignalingClient
+    ) async {
+        guard signalingClient === sourceClient,
+              signalingShardKey == env.sessionId,
+              let admissionWitness = webRTCSessionStartGate.captureAdmissionWitness() else {
+            return
+        }
+        if let existingSession = webrtcSessionsBySessionId[env.sessionId],
+           env.from == existingSession.localDeviceId {
+            return
+        }
+        if env.type == .join,
+           let joinOwnerSession = webrtcSessionsBySessionId[env.sessionId] {
+            do {
+                try await ingestWebRTCJoinBootstrapPayload(
+                    env.payload,
+                    from: env.from,
+                    sessionID: env.sessionId,
+                    sourceClient: sourceClient,
+                    admissionWitness: admissionWitness,
+                    ownerSession: joinOwnerSession
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                guard isCurrentWebRTCJoinBootstrapOwner(
+                    sessionID: env.sessionId,
+                    sourceClient: sourceClient,
+                    admissionWitness: admissionWitness,
+                    ownerSession: joinOwnerSession
+                ) else {
+                    return
+                }
+                let shouldCommitGlobalFailure = isCurrentGlobalWebRTCSession(joinOwnerSession)
+                cleanupWebRTCSession(
+                    env.sessionId,
+                    reason: "join_bootstrap_ingest_failed",
+                    disconnectKind: .explicit
+                )
+                if shouldCommitGlobalFailure {
+                    connectionStatus = .failed(error.localizedDescription)
+                    readiness = .idle
+                }
+                return
+            }
+            guard signalingClient === sourceClient,
+                  signalingShardKey == env.sessionId,
+                  webRTCSessionStartGate.isCurrent(admissionWitness),
+                  webrtcSessionsBySessionId[env.sessionId] === joinOwnerSession else {
+                return
+            }
+        }
+
+        guard let session = webrtcSessionsBySessionId[env.sessionId] else {
+            if env.type == .join {
+                storePendingWebRTCJoinBootstrap(
+                    sessionID: env.sessionId,
+                    from: env.from,
+                    payload: env.payload,
+                    sourceClient: sourceClient,
+                    admissionWitness: admissionWitness
+                )
+            }
+            if env.type == .join, shouldWakeOffererFromRemoteJoin(sessionID: env.sessionId) {
+                logger.warning(
+                    "⚠️ remote join arrived before local WebRTC offerer was active; waking offerer: session=\(env.sessionId, privacy: .public)"
+                )
+                _ = startWebRTCOfferSession(
+                    sessionID: env.sessionId,
+                    admissionWitness: admissionWitness
+                )
+            } else if isPreSessionSignalingEnvelope(env) {
+                enqueuePreSessionSignalingEnvelope(
+                    env,
+                    sourceClient: sourceClient,
+                    admissionWitness: admissionWitness
+                )
+            } else {
+                logger.debug("ℹ️ drop signaling envelope without local session: type=\(env.type.rawValue, privacy: .public) session=\(env.sessionId, privacy: .public)")
+            }
+            return
+        }
+
+        appendSmokeStatus(
+            "signal-recv session=\(env.sessionId) type=\(env.type.rawValue)"
+        )
+
+        // 记录对端 id（用于未来做定向路由）
+        if webrtcRemoteIdBySessionId[env.sessionId] == nil {
+            webrtcRemoteIdBySessionId[env.sessionId] = env.from
+            if let snapshot = activeSessionSnapshot, snapshot.sessionId == env.sessionId {
+                updatePreparedSessionSnapshot(
+                    sessionID: env.sessionId,
+                    phase: snapshot.phase,
+                    deviceId: env.from
+                )
+            }
+        }
+
+        switch env.type {
+        case .offer:
+            stopJoinHeartbeat(for: env.sessionId)
+            if let sdp = env.payload?.sdp {
+                session.setRemoteOffer(sdp)
+            }
+            Task { @MainActor [weak self] in
+                await self?.resendCachedAnswerIfNeeded(for: env.sessionId, reason: "remote_offer")
+                await self?.resendCachedLocalICECandidatesIfNeeded(for: env.sessionId, reason: "remote_offer")
+            }
+        case .answer:
+            stopJoinHeartbeat(for: env.sessionId)
+            stopOfferResendLoop(for: env.sessionId)
+            if let sdp = env.payload?.sdp {
+                session.setRemoteAnswer(sdp)
+            }
+            Task { @MainActor [weak self] in
+                await self?.resendCachedLocalICECandidatesIfNeeded(for: env.sessionId, reason: "remote_answer")
+            }
+        case .iceCandidate:
+            if let p = env.payload, let c = p.candidate {
+                session.addRemoteICECandidate(candidate: c, sdpMid: p.sdpMid, sdpMLineIndex: p.sdpMLineIndex)
+            }
+        case .join:
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if Self.shouldResendOffererJoinBootstrapForRemoteJoin(isOfferer: session.role == .offerer) {
+                    appendSmokeStatus(
+                        "join-bootstrap-resend session=\(env.sessionId) reason=remote-join"
+                    )
+                    do {
+                        try await sendWebRTCJoinSignal(
+                            session: session,
+                            retries: 2
+                        )
+                    } catch is CancellationError {
+                        return
+                    } catch {
+                        logger.warning(
+                            "WebRTC remote-join bootstrap resend failed: session=\(env.sessionId, privacy: .private) errorClass=\(String(reflecting: Swift.type(of: error)), privacy: .public)"
+                        )
+                    }
+                }
+                await resendOrRecoverLocalOfferForRemoteJoin(sessionID: env.sessionId, session: session)
+                await resendCachedAnswerIfNeeded(for: env.sessionId, reason: "remote-join")
+                await resendCachedLocalICECandidatesIfNeeded(for: env.sessionId, reason: "remote-join")
+            }
+        case .leave:
+            cleanupWebRTCSession(
+                env.sessionId,
+                reason: "remote_leave",
+                disconnectKind: .remoteLeave
+            )
+            if currentConnection == nil {
+                connectionStatus = .idle
+                readiness = .idle
+            }
+        }
+    }
+
+    private func shouldWakeOffererFromRemoteJoin(sessionID: String) -> Bool {
+        Self.shouldWakeOffererFromRemoteJoin(
+            hasLocalSession: webrtcSessionsBySessionId[sessionID] != nil,
+            pendingOfferStart: webRTCSessionStartGate.hasPendingStart(sessionID: sessionID),
+            authorityBoundBootstrap: authorityBoundWebRTCBootstrapSessionIds.contains(sessionID),
+            hasSignalingToken: webrtcSignalingAuthTokenBySessionId[sessionID]?.isEmpty == false
+        )
+    }
+
+    private func shouldRecoverMissingOfferCacheFromRemoteJoin(sessionID: String, session: WebRTCSession) -> Bool {
+        Self.shouldRecoverMissingOfferCacheFromRemoteJoin(
+            hasLocalSession: true,
+            isOfferer: session.role == .offerer,
+            hasCachedOffer: webrtcLatestOfferBySessionId[sessionID] != nil,
+            authorityBoundBootstrap: authorityBoundWebRTCBootstrapSessionIds.contains(sessionID),
+            hasSignalingToken: webrtcSignalingAuthTokenBySessionId[sessionID]?.isEmpty == false
+        )
+    }
+
+    nonisolated static func shouldResendOffererJoinBootstrapForRemoteJoin(isOfferer: Bool) -> Bool {
+        isOfferer
+    }
+
+    // MARK: - WebRTC -> Handshake/Control Channel
+
+    private func stopWebRTCScreenStreaming(sessionID: String) {
+        webrtcInteractionStreamingAllowedSessionIds.remove(sessionID)
+        if let record = webrtcScreenStreamingTasksBySessionId.removeValue(forKey: sessionID) {
+            record.callbackLease.revoke(token: record.token)
+#if canImport(WebRTCAudioDeviceBridge)
+            SBWebRTCSystemAudioDevice.shared().retireRecordedAudioOwner(
+                withToken: record.nativeAudioOwnerToken
+            )
+#endif
+            record.task.cancel()
+        }
+        webrtcInteractionStreamingTaskTokensBySessionId.removeValue(forKey: sessionID)
+        if let task = webrtcInteractionStreamingTasksBySessionId.removeValue(forKey: sessionID) {
+            task.cancel()
+        }
+        webrtcSessionsBySessionId[sessionID]?.setOutgoingSystemAudioTrackEnabled(false)
+    }
+
+    private func isCurrentWebRTCScreenStreamingOwner(
+        sessionID: String,
+        session: WebRTCSession,
+        screenStreamingTaskToken: UUID,
+        keys: SessionKeys
+    ) -> Bool {
+        guard webrtcSessionsBySessionId[sessionID] === session,
+              let record = webrtcScreenStreamingTasksBySessionId[sessionID],
+              record.token == screenStreamingTaskToken,
+              record.sessionObjectIdentifier == ObjectIdentifier(session),
+              let currentKeys = webrtcSessionKeysBySessionId[sessionID] else {
+            return false
+        }
+        return Self.isSameWebRTCSecureSession(currentKeys, keys)
+    }
+
+    private func requireCurrentWebRTCScreenStreamingOwner(
+        sessionID: String,
+        session: WebRTCSession,
+        screenStreamingTaskToken: UUID,
+        keys: SessionKeys
+    ) throws(CancellationError) {
+        guard isCurrentWebRTCScreenStreamingOwner(
+            sessionID: sessionID,
+            session: session,
+            screenStreamingTaskToken: screenStreamingTaskToken,
+            keys: keys
+        ) else {
+            throw CancellationError()
+        }
+    }
+
+    private func isCurrentWebRTCInteractionStreamingOwner(
+        sessionID: String,
+        session: WebRTCSession,
+        interactionTaskToken: UUID,
+        keys: SessionKeys
+    ) -> Bool {
+        guard webrtcSessionsBySessionId[sessionID] === session,
+              webrtcInteractionStreamingTaskTokensBySessionId[sessionID]
+                == interactionTaskToken,
+              let currentKeys = webrtcSessionKeysBySessionId[sessionID] else {
+            return false
+        }
+        return Self.isSameWebRTCSecureSession(currentKeys, keys)
+    }
+
+#if os(macOS)
+    @available(macOS 14.0, *)
+    private func makeWebRTCRealtimeAudioSenderIfNeeded(
+        sessionID: String,
+        session: WebRTCSession,
+        screenStreamingTaskToken: UUID,
+        keys: SessionKeys,
+        config: RemoteDesktopStreamConfiguration?,
+        relayBindPolicy: SkyBridgeRealtimeMediaRelayBindPolicy,
+        continuityState: RemoteRealtimeMediaAudioSender.ContinuityState? = nil
+    ) async throws(CancellationError) -> (
+        sender: RemoteRealtimeMediaAudioSender,
+        endpoint: SkyBridgeMediaEndpoint
+    )? {
+        let validateOperationOwner: WebRTCRealtimeAudioSenderCoordinator.OperationOwnerValidator = {
+            @MainActor [weak self, weak session] () throws(CancellationError) in
+            guard let self, let session else { throw CancellationError() }
+            try self.requireCurrentWebRTCScreenStreamingOwner(
+                sessionID: sessionID,
+                session: session,
+                screenStreamingTaskToken: screenStreamingTaskToken,
+                keys: keys
+            )
+        }
+        let started = try await makeWebRTCRealtimeAudioSenderCoordinator().makeSenderIfNeeded(
+            sessionID: sessionID,
+            keys: keys,
+            config: config,
+            relayBindPolicy: relayBindPolicy,
+            continuityState: continuityState,
+            validateOperationOwner: validateOperationOwner
+        )
+        return started.map { ($0.sender, $0.endpoint) }
+    }
+
+    @available(macOS 14.0, *)
+    private func requestWebRTCRealtimeAudioSenderEndpoint(
+        sessionID: String,
+        session: WebRTCSession,
+        screenStreamingTaskToken: UUID,
+        keys: SessionKeys
+    ) async throws -> SkyBridgeMediaEndpoint {
+        let validateOperationOwner: WebRTCRealtimeAudioSenderCoordinator.OperationOwnerValidator = {
+            @MainActor [weak self, weak session] () throws(CancellationError) in
+            guard let self, let session else { throw CancellationError() }
+            try self.requireCurrentWebRTCScreenStreamingOwner(
+                sessionID: sessionID,
+                session: session,
+                screenStreamingTaskToken: screenStreamingTaskToken,
+                keys: keys
+            )
+        }
+        return try await makeWebRTCRealtimeAudioSenderCoordinator().requestSenderEndpoint(
+            sessionID: sessionID,
+            validateOperationOwner: validateOperationOwner
+        )
+    }
+
+    @available(macOS 14.0, *)
+    private func refreshWebRTCMediaAdmissionLease(
+        sessionID: String,
+        session: WebRTCSession,
+        screenStreamingTaskToken: UUID,
+        keys: SessionKeys
+    ) async throws -> SignalServerClient.MediaAdmissionLease? {
+        let validateOperationOwner: WebRTCRealtimeAudioSenderCoordinator.OperationOwnerValidator = {
+            @MainActor [weak self, weak session] () throws(CancellationError) in
+            guard let self, let session else { throw CancellationError() }
+            try self.requireCurrentWebRTCScreenStreamingOwner(
+                sessionID: sessionID,
+                session: session,
+                screenStreamingTaskToken: screenStreamingTaskToken,
+                keys: keys
+            )
+        }
+        return try await makeWebRTCRealtimeAudioSenderCoordinator().refreshAdmissionLease(
+            sessionID: sessionID,
+            validateOperationOwner: validateOperationOwner
+        )
+    }
+
+    @available(macOS 14.0, *)
+    private func makeWebRTCRealtimeAudioSenderCoordinator() -> WebRTCRealtimeAudioSenderCoordinator {
+        WebRTCRealtimeAudioSenderCoordinator(
+            logger: logger,
+            dependencies: WebRTCRealtimeAudioSenderCoordinator.Dependencies(
+                reusableAdmissionLease: { [self] sessionID in
+                    usableWebRTCMediaAdmissionLease(for: sessionID)
+                },
+                sessionToken: { [self] sessionID in
+                    webrtcSignalingAuthTokenBySessionId[sessionID]
+                },
+                sessionRoleName: { [self] sessionID in
+                    guard let role = webrtcSessionsBySessionId[sessionID]?.role else { return nil }
+                    return role == .offerer ? "initiator" : "responder"
+                },
+                storeAdmissionLease: { [self] lease, sessionID in
+                    storeWebRTCMediaAdmissionLease(lease, for: sessionID)
+                },
+                requestMediaRelayLease: { [signalServer] token in
+                    try await signalServer.requestMediaRelayLease(mediaAdmissionToken: token)
+                },
+                refreshMediaAdmissionLease: { [signalServer] sessionID, sessionToken, roleName in
+                    try await signalServer.refreshMediaAdmissionLease(
+                        sessionId: sessionID,
+                        sessionToken: sessionToken,
+                        role: roleName
+                    )
+                },
+                appendSessionDiagnostic: { [self] line, sessionID in
+                    appendWebRTCSessionDiagnostic(line, sessionID: sessionID)
+                }
             )
         )
     }
-    
+
+#endif
+
+    private func isCurrentWebRTCControlLoopOwner(
+        sessionID: String,
+        session: WebRTCSession,
+        controlTaskToken: UUID
+    ) -> Bool {
+        guard webrtcSessionsBySessionId[sessionID] === session,
+              let record = webrtcControlTasksBySessionId[sessionID] else {
+            return false
+        }
+        return record.token == controlTaskToken
+            && record.sessionObjectIdentifier == ObjectIdentifier(session)
+    }
+
+#if os(macOS)
+    private func releaseWebRTCRemoteInput(
+        sessionID: String,
+        controlTaskToken: UUID,
+        reason: String
+    ) {
+        let result = RemoteControlInputLifecycleCoordinator.shared.releaseAll(
+            for: RemoteControlInputOwner(
+                transport: .webRTC,
+                sessionID: sessionID,
+                generation: controlTaskToken
+            )
+        )
+        guard result.hadTrackedInput else { return }
+        logger.info(
+            """
+            remote-input-release transport=webrtc reason=\(reason, privacy: .public) \
+            mouseButtons=\(result.trackedMouseButtonCount, privacy: .public) \
+            keys=\(result.trackedKeyCount, privacy: .public) \
+            released=\(result.releasedControlCount, privacy: .public) \
+            failed=\(result.failedReleaseCount, privacy: .public) \
+            permissionSkipped=\(result.skippedForMissingPermission, privacy: .public)
+            """
+        )
+    }
+#endif
+
+    private func isCurrentWebRTCControlLoopSecureOwner(
+        sessionID: String,
+        session: WebRTCSession,
+        controlTaskToken: UUID,
+        keys: SessionKeys
+    ) -> Bool {
+        guard isCurrentWebRTCControlLoopOwner(
+            sessionID: sessionID,
+            session: session,
+            controlTaskToken: controlTaskToken
+        ), let currentKeys = webrtcSessionKeysBySessionId[sessionID] else {
+            return false
+        }
+        return Self.isSameWebRTCSecureSession(currentKeys, keys)
+    }
+
+    @discardableResult
+    private func cleanupWebRTCSessionIfCurrentControlLoopOwner(
+        sessionID: String,
+        session: WebRTCSession,
+        controlTaskToken: UUID,
+        reason: String,
+        disconnectKind: SessionDisconnectKind
+    ) -> Bool {
+        guard isCurrentWebRTCControlLoopOwner(
+            sessionID: sessionID,
+            session: session,
+            controlTaskToken: controlTaskToken
+        ) else {
+            return false
+        }
+        cleanupWebRTCSession(
+            sessionID,
+            reason: reason,
+            disconnectKind: disconnectKind
+        )
+        return true
+    }
+
+    private func startWebRTCInboundHandshakeAndControlLoop(sessionID: String, session: WebRTCSession, endpointDescription: String) {
+        guard webrtcSessionsBySessionId[sessionID] === session else { return }
+
+        if let existingRecord = webrtcControlTasksBySessionId[sessionID] {
+            guard existingRecord.sessionObjectIdentifier != ObjectIdentifier(session) else {
+                return
+            }
+#if os(macOS)
+            releaseWebRTCRemoteInput(
+                sessionID: sessionID,
+                controlTaskToken: existingRecord.token,
+                reason: "control_task_replaced"
+            )
+#endif
+            webrtcControlTasksBySessionId.removeValue(forKey: sessionID)
+            _ = existingRecord.inboundFileTransferReceiver.cleanupOnChannelClosed()
+            existingRecord.task.cancel()
+            if let staleQueue = webrtcInboundQueuesBySessionId.removeValue(forKey: sessionID) {
+                Task { await staleQueue.finish() }
+            }
+        }
+
+        let controlTaskToken = UUID()
+        let sessionObjectIdentifier = ObjectIdentifier(session)
+        let queue = InboundChunkQueue()
+        let orderedInboundRelay = OrderedInboundChunkRelay()
+        webrtcInboundQueuesBySessionId[sessionID] = queue
+        session.onData = { data in
+            guard WebRTCFramedPayloadPolicy.isValidPayloadByteCount(data.count) else {
+                Task { await queue.failOverflow() }
+                return
+            }
+            let accepted = orderedInboundRelay.submit(byteCount: data.count) {
+                switch await queue.push(data) {
+                case .accepted, .closed, .overflow:
+                    break
+                }
+            }
+            if !accepted {
+                Task { await queue.failOverflow() }
+            }
+        }
+
+        let inboundFileTransferReceiver = WebRTCInboundFileTransferReceiver(
+            senderAuthorityProvider: { [weak self] requestedSessionID in
+                guard requestedSessionID == sessionID,
+                      let self,
+                      self.isCurrentWebRTCControlLoopOwner(
+                        sessionID: sessionID,
+                        session: session,
+                        controlTaskToken: controlTaskToken
+                      ),
+                      let authority = self.currentPathExpectedRemoteAuthorityBySessionId[requestedSessionID] else {
+                    return nil
+                }
+                return WebRTCInboundFileTransferSenderAuthority(
+                    deviceId: authority.deviceId,
+                    deviceName: authority.deviceName ?? authority.deviceId
+                )
+            },
+            approvalProvider: { request in
+                await FileTransferManager.shared.approveInboundWebRTCFileTransfer(request)
+            }
+        )
+
+        let controlTask = Task { [weak self] in
+            guard let self else { return }
+            await self.consumeInboundHandshakeOrControlChannelWebRTC(
+                sessionID: sessionID,
+                session: session,
+                controlTaskToken: controlTaskToken,
+                endpointDescription: endpointDescription,
+                inbound: queue,
+                inboundFileTransferReceiver: inboundFileTransferReceiver
+            )
+            let ownsTerminalCleanup = await MainActor.run { [weak self] in
+                guard let self,
+                      let currentRecord = self.webrtcControlTasksBySessionId[sessionID],
+                      currentRecord.token == controlTaskToken,
+                      currentRecord.sessionObjectIdentifier == sessionObjectIdentifier,
+                      currentRecord.inboundFileTransferReceiver === inboundFileTransferReceiver,
+                      self.webrtcSessionsBySessionId[sessionID] === session else {
+                    return false
+                }
+#if os(macOS)
+                self.releaseWebRTCRemoteInput(
+                    sessionID: sessionID,
+                    controlTaskToken: controlTaskToken,
+                    reason: "control_channel_closed"
+                )
+#endif
+                self.webrtcControlTasksBySessionId.removeValue(forKey: sessionID)
+                return true
+            }
+            if ownsTerminalCleanup {
+                await inboundFileTransferReceiver.cleanupOnChannelClosed().value
+            }
+            await queue.finish()
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                guard ownsTerminalCleanup,
+                      self.webrtcSessionsBySessionId[sessionID] === session,
+                      self.webrtcControlTasksBySessionId[sessionID] == nil else {
+                    orderedInboundRelay.cancel()
+                    return
+                }
+                if self.webrtcInboundQueuesBySessionId[sessionID] === queue {
+                    self.webrtcInboundQueuesBySessionId.removeValue(forKey: sessionID)
+                }
+                self.stopWebRTCScreenStreaming(sessionID: sessionID)
+                self.failAllFileTransferWaitersForSession(sessionID: sessionID, message: "WebRTC control channel closed")
+                orderedInboundRelay.cancel()
+                if self.webrtcSessionsBySessionId[sessionID] === session {
+                    self.cleanupWebRTCSession(
+                        sessionID,
+                        reason: "control_channel_closed",
+                        disconnectKind: .transient
+                    )
+                    self.connectionStatus = .failed("WebRTC control channel closed")
+                    self.readiness = .idle
+                }
+            }
+        }
+        webrtcControlTasksBySessionId[sessionID] = WebRTCControlTaskRecord(
+            token: controlTaskToken,
+            sessionObjectIdentifier: sessionObjectIdentifier,
+            inboundFileTransferReceiver: inboundFileTransferReceiver,
+            task: controlTask
+        )
+    }
+
+    private func consumeInboundHandshakeOrControlChannelWebRTC(
+        sessionID: String,
+        session: WebRTCSession,
+        controlTaskToken: UUID,
+        endpointDescription: String,
+        inbound: InboundChunkQueue,
+        inboundFileTransferReceiver: WebRTCInboundFileTransferReceiver
+    ) async {
+        let webRTCHandshakeMaxChunkBytes = 1024
+        let webRTCHandshakeMaxPaddedPayloadBytes = (8 * 1024) - 4
+
+        struct DirectHandshakeTransport: DiscoveryTransport {
+            let sendRaw: @Sendable (Data) async throws -> Void
+            func send(to peer: PeerIdentifier, data: Data) async throws { try await sendRaw(data) }
+        }
+
+        let sendFramed: @MainActor @Sendable (Data) async throws -> Void = { data in
+            guard self.isCurrentWebRTCControlLoopOwner(
+                sessionID: sessionID,
+                session: session,
+                controlTaskToken: controlTaskToken
+            ) else {
+                throw CancellationError()
+            }
+            try await session.sendFramedPayloadAsync(
+                data,
+                maxChunkBytes: webRTCHandshakeMaxChunkBytes,
+                // Control-plane messages must not starve behind ongoing screen/file traffic.
+                maxBufferedAmountBytes: 256 * 1024
+            )
+            guard self.isCurrentWebRTCControlLoopOwner(
+                sessionID: sessionID,
+                session: session,
+                controlTaskToken: controlTaskToken
+            ) else {
+                throw CancellationError()
+            }
+        }
+
+        @discardableResult
+        func failCurrentControlLoop(
+            reason: String,
+            disconnectKind: SessionDisconnectKind,
+            statusMessage: String
+        ) -> Bool {
+            let didCleanup = self.cleanupWebRTCSessionIfCurrentControlLoopOwner(
+                sessionID: sessionID,
+                session: session,
+                controlTaskToken: controlTaskToken,
+                reason: reason,
+                disconnectKind: disconnectKind
+            )
+            if didCleanup {
+                self.connectionStatus = .failed(statusMessage)
+                self.readiness = .idle
+            }
+            return didCleanup
+        }
+
+        let stagedFrameReader = WebRTCStagedFramedPayloadReader { maximumByteCount in
+            try await inbound.next(max: maximumByteCount)
+        }
+
+        let transport = DirectHandshakeTransport(sendRaw: { data in
+            let rawHandshake = HandshakePadding.unwrapIfNeeded(data, label: "tx/webrtc")
+            let tunedHandshake = try HandshakePadding.wrapIfEnabled(
+                rawHandshake,
+                label: "tx/webrtc",
+                maximumPaddingTargetByteCount: webRTCHandshakeMaxPaddedPayloadBytes
+            )
+            if let messageB = try? HandshakeMessageB.decode(from: rawHandshake) {
+                await MainActor.run {
+                    self.lastRekeyEvent = "messageB raw=\(rawHandshake.count) padded=\(tunedHandshake.count) suite=\(messageB.selectedSuite.rawValue)"
+                }
+                if Self.isSmokeRuntimeEnabled {
+                    Self.emitSmokeLog("🧪 WebRTC rekey tx MessageB raw=\(rawHandshake.count) padded=\(tunedHandshake.count) suite=\(messageB.selectedSuite.rawValue)")
+                }
+            } else if (try? HandshakeFinished.decode(from: rawHandshake)) != nil {
+                await MainActor.run {
+                    self.lastRekeyEvent = "finished raw=\(rawHandshake.count) padded=\(tunedHandshake.count)"
+                }
+                if Self.isSmokeRuntimeEnabled {
+                    Self.emitSmokeLog("🧪 WebRTC rekey tx Finished raw=\(rawHandshake.count) padded=\(tunedHandshake.count)")
+                }
+            }
+            try await sendFramed(tunedHandshake)
+        })
+
+        let peerDeviceId = webrtcRemoteIdBySessionId[sessionID] ?? "webrtc-\(sessionID)"
+        let peer = PeerIdentifier(deviceId: peerDeviceId)
+        let currentPathTrustProvider = CurrentPathHandshakeTrustProvider(
+            expectedRemoteAuthority: currentPathExpectedRemoteAuthorityBySessionId[sessionID],
+            fallbackPeerIDs: [peerDeviceId, endpointDescription],
+            additionalTrustedFingerprints: handshakeTrustedProtocolFingerprints(
+                for: sessionID,
+                candidateDeviceIds: [peerDeviceId]
+            )
+        )
+
+        let handshakeState = WebRTCHandshakeLoopState()
+
+        func isLikelyHandshakeControlPacket(_ data: Data) -> Bool {
+            WebRTCControlChannelCodec.isLikelyHandshakeControlPacket(data)
+        }
+
+        func isActiveHandshakeDriverFrame(_ data: Data) -> Bool {
+            WebRTCControlChannelCodec.isActiveHandshakeDriverFrame(data)
+        }
+
+        func encryptAppPayload(
+            _ plaintext: Data,
+            with keys: SessionKeys,
+            packetType: WebRTCAppSecurePacketType = .appControl
+        ) throws -> Data {
+            guard self.isCurrentWebRTCControlLoopSecureOwner(
+                sessionID: sessionID,
+                session: session,
+                controlTaskToken: controlTaskToken,
+                keys: keys
+            ) else {
+                throw CancellationError()
+            }
+            return try sealWebRTCSecurePayload(
+                plaintext,
+                with: keys,
+                sessionID: sessionID,
+                packetType: packetType
+            )
+        }
+
+        func makeLocalHeartbeatMessage() async -> AppMessage? {
+            let localDeviceId = session.localDeviceId
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !localDeviceId.isEmpty else { return nil }
+            let localIdentity = RemoteControlSecurityNoticeCenter.shared.localIdentitySnapshot()
+            return CrossNetworkWebRTCLocalAppMessageFactory.heartbeatMessage(
+                deviceId: localDeviceId,
+                remoteVideoFormats: Self.supportedRemoteVideoFormats(),
+                accountDisplayName: localIdentity?.accountDisplayName,
+                nebulaId: localIdentity?.nebulaId
+            )
+        }
+
+        func decryptAppPayload(
+            _ ciphertext: Data,
+            with keys: SessionKeys
+        ) async throws -> WebRTCAppSecureOpenedPayload {
+            guard self.isCurrentWebRTCControlLoopSecureOwner(
+                sessionID: sessionID,
+                session: session,
+                controlTaskToken: controlTaskToken,
+                keys: keys
+            ) else {
+                throw CancellationError()
+            }
+            let opened = try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<WebRTCAppSecureOpenedPayload, Error>) in
+                webRTCControlCryptoQueue.async {
+                    continuation.resume(
+                        with: Result {
+                            try WebRTCControlChannelCodec.decryptAppPayload(
+                                ciphertext,
+                                with: keys
+                            )
+                        }
+                    )
+                }
+            }
+            guard self.isCurrentWebRTCControlLoopSecureOwner(
+                sessionID: sessionID,
+                session: session,
+                controlTaskToken: controlTaskToken,
+                keys: keys
+            ) else {
+                throw CancellationError()
+            }
+            return try validateWebRTCSecureOpenedPayload(
+                opened,
+                with: keys,
+                sessionID: sessionID
+            )
+        }
+
+        func decryptBoundSessionCarrier(
+            _ carrierPayload: Data,
+            header: BoundSessionWebRTCCarrierHeaderV1,
+            with keys: SessionKeys
+        ) async throws -> WebRTCAppSecureOpenedPayload {
+            guard self.isCurrentWebRTCControlLoopSecureOwner(
+                sessionID: sessionID,
+                session: session,
+                controlTaskToken: controlTaskToken,
+                keys: keys
+            ) else {
+                throw CancellationError()
+            }
+            let opened = try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<WebRTCAppSecureOpenedPayload, Error>) in
+                webRTCControlCryptoQueue.async {
+                    continuation.resume(
+                        with: Result {
+                            try WebRTCControlChannelCodec.decryptBoundSessionCarrier(
+                                carrierPayload,
+                                admittedHeader: header,
+                                with: keys
+                            )
+                        }
+                    )
+                }
+            }
+            guard self.isCurrentWebRTCControlLoopSecureOwner(
+                sessionID: sessionID,
+                session: session,
+                controlTaskToken: controlTaskToken,
+                keys: keys
+            ) else {
+                throw CancellationError()
+            }
+            return try validateWebRTCSecureOpenedPayload(
+                opened,
+                with: keys,
+                sessionID: sessionID
+            )
+        }
+
+        func decodeCompatibilityAppMessage(_ plaintext: Data) -> AppMessage? {
+            WebRTCControlChannelCodec.decodeCompatibilityAppMessage(plaintext)
+        }
+
+        func bootstrapAppMessageKind(_ message: AppMessage) -> String {
+            WebRTCControlChannelCodec.bootstrapAppMessageKind(message)
+        }
+
+        @MainActor
+        func startOutboundHeartbeatIfNeeded() {
+            guard self.isCurrentWebRTCControlLoopOwner(
+                sessionID: sessionID,
+                session: session,
+                controlTaskToken: controlTaskToken
+            ), self.webrtcOutboundHeartbeatTasksBySessionId[sessionID] == nil else {
+                return
+            }
+            self.appendWebRTCSessionDiagnostic(
+                "app-heartbeat-send-start session=\(sessionID) interval=2.0",
+                sessionID: sessionID
+            )
+            self.webrtcOutboundHeartbeatTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer {
+                    if self.isCurrentWebRTCControlLoopOwner(
+                        sessionID: sessionID,
+                        session: session,
+                        controlTaskToken: controlTaskToken
+                    ) {
+                        self.webrtcOutboundHeartbeatTasksBySessionId.removeValue(forKey: sessionID)
+                    }
+                }
+                while !Task.isCancelled {
+                    guard self.isCurrentWebRTCControlLoopOwner(
+                        sessionID: sessionID,
+                        session: session,
+                        controlTaskToken: controlTaskToken
+                    ) else {
+                        break
+                    }
+                    guard case .connected = self.connectionStatus else {
+                        do {
+                            try await Task.sleep(for: .milliseconds(250))
+                        } catch {
+                            return
+                        }
+                        continue
+                    }
+                    guard let keys = self.webrtcSessionKeysBySessionId[sessionID] else {
+                        do {
+                            try await Task.sleep(for: .milliseconds(250))
+                        } catch {
+                            return
+                        }
+                        continue
+                    }
+                    if self.webrtcRekeyInProgressSessionIds.contains(sessionID) {
+                        do {
+                            try await Task.sleep(for: .milliseconds(250))
+                        } catch {
+                            return
+                        }
+                        continue
+                    }
+
+                    guard let heartbeat = await makeLocalHeartbeatMessage() else {
+                        guard self.isCurrentWebRTCControlLoopOwner(
+                            sessionID: sessionID,
+                            session: session,
+                            controlTaskToken: controlTaskToken
+                        ) else {
+                            return
+                        }
+                        self.appendWebRTCSessionDiagnostic(
+                            "app-heartbeat-send-skipped session=\(sessionID) reason=empty_device_id",
+                            sessionID: sessionID
+                        )
+                        do {
+                            try await Task.sleep(for: .seconds(2))
+                        } catch {
+                            return
+                        }
+                        continue
+                    }
+
+                    do {
+                        let plaintext = try JSONEncoder().encode(heartbeat)
+                        let ciphertext = try encryptAppPayload(plaintext, with: keys)
+                        let padded = try TrafficPadding.wrapIfEnabled(ciphertext, label: "tx/webrtc-heartbeat")
+                        try await sendFramed(padded)
+                        if Self.isSmokeRuntimeEnabled {
+                            self.appendSmokeStatus("app-heartbeat-send session=\(sessionID)")
+                        }
+                    } catch is CancellationError {
+                        return
+                    } catch {
+                        guard self.isCurrentWebRTCControlLoopOwner(
+                            sessionID: sessionID,
+                            session: session,
+                            controlTaskToken: controlTaskToken
+                        ) else {
+                            return
+                        }
+                        self.logger.debug(
+                            "ℹ️ WebRTC outbound heartbeat send failed: session=\(sessionID, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                        )
+                        self.appendWebRTCSessionDiagnostic(
+                            "app-heartbeat-send-failed session=\(sessionID) error=\(sanitizeStatus(error.localizedDescription))",
+                            sessionID: sessionID
+                        )
+                        do {
+                            try await Task.sleep(for: .seconds(2))
+                        } catch {
+                            return
+                        }
+                        continue
+                    }
+
+                    do {
+                        try await Task.sleep(for: .seconds(2))
+                    } catch {
+                        return
+                    }
+                }
+            }
+        }
+
+        func orderedUniqueCandidateIds(_ rawValues: [String]) -> [String] {
+            WebRTCControlChannelCodec.orderedUniqueCandidateIds(rawValues)
+        }
+
+        func pairingExchangeFingerprint(_ payload: AppMessage.PairingIdentityExchangePayload) -> String {
+            WebRTCControlChannelCodec.pairingExchangeFingerprint(payload)
+        }
+
+        func makeLocalPairingIdentityExchangePayload() async throws -> AppMessage.PairingIdentityExchangePayload {
+            guard self.isCurrentWebRTCControlLoopOwner(
+                sessionID: sessionID,
+                session: session,
+                controlTaskToken: controlTaskToken
+            ) else {
+                throw CancellationError()
+            }
+            let provider = CryptoProviderFactory.make(policy: .preferPQC)
+            let kemKeys = KEMPublicKeyInfo.normalizedValidKeys(
+                try await DeviceIdentityKeyManager.shared.pairingIdentityKEMPublicKeys(using: provider)
+            )
+            guard self.isCurrentWebRTCControlLoopOwner(
+                sessionID: sessionID,
+                session: session,
+                controlTaskToken: controlTaskToken
+            ) else {
+                throw CancellationError()
+            }
+            guard !kemKeys.isEmpty else {
+                throw NSError(
+                    domain: "CrossNetworkConnectionManager",
+                    code: 720,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "local device has no usable PQC KEM public keys to advertise"
+                    ]
+                )
+            }
+
+            let localId = session.localDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !localId.isEmpty else {
+                throw NSError(
+                    domain: "CrossNetworkConnectionManager",
+                    code: 721,
+                    userInfo: [NSLocalizedDescriptionKey: "local device id is empty"]
+                )
+            }
+
+            let localIdentity = RemoteControlSecurityNoticeCenter.shared.localIdentitySnapshot()
+            let protocolIdentityPublicKeys = try await localProtocolIdentityPublicKeysForPairing(
+                sessionID: sessionID
+            )
+            guard self.isCurrentWebRTCControlLoopOwner(
+                sessionID: sessionID,
+                session: session,
+                controlTaskToken: controlTaskToken
+            ) else {
+                throw CancellationError()
+            }
+            return CrossNetworkWebRTCLocalAppMessageFactory.pairingIdentityExchangePayload(
+                deviceId: localId,
+                kemPublicKeys: kemKeys,
+                protocolIdentityPublicKeys: protocolIdentityPublicKeys,
+                remoteVideoFormats: Self.supportedRemoteVideoFormats(),
+                accountDisplayName: localIdentity?.accountDisplayName,
+                nebulaId: localIdentity?.nebulaId
+            )
+        }
+
+        func sendLocalPairingIdentityExchange(
+            keys: SessionKeys,
+            force: Bool,
+            stage: String
+        ) async throws {
+            try Task.checkCancellation()
+            guard self.isCurrentWebRTCControlLoopOwner(
+                sessionID: sessionID,
+                session: session,
+                controlTaskToken: controlTaskToken
+            ) else {
+                throw CancellationError()
+            }
+            let payload = try await makeLocalPairingIdentityExchangePayload()
+            try Task.checkCancellation()
+            guard self.isCurrentWebRTCControlLoopOwner(
+                sessionID: sessionID,
+                session: session,
+                controlTaskToken: controlTaskToken
+            ) else {
+                throw CancellationError()
+            }
+            let fingerprint = pairingExchangeFingerprint(payload)
+            if !force, self.webrtcBootstrapReplyFingerprintBySessionId[sessionID] == fingerprint {
+                return
+            }
+
+            let reply = AppMessage.pairingIdentityExchange(payload)
+            let outPlain = try JSONEncoder().encode(reply)
+            let outCipher = try encryptAppPayload(outPlain, with: keys)
+            let outPadded = try TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-bootstrap")
+            try await sendFramed(outPadded)
+            try Task.checkCancellation()
+            guard self.isCurrentWebRTCControlLoopSecureOwner(
+                sessionID: sessionID,
+                session: session,
+                controlTaskToken: controlTaskToken,
+                keys: keys
+            ) else {
+                throw CancellationError()
+            }
+            self.webrtcBootstrapReplyFingerprintBySessionId[sessionID] = fingerprint
+            self.appendSmokeStatus(
+                "app-pairing-send session=\(sessionID) stage=\(stage) deviceId=\(payload.deviceId) keys=\(payload.kemPublicKeys.count)"
+            )
+            logger.info(
+                "📤 WebRTC pairingIdentityExchange sent: session=\(sessionID, privacy: .public) stage=\(stage, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"
+            )
+        }
+
+        func sendLocalAuthenticatedRouteBindings(
+            keys: SessionKeys,
+            stage: String
+        ) async {
+            guard self.isCurrentWebRTCControlLoopOwner(
+                sessionID: sessionID,
+                session: session,
+                controlTaskToken: controlTaskToken
+            ) else {
+                return
+            }
+            if self.strictPQCClassicBootstrapOnlySessionIds.contains(sessionID) ||
+                self.webrtcRekeyInProgressSessionIds.contains(sessionID) {
+                self.appendWebRTCSessionDiagnostic(
+                    "authenticated-route-binding-send-skipped session=\(sessionID) stage=\(stage) reason=session_not_business_ready",
+                    sessionID: sessionID
+                )
+                return
+            }
+
+            guard let remoteAuthority = self.currentPathExpectedRemoteAuthorityBySessionId[sessionID] else {
+                self.appendWebRTCSessionDiagnostic(
+                    "authenticated-route-binding-send-skipped session=\(sessionID) stage=\(stage) reason=missing_remote_authority",
+                    sessionID: sessionID
+                )
+                return
+            }
+
+            let localDeviceId = session.localDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let remoteDeviceId = remoteAuthority.deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let remoteFingerprint = remoteAuthority.protocolPublicKeyFingerprint
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let localIdentity: CurrentPathLocalProtocolIdentitySnapshot
+            do {
+                localIdentity = try self.requiredCurrentPathLocalIdentity(for: sessionID)
+            } catch {
+                self.appendWebRTCSessionDiagnostic(
+                    "authenticated-route-binding-send-skipped session=\(sessionID) stage=\(stage) reason=local_identity_unavailable",
+                    sessionID: sessionID
+                )
+                logger.error(
+                    "❌ Authenticated route binding local identity unavailable: \(error.localizedDescription, privacy: .public)"
+                )
+                return
+            }
+            let localFingerprint = localIdentity.identity.authoritativeFingerprint
+            let endpointSnapshot = ServiceEndpointRegistry.shared.snapshot()
+            let routes = CrossNetworkWebRTCLocalAppMessageFactory.localAuthenticatedRouteBindingRoutes(
+                endpointSnapshot: endpointSnapshot
+            )
+            guard !routes.isEmpty else {
+                self.appendWebRTCSessionDiagnostic(
+                    "authenticated-route-binding-send-skipped session=\(sessionID) stage=\(stage) reason=no_registered_product_routes",
+                    sessionID: sessionID
+                )
+                return
+            }
+
+            do {
+                let messages = try CrossNetworkWebRTCLocalAppMessageFactory.authenticatedRouteBindingMessages(
+                    routes: routes,
+                    localDeviceId: localDeviceId,
+                    remoteDeviceId: remoteDeviceId,
+                    localProtocolPublicKeyFingerprint: localFingerprint,
+                    remoteProtocolPublicKeyFingerprint: remoteFingerprint,
+                    sessionBinding: WebRTCControlChannelCodec.sessionBindingDescriptor(for: keys)
+                )
+                for message in messages {
+                    let outPlain = try JSONEncoder().encode(message)
+                    let outCipher = try encryptAppPayload(outPlain, with: keys)
+                    let outPadded = try TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-route-binding")
+                    try await sendFramed(outPadded)
+                }
+                self.appendWebRTCSessionDiagnostic(
+                    "authenticated-route-binding-send session=\(sessionID) stage=\(stage) routes=\(messages.count)",
+                    sessionID: sessionID
+                )
+                if Self.isSmokeRuntimeEnabled {
+                    Self.emitSmokeLog("🧪 mac app message=authenticatedRouteBinding sent routes=\(messages.count)")
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard self.isCurrentWebRTCControlLoopOwner(
+                    sessionID: sessionID,
+                    session: session,
+                    controlTaskToken: controlTaskToken
+                ) else {
+                    return
+                }
+                logger.warning(
+                    "⚠️ WebRTC authenticatedRouteBinding send failed: session=\(sessionID, privacy: .public) stage=\(stage, privacy: .public) err=\(self.sanitizeStatus(error.localizedDescription), privacy: .public)"
+                )
+                self.appendWebRTCSessionDiagnostic(
+                    "authenticated-route-binding-send-failed session=\(sessionID) stage=\(stage) error=\(self.sanitizeStatus(error.localizedDescription))",
+                    sessionID: sessionID
+                )
+            }
+        }
+
+        let initialHandshakeTask: Task<Void, Never>? = {
+            guard WebRTCPQCHandshakePolicy.shouldInitiateInitialWebRTCHandshake(role: session.role) else {
+                return nil
+            }
+
+            return Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard self.isCurrentWebRTCControlLoopOwner(
+                    sessionID: sessionID,
+                    session: session,
+                    controlTaskToken: controlTaskToken
+                ) else {
+                    return
+                }
+                guard handshakeState.driver == nil, handshakeState.sessionKeys == nil else { return }
+
+                do {
+                    let handshakePolicy = try self.requiredCurrentPathLocalIdentity(
+                        for: sessionID
+                    ).handshakePolicy
+                    let strictPQCRequested = handshakePolicy.requirePQC
+                    let capability = CryptoProviderFactory.detectCapability()
+                    let peerResolutionDeadline = Date().addingTimeInterval(strictPQCRequested ? 6.0 : 0.0)
+                    var trustedPeerKEMKeys: [UInt16: Data] = [:]
+                    var trustLookupPeerId: String?
+                    var resolvedPeerDeviceId: String?
+                    var candidateIds: [String] = []
+
+                    while true {
+                        guard self.isCurrentWebRTCControlLoopOwner(
+                            sessionID: sessionID,
+                            session: session,
+                            controlTaskToken: controlTaskToken
+                        ) else {
+                            return
+                        }
+                        let resolution = WebRTCPQCHandshakePolicy.initialWebRTCHandshakePeerResolution(
+                            expectedRemoteDeviceId: currentPathExpectedRemoteAuthorityBySessionId[sessionID]?.deviceId,
+                            learnedRemoteDeviceId: self.webrtcRemoteIdBySessionId[sessionID],
+                            endpointDescription: endpointDescription
+                        )
+                        resolvedPeerDeviceId = resolution.resolvedPeerDeviceId
+                        candidateIds = resolution.candidateIds
+                        trustLookupPeerId = resolvedPeerDeviceId ?? candidateIds.first
+                        trustedPeerKEMKeys.removeAll(keepingCapacity: true)
+
+                        if let resolvedPeerDeviceId {
+                            for candidateId in orderedUniqueCandidateIds([resolvedPeerDeviceId] + candidateIds) {
+                                let merged = await self.trustedSignedRefreshKEMPublicKeys(
+                                    forCandidates: [candidateId],
+                                    sessionID: sessionID
+                                )
+                                guard self.isCurrentWebRTCControlLoopOwner(
+                                    sessionID: sessionID,
+                                    session: session,
+                                    controlTaskToken: controlTaskToken
+                                ) else {
+                                    return
+                                }
+                                guard !merged.isEmpty else { continue }
+                                trustedPeerKEMKeys = merged
+                                trustLookupPeerId = candidateId
+                                break
+                            }
+                        }
+
+                        if !WebRTCPQCHandshakePolicy.shouldWaitForStrictPQCInitialWebRTCHandshake(
+                            strictPQCRequested: strictPQCRequested,
+                            resolvedPeerDeviceId: resolvedPeerDeviceId,
+                            hasTrustedPeerKEM: !trustedPeerKEMKeys.isEmpty
+                        ) {
+                            break
+                        }
+
+                        guard Date() < peerResolutionDeadline else { break }
+                        do {
+                            try await Task.sleep(for: .milliseconds(150))
+                        } catch {
+                            return
+                        }
+                    }
+
+                    guard let trustLookupPeerId else { return }
+
+                    let hasTrustedPeerKEM = !trustedPeerKEMKeys.isEmpty
+                    let useClassicAuthorityBootstrap = WebRTCPQCHandshakePolicy.shouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
+                        sessionID: sessionID,
+                        authorityBoundBootstrapSessionIds: authorityBoundWebRTCBootstrapSessionIds,
+                        expectedRemoteAuthorityAlgorithm: currentPathExpectedRemoteAuthorityBySessionId[sessionID]?.protocolSigningAlgorithm,
+                        activeConnectionCodeSessionID: activeConnectionCodeSessionID,
+                        strictPQCRequested: strictPQCRequested
+                    )
+                    let bootstrapDecision = WebRTCPQCHandshakePolicy.initialWebRTCHandshakeBootstrapDecision(
+                        strictPQCRequested: strictPQCRequested,
+                        hasTrustedPeerKEM: hasTrustedPeerKEM,
+                        capability: capability,
+                        useClassicAuthorityBootstrap: useClassicAuthorityBootstrap,
+                        peerDeviceId: resolvedPeerDeviceId ?? trustLookupPeerId
+                    )
+                    let bootstrapPlan: WebRTCPQCHandshakePolicy.InitialHandshakeBootstrapPlan
+                    switch bootstrapDecision {
+                    case .proceed(let plan):
+                        bootstrapPlan = plan
+                    case .reject(let failure):
+                        if failure.includeProviderAvailabilityInLog {
+                            logger.error(
+                                "⛔️ \(failure.message, privacy: .public) hasApplePQC=\(capability.hasApplePQC, privacy: .public) hasLiboqs=\(capability.hasLiboqs, privacy: .public)"
+                            )
+                        }
+                        throw NSError(
+                            domain: "CrossNetworkConnectionManager",
+                            code: failure.code,
+                            userInfo: [NSLocalizedDescriptionKey: failure.message]
+                        )
+                    }
+                    let selection = bootstrapPlan.selection
+
+                    let protocolIdentityConfiguration = try currentPathProtocolIdentityConfiguration(
+                        for: sessionID
+                    )
+                    let outboundProtocolIdentity = outboundWebRTCProtocolIdentity(
+                        for: [trustLookupPeerId] + candidateIds,
+                        sessionID: sessionID,
+                        configuration: protocolIdentityConfiguration
+                    )
+                    publishProtocolIdentityStatus(
+                        outboundProtocolIdentity,
+                        configured: protocolIdentityConfiguration,
+                        sessionID: sessionID
+                    )
+                    let sigAAlgorithm: ProtocolSigningAlgorithm = selection == .classicOnly
+                        ? .ed25519
+                        : outboundProtocolIdentity.algorithm
+                    let cryptoProvider: any CryptoProvider
+                    let offeredSuites: [CryptoSuite]
+                    if selection == .classicOnly {
+                        cryptoProvider = CryptoProviderFactory.make(policy: selection)
+                        offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                    } else {
+                        // Strict / PQC path. The offerer must NOT elect its MessageA suite set purely from
+                        // local provider capability — that offers X-Wing-only to an ML-KEM-only peer and
+                        // fails suite negotiation even though both share ML-KEM-768. Mirror the REKEY /
+                        // inbound-responder election: intersect the local advertised PQC suites with the
+                        // peer's authority-bound advertised KEM, and pick a provider that can encapsulate
+                        // the shared family.
+                        //
+                        // `trustedPeerKEMKeys` ([UInt16: Data], keyed by CryptoSuite.wireId) is the
+                        // authority-bound / signed-refresh peer KEM resolved above; on the strict-PQC path
+                        // the bootstrap decision already guaranteed it is non-empty (else code 701).
+                        let peerAdvertisedSuites: [CryptoSuite] = trustedPeerKEMKeys.keys.map { CryptoSuite(wireId: $0) }
+                        let initiatorProvider = CryptoProviderFactory.makeOutboundPQCInitiatorProvider(
+                            policy: selection,
+                            peerAdvertisedSuites: peerAdvertisedSuites
+                        )
+                        let advertised = DeviceIdentityKeyManager
+                            .pairingIdentityAdvertisedPQCSuites(
+                                using: initiatorProvider,
+                                activeProtocolSigningAlgorithm: sigAAlgorithm,
+                                qPeriaptEnabled: sigAAlgorithm == .mlDSA65
+                                    && QPeriaptPlatformPolicy.isEnabledForLocalRuntime()
+                            )
+                        let shared = WebRTCPQCHandshakePolicy.webRTCPQCRekeySharedSuites(
+                            localPQCSuites: advertised,
+                            with: trustedPeerKEMKeys
+                        )
+                        let signatureCompatibleShared = sigAAlgorithm == .mlDSA87
+                            ? shared.filter { $0 != .qperiaptABI2PolicyBound }
+                            : shared
+                        guard !signatureCompatibleShared.isEmpty else {
+                            // Fail closed: no mutually-supported PQC family. NEVER fall back to classic.
+                            logger.error(
+                                "⛔️ WebRTC 初始出站握手挑选不出共享 PQC 套件: session=\(sessionID, privacy: .public) peer=\(trustLookupPeerId, privacy: .public) localAdvertised=\(advertised.map(\.wireId), privacy: .public) peerKEM=\(Array(trustedPeerKEMKeys.keys), privacy: .public)"
+                            )
+                            throw NSError(
+                                domain: "CrossNetworkConnectionManager",
+                                code: 704,
+                                userInfo: [NSLocalizedDescriptionKey: "严格 PQC 已启用，但 WebRTC 初始握手与对端没有共享的 PQC 套件族（suiteNegotiationFailed）；当前已拒绝 classic fallback。peer=\(trustLookupPeerId)"]
+                            )
+                        }
+                        cryptoProvider = initiatorProvider
+                        offeredSuites = signatureCompatibleShared.filter(\.isPQCGroup)
+                    }
+
+                    let outboundDriver = try HandshakeDriver(
+                        transport: transport,
+                        cryptoProvider: cryptoProvider,
+                        protocolSignatureProvider: ProtocolSignatureProviderSelector.select(for: sigAAlgorithm),
+                        identityProvider: DeviceIdentityHandshakeProvider(
+                            sigAAlgorithm: sigAAlgorithm,
+                            protocolSigningKeyProtection: sigAAlgorithm == .ed25519
+                                ? .softwareKeychain
+                                : outboundProtocolIdentity.protection,
+                            includeSecureEnclavePoP: handshakePolicy.requireSecureEnclavePoP
+                        ),
+                        sigAAlgorithm: sigAAlgorithm,
+                        offeredSuites: offeredSuites,
+                        policy: handshakePolicy,
+                        cryptoPolicy: HandshakeCryptoPolicyResolver.policy(for: offeredSuites),
+                        // The current-path trust provider carries the pinned remote authority (set by the
+                        // answerer code/QR path, or — on the offerer path — by ingestWebRTCJoinBootstrapPayload).
+                        // It is required on the strict-PQC path too: it supplies the authority-bound peer KEM
+                        // for encapsulation AND enforces protocol-identity pinning on MessageB. Without it the
+                        // driver falls back to DefaultHandshakeTrustProvider, which has no current-path authority
+                        // and returns no peer KEM for a fresh cross-network peer (the 701 deadlock).
+                        trustProvider: currentPathTrustProvider
+                    )
+                    guard self.isCurrentWebRTCControlLoopOwner(
+                        sessionID: sessionID,
+                        session: session,
+                        controlTaskToken: controlTaskToken
+                    ) else {
+                        return
+                    }
+                    handshakeState.driver = outboundDriver
+
+                    logger.info(
+                        "🤝 WebRTC 初始出站握手启动: session=\(sessionID, privacy: .public) peer=\(trustLookupPeerId, privacy: .public) policy=\(selection.rawValue, privacy: .public) mode=\(bootstrapPlan.bootstrapMode, privacy: .public) trustedKEM=\(hasTrustedPeerKEM, privacy: .public) authorityBootstrap=\(bootstrapPlan.usesClassicAuthorityBootstrap, privacy: .public)"
+                    )
+                    let keys = try await outboundDriver.initiateHandshake(
+                        with: PeerIdentifier(deviceId: trustLookupPeerId)
+                    )
+
+                    guard handshakeState.driver === outboundDriver,
+                          self.isCurrentWebRTCControlLoopOwner(
+                            sessionID: sessionID,
+                            session: session,
+                            controlTaskToken: controlTaskToken
+                          ) else {
+                        return
+                    }
+
+                    let authenticatedAuthority = await outboundDriver
+                        .getAuthenticatedRemoteAuthority()
+                    guard handshakeState.driver === outboundDriver,
+                          self.isCurrentWebRTCControlLoopOwner(
+                            sessionID: sessionID,
+                            session: session,
+                            controlTaskToken: controlTaskToken
+                          ) else {
+                        return
+                    }
+                    handshakeState.authenticatedRemoteAuthority = authenticatedAuthority
+                    handshakeState.sessionKeys = keys
+                    handshakeState.driver = nil
+                    self.webrtcSessionKeysBySessionId[sessionID] = keys
+                    let isStrictClassicAuthorityBootstrap =
+                        strictPQCRequested && useClassicAuthorityBootstrap && !keys.negotiatedSuite.isPQCGroup
+                    if isStrictClassicAuthorityBootstrap {
+                        self.lastRekeyEvent = "bootstrapOnly suite=\(keys.negotiatedSuite.rawValue)"
+                        self.strictPQCClassicBootstrapOnlySessionIds.insert(sessionID)
+                        self.logger.warning(
+                            "⏳ WebRTC strictPQC classic authority bootstrap is bootstrap-only: session=\(sessionID, privacy: .public) event=pqcRekeyPending suite=\(keys.negotiatedSuite.rawValue, privacy: .public)"
+                        )
+                        self.appendSmokeStatus(
+                            "strict-pqc-bootstrap-only session=\(sessionID) suite=\(keys.negotiatedSuite.rawValue)"
+                        )
+                        do {
+                            try await sendLocalPairingIdentityExchange(
+                                keys: keys,
+                                force: true,
+                                stage: "strict-bootstrap"
+                            )
+                        } catch is CancellationError {
+                            return
+                        } catch {
+                            guard self.isCurrentWebRTCControlLoopOwner(
+                                sessionID: sessionID,
+                                session: session,
+                                controlTaskToken: controlTaskToken
+                            ) else {
+                                return
+                            }
+                            self.logger.warning(
+                                "⚠️ WebRTC strictPQC bootstrap pairingIdentityExchange send failed: session=\(sessionID, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                            )
+                            self.appendSmokeStatus(
+                                "app-pairing-send-failed session=\(sessionID) stage=strict_bootstrap error=\(sanitizeStatus(error.localizedDescription))"
+                            )
+                        }
+                        return
+                    }
+                    self.strictPQCClassicBootstrapOnlySessionIds.remove(sessionID)
+                    self.connectionStatus = .connected
+                    self.readiness = .handshakeComplete(
+                        sessionId: sessionID,
+                        negotiatedSuite: keys.negotiatedSuite.rawValue
+                    )
+                    self.markCrossNetworkPresenceConnected(
+                        sessionID: sessionID,
+                        negotiatedSuite: keys.negotiatedSuite.rawValue
+                    )
+                    self.updatePreparedSessionSnapshot(
+                        sessionID: sessionID,
+                        phase: .handshakeComplete,
+                        negotiatedSuite: keys.negotiatedSuite.rawValue
+                    )
+                    startOutboundHeartbeatIfNeeded()
+                    await sendLocalAuthenticatedRouteBindings(keys: keys, stage: "initial-handshake")
+                    guard self.isCurrentWebRTCControlLoopOwner(
+                        sessionID: sessionID,
+                        session: session,
+                        controlTaskToken: controlTaskToken
+                    ) else {
+                        return
+                    }
+                    startScreenStreamingIfNeeded(keys: keys)
+                    logger.info(
+                        "✅ WebRTC 初始出站握手完成: session=\(sessionID, privacy: .public) suite=\(keys.negotiatedSuite.rawValue, privacy: .public)"
+                    )
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard self.isCurrentWebRTCControlLoopOwner(
+                        sessionID: sessionID,
+                        session: session,
+                        controlTaskToken: controlTaskToken
+                    ) else { return }
+                    handshakeState.driver = nil
+                    let didCleanup = self.cleanupWebRTCSessionIfCurrentControlLoopOwner(
+                        sessionID: sessionID,
+                        session: session,
+                        controlTaskToken: controlTaskToken,
+                        reason: "handshake_failed",
+                        disconnectKind: .explicit
+                    )
+                    if didCleanup {
+                        self.connectionStatus = .failed("WebRTC handshake failed: \(error.localizedDescription)")
+                        self.readiness = .idle
+                    }
+                }
+            }
+        }()
+
+        func maybeStartOutboundPQCRekeyIfNeeded(
+            from pairingPayload: AppMessage.PairingIdentityExchangePayload,
+            validatedAuthority: ValidatedPairingIdentityAuthority,
+            trigger: String,
+            ownerSession: WebRTCSession,
+            ownerControlTaskToken: UUID
+        ) async {
+            guard self.isCurrentWebRTCControlLoopOwner(
+                sessionID: sessionID,
+                session: ownerSession,
+                controlTaskToken: ownerControlTaskToken
+            ) else {
+                return
+            }
+            if Self.isSmokeRuntimeEnabled {
+                Self.emitSmokeLog("🧪 mac maybeStartPQCRekey trigger=\(trigger) deviceId=\(pairingPayload.deviceId) keys=\(pairingPayload.kemPublicKeys.count)")
+            }
+            guard let establishedKeys = handshakeState.sessionKeys else { return }
+            guard !establishedKeys.negotiatedSuite.isPQCGroup else { return }
+            let strictPQCRequired = HandshakePolicy.recommendedDefault(
+                compatibilityModeEnabled: UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
+            ).requirePQC
+            func failStrictClassicBootstrap(reason: String, diagnostic: String) {
+                guard strictPQCRequired,
+                      !establishedKeys.negotiatedSuite.isPQCGroup,
+                      self.isCurrentWebRTCControlLoopOwner(
+                        sessionID: sessionID,
+                        session: ownerSession,
+                        controlTaskToken: ownerControlTaskToken
+                      ) else {
+                    return
+                }
+                self.logger.error(
+                    "⛔️ WebRTC strictPQC bootstrap could not rekey to PQC; closing classic bootstrap-only session: session=\(sessionID, privacy: .public) event=pqcRekeyFailed trigger=\(trigger, privacy: .public) reason=\(diagnostic, privacy: .public)"
+                )
+                self.appendWebRTCSessionDiagnostic(
+                    "strictPQCRekeyFailed session=\(sessionID) trigger=\(trigger) reason=\(sanitizeStatus(reason))",
+                    sessionID: sessionID
+                )
+                self.lastRekeyEvent = "failed strict reason=\(reason)"
+                handshakeState.driver = nil
+                handshakeState.previousSessionKeysBeforeRekey = nil
+                self.webrtcRekeyInProgressSessionIds.remove(sessionID)
+                self.strictPQCClassicBootstrapOnlySessionIds.remove(sessionID)
+                let didCleanup = self.cleanupWebRTCSessionIfCurrentControlLoopOwner(
+                    sessionID: sessionID,
+                    session: ownerSession,
+                    controlTaskToken: ownerControlTaskToken,
+                    reason: "strict_pqc_rekey_failed_\(reason)",
+                    disconnectKind: .explicit
+                )
+                if didCleanup {
+                    self.connectionStatus = .failed("Strict PQC rekey failed: \(diagnostic)")
+                    self.readiness = .idle
+                }
+            }
+            guard handshakeState.driver == nil else { return }
+            guard !self.webrtcRekeyInProgressSessionIds.contains(sessionID) else { return }
+ // 本端选举标识必须使用我们向对端广播的同一个 protocol/account id（session.localDeviceId），
+ // 否则两端会对不同的字符串对做字典序排序，选举结果可能不一致（双方都发起或都等待）。
+ // 不要回退到 deviceFingerprint：那是硬件派生值，并非对端在 pairingPayload.deviceId 中收到的标识，
+ // 会造成跨命名空间比较。当 session.localDeviceId 经规范化后为 nil 时，
+ // shouldInitiatePQCRekey 返回 nil，由下方 3984- 的 guard 走 pending/wait（严格模式下 failStrictClassicBootstrap），
+ // 这与 iOS 的行为一致。
+            let localElectionDeviceId = WebRTCPQCHandshakePolicy.canonicalPQCRekeyElectionDeviceId(session.localDeviceId)
+            let remoteElectionDeviceId = validatedAuthority.authorizedDeviceIds
+                .first { WebRTCPQCHandshakePolicy.canonicalPQCRekeyElectionDeviceId($0) != nil }
+            guard let shouldInitiate = WebRTCPQCHandshakePolicy.shouldInitiatePQCRekey(
+                localDeviceId: localElectionDeviceId,
+                remoteDeviceId: remoteElectionDeviceId
+            ) else {
+                self.lastRekeyEvent = "waiting peer=\(pairingPayload.deviceId) election"
+                logger.info(
+                    "⏳ WebRTC rekey waiting for stable initiator election: session=\(sessionID, privacy: .public) event=pqcRekeyPending trigger=\(trigger, privacy: .public) local=\(localElectionDeviceId ?? "nil", privacy: .public) peer=\(remoteElectionDeviceId ?? "nil", privacy: .public)"
+                )
+                failStrictClassicBootstrap(
+                    reason: "unstable_rekey_election",
+                    diagnostic: "stable initiator election unavailable (local=\(localElectionDeviceId ?? "nil") peer=\(remoteElectionDeviceId ?? "nil"))"
+                )
+                return
+            }
+            guard shouldInitiate else {
+                self.lastRekeyEvent = "await inbound peer=\(pairingPayload.deviceId)"
+                logger.info(
+                    "ℹ️ WebRTC rekey elected peer as initiator; waiting inbound rekey: session=\(sessionID, privacy: .public) event=pqcRekeyPending trigger=\(trigger, privacy: .public) peer=\(pairingPayload.deviceId, privacy: .public)"
+                )
+                return
+            }
+
+            let capability = CryptoProviderFactory.detectCapability()
+            guard capability.hasApplePQC || capability.hasLiboqs else {
+                if Self.isSmokeRuntimeEnabled {
+                    Self.emitSmokeLog("🧪 mac skip PQC rekey: no local PQC provider")
+                }
+                logger.info(
+                    "⚠️ WebRTC skip PQC rekey: local PQC provider unavailable. session=\(sessionID, privacy: .public) event=pqcRekeyFailed trigger=\(trigger, privacy: .public)"
+                )
+                failStrictClassicBootstrap(
+                    reason: "local_pqc_provider_unavailable",
+                    diagnostic: "local device has no available Apple PQC or liboqs provider"
+                )
+                return
+            }
+
+            let prefersLiboqsForPeer =
+                (pairingPayload.platform ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    .localizedCaseInsensitiveCompare("android") == .orderedSame
+
+            let candidateIds = validatedAuthority.authorizedDeviceIds
+            guard !candidateIds.isEmpty else { return }
+
+            let protocolIdentityConfiguration: ProtocolIdentityConfigurationRecord
+            do {
+                protocolIdentityConfiguration = try await SettingsManager.shared
+                    .committedProtocolIdentityConfiguration()
+                guard self.isCurrentWebRTCControlLoopOwner(
+                    sessionID: sessionID,
+                    session: ownerSession,
+                    controlTaskToken: ownerControlTaskToken
+                ) else {
+                    return
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard self.isCurrentWebRTCControlLoopOwner(
+                    sessionID: sessionID,
+                    session: ownerSession,
+                    controlTaskToken: ownerControlTaskToken
+                ) else {
+                    return
+                }
+                let diagnostic = SkyBridgeDiagnosticRedaction.errorSummary(error)
+                logger.error(
+                    "⛔️ WebRTC PQC rekey local protocol identity is unavailable: \(diagnostic, privacy: .public)"
+                )
+                failStrictClassicBootstrap(
+                    reason: "local_protocol_identity_unavailable",
+                    diagnostic: diagnostic
+                )
+                return
+            }
+
+            var peerKEMByCandidateId: [String: [UInt16: Data]] = [:]
+            for candidateId in candidateIds {
+                peerKEMByCandidateId[candidateId] = await self.trustedSignedRefreshKEMPublicKeys(
+                    forCandidates: [candidateId],
+                    sessionID: sessionID
+                )
+                guard self.isCurrentWebRTCControlLoopOwner(
+                    sessionID: sessionID,
+                    session: ownerSession,
+                    controlTaskToken: ownerControlTaskToken
+                ) else {
+                    return
+                }
+            }
+
+            let peerHasXWing = peerKEMByCandidateId.values.contains { keys in
+                WebRTCPQCHandshakePolicy.peerKEMCanonicalWireIds(keys).contains(CryptoSuite.xwingMLDSA.canonicalKEMSuite.wireId)
+            }
+
+            let providerPlans = WebRTCPQCHandshakePolicy.webRTCPQCRekeyProviderPlans(
+                capability: capability,
+                prefersLiboqsForPeer: prefersLiboqsForPeer,
+                peerHasXWing: peerHasXWing,
+                appleXWingAvailable: Self.isAppleXWingRuntimeAvailableForWebRTCRekey()
+            )
+            let providerCandidates: [(provider: any CryptoProvider, label: String, suites: [CryptoSuite])] =
+                Self.webRTCPQCRekeyProviderCandidates(from: providerPlans)
+
+            var selectedPeerId: String?
+            var selectedProvider: (any CryptoProvider)?
+            var selectedProviderLabel = ""
+            var selectedCryptoPolicy: CryptoPolicy = .default
+            var offeredSuites: [CryptoSuite] = []
+            var selectedProtocolIdentity: WebRTCOutboundProtocolIdentitySelection?
+
+            providerLoop: for candidate in providerCandidates {
+                let candidateLocalSuites = candidate.suites.filter(\.isPQCGroup)
+                guard !candidateLocalSuites.isEmpty else { continue }
+
+                if Self.isSmokeRuntimeEnabled {
+                    let localSuitesSummary = candidateLocalSuites.map(\.rawValue).joined(separator: ",")
+                    Self.emitSmokeLog(
+                        "🧪 mac PQC candidates=\(candidateIds.joined(separator: ",")) " +
+                        "provider=\(candidate.label) localSuites=\(localSuitesSummary)"
+                    )
+                }
+
+                for candidateId in candidateIds {
+                    let peerKEMPublicKeys = peerKEMByCandidateId[candidateId] ?? [:]
+                    let sharedSuites = WebRTCPQCHandshakePolicy.webRTCPQCRekeySharedSuites(
+                        localPQCSuites: candidateLocalSuites,
+                        with: peerKEMPublicKeys
+                    )
+                    let protocolIdentity = outboundWebRTCProtocolIdentity(
+                        for: [candidateId] + candidateIds,
+                        sessionID: sessionID,
+                        configuration: protocolIdentityConfiguration
+                    )
+                    let signatureCompatibleSharedSuites = protocolIdentity.algorithm == .mlDSA87
+                        ? sharedSuites.filter { $0 != .qperiaptABI2PolicyBound }
+                        : sharedSuites
+                    if !signatureCompatibleSharedSuites.isEmpty {
+                        selectedPeerId = candidateId
+                        selectedProvider = candidate.provider
+                        selectedProviderLabel = candidate.label
+                        offeredSuites = signatureCompatibleSharedSuites
+                        selectedProtocolIdentity = protocolIdentity
+                        selectedCryptoPolicy = signatureCompatibleSharedSuites.contains(where: { $0.isHybrid })
+                            ? CryptoPolicy(
+                                minimumSecurityTier: .hybridPreferred,
+                                allowExperimentalHybrid: true,
+                                advertiseHybrid: true,
+                                requireHybridIfAvailable: true
+                            )
+                            : .default
+                        break providerLoop
+                    }
+                }
+            }
+
+            guard let selectedPeerId,
+                  let cryptoProvider = selectedProvider,
+                  let selectedProtocolIdentity else {
+                let mergedPeerKEMPublicKeys = await self.trustedSignedRefreshKEMPublicKeys(
+                    forCandidates: candidateIds,
+                    sessionID: sessionID
+                )
+                guard self.isCurrentWebRTCControlLoopOwner(
+                    sessionID: sessionID,
+                    session: ownerSession,
+                    controlTaskToken: ownerControlTaskToken
+                ) else {
+                    return
+                }
+                let missingCanonicalSuites = Array(Set(
+                    providerCandidates
+                        .flatMap { $0.suites.filter(\.isPQCGroup) }
+                        .map(\.canonicalKEMSuite)
+                        .filter { mergedPeerKEMPublicKeys[$0.wireId] == nil }
+                        .map(\.rawValue)
+                )).sorted()
+                let missingSummary = missingCanonicalSuites.joined(separator: ",")
+                if Self.isSmokeRuntimeEnabled {
+                    Self.emitSmokeLog("🧪 mac skip PQC rekey: missing peer KEM suites=\(missingSummary)")
+                }
+                self.lastRekeyEvent = "waiting peer=\(pairingPayload.deviceId) missing=\(missingSummary)"
+                logger.info(
+                    "⏳ WebRTC rekey waiting for peer KEM keys: session=\(sessionID, privacy: .public) event=pqcRekeyPending trigger=\(trigger, privacy: .public) candidates=\(candidateIds.joined(separator: ","), privacy: .public) missing=\(missingSummary, privacy: .public)"
+                )
+                failStrictClassicBootstrap(
+                    reason: "missing_common_peer_kem",
+                    diagnostic: missingSummary.isEmpty
+                        ? "no common trusted peer PQC KEM key"
+                        : "missing common trusted peer PQC KEM key(s): \(missingSummary)"
+                )
+                return
+            }
+
+            guard self.isCurrentWebRTCControlLoopOwner(
+                sessionID: sessionID,
+                session: ownerSession,
+                controlTaskToken: ownerControlTaskToken
+            ) else {
+                return
+            }
+            publishProtocolIdentityStatus(
+                selectedProtocolIdentity,
+                configured: protocolIdentityConfiguration,
+                sessionID: sessionID
+            )
+
+            do {
+                let identityProvider = DeviceIdentityHandshakeProvider(
+                    sigAAlgorithm: selectedProtocolIdentity.algorithm,
+                    protocolSigningKeyProtection: selectedProtocolIdentity.protection
+                )
+                let rekeyTrustProvider = CurrentPathHandshakeTrustProvider(
+                    expectedRemoteAuthority: currentPathExpectedRemoteAuthorityBySessionId[sessionID],
+                    fallbackPeerIDs: candidateIds,
+                    additionalTrustedFingerprints: handshakeTrustedProtocolFingerprints(
+                        for: sessionID,
+                        candidateDeviceIds: candidateIds
+                    )
+                )
+
+                let outboundDriver = try HandshakeDriver(
+                    transport: transport,
+                    cryptoProvider: cryptoProvider,
+                    protocolSignatureProvider: ProtocolSignatureProviderSelector.select(
+                        for: selectedProtocolIdentity.algorithm
+                    ),
+                    identityProvider: identityProvider,
+                    sigAAlgorithm: selectedProtocolIdentity.algorithm,
+                    offeredSuites: offeredSuites,
+                    policy: .strictPQC,
+                    cryptoPolicy: selectedCryptoPolicy,
+                    trustProvider: rekeyTrustProvider
+                )
+
+                guard self.isCurrentWebRTCControlLoopOwner(
+                    sessionID: sessionID,
+                    session: ownerSession,
+                    controlTaskToken: ownerControlTaskToken
+                ) else {
+                    return
+                }
+                handshakeState.previousSessionKeysBeforeRekey = establishedKeys
+                handshakeState.driver = outboundDriver
+                self.webrtcRekeyInProgressSessionIds.insert(sessionID)
+                self.stopWebRTCScreenStreaming(sessionID: sessionID)
+
+                let offeredSummary = offeredSuites.map(\.rawValue).joined(separator: ",")
+                if Self.isSmokeRuntimeEnabled {
+                    Self.emitSmokeLog(
+                        "🧪 mac start PQC rekey peer=\(selectedPeerId) offered=\(offeredSummary) " +
+                        "provider=\(String(describing: type(of: cryptoProvider))) source=\(selectedProviderLabel)"
+                    )
+                }
+                self.lastRekeyEvent = "start peer=\(selectedPeerId) policy=requirePQC"
+                logger.info(
+                    "🔁 WebRTC outbound PQC rekey start: session=\(sessionID, privacy: .public) event=pqcRekeyStarted trigger=\(trigger, privacy: .public) peer=\(selectedPeerId, privacy: .public) offered=\(offeredSummary, privacy: .public)"
+                )
+                do {
+                    let rekeyed = try await outboundDriver.initiateHandshake(
+                        with: PeerIdentifier(deviceId: selectedPeerId)
+                    )
+                    guard handshakeState.driver === outboundDriver,
+                          self.isCurrentWebRTCControlLoopOwner(
+                            sessionID: sessionID,
+                            session: ownerSession,
+                            controlTaskToken: ownerControlTaskToken
+                          ) else {
+                        return
+                    }
+                    if Self.isSmokeRuntimeEnabled {
+                        Self.emitSmokeLog("🧪 mac PQC rekey task completed suite=\(rekeyed.negotiatedSuite.rawValue)")
+                    }
+                    let rekeyCompletionEvent = rekeyed.negotiatedSuite.isPQCGroup
+                        ? "pqcRekeyComplete"
+                        : "classicRekeyComplete"
+                    let rekeyCompletionLabel = rekeyed.negotiatedSuite.isPQCGroup
+                        ? "PQC"
+                        : "classic compatibility"
+                    self.logger.info(
+                        "✅ WebRTC outbound \(rekeyCompletionLabel, privacy: .public) rekey completed: session=\(sessionID, privacy: .public) event=\(rekeyCompletionEvent, privacy: .public) peer=\(selectedPeerId, privacy: .public) suite=\(rekeyed.negotiatedSuite.rawValue, privacy: .public)"
+                    )
+                    let authenticatedAuthority = await outboundDriver
+                        .getAuthenticatedRemoteAuthority()
+                    guard handshakeState.driver === outboundDriver,
+                          self.isCurrentWebRTCControlLoopOwner(
+                            sessionID: sessionID,
+                            session: ownerSession,
+                            controlTaskToken: ownerControlTaskToken
+                          ) else {
+                        return
+                    }
+                    handshakeState.authenticatedRemoteAuthority = authenticatedAuthority
+                    handshakeState.sessionKeys = rekeyed
+                    handshakeState.previousSessionKeysBeforeRekey = nil
+                    handshakeState.driver = nil
+                    self.webrtcRekeyInProgressSessionIds.remove(sessionID)
+                    self.strictPQCClassicBootstrapOnlySessionIds.remove(sessionID)
+                    self.lastRekeyEvent = "complete suite=\(rekeyed.negotiatedSuite.rawValue)"
+                    PairingTrustApprovalService.shared.updateVerificationCode(
+                        declaredDeviceId: pairingPayload.deviceId,
+                        sessionKeys: rekeyed
+                    )
+                    self.webrtcSessionKeysBySessionId[sessionID] = rekeyed
+                    self.connectionStatus = .connected
+                    self.readiness = .handshakeComplete(
+                        sessionId: sessionID,
+                        negotiatedSuite: rekeyed.negotiatedSuite.rawValue
+                    )
+                    self.markCrossNetworkPresenceConnected(
+                        sessionID: sessionID,
+                        negotiatedSuite: rekeyed.negotiatedSuite.rawValue
+                    )
+                    self.updatePreparedSessionSnapshot(
+                        sessionID: sessionID,
+                        phase: .handshakeComplete,
+                        negotiatedSuite: rekeyed.negotiatedSuite.rawValue
+                    )
+                    startOutboundHeartbeatIfNeeded()
+                    await sendLocalAuthenticatedRouteBindings(keys: rekeyed, stage: "outbound-rekey")
+                    guard self.isCurrentWebRTCControlLoopOwner(
+                        sessionID: sessionID,
+                        session: ownerSession,
+                        controlTaskToken: ownerControlTaskToken
+                    ) else {
+                        return
+                    }
+                    startScreenStreamingIfNeeded(keys: rekeyed)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard handshakeState.driver === outboundDriver,
+                          self.isCurrentWebRTCControlLoopOwner(
+                            sessionID: sessionID,
+                            session: ownerSession,
+                            controlTaskToken: ownerControlTaskToken
+                          ) else {
+                        return
+                    }
+                    if Self.isSmokeRuntimeEnabled {
+                        Self.emitSmokeLog("🧪 mac PQC rekey task failed err=\(error.localizedDescription)")
+                    }
+
+                    if let fallbackKeys = handshakeState.previousSessionKeysBeforeRekey {
+                        if strictPQCRequired && !fallbackKeys.negotiatedSuite.isPQCGroup {
+                            self.logger.error(
+                                "⛔️ WebRTC outbound PQC rekey failed under strictPQC; closing classic bootstrap-only session: session=\(sessionID, privacy: .public) event=pqcRekeyFailed peer=\(selectedPeerId, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                            )
+                            handshakeState.previousSessionKeysBeforeRekey = nil
+                            handshakeState.driver = nil
+                            self.webrtcRekeyInProgressSessionIds.remove(sessionID)
+                            self.lastRekeyEvent = "failed strict reason=\(error.localizedDescription)"
+                            let didCleanup = self.cleanupWebRTCSessionIfCurrentControlLoopOwner(
+                                sessionID: sessionID,
+                                session: ownerSession,
+                                controlTaskToken: ownerControlTaskToken,
+                                reason: "strict_pqc_rekey_failed",
+                                disconnectKind: .explicit
+                            )
+                            if didCleanup {
+                                self.connectionStatus = .failed("Strict PQC rekey failed: \(error.localizedDescription)")
+                                self.readiness = .idle
+                            }
+                            return
+                        }
+                        self.logger.warning(
+                            "⚠️ WebRTC outbound PQC rekey failed, preserving established session: session=\(sessionID, privacy: .public) event=pqcRekeyFailed establishedClassicPreserved=true peer=\(selectedPeerId, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                        )
+                        handshakeState.sessionKeys = fallbackKeys
+                        handshakeState.previousSessionKeysBeforeRekey = nil
+                        handshakeState.driver = nil
+                        self.webrtcRekeyInProgressSessionIds.remove(sessionID)
+                        self.lastRekeyEvent = "failed reason=\(error.localizedDescription)"
+                        self.webrtcSessionKeysBySessionId[sessionID] = fallbackKeys
+                        startOutboundHeartbeatIfNeeded()
+                        await sendLocalAuthenticatedRouteBindings(keys: fallbackKeys, stage: "outbound-rekey-fallback")
+                        guard self.isCurrentWebRTCControlLoopOwner(
+                            sessionID: sessionID,
+                            session: ownerSession,
+                            controlTaskToken: ownerControlTaskToken
+                        ) else {
+                            return
+                        }
+                        startScreenStreamingIfNeeded(keys: fallbackKeys)
+                    } else {
+                        let didCleanup = self.cleanupWebRTCSessionIfCurrentControlLoopOwner(
+                            sessionID: sessionID,
+                            session: ownerSession,
+                            controlTaskToken: ownerControlTaskToken,
+                            reason: "handshake_failed",
+                            disconnectKind: .explicit
+                        )
+                        if didCleanup {
+                            self.connectionStatus = .failed("WebRTC handshake failed: \(error.localizedDescription)")
+                            self.readiness = .idle
+                        }
+                    }
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard self.isCurrentWebRTCControlLoopOwner(
+                    sessionID: sessionID,
+                    session: ownerSession,
+                    controlTaskToken: ownerControlTaskToken
+                ) else {
+                    return
+                }
+                logger.warning(
+                    "⚠️ WebRTC PQC rekey bootstrap setup failed: session=\(sessionID, privacy: .public) trigger=\(trigger, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                )
+                failStrictClassicBootstrap(
+                    reason: "rekey_driver_setup_failed",
+                    diagnostic: error.localizedDescription
+                )
+            }
+        }
+
+        #if os(macOS)
+        func jpegData(from image: CGImage, quality: CGFloat) -> Data? {
+            ScreenCaptureKitStreamer.jpegData(from: image, quality: quality)
+        }
+
+        #if os(macOS)
+        // macOS-exclusive: 远程桌面宿主能力（屏幕捕获 / 视频策略 / 输入注入 / 剪贴板重定向）。
+        func degradedFallbackJPEGData(
+            from image: CGImage,
+            profile: WebRTCDegradedFallbackJPEGProfile
+        ) -> (image: CGImage, data: Data, quality: CGFloat)? {
+            ScreenCaptureKitStreamer.encodeDegradedFallbackJPEG(
+                from: image,
+                profile: profile
+            )
+        }
+        #endif
+
+        func syntheticScreenDataIfEnabled() -> ScreenDataWire? {
+            guard Self.shouldUseSyntheticScreenForSmoke else {
+                return nil
+            }
+
+            let width = 96
+            let height = 54
+            guard let ctx = CGContext(
+                data: nil,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ) else {
+                return nil
+            }
+
+            let phase = CGFloat(Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 1.0))
+            ctx.setFillColor(CGColor(red: phase, green: 0.18, blue: 1.0 - phase, alpha: 1.0))
+            ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            ctx.setFillColor(CGColor(red: 1.0, green: 1.0, blue: 1.0, alpha: 0.35))
+            ctx.fill(CGRect(x: 8, y: 8, width: width - 16, height: 10))
+            ctx.fill(CGRect(x: 8, y: 24, width: width - 28, height: 8))
+            ctx.fill(CGRect(x: 8, y: 38, width: width - 40, height: 8))
+
+            guard let image = ctx.makeImage(),
+                  let jpg = jpegData(from: image, quality: 0.75) else {
+                return nil
+            }
+
+            return ScreenDataWire(
+                width: width,
+                height: height,
+                imageData: jpg,
+                timestamp: Date().timeIntervalSince1970,
+                format: "jpeg",
+                isSyncFrame: true
+            )
+        }
+        #endif
+
+        #if os(macOS)
+        // macOS-exclusive: 远程桌面宿主能力（屏幕捕获 / 视频策略 / 输入注入 / 剪贴板重定向）。
+        @MainActor
+        func currentVideoPolicy(for transportPath: WebRTCSession.ICETransportPath) -> WebRTCRemoteDesktopVideoPolicy {
+            let settings = RemoteDesktopSettingsManager.shared.settings.displaySettings
+            let peerFormats = self.effectiveWebRTCRemoteVideoFormats(for: sessionID)
+            let nativeVideoTrackEnabled = session.supportsNativeScreenVideoTrack
+            let selectedPolicy = WebRTCRemoteDesktopVideoPolicySelector.select(
+                request: self.webrtcVideoRequest(
+                    for: sessionID,
+                    from: settings,
+                    transportPath: transportPath
+                ),
+                transportPath: transportPath,
+                peerFormats: peerFormats,
+                thermalState: ProcessInfo.processInfo.thermalState,
+                isAppleSilicon: Self.isAppleSiliconRuntime,
+                nativeVideoTrackEnabled: nativeVideoTrackEnabled
+            )
+            let streamConfig = self.webrtcRemoteStreamConfigurationBySessionId[sessionID]
+            let strictSelectedPolicy = Self.policyByEnforcingStrictMediaFrameRateFloor(
+                selectedPolicy,
+                remoteStreamConfiguration: streamConfig
+            )
+            let failFastMediaFallbacks = Self.shouldFailFastRemoteMediaFallbacks(
+                remoteStreamConfiguration: streamConfig
+            )
+            let audioRedirectionEnabled = streamConfig?.audioRedirectionEnabled == true
+            let shouldUseNativeAudioTrack = Self.shouldUseWebRTCNativeAudio(
+                audioRedirectionEnabled: audioRedirectionEnabled,
+                remoteNativeAudioTrackEnabled: streamConfig?.nativeAudioTrackEnabled == true,
+                localNativeAudioTrackReady: session.supportsNativeSystemAudioTrack
+            )
+            let shouldUseFallbackAudioChunks = Self.shouldUseWebRTCAudioFallback(
+                audioRedirectionEnabled: audioRedirectionEnabled,
+                nativeAudioTrackEnabled: shouldUseNativeAudioTrack,
+                legacyAudioFallbackEnabled: streamConfig?.allowsLegacyAudioChunkFallback == true
+            )
+            return shouldUseFallbackAudioChunks && !failFastMediaFallbacks
+                ? strictSelectedPolicy.protectingRealtimeAudio()
+                : strictSelectedPolicy
+        }
+        #endif
+
+        #if os(macOS)
+        // macOS-exclusive: 远程桌面宿主能力（屏幕捕获 / 视频策略 / 输入注入 / 剪贴板重定向）。
+        @MainActor
+        func currentNativeCaptureVideoPolicy(
+            for transportPath: WebRTCSession.ICETransportPath
+        ) -> WebRTCRemoteDesktopVideoPolicy {
+            let settings = RemoteDesktopSettingsManager.shared.settings.displaySettings
+            let peerFormats = self.effectiveWebRTCNativeCaptureVideoFormats(for: sessionID)
+            let selectedPolicy = WebRTCRemoteDesktopVideoPolicySelector.select(
+                request: self.webrtcVideoRequest(
+                    for: sessionID,
+                    from: settings,
+                    transportPath: transportPath
+                ),
+                transportPath: transportPath,
+                peerFormats: peerFormats,
+                thermalState: ProcessInfo.processInfo.thermalState,
+                isAppleSilicon: Self.isAppleSiliconRuntime,
+                nativeVideoTrackEnabled: true
+            )
+            let streamConfig = self.webrtcRemoteStreamConfigurationBySessionId[sessionID]
+            let strictSelectedPolicy = Self.policyByEnforcingStrictMediaFrameRateFloor(
+                selectedPolicy,
+                remoteStreamConfiguration: streamConfig
+            )
+            let failFastMediaFallbacks = Self.shouldFailFastRemoteMediaFallbacks(
+                remoteStreamConfiguration: streamConfig
+            )
+            let audioRedirectionEnabled = streamConfig?.audioRedirectionEnabled == true
+            let shouldUseNativeAudioTrack = Self.shouldUseWebRTCNativeAudio(
+                audioRedirectionEnabled: audioRedirectionEnabled,
+                remoteNativeAudioTrackEnabled: streamConfig?.nativeAudioTrackEnabled == true,
+                localNativeAudioTrackReady: session.supportsNativeSystemAudioTrack
+            )
+            let shouldUseFallbackAudioChunks = Self.shouldUseWebRTCAudioFallback(
+                audioRedirectionEnabled: audioRedirectionEnabled,
+                nativeAudioTrackEnabled: shouldUseNativeAudioTrack,
+                legacyAudioFallbackEnabled: streamConfig?.allowsLegacyAudioChunkFallback == true
+            )
+            return shouldUseFallbackAudioChunks && !failFastMediaFallbacks
+                ? strictSelectedPolicy.protectingRealtimeAudio()
+                : strictSelectedPolicy
+        }
+        #endif
+
+#if os(macOS)
+        @MainActor
+        func currentInteractionCaptureContext(
+            for transportPath: WebRTCSession.ICETransportPath
+        ) -> RemoteDesktopInteractionTelemetrySampler.CaptureContext? {
+            let displayID = CGMainDisplayID()
+            let displayPixelSize: CGSize = {
+                guard let mode = CGDisplayCopyDisplayMode(displayID) else {
+                    return .zero
+                }
+                return CGSize(width: mode.pixelWidth, height: mode.pixelHeight)
+            }()
+
+            guard displayPixelSize.width > 0, displayPixelSize.height > 0 else {
+                return nil
+            }
+
+            let videoPolicy = currentVideoPolicy(for: transportPath)
+            let streamSize = videoPolicy.usesHardwareEncoder
+                ? videoPolicy.preferredSize
+                : displayPixelSize
+            return RemoteDesktopInteractionTelemetrySampler.CaptureContext(
+                displayID: displayID,
+                displayPixelSize: displayPixelSize,
+                streamSize: streamSize
+            )
+        }
+#endif
+
+        func sendRealtimeRemoteControlPayload<T: Encodable>(
+            _ payload: T,
+            type: RemoteMessageTypeWire,
+            sessionKeys: SessionKeys,
+            interactionTaskToken: UUID,
+            maxBufferedAmountBytes: Int,
+            label: String
+        ) async throws {
+            guard self.isCurrentWebRTCInteractionStreamingOwner(
+                sessionID: sessionID,
+                session: session,
+                interactionTaskToken: interactionTaskToken,
+                keys: sessionKeys
+            ) else {
+                throw CancellationError()
+            }
+            let encodedPayload = try JSONEncoder().encode(payload)
+            let message = RemoteMessageWire(type: type, payload: encodedPayload)
+            let plaintext = try JSONEncoder().encode(message)
+            let ciphertext = try encryptAppPayload(
+                plaintext,
+                with: sessionKeys,
+                packetType: .remoteControl
+            )
+            let padded = try TrafficPadding.wrapIfEnabled(ciphertext, label: label)
+            try await session.sendFramedPayloadAsync(
+                padded,
+                maxChunkBytes: 16 * 1024,
+                maxBufferedAmountBytes: UInt64(maxBufferedAmountBytes)
+            )
+            guard self.isCurrentWebRTCInteractionStreamingOwner(
+                sessionID: sessionID,
+                session: session,
+                interactionTaskToken: interactionTaskToken,
+                keys: sessionKeys
+            ) else {
+                throw CancellationError()
+            }
+        }
+
+        func startInteractionStreamingIfNeeded(keys: SessionKeys) {
+            #if os(macOS)
+            guard self.isCurrentWebRTCRemoteControlSession(
+                sessionID: sessionID,
+                session: session,
+                keys: keys
+            ), self.isWebRTCRemoteControlSecurityApproved(
+                sessionID: sessionID,
+                session: session
+            ) else {
+                self.appendSmokeStatus(
+                    "interaction-streaming-blocked session=\(sessionID) reason=awaiting_security_notice"
+                )
+                return
+            }
+            guard self.webrtcInteractionStreamingTasksBySessionId[sessionID] == nil else { return }
+            let interactionTaskToken = UUID()
+            self.webrtcInteractionStreamingTaskTokensBySessionId[sessionID] = interactionTaskToken
+            self.webrtcInteractionStreamingTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard self.isCurrentWebRTCInteractionStreamingOwner(
+                    sessionID: sessionID,
+                    session: session,
+                    interactionTaskToken: interactionTaskToken,
+                    keys: keys
+                ) else {
+                    return
+                }
+                defer {
+                    if self.webrtcInteractionStreamingTaskTokensBySessionId[sessionID]
+                        == interactionTaskToken {
+                        self.webrtcInteractionStreamingTaskTokensBySessionId.removeValue(forKey: sessionID)
+                        self.webrtcInteractionStreamingTasksBySessionId.removeValue(forKey: sessionID)
+                    }
+                }
+
+#if os(macOS)
+                let heartbeatTimeoutSeconds: TimeInterval = 12.0
+                let overlaySampleStride = 6
+                let sampler = RemoteDesktopInteractionTelemetrySampler()
+                var transportPath: WebRTCSession.ICETransportPath = .unknown
+                var transportPathState = StableICETransportPathState()
+                var lastTransportProbeAt = Date.distantPast
+                var overlayLoopIndex = 0
+                var cursorChannelWasEnabled = false
+                var overlayChannelWasEnabled = false
+
+                while !Task.isCancelled {
+                    guard self.isCurrentWebRTCInteractionStreamingOwner(
+                        sessionID: sessionID,
+                        session: session,
+                        interactionTaskToken: interactionTaskToken,
+                        keys: keys
+                    ), self.isWebRTCRemoteControlSecurityApproved(
+                        sessionID: sessionID,
+                        session: session
+                    ) else {
+                        break
+                    }
+                    guard let lastHeartbeatAt = self.webrtcRemoteDesktopHeartbeatAtBySessionId[sessionID] else {
+                        break
+                    }
+                    if Date().timeIntervalSince(lastHeartbeatAt) > heartbeatTimeoutSeconds {
+                        break
+                    }
+                    if self.webrtcRekeyInProgressSessionIds.contains(sessionID) {
+                        do {
+                            try await Task.sleep(for: .milliseconds(100))
+                        } catch {
+                            return
+                        }
+                        guard self.isCurrentWebRTCInteractionStreamingOwner(
+                            sessionID: sessionID,
+                            session: session,
+                            interactionTaskToken: interactionTaskToken,
+                            keys: keys
+                        ) else {
+                            return
+                        }
+                        continue
+                    }
+                    if Date().timeIntervalSince(lastTransportProbeAt) >= 2.0 {
+                        let probedPath = await session.currentICETransportPath()
+                        guard self.isCurrentWebRTCInteractionStreamingOwner(
+                            sessionID: sessionID,
+                            session: session,
+                            interactionTaskToken: interactionTaskToken,
+                            keys: keys
+                        ) else {
+                            return
+                        }
+                        let retainedPreviousPath = transportPathState.recordProbe(probedPath)
+                        transportPath = transportPathState.effectivePath
+                        if retainedPreviousPath {
+                            self.logger.debug(
+                                "ℹ️ WebRTC 交互通道保留上次稳定传输路径: session=\(sessionID, privacy: .public) probed=unknown effective=\(transportPath.rawValue, privacy: .public) unknownProbes=\(transportPathState.consecutiveUnknownProbes, privacy: .public)"
+                            )
+                        }
+                        lastTransportProbeAt = Date()
+                    }
+
+                    let streamConfig = self.webrtcRemoteStreamConfigurationBySessionId[sessionID]
+                    let wantsCursorChannel = streamConfig?.separateCursorChannelEnabled ?? false
+                    let wantsOverlayChannel = streamConfig?.interactionOverlayChannelEnabled ?? false
+
+                    if !wantsCursorChannel && cursorChannelWasEnabled {
+                        sampler.resetCursorState()
+                        do {
+                            try await sendRealtimeRemoteControlPayload(
+                                RemoteDesktopCursorPayload(
+                                    x: 0,
+                                    y: 0,
+                                    width: 1,
+                                    height: 1,
+                                    hidden: true
+                                ),
+                                type: .cursorUpdate,
+                                sessionKeys: keys,
+                                interactionTaskToken: interactionTaskToken,
+                                maxBufferedAmountBytes: 96 * 1024,
+                                label: "tx/webrtc-cursor"
+                            )
+                        } catch is CancellationError {
+                            return
+                        } catch {
+                            self.logger.debug(
+                                "WebRTC cursor reset send failed: session=\(sessionID, privacy: .private) errorClass=\(String(reflecting: Swift.type(of: error)), privacy: .public)"
+                            )
+                        }
+                    }
+
+                    if !wantsOverlayChannel && overlayChannelWasEnabled {
+                        sampler.resetOverlayState()
+                        do {
+                            try await sendRealtimeRemoteControlPayload(
+                                RemoteDesktopOverlayPayload(),
+                                type: .overlayUpdate,
+                                sessionKeys: keys,
+                                interactionTaskToken: interactionTaskToken,
+                                maxBufferedAmountBytes: 96 * 1024,
+                                label: "tx/webrtc-overlay"
+                            )
+                        } catch is CancellationError {
+                            return
+                        } catch {
+                            self.logger.debug(
+                                "WebRTC overlay reset send failed: session=\(sessionID, privacy: .private) errorClass=\(String(reflecting: Swift.type(of: error)), privacy: .public)"
+                            )
+                        }
+                    }
+
+                    cursorChannelWasEnabled = wantsCursorChannel
+                    overlayChannelWasEnabled = wantsOverlayChannel
+
+                    guard wantsCursorChannel || wantsOverlayChannel else {
+                        do {
+                            try await Task.sleep(for: .milliseconds(250))
+                        } catch is CancellationError {
+                            return
+                        } catch {
+                            return
+                        }
+                        continue
+                    }
+
+                    guard self.webrtcInteractionStreamingAllowedSessionIds.contains(sessionID) else {
+                        do {
+                            try await Task.sleep(for: .milliseconds(100))
+                        } catch is CancellationError {
+                            return
+                        } catch {
+                            return
+                        }
+                        continue
+                    }
+
+                    guard self.isCurrentWebRTCInteractionStreamingOwner(
+                        sessionID: sessionID,
+                        session: session,
+                        interactionTaskToken: interactionTaskToken,
+                        keys: keys
+                    ), let captureContext = currentInteractionCaptureContext(for: transportPath) else {
+                        do {
+                            try await Task.sleep(for: .milliseconds(50))
+                        } catch {
+                            return
+                        }
+                        continue
+                    }
+
+                    let bufferedAmount = session.dataChannelBufferedAmountBytes()
+                    if bufferedAmount > 512 * 1024 {
+                        do {
+                            try await Task.sleep(for: .milliseconds(16))
+                        } catch {
+                            return
+                        }
+                        continue
+                    }
+
+                    if wantsCursorChannel,
+                       let cursorPayload = sampler.sampleCursor(context: captureContext) {
+                        do {
+                            try await sendRealtimeRemoteControlPayload(
+                                cursorPayload,
+                                type: .cursorUpdate,
+                                sessionKeys: keys,
+                                interactionTaskToken: interactionTaskToken,
+                                maxBufferedAmountBytes: 128 * 1024,
+                                label: "tx/webrtc-cursor"
+                            )
+                        } catch is CancellationError {
+                            return
+                        } catch {
+                            self.logger.debug(
+                                "ℹ️ WebRTC cursorUpdate 发送失败: session=\(sessionID, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                            )
+                        }
+                    }
+
+                    overlayLoopIndex = (overlayLoopIndex + 1) % overlaySampleStride
+                    if wantsOverlayChannel,
+                       overlayLoopIndex == 0,
+                       let overlayPayload = sampler.sampleOverlay(context: captureContext) {
+                        do {
+                            try await sendRealtimeRemoteControlPayload(
+                                overlayPayload,
+                                type: .overlayUpdate,
+                                sessionKeys: keys,
+                                interactionTaskToken: interactionTaskToken,
+                                maxBufferedAmountBytes: 128 * 1024,
+                                label: "tx/webrtc-overlay"
+                            )
+                        } catch is CancellationError {
+                            return
+                        } catch {
+                            self.logger.debug(
+                                "ℹ️ WebRTC overlayUpdate 发送失败: session=\(sessionID, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                            )
+                        }
+                    }
+
+                    do {
+                        try await Task.sleep(for: .milliseconds(16))
+                    } catch {
+                        return
+                    }
+                    guard self.isCurrentWebRTCInteractionStreamingOwner(
+                        sessionID: sessionID,
+                        session: session,
+                        interactionTaskToken: interactionTaskToken,
+                        keys: keys
+                    ) else {
+                        return
+                    }
+                }
+#endif
+            }
+            #else
+            return
+            #endif
+        }
+
+        func startScreenStreamingIfNeeded(keys: SessionKeys) {
+            #if os(macOS)
+            let inputOwner = RemoteControlInputOwner(
+                transport: .webRTC,
+                sessionID: sessionID,
+                generation: controlTaskToken
+            )
+            guard self.isCurrentWebRTCRemoteControlSession(
+                sessionID: sessionID,
+                session: session,
+                keys: keys
+            ) else {
+                return
+            }
+            guard RemoteDesktopSettingsManager.shared.settings.networkSettings.enableUDPTransport else {
+                self.webrtcAwaitingStreamConfigurationSessionIds.remove(sessionID)
+                self.webrtcInteractionStreamingAllowedSessionIds.remove(sessionID)
+                self.logger.warning(
+                    "⛔️ WebRTC 远程桌面推流被设置阻止: session=\(sessionID, privacy: .public) reason=udp_transport_disabled"
+                )
+                self.appendSmokeStatus(
+                    "stream-deferred session=\(sessionID) reason=udp_transport_disabled_by_settings"
+                )
+                self.appendWebRTCSessionDiagnostic(
+                    "stream-deferred session=\(sessionID) reason=udp_transport_disabled_by_settings",
+                    sessionID: sessionID
+                )
+                return
+            }
+            guard self.isWebRTCRemoteControlSecurityApproved(
+                sessionID: sessionID,
+                session: session
+            ) else {
+                guard !self.isWebRTCRemoteControlSecurityPending(
+                    sessionID: sessionID,
+                    session: session
+                ) else {
+                    self.appendSmokeStatus(
+                        "stream-deferred session=\(sessionID) reason=security_notice_pending"
+                    )
+                    return
+                }
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    guard await self.ensureWebRTCRemoteControlSecurityApproved(
+                        sessionID: sessionID,
+                        session: session,
+                        keys: keys
+                    ) else {
+                        return
+                    }
+                    startScreenStreamingIfNeeded(keys: keys)
+                }
+                self.appendSmokeStatus(
+                    "stream-deferred session=\(sessionID) reason=await_security_notice"
+                )
+                return
+            }
+            if self.webrtcSessionReadyDiagnosticSessionIds.insert(sessionID).inserted {
+                self.appendWebRTCSessionDiagnostic(
+                    "sessionReady session=\(sessionID) suite=\(keys.negotiatedSuite.rawValue)",
+                    sessionID: sessionID
+                )
+            }
+            if self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.isStopRequest == true {
+                self.webrtcAwaitingStreamConfigurationSessionIds.remove(sessionID)
+                self.webrtcInteractionStreamingAllowedSessionIds.remove(sessionID)
+                self.logger.info(
+                    "⏸️ WebRTC 推流保持停止状态: session=\(sessionID, privacy: .public)"
+                )
+                return
+            }
+            guard Self.shouldStartWebRTCScreenStreaming(
+                remoteStreamConfiguration: self.webrtcRemoteStreamConfigurationBySessionId[sessionID]
+            ) else {
+                if self.webrtcAwaitingStreamConfigurationSessionIds.insert(sessionID).inserted {
+                    self.logger.info(
+                        "ℹ️ WebRTC 推流等待 viewer 流配置: session=\(sessionID, privacy: .public)"
+                    )
+                    self.appendSmokeStatus(
+                        "stream-deferred session=\(sessionID) reason=await_stream_configuration"
+                    )
+                    self.appendWebRTCSessionDiagnostic(
+                        "stream-deferred session=\(sessionID) reason=await_stream_configuration",
+                        sessionID: sessionID
+                    )
+                }
+                return
+            }
+            self.webrtcAwaitingStreamConfigurationSessionIds.remove(sessionID)
+            guard self.webrtcScreenStreamingTasksBySessionId[sessionID] == nil else { return }
+            let screenStreamingTaskToken = UUID()
+            let nativeAudioOwnerToken = UUID()
+            let captureCallbackLease = WebRTCScreenCaptureCallbackLease(
+                ownerToken: screenStreamingTaskToken
+            )
+            let screenStreamingTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard self.isCurrentWebRTCScreenStreamingOwner(
+                    sessionID: sessionID,
+                    session: session,
+                    screenStreamingTaskToken: screenStreamingTaskToken,
+                    keys: keys
+                ) else {
+                    return
+                }
+                let heartbeatTimeoutSeconds: TimeInterval = 12.0
+                let screenFrameChunkBytes = 16 * 1024
+                var screenChannelWaitStartedAt: Date?
+                var lastScreenChannelRouteState = ""
+                var bytesSent: Int = 0
+                var framesSent: Int = 0
+                var framesDroppedBackpressure: Int = 0
+                var fallbackLoopTicks: Int = 0
+                var directEncodedFramesTaken: Int = 0
+                var sckLatestFallbackFrames: Int = 0
+                var sckLatestAgeMsTotal: Int = 0
+                var cgDisplayFallbackFrames: Int = 0
+                var cgDisplayCaptureMsTotal: Int = 0
+                var jpegEncodeMsTotal: Int = 0
+                var lastSendLatencyMs: Int = 0
+                var logWindowStart = Date()
+                var usingSyntheticFrames = false
+                var transportPath: WebRTCSession.ICETransportPath = .unknown
+                var transportPathState = StableICETransportPathState()
+                var lastTransportProbeAt = Date.distantPast
+                var lastBudget: WebRTCRemoteDesktopStreamBudget?
+                var lastEncoderVideoPolicy: WebRTCRemoteDesktopVideoPolicy?
+                var lastFallbackSendVideoPolicy: WebRTCRemoteDesktopVideoPolicy?
+                var lastNativeAudioTrackEnabled: Bool?
+                var lastPreferredAudioEncoding: RemoteDesktopAudioChunkPayload.Encoding?
+                var lastAudioRedirectionEnabled: Bool?
+                var lastFailFastMediaFallbacks: Bool?
+                var lastRealtimeAudioEndpointStableKey: WebRTCRealtimeAudioEndpointStableKey?
+                var lastSentFormat = ""
+                var lastBackpressureReportAt = Date.distantPast
+                var lastScreenChannelWaitReportAt = Date.distantPast
+                var awaitingRefreshToken: UInt64?
+                var awaitingRefreshRequestedAt: Date?
+                var predictiveFramesSentAfterRefresh = 0
+                var lastAwaitingRefreshReportAt = Date.distantPast
+                var lastNativeVideoStatsReportAt = Date.distantPast
+                let encodedFrameStore = LatestWebRTCEncodedFrameStore()
+                let fallbackFrameSequence = RemoteControlFrameSequenceGenerator()
+                var activeFallbackProducer = "initial"
+                var fallbackProducerSwitchReason = "initial"
+                var lastFallbackSignature = "-"
+                var nativeVideoFallbackDrivingMain = false
+                var lastNativeVideoRetryDiagnosticAt = Date.distantPast
+                var nativeWarmupNonJPEGFallbackDrops = 0
+                var lastNativeWarmupNonJPEGFallbackDropReportAt = Date.distantPast
+                let streamingState = WebRTCScreenStreamingRuntimeState()
+#if os(macOS)
+                var directCaptureStreamer: ScreenCaptureKitStreamer?
+                var directAudioFallbackSender: WebRTCAudioFallbackSender?
+                var directSyntheticNativeVideoTask: Task<Void, Never>?
+                var directNativeFramePacingTask: Task<Void, Never>?
+                var directSyntheticNativeVideoSignature = ""
+                var directSyntheticNativeVideoStartedAt = Date.distantPast
+                var lastHardwareFrameAt = Date.distantPast
+                var lastDirectEncoderStartAt = Date.distantPast
+                var lastEncodedFallbackMissReportAt = Date.distantPast
+                var nativeVideoHealthState: NativeVideoHealthState = .negotiated
+                var nativeVideoFailureCooldownUntil = Date.distantPast
+                var nativeVideoFailureStrikeCount = 0
+                var nativeVideoSenderRefreshAttempted = false
+                let cgDisplayFrameWorker = MacWebRTCScreenFrameWorker()
+                var nextCGDisplayWorkerRequestID: UInt64 = 1
+                var resetCGDisplayDamageTracker = true
+                var lastCGDisplayWorkerDroppedPending: UInt64 = 0
+                var pendingDamageReport: RemoteDesktopDamageReport?
+                // CGDisplay JPEG 回退路径的注入映射租约（SCK 硬编路径由
+                // ScreenCaptureKitStreamer.start()/stop() 自行发布/清除）。
+                var cgDisplayInjectionMappingLease: RemoteControlInjectionMappingLease?
+#endif
+
+                @MainActor
+                func recordStrictMediaValidationFailure(
+                    reason: String,
+                    probable: String,
+                    config: RemoteDesktopStreamConfiguration? = nil
+                ) {
+                    self.recordWebRTCStrictMediaValidationFailure(
+                        runtimeState: streamingState,
+                        sessionID: sessionID,
+                        session: session,
+                        screenStreamingTaskToken: screenStreamingTaskToken,
+                        keys: keys,
+                        reason: reason,
+                        probable: probable,
+                        config: config
+                    )
+                }
+
+                @MainActor
+                func currentBudget(
+                    for transportPath: WebRTCSession.ICETransportPath,
+                    videoPolicy: WebRTCRemoteDesktopVideoPolicy
+                ) -> WebRTCRemoteDesktopStreamBudget {
+                    let settings = RemoteDesktopSettingsManager.shared.settings.displaySettings
+                    let networkSettings = RemoteDesktopSettingsManager.shared.settings.networkSettings
+                    let streamConfig = self.webrtcRemoteStreamConfigurationBySessionId[sessionID]
+                    let strictHighFPS =
+                        videoPolicy.targetFrameRate >= 59 &&
+                        Self.shouldFailFastRemoteMediaFallbacks(
+                            remoteStreamConfiguration: streamConfig
+                        )
+                    let longEdge: Int = {
+                        if videoPolicy.usesHardwareEncoder {
+                            return max(
+                                Int(videoPolicy.preferredSize.width.rounded()),
+                                Int(videoPolicy.preferredSize.height.rounded())
+                            )
+                        }
+                        if let mode = CGDisplayCopyDisplayMode(CGMainDisplayID()) {
+                            return max(mode.width, mode.height)
+                        }
+                        return max(
+                            Int(videoPolicy.preferredSize.width.rounded()),
+                            Int(videoPolicy.preferredSize.height.rounded())
+                        )
+                    }()
+                    return WebRTCRemoteDesktopBudgetSelector.select(
+                        requestedFrameRate: videoPolicy.targetFrameRate,
+                        transportPath: transportPath,
+                        thermalState: networkSettings.enableAdaptiveQuality
+                            ? ProcessInfo.processInfo.thermalState
+                            : .nominal,
+                        longEdge: max(1, longEdge),
+                        lowLatencyMode: settings.lowLatencyMode || strictHighFPS,
+                        codec: videoPolicy.codec,
+                        nativeVideoTrackEnabled: session.supportsNativeScreenVideoTrack,
+                        enableHardwareAcceleration: settings.enableHardwareAcceleration,
+                        enableAppleSiliconOptimization: settings.enableAppleSiliconOptimization,
+                        isAppleSilicon: Self.isAppleSiliconRuntime,
+                        bandwidthLimitMbps: networkSettings.boundedBandwidthLimitMbps,
+                        enableAdaptiveQuality: networkSettings.enableAdaptiveQuality,
+                        maxBufferedAmountOverrideBytes: networkSettings.maxBufferedAmountOverrideBytes
+                    )
+                }
+
+#if os(macOS)
+                @MainActor
+                func ensureDirectEncoder(
+                    for videoPolicy: WebRTCRemoteDesktopVideoPolicy
+                ) async -> Bool {
+                    let nativeVideoTrackEnabled = session.supportsNativeScreenVideoTrack
+                    let streamConfig = self.webrtcRemoteStreamConfigurationBySessionId[sessionID]
+                    let failFastMediaFallbacks = Self.shouldFailFastRemoteMediaFallbacks(
+                        remoteStreamConfiguration: streamConfig
+                    )
+                    let realtimeAudioRelayBindPolicy: SkyBridgeRealtimeMediaRelayBindPolicy =
+                        failFastMediaFallbacks ? .requireAcknowledgement : .optimisticAfterSend
+                    let realtimeAudioRelayRenewalMargin: TimeInterval =
+                        failFastMediaFallbacks ? 30 : 10
+                    let explicitStreamResolutionRequested =
+                        streamConfig?.width != nil
+                        && streamConfig?.height != nil
+                        && (streamConfig?.adaptiveResolutionEnabled ?? false) == false
+                    let preserveExactVisibleCaptureSize =
+                        failFastMediaFallbacks
+                        && streamConfig?.requiresExtremePerformanceValidation == true
+                        && explicitStreamResolutionRequested
+                    let nativeVideoTrackReady =
+                        streamConfig?.nativeVideoTrackReady == true
+                    let fallbackShouldDriveMain = Self.nativeVideoFallbackDecision(
+                        supportsNativeVideoTrack: nativeVideoTrackEnabled,
+                        nativeVideoTrackReady: nativeVideoTrackReady,
+                        nativeVideoHealthState: nativeVideoHealthState,
+                        cooldownRemainingSeconds: max(0, nativeVideoFailureCooldownUntil.timeIntervalSince(Date()))
+                    ).fallbackShouldDriveMain
+                    let nativeAudioTrackEnabled =
+                        streamConfig?.nativeAudioTrackEnabled == true
+                    let audioRedirectionEnabled =
+                        streamConfig?.audioRedirectionEnabled == true
+                    let legacyAudioFallbackEnabled =
+                        streamConfig?.allowsLegacyAudioChunkFallback == true
+                    let preferredAudioEncoding = RemoteDesktopAudioChunkPayload.Encoding(
+                        rawValue: streamConfig?.preferredAudioEncoding ?? ""
+                    ) ?? .pcmS16LE
+                    let localNativeAudioTrackReady = session.supportsNativeSystemAudioTrack
+                    let shouldUseNativeAudioTrack = Self.shouldUseWebRTCNativeAudio(
+                        audioRedirectionEnabled: audioRedirectionEnabled,
+                        remoteNativeAudioTrackEnabled: nativeAudioTrackEnabled,
+                        localNativeAudioTrackReady: localNativeAudioTrackReady
+                    )
+                    let shouldUseFallbackAudioChunks = Self.shouldUseWebRTCAudioFallback(
+                        audioRedirectionEnabled: audioRedirectionEnabled,
+                        nativeAudioTrackEnabled: shouldUseNativeAudioTrack,
+                        legacyAudioFallbackEnabled: legacyAudioFallbackEnabled
+                    )
+                    let realtimeAudioEndpoint =
+                        streamConfig?.mediaAudioEndpoint
+                    let realtimeAudioMode =
+                        streamConfig?.requestedMediaAudioMode ?? .lowLatency
+                    let realtimeAudioMediaSessionId =
+                        streamConfig?.mediaSessionId ?? keys.sessionId
+                    let realtimeAudioEndpointStableKey = WebRTCRealtimeAudioEndpointStableKey(
+                        mediaSessionId: realtimeAudioMediaSessionId,
+                        mode: realtimeAudioMode,
+                        endpoint: realtimeAudioEndpoint
+                    )
+                    let shouldUseRealtimeAudio = audioRedirectionEnabled
+                        && streamConfig?.requestsRealtimeMediaAudio == true
+                        && !shouldUseNativeAudioTrack
+                        && !shouldUseFallbackAudioChunks
+                    let nativeVideoWarmBackupEnabled =
+                        nativeVideoTrackEnabled && fallbackShouldDriveMain && !failFastMediaFallbacks
+                    guard videoPolicy.usesHardwareEncoder || nativeVideoTrackEnabled else {
+                        if failFastMediaFallbacks {
+                            recordStrictMediaValidationFailure(
+                                reason: "hardware-video-encoder-unavailable",
+                                probable: "video-policy-selected-fallback-codec",
+                                config: streamConfig
+                            )
+                        }
+                        if let directCaptureStreamer {
+                            directCaptureStreamer.stop(inputOwner: inputOwner)
+                            self.logger.info(
+                                "🛑 WebRTC ScreenCaptureKit 直连硬编停止，回退到 JPEG: session=\(sessionID, privacy: .public)"
+                            )
+                        }
+                        directCaptureStreamer = nil
+                        directNativeFramePacingTask?.cancel()
+                        directNativeFramePacingTask = nil
+                        encodedFrameStore.clear()
+                        lastNativeAudioTrackEnabled = nil
+                        lastPreferredAudioEncoding = nil
+                        lastAudioRedirectionEnabled = nil
+                        lastFailFastMediaFallbacks = nil
+                        lastRealtimeAudioEndpointStableKey = nil
+                        lastDirectEncoderStartAt = .distantPast
+                        if !failFastMediaFallbacks,
+                           case .missing = RemoteControlInjectionMappingStore.snapshot(for: inputOwner) {
+                            // 承诺走 CGDisplay JPEG 回退且商店已空（上面 SCK stop() 清
+                            // 除了其注入映射）：立即为同一 owner 重新发布（对称于
+                            // ScreenCaptureKitStreamer.start()），否则观看端鼠标/键盘全
+                            // 部被 .mappingUnavailable 拒绝而帧仍在推送。visibleSize 先
+                            // 按主屏当前像素尺寸预测（worker 用 CGDisplayCreateImage(
+                            // CGMainDisplayID()) 全分辨率采集），首帧产出后在帧消费处
+                            // 按真实输出尺寸 publishIfChanged 校正；仅补空、不覆盖，
+                            // 避免与帧消费处的权威尺寸互相翻覆。
+                            let fallbackDisplayID = CGMainDisplayID()
+                            if let displayMode = CGDisplayCopyDisplayMode(fallbackDisplayID) {
+                                cgDisplayInjectionMappingLease = RemoteControlInjectionMappingStore.publish(
+                                    RemoteControlInjectionMapping(
+                                        displayID: fallbackDisplayID,
+                                        visibleSize: CGSize(
+                                            width: displayMode.pixelWidth,
+                                            height: displayMode.pixelHeight
+                                        )
+                                    ),
+                                    for: inputOwner
+                                )
+                            }
+                        }
+#if canImport(WebRTCAudioDeviceBridge)
+                            SBWebRTCSystemAudioDevice.shared().retireRecordedAudioOwner(
+                                withToken: nativeAudioOwnerToken
+                            )
+#endif
+                        session.setOutgoingSystemAudioTrackEnabled(false)
+                        await directAudioFallbackSender?.close()
+                        directAudioFallbackSender = nil
+                        streamingState.directSyntheticAudioToneSource?.stop()
+                        streamingState.directSyntheticAudioToneSource = nil
+                        streamingState.directRealtimeAudioAttachGeneration &+= 1
+                        streamingState.directRealtimeAudioRetryAfter = .distantPast
+                        streamingState.directRealtimeAudioRenewalRetryAfter = .distantPast
+                        streamingState.directRealtimeAudioAttachTask?.cancel()
+                        streamingState.directRealtimeAudioAttachTask = nil
+                        streamingState.directRealtimePCMSubmissionPipe?.close()
+                        streamingState.directRealtimePCMSubmissionPipe = nil
+                        await streamingState.directRealtimeAudioSender?.close(reason: "direct-encoder-unavailable")
+                        streamingState.directRealtimeAudioSender = nil
+                        streamingState.directRealtimeAudioSenderRelayEndpoint = nil
+                        streamingState.directRealtimeAudioSenderRelayExpiresAt = nil
+                        streamingState.directRealtimeAudioContinuityState = nil
+                        return false
+                    }
+
+                    let realtimeAudioSenderLeaseReusable = !shouldUseRealtimeAudio
+                        || streamingState.directRealtimeAudioSender == nil
+                        || Self.isReusableMediaRelayEndpoint(
+                            expiresAt: streamingState.directRealtimeAudioSenderRelayExpiresAt,
+                            minimumRemainingTime: realtimeAudioRelayRenewalMargin
+                        )
+                    let realtimeAudioEndpointStable =
+                        lastRealtimeAudioEndpointStableKey == realtimeAudioEndpointStableKey
+                    let preserveRealtimeAudioSender =
+                        shouldUseRealtimeAudio
+                        && streamingState.directRealtimeAudioSender != nil
+                        && realtimeAudioSenderLeaseReusable
+                        && realtimeAudioEndpointStable
+                    let diagnosticSyntheticNativeVideoEnabled =
+                        ProcessInfo.processInfo.environment["SKYBRIDGE_WEBRTC_DIAGNOSTIC_SYNTHETIC_NATIVE_VIDEO"] == "1"
+                    if !diagnosticSyntheticNativeVideoEnabled, directSyntheticNativeVideoTask != nil {
+                        directSyntheticNativeVideoTask?.cancel()
+                        directSyntheticNativeVideoTask = nil
+                        directSyntheticNativeVideoSignature = ""
+                        directSyntheticNativeVideoStartedAt = .distantPast
+                    }
+                    let directVideoPipelineReusable =
+                        lastEncoderVideoPolicy == videoPolicy
+                        && lastNativeAudioTrackEnabled == nativeAudioTrackEnabled
+                        && lastPreferredAudioEncoding == preferredAudioEncoding
+                        && lastAudioRedirectionEnabled == audioRedirectionEnabled
+                        && lastFailFastMediaFallbacks == failFastMediaFallbacks
+                        && (directCaptureStreamer == nil
+                            || !(nativeVideoTrackEnabled && failFastMediaFallbacks && videoPolicy.targetFrameRate >= 59)
+                            || directNativeFramePacingTask != nil)
+                        && (directCaptureStreamer != nil
+                            || (diagnosticSyntheticNativeVideoEnabled && directSyntheticNativeVideoTask != nil))
+                    if directVideoPipelineReusable {
+                        let realtimeAudioSenderNeedsRenewal =
+                            shouldUseRealtimeAudio
+                            && (!realtimeAudioSenderLeaseReusable || !realtimeAudioEndpointStable)
+                        if realtimeAudioSenderNeedsRenewal,
+                           streamingState.directRealtimeAudioSender != nil,
+                           !realtimeAudioSenderLeaseReusable,
+                           realtimeAudioEndpointStable,
+                           Date() < streamingState.directRealtimeAudioRenewalRetryAfter {
+                            scheduleRealtimeAudioAttachIfNeeded()
+                            lastRealtimeAudioEndpointStableKey = realtimeAudioEndpointStableKey
+                            return true
+                        }
+                        if realtimeAudioSenderNeedsRenewal,
+                           let senderToRenew = streamingState.directRealtimeAudioSender,
+                           streamingState.directRealtimeAudioAttachTask == nil {
+                            if !realtimeAudioSenderLeaseReusable,
+                               realtimeAudioEndpointStable {
+                                do {
+                                    let refreshedEndpoint = try await self.requestWebRTCRealtimeAudioSenderEndpoint(
+                                        sessionID: sessionID,
+                                        session: session,
+                                        screenStreamingTaskToken: screenStreamingTaskToken,
+                                        keys: keys
+                                    )
+                                    if Self.isSameMediaRelaySocket(streamingState.directRealtimeAudioSenderRelayEndpoint, refreshedEndpoint),
+                                       let relayToken = refreshedEndpoint.relayToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+                                       !relayToken.isEmpty {
+                                        let renewalBindPolicy = realtimeAudioRelayBindPolicy
+                                        try await senderToRenew.rebindRelayToken(
+                                            relayToken,
+                                            relayBindPolicy: renewalBindPolicy
+                                        )
+                                        try self.requireCurrentWebRTCScreenStreamingOwner(
+                                            sessionID: sessionID,
+                                            session: session,
+                                            screenStreamingTaskToken: screenStreamingTaskToken,
+                                            keys: keys
+                                        )
+                                        streamingState.directRealtimeAudioSenderRelayEndpoint = refreshedEndpoint
+                                        streamingState.directRealtimeAudioSenderRelayExpiresAt = refreshedEndpoint.expiresAt
+                                        streamingState.directRealtimeAudioRenewalRetryAfter = .distantPast
+                                        self.appendWebRTCSessionDiagnostic(
+                                            "audioTxSenderRenewed session=\(sessionID) leaseSource=localRoleLease reason=relay-lease-expiring mode=in-place bindPolicy=\(renewalBindPolicy == .requireAcknowledgement ? "require-ack" : "optimistic") endpoint=\(refreshedEndpoint.host):\(refreshedEndpoint.port)",
+                                            sessionID: sessionID
+                                        )
+                                        WebRTCMediaDiagnosticWriter.append(
+                                            WebRTCMediaDiagnosticEvent(
+                                                sessionId: sessionID,
+                                                kind: "audioTxEndpointRenewed",
+                                                probable: renewalBindPolicy == .requireAcknowledgement
+                                                    ? "relay-lease-renewed-in-place-acknowledged"
+                                                    : "relay-lease-renewed-in-place"
+                                            )
+                                        )
+                                        scheduleRealtimeAudioAttachIfNeeded()
+                                        lastRealtimeAudioEndpointStableKey = realtimeAudioEndpointStableKey
+                                        return true
+                                    }
+                                } catch {
+                                    let relayLeaseRemaining = (streamingState.directRealtimeAudioSenderRelayExpiresAt ?? 0)
+                                        - Date().timeIntervalSince1970
+                                    self.appendWebRTCSessionDiagnostic(
+                                        "audioTxSenderRenewalFallback session=\(sessionID) leaseSource=localRoleLease reason=relay-lease-expiring stage=in-place remainingMs=\(Int((relayLeaseRemaining * 1000).rounded())) error=\(self.sanitizeStatus(error.localizedDescription))",
+                                        sessionID: sessionID
+                                    )
+                                    if relayLeaseRemaining > 5 {
+                                        streamingState.directRealtimeAudioRenewalRetryAfter = Date().addingTimeInterval(1.0)
+                                        scheduleRealtimeAudioAttachIfNeeded()
+                                        lastRealtimeAudioEndpointStableKey = realtimeAudioEndpointStableKey
+                                        return true
+                                    }
+                                }
+                            }
+                            streamingState.directRealtimeAudioContinuityState = await senderToRenew.continuityState()
+                            guard self.isCurrentWebRTCScreenStreamingOwner(
+                                sessionID: sessionID,
+                                session: session,
+                                screenStreamingTaskToken: screenStreamingTaskToken,
+                                keys: keys
+                            ) else {
+                                return false
+                            }
+                            let renewalReason = realtimeAudioEndpointStable
+                                ? "relay-lease-expiring"
+                                : "viewer-endpoint-renewed"
+                            self.appendWebRTCSessionDiagnostic(
+                                "audioTxSenderRenewing session=\(sessionID) leaseSource=localRoleLease reason=\(renewalReason) nextSeq=\(streamingState.directRealtimeAudioContinuityState.map { String($0.nextSequence) } ?? "-")",
+                                sessionID: sessionID
+                            )
+                            streamingState.directSyntheticAudioToneSource?.stop()
+                            streamingState.directSyntheticAudioToneSource = nil
+                            streamingState.directRealtimeAudioAttachGeneration &+= 1
+                            streamingState.directRealtimeAudioRetryAfter = .distantPast
+                            streamingState.directRealtimePCMSubmissionPipe?.detachSender()
+                            await senderToRenew.close(reason: "relay-lease-renewal")
+                            streamingState.directRealtimeAudioSender = nil
+                            streamingState.directRealtimeAudioSenderRelayEndpoint = nil
+                            streamingState.directRealtimeAudioSenderRelayExpiresAt = nil
+                        }
+                        if realtimeAudioSenderNeedsRenewal,
+                           streamingState.directRealtimeAudioSender == nil,
+                           streamingState.directRealtimeAudioAttachTask != nil,
+                           !realtimeAudioEndpointStable {
+                            streamingState.directRealtimeAudioAttachGeneration &+= 1
+                            streamingState.directRealtimeAudioAttachTask?.cancel()
+                            streamingState.directRealtimeAudioAttachTask = nil
+                            streamingState.directRealtimeAudioRetryAfter = .distantPast
+                        }
+                        scheduleRealtimeAudioAttachIfNeeded()
+                        lastRealtimeAudioEndpointStableKey = realtimeAudioEndpointStableKey
+                        return true
+                    }
+
+                    directCaptureStreamer?.stop(inputOwner: inputOwner)
+                    directCaptureStreamer = nil
+                    directNativeFramePacingTask?.cancel()
+                    directNativeFramePacingTask = nil
+                    await directAudioFallbackSender?.close()
+                    directAudioFallbackSender = nil
+                    if !preserveRealtimeAudioSender {
+                        if shouldUseRealtimeAudio,
+                           let directRealtimeAudioSender = streamingState.directRealtimeAudioSender {
+                            streamingState.directRealtimeAudioContinuityState =
+                                await directRealtimeAudioSender.continuityState()
+                            self.appendWebRTCSessionDiagnostic(
+                                "audioTxSenderRenewing session=\(sessionID) leaseSource=localRoleLease reason=\(realtimeAudioSenderLeaseReusable ? "stream-restart" : "relay-lease-expiring") nextSeq=\(streamingState.directRealtimeAudioContinuityState.map { String($0.nextSequence) } ?? "-")",
+                                sessionID: sessionID
+                            )
+                        } else {
+                            streamingState.directRealtimeAudioContinuityState = nil
+                        }
+                        streamingState.directSyntheticAudioToneSource?.stop()
+                        streamingState.directSyntheticAudioToneSource = nil
+                        streamingState.directRealtimeAudioAttachGeneration &+= 1
+                        streamingState.directRealtimeAudioRetryAfter = .distantPast
+                        streamingState.directRealtimeAudioRenewalRetryAfter = .distantPast
+                        streamingState.directRealtimeAudioAttachTask?.cancel()
+                        streamingState.directRealtimeAudioAttachTask = nil
+                        streamingState.directRealtimePCMSubmissionPipe?.close()
+                        streamingState.directRealtimePCMSubmissionPipe = nil
+                        await streamingState.directRealtimeAudioSender?.close(reason: realtimeAudioSenderLeaseReusable ? "video-restart" : "relay-lease-expiring")
+                        streamingState.directRealtimeAudioSender = nil
+                        streamingState.directRealtimeAudioSenderRelayEndpoint = nil
+                        streamingState.directRealtimeAudioSenderRelayExpiresAt = nil
+                    } else {
+                        self.appendWebRTCSessionDiagnostic(
+                            "audioTxSenderPreserved session=\(sessionID) leaseSource=localRoleLease reason=video-restart endpoint=\(realtimeAudioEndpoint?.host ?? "-"):\(realtimeAudioEndpoint.map { String($0.port) } ?? "-")",
+                            sessionID: sessionID
+                        )
+                    }
+                    encodedFrameStore.clear()
+                    lastNativeAudioTrackEnabled = nativeAudioTrackEnabled
+                    lastPreferredAudioEncoding = preferredAudioEncoding
+                    lastAudioRedirectionEnabled = audioRedirectionEnabled
+                    lastFailFastMediaFallbacks = failFastMediaFallbacks
+                    lastRealtimeAudioEndpointStableKey = realtimeAudioEndpointStableKey
+                    lastDirectEncoderStartAt = .distantPast
+                    // 系统音频采集在进程内是独占的（单一采样游标）。另一路会话正在占用时必须
+                    // 明确退让：抢过去会让对方的音频静默中断，且两端都看不到任何错误。
+                    var nativeAudioCaptureGranted = shouldUseNativeAudioTrack
+#if canImport(WebRTCAudioDeviceBridge)
+                    if shouldUseNativeAudioTrack {
+                        nativeAudioCaptureGranted = SBWebRTCSystemAudioDevice.shared()
+                            .activateRecordedAudioOwner(withToken: nativeAudioOwnerToken)
+                        if !nativeAudioCaptureGranted {
+                            self.appendWebRTCSessionDiagnostic(
+                                "audioTxNativeCaptureDenied session=\(sessionID) reason=system_audio_owned_by_another_session",
+                                sessionID: sessionID
+                            )
+                        }
+                    } else {
+                        SBWebRTCSystemAudioDevice.shared().retireRecordedAudioOwner(
+                            withToken: nativeAudioOwnerToken
+                        )
+                    }
+#endif
+                    session.setOutgoingSystemAudioTrackEnabled(nativeAudioCaptureGranted)
+                    func storeEncodedFrame(
+                        _ data: Data,
+                        width: Int,
+                        height: Int,
+                        frameType: RemoteFrameType,
+                        isSyncFrame: Bool
+                    ) {
+                        captureCallbackLease.withActiveOwner(token: screenStreamingTaskToken) {
+                            encodedFrameStore.store(
+                                .init(
+                                    width: width,
+                                    height: height,
+                                    imageData: data,
+                                    timestamp: Date().timeIntervalSince1970,
+                                    format: Self.remoteFrameFormatName(frameType: frameType, payload: data),
+                                    isSyncFrame: isSyncFrame,
+                                    sequenceNumber: fallbackFrameSequence.next()
+                                )
+                            )
+                        }
+                    }
+
+                    let captureStreamer = ScreenCaptureKitStreamer()
+                    let captureFPS = videoPolicy.targetFrameRate
+                    let audioControlBufferedAmountBytes = 96 * 1024
+                    @MainActor
+                    func startDiagnosticSyntheticNativeVideoIfRequested() -> Bool {
+                        guard diagnosticSyntheticNativeVideoEnabled,
+                              nativeVideoTrackEnabled else {
+                            return false
+                        }
+                        if shouldUseNativeAudioTrack || shouldUseFallbackAudioChunks || shouldUseRealtimeAudio {
+                            recordStrictMediaValidationFailure(
+                                reason: "diagnostic-synthetic-native-video-with-audio-forbidden",
+                                probable: "synthetic-native-video-is-video-only",
+                                config: streamConfig
+                            )
+                            return false
+                        }
+                        let requestedSyntheticSize = ProcessInfo.processInfo
+                            .environment["SKYBRIDGE_WEBRTC_DIAGNOSTIC_SYNTHETIC_NATIVE_VIDEO_SIZE"]?
+                            .split(separator: "x", maxSplits: 1)
+                        let requestedSyntheticWidth = requestedSyntheticSize?.first
+                            .flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                        let requestedSyntheticHeight = requestedSyntheticSize?.dropFirst().first
+                            .flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                        let targetWidth = max(
+                            2,
+                            requestedSyntheticWidth ?? Int(videoPolicy.preferredSize.width.rounded(.down))
+                        )
+                        let targetHeight = max(
+                            2,
+                            requestedSyntheticHeight ?? Int(videoPolicy.preferredSize.height.rounded(.down))
+                        )
+                        let evenWidth = targetWidth - (targetWidth % 2)
+                        let evenHeight = targetHeight - (targetHeight % 2)
+                        let clampedFPS = max(1, captureFPS)
+                        let signature = "\(evenWidth)x\(evenHeight)@\(clampedFPS)"
+                        if directSyntheticNativeVideoSignature != signature {
+                            directSyntheticNativeVideoTask?.cancel()
+                            directSyntheticNativeVideoTask = nil
+                            directSyntheticNativeVideoSignature = signature
+                        }
+                        if directSyntheticNativeVideoTask == nil {
+                            directCaptureStreamer?.stop(inputOwner: inputOwner)
+                            directCaptureStreamer = nil
+                            directNativeFramePacingTask?.cancel()
+                            directNativeFramePacingTask = nil
+                            encodedFrameStore.clear()
+                            lastNativeAudioTrackEnabled = nil
+                            lastPreferredAudioEncoding = nil
+                            lastAudioRedirectionEnabled = nil
+                            lastFailFastMediaFallbacks = nil
+                            lastRealtimeAudioEndpointStableKey = nil
+#if canImport(WebRTCAudioDeviceBridge)
+                            SBWebRTCSystemAudioDevice.shared().retireRecordedAudioOwner(
+                                withToken: nativeAudioOwnerToken
+                            )
+#endif
+                            session.setOutgoingSystemAudioTrackEnabled(false)
+                            session.prepareOutgoingScreenVideo(
+                                width: evenWidth,
+                                height: evenHeight,
+                                fps: clampedFPS,
+                                disallowQualityDegradation: true
+                            )
+                            directSyntheticNativeVideoTask = Task.detached(priority: .userInitiated) {
+                                [sessionID, session, captureCallbackLease, screenStreamingTaskToken] in
+                                var frameIndex: UInt64 = 0
+                                let sleepNanoseconds = UInt64(
+                                    max(1, 1_000_000_000 / clampedFPS)
+                                )
+                                while !Task.isCancelled {
+                                    do {
+                                        let didPublish: Void? = try captureCallbackLease.withActiveOwner(
+                                            token: screenStreamingTaskToken
+                                        ) {
+                                            try session.pushDiagnosticSyntheticNativeVideoFrame(
+                                                width: evenWidth,
+                                                height: evenHeight,
+                                                fps: clampedFPS,
+                                                frameIndex: frameIndex
+                                            )
+                                        }
+                                        guard didPublish != nil else { return }
+                                    } catch {
+                                        let renderedError = error.localizedDescription
+                                            .replacingOccurrences(of: "\n", with: " ")
+                                            .replacingOccurrences(of: "\r", with: " ")
+                                        Self.writeWebRTCSessionDiagnostic(
+                                            "native-video-diagnostic-synthetic-frame-error session=\(sessionID) error=\(renderedError)",
+                                            sessionID: sessionID
+                                        )
+                                        return
+                                    }
+                                    frameIndex &+= 1
+                                    do {
+                                        try await Task.sleep(nanoseconds: sleepNanoseconds)
+                                    } catch {
+                                        return
+                                    }
+                                }
+                            }
+                            self.appendSmokeStatus(
+                                "stream-diagnostic-synthetic-native-video-started session=\(sessionID) size=\(evenWidth)x\(evenHeight) fps=\(clampedFPS)"
+                            )
+                            self.appendWebRTCSessionDiagnostic(
+                                "stream-diagnostic-synthetic-native-video-started session=\(sessionID) size=\(evenWidth)x\(evenHeight) fps=\(clampedFPS)",
+                                sessionID: sessionID
+                            )
+                            directSyntheticNativeVideoStartedAt = Date()
+                            lastDirectEncoderStartAt = directSyntheticNativeVideoStartedAt
+                        }
+                        return true
+                    }
+                    func scheduleRealtimeAudioAttachIfNeeded() {
+                        if shouldUseRealtimeAudio, streamingState.directRealtimePCMSubmissionPipe == nil {
+                            streamingState.directRealtimePCMSubmissionPipe = RemoteRealtimePCM16SubmissionPipe(
+                                replayBufferedOnAttach: false
+                            )
+                            self.appendWebRTCSessionDiagnostic(
+                                "audioTxCapturePipeReady session=\(sessionID) leaseSource=localRoleLease state=pending-attach",
+                                sessionID: sessionID
+                            )
+                        }
+                        guard shouldUseRealtimeAudio,
+                              streamingState.directRealtimeAudioSender == nil,
+                              streamingState.directRealtimeAudioAttachTask == nil,
+                              Date() >= streamingState.directRealtimeAudioRetryAfter,
+                              let realtimePCMSubmissionPipe = streamingState.directRealtimePCMSubmissionPipe else {
+                            return
+                        }
+                        let configSnapshot = streamConfig
+                        streamingState.directRealtimeAudioAttachGeneration &+= 1
+                        let attachGeneration = streamingState.directRealtimeAudioAttachGeneration
+                        streamingState.directRealtimeAudioAttachTask = Task(priority: .utility) {
+                            @MainActor [weak self, weak streamingState] in
+                            guard let self else { return }
+                            guard self.isCurrentWebRTCScreenStreamingOwner(
+                                sessionID: sessionID,
+                                session: session,
+                                screenStreamingTaskToken: screenStreamingTaskToken,
+                                keys: keys
+                            ) else {
+                                return
+                            }
+                            self.appendWebRTCSessionDiagnostic(
+                                "audioTxAttachStart session=\(sessionID) leaseSource=localRoleLease state=background",
+                                sessionID: sessionID
+                            )
+                            let continuityState =
+                                streamingState?.directRealtimeAudioContinuityState
+                            let realtimeSender: (
+                                sender: RemoteRealtimeMediaAudioSender,
+                                endpoint: SkyBridgeMediaEndpoint
+                            )?
+                            do {
+                                realtimeSender = try await self.makeWebRTCRealtimeAudioSenderIfNeeded(
+                                    sessionID: sessionID,
+                                    session: session,
+                                    screenStreamingTaskToken: screenStreamingTaskToken,
+                                    keys: keys,
+                                    config: configSnapshot,
+                                    relayBindPolicy: realtimeAudioRelayBindPolicy,
+                                    continuityState: continuityState
+                                )
+                            } catch {
+                                return
+                            }
+                            guard let streamingState else {
+                                if let realtimeSender {
+                                    await realtimeSender.sender.close(
+                                        reason: "streaming-state-released"
+                                    )
+                                }
+                                return
+                            }
+                            guard !Task.isCancelled,
+                                  streamingState.directRealtimeAudioAttachGeneration == attachGeneration,
+                                  self.isCurrentWebRTCScreenStreamingOwner(
+                                    sessionID: sessionID,
+                                    session: session,
+                                    screenStreamingTaskToken: screenStreamingTaskToken,
+                                    keys: keys
+                                  ) else {
+                                if let realtimeSender {
+                                    await realtimeSender.sender.close(
+                                        reason: "stale-audio-attach-generation"
+                                    )
+                                }
+                                return
+                            }
+                            guard let realtimeSender else {
+                                let snapshot = realtimePCMSubmissionPipe.snapshot()
+                                self.appendWebRTCSessionDiagnostic(
+                                    "audioTxAttachFailed session=\(sessionID) leaseSource=localRoleLease pendingBeforeAttach=\(snapshot.pendingBeforeAttach) submittedBeforeAttach=\(snapshot.submittedBeforeAttach) droppedBeforeAttach=\(snapshot.droppedBeforeAttach)",
+                                    sessionID: sessionID
+                                )
+                                if failFastMediaFallbacks {
+                                    let now = Date()
+                                    let firstFailureAt = streamingState.directRealtimeAudioStrictFirstAttachFailureAt ?? now
+                                    streamingState.directRealtimeAudioStrictFirstAttachFailureAt = firstFailureAt
+                                    let retryWindow = Self.strictRealtimeAudioAttachRetryWindowSeconds()
+                                    let elapsed = now.timeIntervalSince(firstFailureAt)
+                                    if elapsed < retryWindow {
+                                        streamingState.directRealtimeAudioRetryAfter = now.addingTimeInterval(1.0)
+                                        self.appendWebRTCSessionDiagnostic(
+                                            "audioTxAttachRetryScheduled session=\(sessionID) leaseSource=localRoleLease reason=main-path-transient elapsedMs=\(Int((elapsed * 1000).rounded())) retryWindowMs=\(Int((retryWindow * 1000).rounded())) retryAfterMs=1000",
+                                            sessionID: sessionID
+                                        )
+                                        if streamingState.directRealtimeAudioAttachGeneration == attachGeneration {
+                                            streamingState.directRealtimeAudioAttachTask = nil
+                                        }
+                                        return
+                                    }
+                                    self.recordWebRTCStrictMediaValidationFailure(
+                                        runtimeState: streamingState,
+                                        sessionID: sessionID,
+                                        session: session,
+                                        screenStreamingTaskToken: screenStreamingTaskToken,
+                                        keys: keys,
+                                        reason: "realtime-audio-main-path-unavailable",
+                                        probable: "pqc-media-audio-sender-unavailable",
+                                        config: configSnapshot
+                                    )
+                                    if streamingState.directRealtimeAudioAttachGeneration == attachGeneration {
+                                        streamingState.directRealtimeAudioAttachTask = nil
+                                    }
+                                    return
+                                }
+                                if streamingState.directRealtimeAudioAttachGeneration == attachGeneration {
+                                    streamingState.directRealtimeAudioRetryAfter = Date().addingTimeInterval(1.0)
+                                    streamingState.directRealtimeAudioAttachTask = nil
+                                }
+                                return
+                            }
+                            streamingState.directRealtimeAudioSender = realtimeSender.sender
+                            streamingState.directRealtimeAudioSenderRelayEndpoint = realtimeSender.endpoint
+                            streamingState.directRealtimeAudioSenderRelayExpiresAt = realtimeSender.endpoint.expiresAt
+                            streamingState.directRealtimeAudioContinuityState = nil
+                            streamingState.directRealtimeAudioStrictFirstAttachFailureAt = nil
+                            streamingState.directRealtimeAudioRetryAfter = .distantPast
+                            realtimePCMSubmissionPipe.attach(sender: realtimeSender.sender)
+                            let snapshot = realtimePCMSubmissionPipe.snapshot()
+                            self.appendWebRTCSessionDiagnostic(
+                                "audioTxAttachComplete session=\(sessionID) leaseSource=localRoleLease pendingBeforeAttach=\(snapshot.pendingBeforeAttach) submittedBeforeAttach=\(snapshot.submittedBeforeAttach) droppedBeforeAttach=\(snapshot.droppedBeforeAttach)",
+                                sessionID: sessionID
+                            )
+                            if Self.shouldUseSyntheticOpusToneForSmoke {
+                                if failFastMediaFallbacks {
+                                    realtimePCMSubmissionPipe.close()
+                                    await realtimeSender.sender.close(reason: "synthetic-audio-forbidden")
+                                    guard !Task.isCancelled,
+                                          streamingState.directRealtimeAudioAttachGeneration
+                                            == attachGeneration else {
+                                        return
+                                    }
+                                    streamingState.directRealtimeAudioSender = nil
+                                    streamingState.directRealtimeAudioSenderRelayEndpoint = nil
+                                    streamingState.directRealtimeAudioSenderRelayExpiresAt = nil
+                                    streamingState.directRealtimeAudioContinuityState = nil
+                                    if streamingState.directRealtimeAudioAttachGeneration == attachGeneration {
+                                        streamingState.directRealtimeAudioAttachTask = nil
+                                    }
+                                    self.recordWebRTCStrictMediaValidationFailure(
+                                        runtimeState: streamingState,
+                                        sessionID: sessionID,
+                                        session: session,
+                                        screenStreamingTaskToken: screenStreamingTaskToken,
+                                        keys: keys,
+                                        reason: "synthetic-audio-forbidden",
+                                        probable: "smoke-synthetic-opus-tone-enabled",
+                                        config: configSnapshot
+                                    )
+                                    return
+                                }
+                                streamingState.directSyntheticAudioToneSource = RemoteRealtimeSyntheticPCM16ToneSource(
+                                    sender: realtimeSender.sender,
+                                    mode: realtimeAudioMode
+                                )
+                                self.appendWebRTCSessionDiagnostic(
+                                    "audioSyntheticToneStart session=\(sessionID) mode=\(realtimeAudioMode.rawValue)",
+                                    sessionID: sessionID
+                                )
+                                WebRTCMediaDiagnosticWriter.append(
+                                    WebRTCMediaDiagnosticEvent(
+                                        sessionId: sessionID,
+                                        kind: "audioSyntheticToneStart",
+                                        probable: "smoke-tone-injected"
+                                    )
+                                )
+                            }
+                            if streamingState.directRealtimeAudioAttachGeneration == attachGeneration {
+                                streamingState.directRealtimeAudioAttachTask = nil
+                            }
+                        }
+                    }
+                    if startDiagnosticSyntheticNativeVideoIfRequested() {
+                        return true
+                    }
+                    if shouldUseFallbackAudioChunks {
+                        if failFastMediaFallbacks {
+                            recordStrictMediaValidationFailure(
+                                reason: "legacy-audio-fallback-forbidden",
+                                probable: "audio-fallback-requested-under-strict-media",
+                                config: streamConfig
+                            )
+                            return false
+                        }
+                        directAudioFallbackSender = WebRTCAudioFallbackSender(
+                            sessionID: sessionID,
+                            session: session,
+                            maxBufferedAmountBytes: UInt64(audioControlBufferedAmountBytes),
+                            securePayloadSealer: { [weak self] plaintext in
+                                guard let self else { throw CancellationError() }
+                                return try await MainActor.run {
+                                    try self.requireCurrentWebRTCScreenStreamingOwner(
+                                        sessionID: sessionID,
+                                        session: session,
+                                        screenStreamingTaskToken: screenStreamingTaskToken,
+                                        keys: keys
+                                    )
+                                    return try self.sealWebRTCSecurePayload(
+                                        plaintext,
+                                        with: keys,
+                                        sessionID: sessionID,
+                                        packetType: .remoteDesktopAudio
+                                    )
+                                }
+                            }
+                        )
+                    }
+                    scheduleRealtimeAudioAttachIfNeeded()
+                    if nativeVideoTrackEnabled {
+                        let strictNativeFramePacingEnabled = captureFPS >= 30 && failFastMediaFallbacks
+                        let nativeFrameIntervalNs = Int64(max(1, 1_000_000_000 / max(1, captureFPS)))
+                        let maximumPacedFramesPerRawFrame = 4
+                        let nativeFramePacingState = strictNativeFramePacingEnabled
+                            ? NativeWebRTCFramePacingState(
+                                frameIntervalNs: nativeFrameIntervalNs,
+                                maxFramesPerRawFrame: maximumPacedFramesPerRawFrame
+                            )
+                            : nil
+                        func submitNativeFrame(
+                            pixelBuffer: CVPixelBuffer,
+                            rawTimestampNs: Int64,
+                            timestampNs: Int64
+                        ) {
+                            captureCallbackLease.withActiveOwner(
+                                token: screenStreamingTaskToken
+                            ) {
+                                let width = CVPixelBufferGetWidth(pixelBuffer)
+                                let height = CVPixelBufferGetHeight(pixelBuffer)
+                                session.prepareOutgoingScreenVideo(
+                                    width: width,
+                                    height: height,
+                                    fps: captureFPS,
+                                    disallowQualityDegradation: failFastMediaFallbacks
+                                )
+                                session.pushVideoFrame(
+                                    pixelBuffer: pixelBuffer,
+                                    rawTimeStampNs: rawTimestampNs,
+                                    timeStampNs: timestampNs
+                                )
+                            }
+                        }
+                        if let nativeFramePacingState {
+                            directNativeFramePacingTask?.cancel()
+                            directNativeFramePacingTask = Task.detached(priority: .userInitiated) {
+                                [sessionID, session, captureFPS, failFastMediaFallbacks, nativeFrameIntervalNs, nativeFramePacingState, captureCallbackLease, screenStreamingTaskToken] in
+                                let frameIntervalNanoseconds = UInt64(max(1, nativeFrameIntervalNs))
+                                var nextDeadline = DispatchTime.now().uptimeNanoseconds &+ frameIntervalNanoseconds
+                                while !Task.isCancelled {
+                                    let now = DispatchTime.now().uptimeNanoseconds
+                                    if nextDeadline > now {
+                                        do {
+                                            try await Task.sleep(nanoseconds: nextDeadline - now)
+                                        } catch {
+                                            return
+                                        }
+                                    } else if now - nextDeadline > frameIntervalNanoseconds * 2 {
+                                        nextDeadline = now
+                                    }
+                                    nextDeadline = nextDeadline &+ frameIntervalNanoseconds
+                                    guard !Task.isCancelled,
+                                          let pacedFrame = nativeFramePacingState.nextTimerFrame() else {
+                                        continue
+                                    }
+                                    let didPublish = captureCallbackLease.withActiveOwner(
+                                        token: screenStreamingTaskToken
+                                    ) {
+                                        let width = CVPixelBufferGetWidth(pacedFrame.pixelBuffer)
+                                        let height = CVPixelBufferGetHeight(pacedFrame.pixelBuffer)
+                                        session.prepareOutgoingScreenVideo(
+                                            width: width,
+                                            height: height,
+                                            fps: captureFPS,
+                                            disallowQualityDegradation: failFastMediaFallbacks
+                                        )
+                                        session.pushVideoFrame(
+                                            pixelBuffer: pacedFrame.pixelBuffer,
+                                            rawTimeStampNs: pacedFrame.rawTimestampNs,
+                                            timeStampNs: pacedFrame.timestampNs
+                                        )
+                                        return pacedFrame.shouldLog
+                                    }
+                                    guard let shouldLog = didPublish else { return }
+                                    if shouldLog {
+                                        Self.writeWebRTCSessionDiagnostic(
+                                            "native-video-last-frame-repeat session=\(sessionID) targetFPS=\(captureFPS) repeatedFrames=\(pacedFrame.timerPacedFrames) lastRawAgeMs=\(pacedFrame.lastRawAgeMs) intervalNs=\(nativeFrameIntervalNs)",
+                                            sessionID: sessionID
+                                        )
+                                    }
+                                }
+                            }
+                        } else {
+                            directNativeFramePacingTask?.cancel()
+                            directNativeFramePacingTask = nil
+                        }
+                        captureStreamer.onRawFrame = { pixelBuffer, presentationTimeStamp in
+                            let rawTimestampNs: Int64
+                            if presentationTimeStamp.isValid,
+                               presentationTimeStamp.seconds.isFinite {
+                                rawTimestampNs = Int64(
+                                    max(
+                                        0,
+                                        (presentationTimeStamp.seconds * 1_000_000_000.0).rounded()
+                                    )
+                                )
+                            } else {
+                                rawTimestampNs = Int64(Date().timeIntervalSince1970 * 1_000_000_000.0)
+                            }
+
+                            guard let nativeFramePacingState else {
+                                submitNativeFrame(
+                                    pixelBuffer: pixelBuffer,
+                                    rawTimestampNs: rawTimestampNs,
+                                    timestampNs: rawTimestampNs
+                                )
+                                return
+                            }
+
+                            let framePlan = nativeFramePacingState.planForRawFrame(
+                                pixelBuffer: pixelBuffer,
+                                rawTimestampNs: rawTimestampNs
+                            )
+                            for timestampNs in framePlan.timestampsNs {
+                                submitNativeFrame(
+                                    pixelBuffer: pixelBuffer,
+                                    rawTimestampNs: rawTimestampNs,
+                                    timestampNs: timestampNs
+                                )
+                            }
+                            if framePlan.shouldLogBurst {
+                                Self.writeWebRTCSessionDiagnostic(
+                                    "native-video-frame-pacing session=\(sessionID) targetFPS=\(captureFPS) rawDeltaNs=\(framePlan.rawDeltaNs) submittedFrames=\(framePlan.submittedFrames) duplicateFrames=\(framePlan.duplicateFrames) intervalNs=\(nativeFrameIntervalNs)",
+                                    sessionID: sessionID
+                                )
+                            }
+                        }
+                        // Native warmup owns ScreenCaptureKit for raw RTP only.
+                        // Fallback main is a separate, bounded JPEG path
+                        // so the viewer never sees HEVC/JPEG topology flapping.
+                        captureStreamer.onEncodedFrame = nil
+                    } else {
+                        directNativeFramePacingTask?.cancel()
+                        directNativeFramePacingTask = nil
+                        captureStreamer.onEncodedFrame = { data, width, height, frameType, isSyncFrame in
+                            storeEncodedFrame(
+                                data,
+                                width: width,
+                                height: height,
+                                frameType: frameType,
+                                isSyncFrame: isSyncFrame
+                            )
+                        }
+                    }
+                    if shouldUseNativeAudioTrack {
+                        captureStreamer.onCapturedPCM16AudioChunk = { chunk in
+                            captureCallbackLease.withActiveOwner(
+                                token: screenStreamingTaskToken
+                            ) {
+                                SBWebRTCSystemAudioDevice.shared().pushRecordedPCM16InterleavedData(
+                                    chunk.data,
+                                    sampleRate: chunk.sampleRate,
+                                    channelCount: chunk.channelCount,
+                                    frameCount: chunk.frameCount,
+                                    ownerToken: nativeAudioOwnerToken
+                                )
+                            }
+                        }
+                    } else if shouldUseRealtimeAudio, let realtimePCMSubmissionPipe = streamingState.directRealtimePCMSubmissionPipe {
+                        captureStreamer.onCapturedPCM16AudioChunk = { [realtimePCMSubmissionPipe] chunk in
+                            captureCallbackLease.withActiveOwner(
+                                token: screenStreamingTaskToken
+                            ) {
+                                realtimePCMSubmissionPipe.submit(chunk)
+                            }
+                        }
+                    } else {
+                        captureStreamer.onCapturedPCM16AudioChunk = nil
+                    }
+                    if shouldUseFallbackAudioChunks {
+                        captureStreamer.onCapturedAudioChunk = { [directAudioFallbackSender] chunk in
+                            captureCallbackLease.withActiveOwner(
+                                token: screenStreamingTaskToken
+                            ) {
+                                guard let directAudioFallbackSender else { return }
+                                let audioWire = RemoteDesktopAudioChunkWire.encode(chunk)
+                                Task(priority: .utility) {
+                                    await directAudioFallbackSender.submit(audioWire)
+                                }
+                            }
+                        }
+                    } else {
+                        captureStreamer.onCapturedAudioChunk = nil
+                    }
+                    captureStreamer.onCaptureIssue = { issue in
+                        captureCallbackLease.withActiveOwner(
+                            token: screenStreamingTaskToken
+                        ) {
+                            self.logger.warning(
+                                "⚠️ WebRTC ScreenCaptureKit 采集提示: session=\(sessionID, privacy: .public) issue=\(issue, privacy: .public)"
+                            )
+                            if failFastMediaFallbacks, issue.hasPrefix("strict-") {
+                                Task { @MainActor in
+                                    guard self.isCurrentWebRTCScreenStreamingOwner(
+                                        sessionID: sessionID,
+                                        session: session,
+                                        screenStreamingTaskToken: screenStreamingTaskToken,
+                                        keys: keys
+                                    ) else {
+                                        return
+                                    }
+                                    recordStrictMediaValidationFailure(
+                                        reason: issue,
+                                        probable: "screencapturekit-strict-media-issue",
+                                        config: streamConfig
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    captureStreamer.onCaptureTelemetry = { snapshot in
+                        guard captureCallbackLease.isActive(token: screenStreamingTaskToken),
+                              self.remoteDesktopNetworkStatsEnabled else {
+                            return
+                        }
+                        let captureFPS = String(format: "%.1f", snapshot.captureFPS)
+                        let meaningfulFPS = String(format: "%.1f", snapshot.meaningfulFPS)
+                        let encodedFPS = String(format: "%.1f", snapshot.encodedFPS)
+                        let encodeLatencyP50 = snapshot.encodeLatencyP50Ms.map { String(format: "%.2f", $0) } ?? "n/a"
+                        let encodeLatencyP95 = snapshot.encodeLatencyP95Ms.map { String(format: "%.2f", $0) } ?? "n/a"
+                        let encodeLatencyMax = snapshot.encodeLatencyMaxMs.map { String(format: "%.2f", $0) } ?? "n/a"
+                        Self.writeWebRTCSessionDiagnostic(
+                            """
+                            sckTxTelemetry session=\(sessionID) targetFPS=\(snapshot.targetFPS) \
+                            codec=\(snapshot.codec) size=\(snapshot.width)x\(snapshot.height) \
+                            capturesAudio=\(snapshot.capturesAudio) captureFPS=\(captureFPS) \
+                            meaningfulFPS=\(meaningfulFPS) encodedFPS=\(encodedFPS) \
+                            captured=\(snapshot.capturedSamples) meaningful=\(snapshot.meaningfulSamples) \
+                            encoded=\(snapshot.encodedFrames) encodedBytes=\(snapshot.encodedBytes) \
+                            encodeLatencyP50Ms=\(encodeLatencyP50) encodeLatencyP95Ms=\(encodeLatencyP95) \
+                            encodeLatencyMaxMs=\(encodeLatencyMax) encodeFailures=\(snapshot.encodeFailures)
+                            """,
+                            sessionID: sessionID
+                        )
+                        WebRTCMediaDiagnosticWriter.append(
+                            WebRTCMediaDiagnosticEvent(
+                                sessionId: sessionID,
+                                kind: "sckTxTelemetry",
+                                probable: snapshot.meaningfulSamples == 0
+                                    ? "sck-no-meaningful-frames"
+                                    : (snapshot.encodedFrames == 0 ? "vt-no-encoded-output" : "sck-vt-flowing"),
+                                codec: snapshot.codec,
+                                sckCaptured: UInt64(max(0, snapshot.capturedSamples)),
+                                sckMeaningful: UInt64(max(0, snapshot.meaningfulSamples)),
+                                sckEncoded: UInt64(max(0, snapshot.encodedFrames)),
+                                sckEncodedBytes: UInt64(max(0, snapshot.encodedBytes)),
+                                sckCaptureFPS: snapshot.captureFPS,
+                                sckMeaningfulFPS: snapshot.meaningfulFPS,
+                                sckEncodedFPS: snapshot.encodedFPS,
+                                sckTargetFPS: UInt64(max(0, snapshot.targetFPS)),
+                                sckWidth: UInt64(max(0, snapshot.width)),
+                                sckHeight: UInt64(max(0, snapshot.height)),
+                                sckCapturesAudio: snapshot.capturesAudio,
+                                sckEncodeLatencyP50Ms: snapshot.encodeLatencyP50Ms,
+                                sckEncodeLatencyP95Ms: snapshot.encodeLatencyP95Ms,
+                                sckEncodeLatencyMaxMs: snapshot.encodeLatencyMaxMs,
+                                sckEncodeFailures: UInt64(max(0, snapshot.encodeFailures))
+                            )
+                        )
+                    }
+
+                    do {
+                        try await captureStreamer.start(
+                            preferredCodec: videoPolicy.codec,
+                            preferredSize: videoPolicy.preferredSize,
+                            targetFPS: captureFPS,
+                            keyFrameInterval: videoPolicy.keyFrameInterval,
+                            captureCursorInVideo: !nativeVideoTrackEnabled,
+                            captureSystemAudio: shouldUseNativeAudioTrack
+                                || shouldUseFallbackAudioChunks
+                                || shouldUseRealtimeAudio,
+                            audioEncoding: shouldUseFallbackAudioChunks ? preferredAudioEncoding : .pcmS16LE,
+                            degradedFallbackJPEGProfile: nil,
+                            failFastOnMediaFallbacks: failFastMediaFallbacks,
+                            preserveExactVisibleSize: preserveExactVisibleCaptureSize,
+                            lowLatencyMode: (streamConfig?.lowLatencyMode ?? false)
+                                || (failFastMediaFallbacks && captureFPS >= 59),
+                            videoCompressionLevelPercent: streamConfig?.videoCompressionLevel
+                                ?? RemoteDesktopSettingsManager.shared.settings.displaySettings.boundedCompressionLevelPercent,
+                            bitstreamFormat: nativeVideoTrackEnabled
+                                ? .native
+                                : .annexB,
+                            inputOwner: inputOwner
+                        )
+                        directCaptureStreamer = captureStreamer
+                        lastDirectEncoderStartAt = Date()
+                        let pqcMediaAudioEnabled = shouldUseRealtimeAudio
+                        let streamMode: String = {
+                            if nativeVideoTrackEnabled {
+                                return nativeVideoWarmBackupEnabled
+                                    ? "webrtc-native-warmup+sbrf-fallback-main"
+                                    : "webrtc-native-main"
+                            }
+                            return "sbrf-main"
+                        }()
+                        self.logger.info(
+                            """
+                            🎥 WebRTC ScreenCaptureKit 直连硬编已启动: session=\(sessionID, privacy: .public) \
+                            codec=\(Self.remoteFrameFormatName(frameType: videoPolicy.codec, payload: Data()), privacy: .public) \
+                            fps=\(captureFPS, privacy: .public) \
+                            size=\(Int(videoPolicy.preferredSize.width), privacy: .public)x\(Int(videoPolicy.preferredSize.height), privacy: .public) \
+                            reason=\(videoPolicy.reason, privacy: .public) \
+                            mode=\(streamMode, privacy: .public) \
+                            audio=\(audioRedirectionEnabled, privacy: .public) \
+                            nativeAudio=\(shouldUseNativeAudioTrack, privacy: .public) \
+                            pqcMediaAudio=\(pqcMediaAudioEnabled, privacy: .public) \
+                            audioCodec=\(preferredAudioEncoding.rawValue, privacy: .public)
+                            """
+                        )
+                        if let directRealtimeAudioSender = streamingState.directRealtimeAudioSender {
+                            Task(priority: .utility) { [logger = self.logger, sessionID] in
+                                do {
+                                    try await Task.sleep(for: .seconds(3))
+                                } catch {
+                                    return
+                                }
+                                let snapshot = await directRealtimeAudioSender.diagnosticSnapshot()
+                                logger.info(
+                                    """
+                                    📈 WebRTC PQC media audio tx startup: session=\(sessionID, privacy: .public) \
+                                    audioTxCaptured=\(snapshot.capturedPackets, privacy: .public) \
+                                    audioTxEncoded=\(snapshot.encodedPackets, privacy: .public) \
+                                    audioTxSent=\(snapshot.sentPackets, privacy: .public) \
+                                    audioDrops=\(snapshot.droppedPackets, privacy: .public) \
+                                    probable=\(snapshot.capturedPackets == 0 ? "capture-unavailable-or-silent" : (snapshot.sentPackets == 0 ? "relay-send-not-draining" : "sending"), privacy: .public)
+                                    """
+                                )
+                                Self.writeWebRTCSessionDiagnostic(
+                                    "audioTxStartup session=\(sessionID) audioTxCaptured=\(snapshot.capturedPackets) audioTxEncoded=\(snapshot.encodedPackets) audioTxSent=\(snapshot.sentPackets) audioDrops=\(snapshot.droppedPackets)",
+                                    sessionID: sessionID
+                                )
+                                WebRTCMediaDiagnosticWriter.append(
+                                    WebRTCMediaDiagnosticEvent(
+                                        sessionId: sessionID,
+                                        kind: "audioTxStartup",
+                                        probable: snapshot.capturedPackets == 0
+                                            ? "capture-unavailable-or-silent"
+                                            : (snapshot.sentPackets == 0 ? "relay-send-not-draining" : "sending"),
+                                        audioTxCaptured: snapshot.capturedPackets,
+                                        audioTxEncoded: snapshot.encodedPackets,
+                                        audioTxSent: snapshot.sentPackets,
+                                        audioDrops: snapshot.droppedPackets
+                                    )
+                                )
+                            }
+                        }
+                        self.appendSmokeStatus(
+                            "stream-sck-started session=\(sessionID) codec=\(nativeVideoTrackEnabled ? "webrtc-native-video" : Self.remoteFrameFormatName(frameType: videoPolicy.codec, payload: Data())) mode=\(streamMode)"
+                        )
+                        return true
+                    } catch {
+                        captureStreamer.stop(inputOwner: inputOwner)
+                        directCaptureStreamer = nil
+                        directNativeFramePacingTask?.cancel()
+                        directNativeFramePacingTask = nil
+                        streamingState.directSyntheticAudioToneSource?.stop()
+                        streamingState.directSyntheticAudioToneSource = nil
+                        streamingState.directRealtimeAudioAttachGeneration &+= 1
+                        streamingState.directRealtimeAudioAttachTask?.cancel()
+                        streamingState.directRealtimeAudioAttachTask = nil
+                        streamingState.directRealtimePCMSubmissionPipe?.close()
+                        streamingState.directRealtimePCMSubmissionPipe = nil
+                        await streamingState.directRealtimeAudioSender?.close(reason: "remote-desktop-task-cleanup")
+                        streamingState.directRealtimeAudioSender = nil
+                        streamingState.directRealtimeAudioSenderRelayEndpoint = nil
+                        streamingState.directRealtimeAudioSenderRelayExpiresAt = nil
+                        streamingState.directRealtimeAudioContinuityState = nil
+                        encodedFrameStore.clear()
+                        lastDirectEncoderStartAt = .distantPast
+                        if failFastMediaFallbacks {
+                            recordStrictMediaValidationFailure(
+                                reason: "sck-video-audio-start-failed",
+                                probable: "screencapturekit-main-path-unavailable",
+                                config: streamConfig
+                            )
+                            return false
+                        }
+                        self.logger.error(
+                            "⚠️ WebRTC ScreenCaptureKit 直连硬编启动失败，回退 JPEG: session=\(sessionID, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                        )
+                        self.appendSmokeStatus(
+                            "stream-sck-start-failed session=\(sessionID) codec=\(Self.remoteFrameFormatName(frameType: videoPolicy.codec, payload: Data())) error=\(error.localizedDescription)"
+                        )
+                        return false
+                    }
+                }
+#endif
+
+                while !Task.isCancelled {
+                    guard self.isCurrentWebRTCScreenStreamingOwner(
+                        sessionID: sessionID,
+                        session: session,
+                        screenStreamingTaskToken: screenStreamingTaskToken,
+                        keys: keys
+                    ) else {
+                        break
+                    }
+                    guard let lastHeartbeatAt = self.webrtcRemoteDesktopHeartbeatAtBySessionId[sessionID] else {
+                        self.logger.info("⏸️ WebRTC 屏幕推流等待远端心跳: session=\(sessionID, privacy: .public)")
+                        break
+                    }
+                    if Date().timeIntervalSince(lastHeartbeatAt) > heartbeatTimeoutSeconds {
+                        self.logger.info("⏹️ WebRTC 屏幕推流因远端心跳超时停止: session=\(sessionID, privacy: .public)")
+                        break
+                    }
+                    if self.webrtcRekeyInProgressSessionIds.contains(sessionID) {
+                        do {
+                            try await Task.sleep(for: .milliseconds(100))
+                        } catch {
+                            break
+                        }
+                        guard self.isCurrentWebRTCScreenStreamingOwner(
+                            sessionID: sessionID,
+                            session: session,
+                            screenStreamingTaskToken: screenStreamingTaskToken,
+                            keys: keys
+                        ) else {
+                            break
+                        }
+                        continue
+                    }
+                    if Date().timeIntervalSince(lastTransportProbeAt) >= 2.0 {
+                        let probedPath = await session.currentICETransportPath()
+                        guard self.isCurrentWebRTCScreenStreamingOwner(
+                            sessionID: sessionID,
+                            session: session,
+                            screenStreamingTaskToken: screenStreamingTaskToken,
+                            keys: keys
+                        ) else {
+                            break
+                        }
+                        let retainedPreviousPath = transportPathState.recordProbe(probedPath)
+                        let newPath = transportPathState.effectivePath
+                        if retainedPreviousPath {
+                            self.logger.debug(
+                                "ℹ️ WebRTC 屏幕通道保留上次稳定传输路径: session=\(sessionID, privacy: .public) probed=unknown effective=\(newPath.rawValue, privacy: .public) unknownProbes=\(transportPathState.consecutiveUnknownProbes, privacy: .public)"
+                            )
+                        }
+                        if newPath != transportPath {
+                            self.logger.info(
+                                "📶 WebRTC 传输路径更新: session=\(sessionID, privacy: .public) path=\(newPath.rawValue, privacy: .public)"
+                            )
+                            self.appendSmokeStatus(
+                                "stream-path session=\(sessionID) path=\(newPath.rawValue)"
+                            )
+                            transportPath = newPath
+                        }
+                        lastTransportProbeAt = Date()
+                    }
+                    let streamConfig = self.webrtcRemoteStreamConfigurationBySessionId[sessionID]
+                    let failFastMediaFallbacks = Self.shouldFailFastRemoteMediaFallbacks(
+                        remoteStreamConfiguration: streamConfig
+                    )
+                    let requestedDedicatedScreenChannel = streamConfig?.screenDataChannelEnabled == true
+                    if requestedDedicatedScreenChannel {
+                        try? session.ensureScreenDataChannel()
+                    }
+                    let screenChannelOpen = requestedDedicatedScreenChannel && session.hasOpenScreenDataChannel()
+                    if requestedDedicatedScreenChannel && !screenChannelOpen && screenChannelWaitStartedAt == nil {
+                        screenChannelWaitStartedAt = Date()
+                    } else if !requestedDedicatedScreenChannel || screenChannelOpen {
+                        screenChannelWaitStartedAt = nil
+                    }
+                    let screenChannelWaitElapsed = screenChannelWaitStartedAt.map { Date().timeIntervalSince($0) }
+                    let screenRoute = Self.planWebRTCScreenChannelRoute(
+                        screenDataChannelEnabled: requestedDedicatedScreenChannel,
+                        screenChannelWireFormat: streamConfig?.screenChannelWireFormat,
+                        screenChannelOpen: screenChannelOpen,
+                        waitElapsed: screenChannelWaitElapsed
+                    )
+                    let useDedicatedScreenChannel = screenRoute.useDedicatedScreenChannel
+                    let useChunkedScreenWire = screenRoute.useChunkedScreenWire
+                    if screenRoute.state != lastScreenChannelRouteState ||
+                        Date().timeIntervalSince(lastScreenChannelWaitReportAt) >= 1.0 {
+                        self.logger.info(
+                            """
+                            📡 WebRTC screenChannelState: session=\(sessionID, privacy: .public) \
+                            state=\(screenRoute.state, privacy: .public) requested=\(requestedDedicatedScreenChannel, privacy: .public) \
+                            open=\(screenChannelOpen, privacy: .public) waitMs=\(Int(((screenChannelWaitElapsed ?? 0) * 1000).rounded()), privacy: .public) \
+                            wire=\(useChunkedScreenWire ? WebRTCSession.screenChunkedWireFormat : "length-framed", privacy: .public)
+                            """
+                        )
+                        self.appendSmokeStatus(
+                            "screenChannelState session=\(sessionID) state=\(screenRoute.state) requested=\(requestedDedicatedScreenChannel) open=\(screenChannelOpen) waitMs=\(Int(((screenChannelWaitElapsed ?? 0) * 1000).rounded()))"
+                        )
+                        self.appendWebRTCSessionDiagnostic(
+                            "screenChannelState session=\(sessionID) state=\(screenRoute.state) requested=\(requestedDedicatedScreenChannel) open=\(screenChannelOpen) waitMs=\(Int(((screenChannelWaitElapsed ?? 0) * 1000).rounded())) wire=\(useChunkedScreenWire ? WebRTCSession.screenChunkedWireFormat : "length-framed")",
+                            sessionID: sessionID
+                        )
+                        lastScreenChannelRouteState = screenRoute.state
+                        lastScreenChannelWaitReportAt = Date()
+                    }
+                    if failFastMediaFallbacks && screenRoute.state == "failed-control-fallback" {
+                        recordStrictMediaValidationFailure(
+                            reason: "screen-channel-control-fallback-forbidden",
+                            probable: "dedicated-screen-channel-not-open",
+                            config: streamConfig
+                        )
+                        break
+                    }
+                    let nativeVideoTrackReadyForInteraction =
+                        self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.nativeVideoTrackReady == true
+                    let hasEstablishedScreenPathForInteraction =
+                        framesSent > 0 ||
+                        nativeVideoTrackReadyForInteraction ||
+                        screenRoute.state == "failed-control-fallback"
+                    if screenRoute.allowsInteractionStreaming && hasEstablishedScreenPathForInteraction {
+                        if self.webrtcInteractionStreamingAllowedSessionIds.insert(sessionID).inserted {
+                            self.appendSmokeStatus(
+                                "interaction-stream-enabled session=\(sessionID) reason=screenChannelState:\(screenRoute.state)"
+                            )
+                        }
+                        startInteractionStreamingIfNeeded(keys: keys)
+                    } else {
+                        self.webrtcInteractionStreamingAllowedSessionIds.remove(sessionID)
+                    }
+                    let selectedVideoPolicy = currentVideoPolicy(for: transportPath)
+                    let nativeVideoTrackReadyForPolicy =
+                        self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.nativeVideoTrackReady == true
+                    let rawFallbackPolicyShouldDriveMain = Self.nativeVideoFallbackDecision(
+                        supportsNativeVideoTrack: session.supportsNativeScreenVideoTrack,
+                        nativeVideoTrackReady: nativeVideoTrackReadyForPolicy,
+                        nativeVideoHealthState: nativeVideoHealthState,
+                        cooldownRemainingSeconds: max(0, nativeVideoFailureCooldownUntil.timeIntervalSince(Date()))
+                    ).fallbackShouldDriveMain
+                    let fallbackPolicyShouldDriveMain = failFastMediaFallbacks
+                        ? false
+                        : rawFallbackPolicyShouldDriveMain
+                    let nativeCaptureVideoPolicy = session.supportsNativeScreenVideoTrack
+                        ? currentNativeCaptureVideoPolicy(for: transportPath)
+                        : selectedVideoPolicy
+                    let nativeWarmupFallbackSourceSize: CGSize = {
+#if os(macOS)
+                        if let displayMode = CGDisplayCopyDisplayMode(CGMainDisplayID()) {
+                            return CGSize(
+                                width: displayMode.pixelWidth,
+                                height: displayMode.pixelHeight
+                            )
+                        }
+#endif
+                        return nativeCaptureVideoPolicy.preferredSize
+                    }()
+                    let nativeWarmupFallbackJPEGProfile =
+                        Self.boundedWebRTCWarmupJPEGProfile(
+                            for: nativeWarmupFallbackSourceSize,
+                            compressionLevel: RemoteDesktopSettingsManager.shared.settings.networkSettings.boundedCompressionLevel
+                        )
+                    let fallbackSendVideoPolicy =
+                        session.supportsNativeScreenVideoTrack && fallbackPolicyShouldDriveMain
+                            ? WebRTCRemoteDesktopVideoPolicySelector.degradedFallbackPolicy(
+                                from: selectedVideoPolicy,
+                                profile: nativeWarmupFallbackJPEGProfile,
+                                reasonSuffix: "native-warmup-bounded-jpeg"
+                            )
+                            : selectedVideoPolicy
+                    let budget = currentBudget(for: transportPath, videoPolicy: fallbackSendVideoPolicy)
+                    let nativeCaptureBudget = session.supportsNativeScreenVideoTrack
+                        ? currentBudget(for: transportPath, videoPolicy: nativeCaptureVideoPolicy)
+                        : budget
+                    let strictHighFPSRequested = max(
+                        fallbackSendVideoPolicy.targetFrameRate,
+                        nativeCaptureVideoPolicy.targetFrameRate
+                    ) >= 59
+                    if failFastMediaFallbacks,
+                       strictHighFPSRequested,
+                       transportPath != .unknown,
+                       (budget.frameRate < 59 || nativeCaptureBudget.frameRate < 59) {
+                        recordStrictMediaValidationFailure(
+                            reason: "remote-video-fps-budget-below-target",
+                            probable: "transport-or-system-budget-clamped-high-fps",
+                            config: streamConfig
+                        )
+                        break
+                    }
+                    let screenSendMaxBufferedAmountBytes =
+                        session.supportsNativeScreenVideoTrack && fallbackPolicyShouldDriveMain
+                            ? max(
+                                budget.maxBufferedAmountBytes,
+                                UInt64(nativeWarmupFallbackJPEGProfile.maxTransportFrameBytes)
+                            )
+                            : budget.maxBufferedAmountBytes
+                    let videoPolicy = WebRTCRemoteDesktopVideoPolicy(
+                        codec: fallbackSendVideoPolicy.codec,
+                        targetFrameRate: min(fallbackSendVideoPolicy.targetFrameRate, budget.frameRate),
+                        keyFrameInterval: fallbackSendVideoPolicy.keyFrameInterval,
+                        preferredSize: fallbackSendVideoPolicy.preferredSize,
+                        usesHardwareEncoder: fallbackSendVideoPolicy.usesHardwareEncoder,
+                        reason: fallbackSendVideoPolicy.reason
+                    )
+                    let encoderVideoPolicy = session.supportsNativeScreenVideoTrack
+                        ? WebRTCRemoteDesktopVideoPolicy(
+                            codec: nativeCaptureVideoPolicy.codec,
+                            targetFrameRate: min(nativeCaptureVideoPolicy.targetFrameRate, nativeCaptureBudget.frameRate),
+                            keyFrameInterval: nativeCaptureVideoPolicy.keyFrameInterval,
+                            preferredSize: nativeCaptureVideoPolicy.preferredSize,
+                            usesHardwareEncoder: nativeCaptureVideoPolicy.usesHardwareEncoder,
+                            reason: nativeCaptureVideoPolicy.reason
+                        )
+                        : videoPolicy
+                    if encoderVideoPolicy != lastEncoderVideoPolicy ||
+                        videoPolicy != lastFallbackSendVideoPolicy {
+                        if lastEncoderVideoPolicy?.preferredSize != encoderVideoPolicy.preferredSize {
+#if os(macOS)
+                            resetCGDisplayDamageTracker = true
+                            pendingDamageReport = nil
+#endif
+                        }
+                        self.logger.info(
+                            """
+                            🧭 WebRTC 推流策略: session=\(sessionID, privacy: .public) \
+                            path=\(transportPath.rawValue, privacy: .public) \
+                            codec=\(Self.remoteFrameFormatName(frameType: videoPolicy.codec, payload: Data()), privacy: .public) \
+                            fps=\(videoPolicy.targetFrameRate, privacy: .public) \
+                            gop=\(videoPolicy.keyFrameInterval, privacy: .public) \
+                            reason=\(videoPolicy.reason, privacy: .public) \
+                            fallbackPreferred=\(Self.remoteFrameFormatName(frameType: videoPolicy.codec, payload: Data()), privacy: .public) \
+                            nativeCodec=\(Self.remoteFrameFormatName(frameType: encoderVideoPolicy.codec, payload: Data()), privacy: .public) \
+                            nativeCaptureCodec=\(Self.remoteFrameFormatName(frameType: nativeCaptureVideoPolicy.codec, payload: Data()), privacy: .public) \
+                            nativeFPS=\(encoderVideoPolicy.targetFrameRate, privacy: .public) \
+                            nativeReason=\(encoderVideoPolicy.reason, privacy: .public)
+                            """
+                        )
+                        self.appendSmokeStatus(
+                            """
+                            stream-policy session=\(sessionID) path=\(transportPath.rawValue) \
+                            codec=\(Self.remoteFrameFormatName(frameType: videoPolicy.codec, payload: Data())) \
+                            fps=\(videoPolicy.targetFrameRate) gop=\(videoPolicy.keyFrameInterval) \
+                            reason=\(videoPolicy.reason) fallbackPreferred=\(Self.remoteFrameFormatName(frameType: videoPolicy.codec, payload: Data())) \
+                            nativeCodec=\(Self.remoteFrameFormatName(frameType: encoderVideoPolicy.codec, payload: Data())) \
+                            nativeCaptureCodec=\(Self.remoteFrameFormatName(frameType: nativeCaptureVideoPolicy.codec, payload: Data())) \
+                            nativeFPS=\(encoderVideoPolicy.targetFrameRate) nativeReason=\(encoderVideoPolicy.reason)
+                            """
+                        )
+                        lastFallbackSendVideoPolicy = videoPolicy
+                    }
+                    if budget != lastBudget {
+                        self.logger.info(
+                            """
+                            🎛️ WebRTC 推流预算: session=\(sessionID, privacy: .public) \
+                            path=\(transportPath.rawValue, privacy: .public) \
+                            fps=\(budget.frameRate, privacy: .public) \
+                            buffered=\(Int(budget.maxBufferedAmountBytes), privacy: .public) \
+                            screenBuffered=\(Int(screenSendMaxBufferedAmountBytes), privacy: .public) \
+                            reason=\(budget.reason, privacy: .public)
+                            """
+                        )
+                        self.appendSmokeStatus(
+                            """
+                            stream-budget session=\(sessionID) path=\(transportPath.rawValue) \
+                            fps=\(budget.frameRate) buffered=\(Int(budget.maxBufferedAmountBytes)) \
+                            screenBuffered=\(Int(screenSendMaxBufferedAmountBytes)) \
+                            reason=\(budget.reason)
+                            """
+                        )
+                        lastBudget = budget
+                    }
+#if os(macOS)
+                    let directEncoderReady = await ensureDirectEncoder(for: encoderVideoPolicy)
+                    guard self.isCurrentWebRTCScreenStreamingOwner(
+                        sessionID: sessionID,
+                        session: session,
+                        screenStreamingTaskToken: screenStreamingTaskToken,
+                        keys: keys
+                    ) else {
+                        break
+                    }
+                    if failFastMediaFallbacks && !directEncoderReady {
+                        if streamingState.strictMediaValidationFailureReason == nil {
+                            recordStrictMediaValidationFailure(
+                                reason: "native-video-main-path-not-ready",
+                                probable: "sck-or-native-video-encoder-unavailable",
+                                config: streamConfig
+                            )
+                        }
+                        break
+                    }
+                    if session.supportsNativeScreenVideoTrack,
+                       Date().timeIntervalSince(lastNativeVideoStatsReportAt) >= 2.0 {
+                        let sendSnapshot = session.nativeScreenVideoSendSnapshot()
+                        let rtcStats = await session.outgoingNativeScreenVideoRTCStats()
+                        guard self.isCurrentWebRTCScreenStreamingOwner(
+                            sessionID: sessionID,
+                            session: session,
+                            screenStreamingTaskToken: screenStreamingTaskToken,
+                            keys: keys
+                        ) else {
+                            break
+                        }
+                        let negotiatedProfileLevelID = session.selectedNativeScreenVideoProfileLevelID() ?? "-"
+                        let nativeVideoTrackReadyForStats =
+                            self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.nativeVideoTrackReady == true
+                        let nextHealthState: NativeVideoHealthState = {
+                            if nativeVideoTrackReadyForStats,
+                               rtcStats.rtpFlowing {
+                                return .rendered
+                            }
+                            if rtcStats.rtpFlowing {
+                                return .rtpFlowing
+                            }
+                            if Date() < nativeVideoFailureCooldownUntil {
+                                return .recovering
+                            }
+                            let nativeVideoSubmissionStartedAt = max(
+                                lastDirectEncoderStartAt,
+                                directSyntheticNativeVideoStartedAt
+                            )
+                            guard nativeVideoSubmissionStartedAt != .distantPast,
+                                  sendSnapshot.submittedFrames > 0 else {
+                                return .negotiated
+                            }
+                            let rawFrameAge = Date().timeIntervalSince(nativeVideoSubmissionStartedAt)
+                            let noRTPFailureGraceSeconds = Self.nativeVideoNoRTPFailureGraceSeconds(
+                                failFastMediaFallbacks: failFastMediaFallbacks,
+                                codec: rtcStats.codec,
+                                encoder: rtcStats.encoderImplementation,
+                                requestedCodec: encoderVideoPolicy.codec
+                            )
+                            guard rawFrameAge >= noRTPFailureGraceSeconds else {
+                                return .rawFramesSubmitted
+                            }
+                            if !rtcStats.outboundStatsPresent || rtcStats.packetsSent == 0 || rtcStats.bytesSent == 0 {
+                                return nativeVideoSenderRefreshAttempted ? .degradedNoRTP : .failedNoRTP
+                            }
+                            if rtcStats.framesEncoded == 0 || rtcStats.framesSent == 0 {
+                                return .senderZero
+                            }
+                            return .rawFramesSubmitted
+                        }()
+                        let now = Date()
+                        if failFastMediaFallbacks,
+                           ProcessInfo.processInfo.environment["SKYBRIDGE_WEBRTC_DIAGNOSTIC_SYNTHETIC_NATIVE_VIDEO"] == "1",
+                           rtcStats.rtpFlowing {
+                            recordStrictMediaValidationFailure(
+                                reason: "diagnostic-synthetic-native-video-enabled",
+                                probable: "synthetic-native-video-diagnostic",
+                                config: streamConfig
+                            )
+                        } else if failFastMediaFallbacks, rtcStats.rtpFlowing {
+                            let observedBitrate = rtcStats.targetBitrate > 0
+                                ? rtcStats.targetBitrate
+                                : rtcStats.availableOutgoingBitrate
+                            if rtcStats.isQualityLimited {
+                                let reason = (rtcStats.qualityLimitationReason ?? "unknown")
+                                    .lowercased()
+                                    .filter { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
+                                recordStrictMediaValidationFailure(
+                                    reason: "native-video-quality-limited-\(reason.isEmpty ? "unknown" : reason)",
+                                    probable: "webrtc-quality-limitation-reported",
+                                    config: streamConfig
+                                )
+                            } else if !rtcStats.bandwidthEstimatePresent {
+                                recordStrictMediaValidationFailure(
+                                    reason: "native-video-bwe-stats-unavailable",
+                                    probable: "webrtc-bandwidth-estimate-missing",
+                                    config: streamConfig
+                                )
+                            } else if let codecFailureReason = Self.strictNativeVideoCodecFailureReason(
+                                rtcStats.codec,
+                                requestedCodec: encoderVideoPolicy.codec
+                            ) {
+                                recordStrictMediaValidationFailure(
+                                    reason: codecFailureReason,
+                                    probable: "webrtc-native-video-codec-not-hardware-path",
+                                    config: streamConfig
+                                )
+                            } else if let encoderFailureReason = Self.strictNativeVideoEncoderFailureReason(rtcStats.encoderImplementation) {
+                                recordStrictMediaValidationFailure(
+                                    reason: encoderFailureReason,
+                                    probable: "webrtc-native-video-encoder-not-hardware-path",
+                                    config: streamConfig
+                                )
+                            } else if sendSnapshot.lastFrameWidth > 0, sendSnapshot.lastFrameHeight > 0 {
+                                let minimumTargetBitrate = WebRTCNativeScreenVideoValuePolicy.minimumExtremeBitrateBps(
+                                    width: sendSnapshot.lastFrameWidth,
+                                    height: sendSnapshot.lastFrameHeight,
+                                    fps: encoderVideoPolicy.targetFrameRate
+                                )
+                                let bitrateFloorTolerance = max(UInt64(64_000), minimumTargetBitrate / 100)
+                                if observedBitrate > 0,
+                                   observedBitrate + bitrateFloorTolerance < minimumTargetBitrate {
+                                    recordStrictMediaValidationFailure(
+                                        reason: "native-video-target-bitrate-below-floor",
+                                        probable: "webrtc-bwe-or-encoder-rate-limited",
+                                        config: streamConfig
+                                    )
+                                }
+                            }
+                        }
+                        let recoveredFromNativeFailure = (nextHealthState == .rtpFlowing || nextHealthState == .rendered)
+                            && nativeVideoHealthState != .rtpFlowing
+                            && nativeVideoHealthState != .rendered
+                            && nativeVideoFailureStrikeCount > 0
+                        if nextHealthState == .rtpFlowing || nextHealthState == .rendered {
+                            nativeVideoFailureStrikeCount = 0
+                            nativeVideoFailureCooldownUntil = .distantPast
+                            if recoveredFromNativeFailure {
+                                self.appendSmokeStatus(
+                                    "native-video-rtp-flowing session=\(sessionID) state=\(nextHealthState.rawValue) framesSent=\(rtcStats.framesSent) bytesSent=\(rtcStats.bytesSent)"
+                                )
+                                self.appendWebRTCSessionDiagnostic(
+                                    "native-video-rtp-flowing session=\(sessionID) state=\(nextHealthState.rawValue) framesSent=\(rtcStats.framesSent) bytesSent=\(rtcStats.bytesSent)",
+                                    sessionID: sessionID
+                                )
+                                WebRTCMediaDiagnosticWriter.append(
+                                    WebRTCMediaDiagnosticEvent(
+                                        sessionId: sessionID,
+                                        kind: "nativeVideoRecovered",
+                                        probable: nil,
+                                        fallbackProducer: activeFallbackProducer,
+                                        nativeVideoHealth: nextHealthState.rawValue
+                                    )
+                                )
+                            }
+                        } else if nextHealthState == .failedNoRTP || nextHealthState == .senderZero || nextHealthState == .degradedNoRTP {
+                            nativeVideoFailureStrikeCount += 1
+                            if failFastMediaFallbacks {
+                                let strictNoRTPReason = Self.strictNativeVideoNoRTPFailureReason(
+                                    outboundStatsPresent: rtcStats.outboundStatsPresent,
+                                    submittedFrames: sendSnapshot.submittedFrames,
+                                    framesEncoded: rtcStats.framesEncoded,
+                                    framesSent: rtcStats.framesSent,
+                                    packetsSent: rtcStats.packetsSent,
+                                    bytesSent: rtcStats.bytesSent
+                                )
+                                recordStrictMediaValidationFailure(
+                                    reason: strictNoRTPReason,
+                                    probable: nextHealthState.rawValue,
+                                    config: streamConfig
+                                )
+                            } else {
+                                if !nativeVideoSenderRefreshAttempted {
+                                    nativeVideoSenderRefreshAttempted = session.refreshOutgoingScreenVideoSender(reason: nextHealthState.rawValue)
+                                    if nativeVideoSenderRefreshAttempted {
+                                        self.appendWebRTCSessionDiagnostic(
+                                            "native-video-sender-refresh session=\(sessionID) action=refresh-sender reason=\(nextHealthState.rawValue)",
+                                            sessionID: sessionID
+                                        )
+                                    }
+                                }
+                                let cooldownSeconds: TimeInterval = nativeVideoSenderRefreshAttempted || nativeVideoFailureStrikeCount >= 3 ? 10.0 : 1.25
+                                nativeVideoFailureCooldownUntil = now.addingTimeInterval(cooldownSeconds)
+                                self.appendSmokeStatus(
+                                    "native-video-retry session=\(sessionID) action=cooldown state=\(nextHealthState.rawValue) cooldownMs=\(Int(cooldownSeconds * 1000)) strike=\(nativeVideoFailureStrikeCount) fallback=heartbeat"
+                                )
+                                self.appendWebRTCSessionDiagnostic(
+                                    "native-video-retry session=\(sessionID) action=cooldown state=\(nextHealthState.rawValue) cooldownMs=\(Int(cooldownSeconds * 1000)) strike=\(nativeVideoFailureStrikeCount) fallback=heartbeat",
+                                    sessionID: sessionID
+                                )
+                                WebRTCMediaDiagnosticWriter.append(
+                                    WebRTCMediaDiagnosticEvent(
+                                        sessionId: sessionID,
+                                        kind: "nativeVideoRetry",
+                                        probable: "native-video-stalled-fast-retry",
+                                        fallbackProducer: activeFallbackProducer,
+                                        nativeVideoHealth: nextHealthState.rawValue
+                                    )
+                                )
+                            }
+                        }
+                        if nextHealthState != nativeVideoHealthState {
+                            nativeVideoHealthState = nextHealthState
+                            self.appendSmokeStatus(
+                                "native-video-health session=\(sessionID) state=\(nativeVideoHealthState.rawValue) fallbackMode=\(nativeVideoTrackReadyForStats ? "heartbeat" : "main")"
+                            )
+                            WebRTCMediaDiagnosticWriter.append(
+                                WebRTCMediaDiagnosticEvent(
+                                    sessionId: sessionID,
+                                    kind: "nativeVideoHealth",
+                                    probable: nativeVideoHealthState == .failedNoRTP || nativeVideoHealthState == .senderZero
+                                        ? "native-video-stalled-fast-retry"
+                                        : nil,
+                                    fallbackProducer: activeFallbackProducer,
+                                    nativeVideoHealth: nativeVideoHealthState.rawValue
+                                )
+                            )
+                        }
+                        let nativeVideoFrameSourceLine =
+                            "native-video-frame-source session=\(sessionID) target=\(sendSnapshot.targetWidth)x\(sendSnapshot.targetHeight)@\(sendSnapshot.targetFPS) lastFrame=\(sendSnapshot.lastFrameWidth)x\(sendSnapshot.lastFrameHeight) bytesPerRow=\(sendSnapshot.lastSubmittedFrameBytesPerRow) iosurface=\(sendSnapshot.lastSubmittedFrameHasIOSurface) rawTimestampNs=\(sendSnapshot.lastRawFrameTimestampNs.map(String.init) ?? "-") rawDeltaNs=\(sendSnapshot.lastRawFrameTimestampDeltaNs.map(String.init) ?? "-") timestampNs=\(sendSnapshot.lastFrameTimestampNs.map(String.init) ?? "-") timestampDeltaNs=\(sendSnapshot.lastFrameTimestampDeltaNs.map(String.init) ?? "-") timestampAdjusted=\(sendSnapshot.lastFrameTimestampWasAdjusted)"
+                        self.appendSmokeStatus(nativeVideoFrameSourceLine)
+                        self.appendWebRTCSessionDiagnostic(
+                            nativeVideoFrameSourceLine,
+                            sessionID: sessionID
+                        )
+                        self.logger.info(
+                            """
+                            📈 native WebRTC screen tx: session=\(sessionID, privacy: .public) \
+                            state=\(nativeVideoHealthState.rawValue, privacy: .public) \
+                            fallbackMode=\(nativeVideoTrackReadyForStats ? "heartbeat" : "main", privacy: .public) \
+                            fallbackProducer=\(activeFallbackProducer, privacy: .public) \
+                            fallbackSignature=\(lastFallbackSignature, privacy: .public) \
+                            fallbackSwitchReason=\(fallbackProducerSwitchReason, privacy: .public) \
+                            submitted=\(sendSnapshot.submittedFrames, privacy: .public) \
+                            trackReady=\(sendSnapshot.trackReady, privacy: .public) \
+                            trackEnabled=\(sendSnapshot.trackEnabled, privacy: .public) \
+                            sourceReady=\(sendSnapshot.sourceReady, privacy: .public) \
+                            capturerReady=\(sendSnapshot.capturerReady, privacy: .public) \
+                            transceiverReady=\(sendSnapshot.transceiverReady, privacy: .public) \
+                            senderReady=\(sendSnapshot.senderReady, privacy: .public) \
+                            transceiverDirection=\(sendSnapshot.transceiverDirection ?? "-", privacy: .public) \
+                            negotiatedDirection=\(sendSnapshot.negotiatedTransceiverDirection ?? "-", privacy: .public) \
+                            lastFrame=\(sendSnapshot.lastFrameWidth, privacy: .public)x\(sendSnapshot.lastFrameHeight, privacy: .public) \
+                            visibleFrame=\(sendSnapshot.lastFrameWidth, privacy: .public)x\(sendSnapshot.lastFrameHeight, privacy: .public) \
+                            codedFrame=\(sendSnapshot.lastSubmittedFrameWidth, privacy: .public)x\(sendSnapshot.lastSubmittedFrameHeight, privacy: .public) \
+                            rawPixelFormat=\(sendSnapshot.lastRawFramePixelFormat.map(String.init) ?? "-", privacy: .public) \
+                            submittedPixelFormat=\(sendSnapshot.lastSubmittedFramePixelFormat.map(String.init) ?? "-", privacy: .public) \
+                            pixelFormat=\(sendSnapshot.lastFramePixelFormat.map(String.init) ?? "-", privacy: .public) \
+                            normalized=\(sendSnapshot.normalizedFrames, privacy: .public) \
+                            frameNormalized=\(sendSnapshot.lastFrameWasNormalized, privacy: .public) \
+                            rawTimestampNs=\(sendSnapshot.lastRawFrameTimestampNs.map(String.init) ?? "-", privacy: .public) \
+                            timestampNs=\(sendSnapshot.lastFrameTimestampNs.map(String.init) ?? "-", privacy: .public) \
+                            timestampAdjusted=\(sendSnapshot.lastFrameTimestampWasAdjusted, privacy: .public) \
+                            profileLevelID=\(negotiatedProfileLevelID, privacy: .public) \
+                            outboundStats=\(rtcStats.outboundStatsPresent, privacy: .public) \
+                            framesEncoded=\(rtcStats.framesEncoded, privacy: .public) \
+                            framesSent=\(rtcStats.framesSent, privacy: .public) \
+                            keyFramesEncoded=\(rtcStats.keyFramesEncoded, privacy: .public) \
+                            packetsSent=\(rtcStats.packetsSent, privacy: .public) \
+                            bytesSent=\(rtcStats.bytesSent, privacy: .public) \
+                            codec=\(rtcStats.codec ?? "-", privacy: .public) \
+                            encoder=\(rtcStats.encoderImplementation ?? "-", privacy: .public) \
+                            qualityLimit=\(rtcStats.qualityLimitationReason ?? "-", privacy: .public) \
+                            encodeSize=\(rtcStats.frameWidth, privacy: .public)x\(rtcStats.frameHeight, privacy: .public) \
+                            encodeFPS=\(rtcStats.framesPerSecond, privacy: .public) \
+                            totalEncodeTime=\(rtcStats.totalEncodeTime.map { String(format: "%.3f", $0) } ?? "-", privacy: .public) \
+                            targetBitrate=\(rtcStats.targetBitrate, privacy: .public) \
+                            availableOutgoingBitrate=\(rtcStats.availableOutgoingBitrate, privacy: .public) \
+                            currentRTT=\(rtcStats.currentRoundTripTime.map { String(format: "%.3f", $0) } ?? "-", privacy: .public) \
+                            remoteRTT=\(rtcStats.remoteRoundTripTime.map { String(format: "%.3f", $0) } ?? "-", privacy: .public) \
+                            remotePacketsLost=\(rtcStats.remotePacketsLost, privacy: .public) \
+                            remoteJitter=\(rtcStats.remoteJitter.map { String(format: "%.3f", $0) } ?? "-", privacy: .public) \
+                            nack=\(rtcStats.nackCount, privacy: .public) \
+                            pli=\(rtcStats.pliCount, privacy: .public) \
+                            fir=\(rtcStats.firCount, privacy: .public)
+                            """
+                        )
+                        self.appendSmokeStatus(
+                            "native-video-tx session=\(sessionID) state=\(nativeVideoHealthState.rawValue) fallbackMode=\(nativeVideoTrackReadyForStats ? "heartbeat" : "main") fallbackProducer=\(activeFallbackProducer) fallbackSignature=\(lastFallbackSignature) submitted=\(sendSnapshot.submittedFrames) normalized=\(sendSnapshot.normalizedFrames) trackEnabled=\(sendSnapshot.trackEnabled) sourceReady=\(sendSnapshot.sourceReady) capturerReady=\(sendSnapshot.capturerReady) senderReady=\(sendSnapshot.senderReady) direction=\(sendSnapshot.transceiverDirection ?? "-") currentDirection=\(sendSnapshot.negotiatedTransceiverDirection ?? "-") lastFrame=\(sendSnapshot.lastFrameWidth)x\(sendSnapshot.lastFrameHeight) visibleFrame=\(sendSnapshot.lastFrameWidth)x\(sendSnapshot.lastFrameHeight) codedFrame=\(sendSnapshot.lastSubmittedFrameWidth)x\(sendSnapshot.lastSubmittedFrameHeight) rawPixelFormat=\(sendSnapshot.lastRawFramePixelFormat.map(String.init) ?? "-") submittedPixelFormat=\(sendSnapshot.lastSubmittedFramePixelFormat.map(String.init) ?? "-") pixelFormat=\(sendSnapshot.lastFramePixelFormat.map(String.init) ?? "-") frameNormalized=\(sendSnapshot.lastFrameWasNormalized) rawTimestampNs=\(sendSnapshot.lastRawFrameTimestampNs.map(String.init) ?? "-") timestampNs=\(sendSnapshot.lastFrameTimestampNs.map(String.init) ?? "-") timestampAdjusted=\(sendSnapshot.lastFrameTimestampWasAdjusted) profileLevelID=\(negotiatedProfileLevelID) framesEncoded=\(rtcStats.framesEncoded) framesSent=\(rtcStats.framesSent) keyFramesEncoded=\(rtcStats.keyFramesEncoded) packetsSent=\(rtcStats.packetsSent) bytesSent=\(rtcStats.bytesSent) outboundStats=\(rtcStats.outboundStatsPresent) codec=\(rtcStats.codec ?? "-") encoder=\(rtcStats.encoderImplementation ?? "-") qualityLimit=\(rtcStats.qualityLimitationReason ?? "-") encodeSize=\(rtcStats.frameWidth)x\(rtcStats.frameHeight) encodeFPS=\(rtcStats.framesPerSecond) totalEncodeTime=\(rtcStats.totalEncodeTime.map { String(format: "%.3f", $0) } ?? "-") targetBitrate=\(rtcStats.targetBitrate) availableOutgoingBitrate=\(rtcStats.availableOutgoingBitrate) currentRTT=\(rtcStats.currentRoundTripTime.map { String(format: "%.3f", $0) } ?? "-") remoteRTT=\(rtcStats.remoteRoundTripTime.map { String(format: "%.3f", $0) } ?? "-") remotePacketsLost=\(rtcStats.remotePacketsLost) remoteJitter=\(rtcStats.remoteJitter.map { String(format: "%.3f", $0) } ?? "-") nack=\(rtcStats.nackCount) pli=\(rtcStats.pliCount) fir=\(rtcStats.firCount)"
+                        )
+                        if self.remoteDesktopNetworkStatsEnabled {
+                            self.appendWebRTCSessionDiagnostic(
+                                "native-video-tx session=\(sessionID) state=\(nativeVideoHealthState.rawValue) fallbackMode=\(nativeVideoTrackReadyForStats ? "heartbeat" : "main") fallbackProducer=\(activeFallbackProducer) fallbackSignature=\(lastFallbackSignature) submitted=\(sendSnapshot.submittedFrames) normalized=\(sendSnapshot.normalizedFrames) trackEnabled=\(sendSnapshot.trackEnabled) sourceReady=\(sendSnapshot.sourceReady) capturerReady=\(sendSnapshot.capturerReady) senderReady=\(sendSnapshot.senderReady) direction=\(sendSnapshot.transceiverDirection ?? "-") currentDirection=\(sendSnapshot.negotiatedTransceiverDirection ?? "-") lastFrame=\(sendSnapshot.lastFrameWidth)x\(sendSnapshot.lastFrameHeight) visibleFrame=\(sendSnapshot.lastFrameWidth)x\(sendSnapshot.lastFrameHeight) codedFrame=\(sendSnapshot.lastSubmittedFrameWidth)x\(sendSnapshot.lastSubmittedFrameHeight) rawPixelFormat=\(sendSnapshot.lastRawFramePixelFormat.map(String.init) ?? "-") submittedPixelFormat=\(sendSnapshot.lastSubmittedFramePixelFormat.map(String.init) ?? "-") pixelFormat=\(sendSnapshot.lastFramePixelFormat.map(String.init) ?? "-") frameNormalized=\(sendSnapshot.lastFrameWasNormalized) rawTimestampNs=\(sendSnapshot.lastRawFrameTimestampNs.map(String.init) ?? "-") timestampNs=\(sendSnapshot.lastFrameTimestampNs.map(String.init) ?? "-") timestampAdjusted=\(sendSnapshot.lastFrameTimestampWasAdjusted) framesEncoded=\(rtcStats.framesEncoded) framesSent=\(rtcStats.framesSent) keyFramesEncoded=\(rtcStats.keyFramesEncoded) packetsSent=\(rtcStats.packetsSent) bytesSent=\(rtcStats.bytesSent) outboundStats=\(rtcStats.outboundStatsPresent) codec=\(rtcStats.codec ?? "-") encoder=\(rtcStats.encoderImplementation ?? "-") qualityLimit=\(rtcStats.qualityLimitationReason ?? "-") encodeSize=\(rtcStats.frameWidth)x\(rtcStats.frameHeight) encodeFPS=\(rtcStats.framesPerSecond) totalEncodeTime=\(rtcStats.totalEncodeTime.map { String(format: "%.3f", $0) } ?? "-") targetBitrate=\(rtcStats.targetBitrate) availableOutgoingBitrate=\(rtcStats.availableOutgoingBitrate) currentRTT=\(rtcStats.currentRoundTripTime.map { String(format: "%.3f", $0) } ?? "-") remoteRTT=\(rtcStats.remoteRoundTripTime.map { String(format: "%.3f", $0) } ?? "-") remotePacketsLost=\(rtcStats.remotePacketsLost) remoteJitter=\(rtcStats.remoteJitter.map { String(format: "%.3f", $0) } ?? "-") nack=\(rtcStats.nackCount) pli=\(rtcStats.pliCount) fir=\(rtcStats.firCount)",
+                                sessionID: sessionID
+                            )
+                        }
+                        if self.remoteDesktopNetworkStatsEnabled, rtcStats.framesPerSecond > 0 {
+                            WebRTCMediaDiagnosticWriter.append(
+                                WebRTCMediaDiagnosticEvent(
+                                    sessionId: sessionID,
+                                    kind: "videoStats",
+                                    videoFPS: Double(rtcStats.framesPerSecond),
+                                    fallbackProducer: activeFallbackProducer,
+                                    nativeVideoHealth: nativeVideoHealthState.rawValue,
+                                    submitted: sendSnapshot.submittedFrames,
+                                    framesEncoded: rtcStats.framesEncoded,
+                                    framesSent: rtcStats.framesSent,
+                                    keyFramesEncoded: rtcStats.keyFramesEncoded,
+                                    packetsSent: rtcStats.packetsSent,
+                                    bytesSent: rtcStats.bytesSent,
+                                    codec: rtcStats.codec,
+                                    encoder: rtcStats.encoderImplementation,
+                                    qualityLimit: rtcStats.qualityLimitationReason,
+                                    encodeWidth: rtcStats.frameWidth,
+                                    encodeHeight: rtcStats.frameHeight,
+                                    encodeFPS: rtcStats.framesPerSecond,
+                                    totalEncodeTime: rtcStats.totalEncodeTime,
+                                    targetBitrate: rtcStats.targetBitrate,
+                                    availableOutgoingBitrate: rtcStats.availableOutgoingBitrate,
+                                    currentRTT: rtcStats.currentRoundTripTime,
+                                    remoteRTT: rtcStats.remoteRoundTripTime,
+                                    remotePacketsLost: rtcStats.remotePacketsLost,
+                                    remoteJitter: rtcStats.remoteJitter,
+                                    nack: rtcStats.nackCount,
+                                    pli: rtcStats.pliCount,
+                                    fir: rtcStats.firCount,
+                                    validationMode: failFastMediaFallbacks ? "strict" : "standard"
+                                )
+                            )
+                        }
+                        lastNativeVideoStatsReportAt = Date()
+                    }
+                    if failFastMediaFallbacks, streamingState.strictMediaValidationFailureReason != nil {
+                        break
+                    }
+                    let nativeVideoTrackReady =
+                        self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.nativeVideoTrackReady == true
+                    let nativeVideoFallbackDecision = Self.nativeVideoFallbackDecision(
+                        supportsNativeVideoTrack: session.supportsNativeScreenVideoTrack,
+                        nativeVideoTrackReady: nativeVideoTrackReady,
+                        nativeVideoHealthState: nativeVideoHealthState,
+                        cooldownRemainingSeconds: max(0, nativeVideoFailureCooldownUntil.timeIntervalSince(Date()))
+                    )
+                    let fallbackDecisionShouldDriveMain = failFastMediaFallbacks
+                        ? false
+                        : nativeVideoFallbackDecision.fallbackShouldDriveMain
+                    if fallbackDecisionShouldDriveMain != nativeVideoFallbackDrivingMain {
+                        nativeVideoFallbackDrivingMain = fallbackDecisionShouldDriveMain
+                        let action = nativeVideoFallbackDrivingMain ? "fallback-main" : "native-main"
+                        self.appendSmokeStatus(
+                            "native-video-retry session=\(sessionID) action=\(action) state=\(nativeVideoHealthState.rawValue) reason=\(nativeVideoFallbackDecision.retryReason) cooldownMs=\(Int(nativeVideoFallbackDecision.cooldownRemainingSeconds * 1000))"
+                        )
+                        self.appendWebRTCSessionDiagnostic(
+                            "native-video-retry session=\(sessionID) action=\(action) state=\(nativeVideoHealthState.rawValue) reason=\(nativeVideoFallbackDecision.retryReason) cooldownMs=\(Int(nativeVideoFallbackDecision.cooldownRemainingSeconds * 1000))",
+                            sessionID: sessionID
+                        )
+                    } else if nativeVideoFallbackDecision.retryNativeCapture,
+                              Date().timeIntervalSince(lastNativeVideoRetryDiagnosticAt) >= 2.0 {
+                        lastNativeVideoRetryDiagnosticAt = Date()
+                        self.appendWebRTCSessionDiagnostic(
+                            "native-video-retry session=\(sessionID) action=probe state=\(nativeVideoHealthState.rawValue) reason=\(nativeVideoFallbackDecision.retryReason) cooldownMs=\(Int(nativeVideoFallbackDecision.cooldownRemainingSeconds * 1000))",
+                            sessionID: sessionID
+                        )
+                    }
+                    if screenRoute.shouldWaitForScreenChannel {
+                        do {
+                            try await Task.sleep(for: .milliseconds(50))
+                        } catch {
+                            break
+                        }
+                        guard self.isCurrentWebRTCScreenStreamingOwner(
+                            sessionID: sessionID,
+                            session: session,
+                            screenStreamingTaskToken: screenStreamingTaskToken,
+                            keys: keys
+                        ) else {
+                            break
+                        }
+                        continue
+                    }
+                    if self.consumePendingWebRTCStreamRefresh(for: sessionID) {
+                        let refreshToken = self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.streamRefreshToken
+                        awaitingRefreshToken = refreshToken
+                        awaitingRefreshRequestedAt = Date()
+                        predictiveFramesSentAfterRefresh = 0
+                        lastAwaitingRefreshReportAt = .distantPast
+                        directCaptureStreamer?.requestKeyFrameRefresh(reason: "viewer-stream-refresh")
+                        self.logger.info(
+                            "🪄 WebRTC viewer 请求关键帧刷新: session=\(sessionID, privacy: .public) refreshTokenState=\(Self.streamRefreshTokenLogState(refreshToken), privacy: .public)"
+                        )
+                    }
+                    if session.supportsNativeScreenVideoTrack,
+                       !nativeVideoFallbackDrivingMain,
+                       nativeVideoTrackReady || nativeVideoHealthState == .rtpFlowing || nativeVideoHealthState == .rendered {
+                        if lastSentFormat != "webrtc-native-video" {
+                            self.logger.info(
+                                "🎬 WebRTC 原生屏幕视频已切换为跨网主链: session=\(sessionID, privacy: .public) nativeReady=\(nativeVideoTrackReady, privacy: .public) nativeHealth=\(nativeVideoHealthState.rawValue, privacy: .public) fallback=frozen-last-good-frame"
+                            )
+                            self.appendSmokeStatus(
+                                "stream-format session=\(sessionID) format=webrtc-native-video nativeReady=\(nativeVideoTrackReady) nativeHealth=\(nativeVideoHealthState.rawValue)"
+                            )
+                            lastSentFormat = "webrtc-native-video"
+                        }
+                        lastEncoderVideoPolicy = encoderVideoPolicy
+                        do {
+                            try await Task.sleep(for: .milliseconds(250))
+                        } catch {
+                            break
+                        }
+                        guard self.isCurrentWebRTCScreenStreamingOwner(
+                            sessionID: sessionID,
+                            session: session,
+                            screenStreamingTaskToken: screenStreamingTaskToken,
+                            keys: keys
+                        ) else {
+                            break
+                        }
+                        continue
+                    } else if !failFastMediaFallbacks,
+                              session.supportsNativeScreenVideoTrack,
+                              lastSentFormat.hasPrefix("webrtc-native-video") {
+                        self.logger.info(
+                            "🫧 WebRTC 原生屏幕视频未获 RTP 正证据，SBRF/JPEG 继续作为主链: session=\(sessionID, privacy: .public) state=\(nativeVideoHealthState.rawValue, privacy: .public)"
+                        )
+                        lastSentFormat = ""
+                    }
+#endif
+                    if failFastMediaFallbacks, session.supportsNativeScreenVideoTrack {
+                        if lastSentFormat != "webrtc-native-video-waiting" {
+                            self.appendSmokeStatus(
+                                "stream-format session=\(sessionID) format=webrtc-native-video-waiting nativeHealth=\(nativeVideoHealthState.rawValue) fallback=forbidden"
+                            )
+                            self.appendWebRTCSessionDiagnostic(
+                                "stream-format session=\(sessionID) format=webrtc-native-video-waiting nativeHealth=\(nativeVideoHealthState.rawValue) fallback=forbidden",
+                                sessionID: sessionID
+                            )
+                            lastSentFormat = "webrtc-native-video-waiting"
+                        }
+                        do {
+                            try await Task.sleep(for: .milliseconds(100))
+                        } catch {
+                            break
+                        }
+                        guard self.isCurrentWebRTCScreenStreamingOwner(
+                            sessionID: sessionID,
+                            session: session,
+                            screenStreamingTaskToken: screenStreamingTaskToken,
+                            keys: keys
+                        ) else {
+                            break
+                        }
+                        continue
+                    }
+                    lastEncoderVideoPolicy = encoderVideoPolicy
+                    do {
+                        let frameIntervalNs = max(1_000_000_000 / budget.frameRate, 1_000_000)
+                        try await Task.sleep(for: .nanoseconds(frameIntervalNs))
+                    } catch {
+                        break
+                    }
+                    guard self.isCurrentWebRTCScreenStreamingOwner(
+                        sessionID: sessionID,
+                        session: session,
+                        screenStreamingTaskToken: screenStreamingTaskToken,
+                        keys: keys
+                    ) else {
+                        break
+                    }
+                    fallbackLoopTicks += 1
+                    let bufferedAmount = useDedicatedScreenChannel
+                        ? session.screenDataChannelBufferedAmountBytes()
+                        : session.dataChannelBufferedAmountBytes()
+                    let nativeWarmupNativeReadyForBackpressure =
+                        self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.nativeVideoTrackReady == true
+                    if Self.shouldThrottleNativeWarmupJPEGFallback(
+                        supportsNativeVideoTrack: session.supportsNativeScreenVideoTrack,
+                        nativeVideoTrackReady: nativeWarmupNativeReadyForBackpressure,
+                        bufferedAmount: bufferedAmount,
+                        maxBufferedAmountBytes: screenSendMaxBufferedAmountBytes
+                    ) {
+                        framesDroppedBackpressure += 1
+                        if Date().timeIntervalSince(lastBackpressureReportAt) >= 1.0 {
+                            self.logger.warning(
+                                "⚠️ WebRTC native warmup JPEG backpressure: skip capture before source read. session=\(sessionID, privacy: .public) screenBuffered=\(Int(bufferedAmount), privacy: .public) threshold=\(Int(Self.nativeWarmupJPEGBackpressureThreshold(maxBufferedAmountBytes: screenSendMaxBufferedAmountBytes)), privacy: .public) budget=\(Int(screenSendMaxBufferedAmountBytes), privacy: .public) chunkDropReason=native-warmup-jpeg-backpressure"
+                            )
+                            self.appendSmokeStatus(
+                                "stream-backpressure session=\(sessionID) screenBuffered=\(Int(bufferedAmount)) budget=\(Int(screenSendMaxBufferedAmountBytes)) chunkDropReason=native-warmup-jpeg-backpressure dropped=\(framesDroppedBackpressure)"
+                            )
+                            lastBackpressureReportAt = Date()
+                        }
+                        continue
+                    }
+                    if bufferedAmount > screenSendMaxBufferedAmountBytes,
+                       awaitingRefreshToken == nil {
+                        framesDroppedBackpressure += 1
+                        self.logger.debug(
+                            "⏳ WebRTC 屏幕推流背压：跳过 stale 帧 buffered=\(Int(bufferedAmount), privacy: .public) budget=\(Int(screenSendMaxBufferedAmountBytes), privacy: .public) chunkDropReason=screen-buffered"
+                        )
+                        if Date().timeIntervalSince(lastBackpressureReportAt) >= 1.0 {
+                            self.appendSmokeStatus(
+                                "stream-backpressure session=\(sessionID) screenBuffered=\(Int(bufferedAmount)) budget=\(Int(screenSendMaxBufferedAmountBytes)) chunkDropReason=screen-buffered dropped=\(framesDroppedBackpressure)"
+                            )
+                            lastBackpressureReportAt = Date()
+                        }
+                        continue
+                    }
+                    var capturedFrame: ScreenDataWire?
+#if os(macOS)
+                    var preparedEncryptedScreenPayload: Data?
+                    var preparedScreenFrameIsIndependent: Bool?
+                    var cgDisplayFallbackAllowed = true
+                    let completedCGDisplayWork = cgDisplayFrameWorker.takeLatestResult()
+                    var completedCGDisplayFrame: MacWebRTCScreenFrameWorker.PreparedFrame?
+                    var completedCGDisplayEncryptionFailed = false
+                    if let completedCGDisplayWork {
+                        switch completedCGDisplayWork {
+                        case .prepared(let prepared):
+                            completedCGDisplayFrame = prepared
+                        case .noDamage(let captureMilliseconds):
+                            cgDisplayCaptureMsTotal += captureMilliseconds
+                        case .captureUnavailable:
+                            self.logger.debug(
+                                "ℹ️ WebRTC CGDisplay 后台采集暂不可用: session=\(sessionID, privacy: .public)"
+                            )
+                        case .jpegEncodingFailed:
+                            self.logger.warning(
+                                "⚠️ WebRTC CGDisplay 后台 JPEG 编码失败: session=\(sessionID, privacy: .public)"
+                            )
+                        case .encryptionFailed(let description):
+                            completedCGDisplayEncryptionFailed = true
+                            self.logger.error(
+                                "❌ WebRTC CGDisplay 后台屏幕 AEAD 失败: session=\(sessionID, privacy: .public) err=\(description, privacy: .public)"
+                            )
+                            break
+                        }
+                    }
+                    if completedCGDisplayEncryptionFailed {
+                        break
+                    }
+#endif
+                    if Self.shouldUseSyntheticScreenForSmoke {
+                        if failFastMediaFallbacks {
+                            recordStrictMediaValidationFailure(
+                                reason: "synthetic-screen-forbidden",
+                                probable: "smoke-synthetic-screen-enabled",
+                                config: streamConfig
+                            )
+                            break
+                        }
+                        if let synthetic = syntheticScreenDataIfEnabled() {
+                            if !usingSyntheticFrames {
+                                usingSyntheticFrames = true
+                                self.logger.info("🧪 WebRTC smoke 使用合成屏幕帧: session=\(sessionID, privacy: .public)")
+                            }
+                            capturedFrame = synthetic
+                        }
+                    }
+#if os(macOS)
+                    if capturedFrame == nil {
+                        let nativeVideoWarmBackupEnabled =
+                            session.supportsNativeScreenVideoTrack && nativeVideoFallbackDrivingMain
+                        let now = Date()
+                        let latestSCKAgeMs = encodedFrameStore.latestAgeMs(now: now)
+                        let directEncodedFrame = videoPolicy.usesHardwareEncoder && !nativeVideoWarmBackupEnabled
+                            ? encodedFrameStore.takeLatest()
+                            : nil
+                        if let encodedFrame = directEncodedFrame {
+                            directEncodedFramesTaken += 1
+                            if activeFallbackProducer != Self.webRTCFallbackDirectEncoderProducer {
+                                activeFallbackProducer = Self.webRTCFallbackDirectEncoderProducer
+                                fallbackProducerSwitchReason = "direct-encoder-frame-ready"
+                                self.logger.info(
+                                    "🔄 WebRTC fallback producer switched: session=\(sessionID, privacy: .public) producer=directEncoder reason=\(fallbackProducerSwitchReason, privacy: .public)"
+                                )
+                                self.appendWebRTCSessionDiagnostic(
+                                    "fallbackProducerSwitch session=\(sessionID) producer=directEncoder reason=\(fallbackProducerSwitchReason)",
+                                    sessionID: sessionID
+                                )
+                            }
+                            lastHardwareFrameAt = now
+                            lastFallbackSignature = "\(encodedFrame.format) \(encodedFrame.width)x\(encodedFrame.height)"
+                            capturedFrame = ScreenDataWire(
+                                width: encodedFrame.width,
+                                height: encodedFrame.height,
+                                imageData: encodedFrame.imageData,
+                                timestamp: encodedFrame.timestamp,
+                                format: encodedFrame.format,
+                                isSyncFrame: encodedFrame.isSyncFrame,
+                                sequenceNumber: encodedFrame.sequenceNumber
+                            )
+                        } else if nativeVideoWarmBackupEnabled {
+                            if activeFallbackProducer != Self.webRTCFallbackBoundedJPEGWarmupProducer {
+                                activeFallbackProducer = Self.webRTCFallbackBoundedJPEGWarmupProducer
+                                fallbackProducerSwitchReason = "native-warmup-bounded-jpeg"
+                                self.logger.info(
+                                    """
+                                    🔄 WebRTC fallback producer locked for native warmup: \
+                                    session=\(sessionID, privacy: .public) \
+                                    producer=boundedJPEGWarmupMain \
+                                    reason=\(fallbackProducerSwitchReason, privacy: .public) \
+                                    maxLongEdge=\(nativeWarmupFallbackJPEGProfile.maxLongEdge, privacy: .public) \
+                                    maxTransportBytes=\(nativeWarmupFallbackJPEGProfile.maxTransportFrameBytes, privacy: .public) \
+                                    sckLatestAgeMs=\(latestSCKAgeMs.map(String.init) ?? "-", privacy: .public)
+                                    """
+                                )
+                                self.appendWebRTCSessionDiagnostic(
+                                    "fallbackProducerSwitch session=\(sessionID) producer=boundedJPEGWarmupMain reason=\(fallbackProducerSwitchReason) maxLongEdge=\(nativeWarmupFallbackJPEGProfile.maxLongEdge) maxTransportBytes=\(nativeWarmupFallbackJPEGProfile.maxTransportFrameBytes) sckLatestAgeMs=\(latestSCKAgeMs.map(String.init) ?? "-")",
+                                    sessionID: sessionID
+                                )
+                            }
+                            if Date().timeIntervalSince(lastEncodedFallbackMissReportAt) >= 2.0 {
+                                self.logger.info(
+                                    """
+                                    ℹ️ WebRTC native warmup uses bounded JPEG fallback until native render evidence: \
+                                    session=\(sessionID, privacy: .public) \
+                                    state=\(nativeVideoHealthState.rawValue, privacy: .public) \
+                                    producer=boundedJPEGWarmupMain \
+                                    maxLongEdge=\(nativeWarmupFallbackJPEGProfile.maxLongEdge, privacy: .public) \
+                                    maxTransportBytes=\(nativeWarmupFallbackJPEGProfile.maxTransportFrameBytes, privacy: .public) \
+                                    sckLatestAgeMs=\(latestSCKAgeMs.map(String.init) ?? "-", privacy: .public)
+                                    """
+                                )
+                                self.appendSmokeStatus(
+                                    "stream-native-warmup-fallback-main session=\(sessionID) state=\(nativeVideoHealthState.rawValue) producer=boundedJPEGWarmupMain maxLongEdge=\(nativeWarmupFallbackJPEGProfile.maxLongEdge) maxTransportBytes=\(nativeWarmupFallbackJPEGProfile.maxTransportFrameBytes) sckLatestAgeMs=\(latestSCKAgeMs.map(String.init) ?? "-")"
+                                )
+                                self.appendWebRTCSessionDiagnostic(
+                                    "stream-native-warmup-fallback-main session=\(sessionID) state=\(nativeVideoHealthState.rawValue) producer=\(activeFallbackProducer) sckLatestAgeMs=\(latestSCKAgeMs.map(String.init) ?? "-")",
+                                    sessionID: sessionID
+                                )
+                                lastEncodedFallbackMissReportAt = Date()
+                            }
+                        } else if videoPolicy.usesHardwareEncoder {
+                            cgDisplayFallbackAllowed = false
+                            let outputBaselineAt: Date = {
+                                var baseline = lastHardwareFrameAt
+                                if lastDirectEncoderStartAt > baseline {
+                                    baseline = lastDirectEncoderStartAt
+                                }
+                                if let requestedAt = awaitingRefreshRequestedAt,
+                                   requestedAt > baseline {
+                                    baseline = requestedAt
+                                }
+                                return baseline
+                            }()
+                            if Date().timeIntervalSince(outputBaselineAt) > 1.0 {
+                                self.appendSmokeStatus(
+                                    "stream-hardware-wait session=\(sessionID) codec=\(Self.remoteFrameFormatName(frameType: videoPolicy.codec, payload: Data()))"
+                                )
+                                if awaitingRefreshToken != nil,
+                                   let requestedAt = awaitingRefreshRequestedAt,
+                                   Date().timeIntervalSince(lastAwaitingRefreshReportAt) >= 1.0 {
+                                    let waitMs = Int((Date().timeIntervalSince(requestedAt) * 1000).rounded())
+                                    self.logger.warning(
+                                        "⚠️ WebRTC 刷新请求后编码器仍未产出可发送视频帧: session=\(sessionID, privacy: .public) refreshTokenState=present waitMs=\(waitMs, privacy: .public) probable=encoder-no-output"
+                                    )
+                                    lastAwaitingRefreshReportAt = Date()
+                                }
+                            }
+                            if completedCGDisplayFrame == nil {
+                                continue
+                            }
+                        }
+                    }
+#endif
+#if os(macOS)
+                    let sourceFrameToPrepare = capturedFrame
+                    if sourceFrameToPrepare == nil,
+                       cgDisplayFallbackAllowed,
+                       failFastMediaFallbacks {
+                        recordStrictMediaValidationFailure(
+                            reason: "degraded-screen-fallback-forbidden",
+                            probable: "native-video-or-hardware-encoded-frame-unavailable",
+                            config: streamConfig
+                        )
+                        break
+                    }
+
+                    let secureStateFingerprint = Self.webRTCSecureEnvelopeKeyFingerprint(for: keys)
+                    if sourceFrameToPrepare != nil || cgDisplayFallbackAllowed {
+                        guard self.isCurrentWebRTCScreenStreamingOwner(
+                            sessionID: sessionID,
+                            session: session,
+                            screenStreamingTaskToken: screenStreamingTaskToken,
+                            keys: keys
+                        ) else {
+                            break
+                        }
+                        let secureCounter: UInt64
+                        do {
+                            secureCounter = try self.reserveWebRTCSecurePayloadCounter(
+                                with: keys,
+                                sessionID: sessionID
+                            )
+                        } catch {
+                            self.logger.error(
+                                "❌ WebRTC screen worker counter 预留失败: session=\(sessionID, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                            )
+                            break
+                        }
+
+                        let nativeVideoFallbackMain = sourceFrameToPrepare == nil
+                            && session.supportsNativeScreenVideoTrack
+                            && nativeVideoFallbackDrivingMain
+                        let damageTrackingEnabled = sourceFrameToPrepare == nil
+                            && (self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.damageTrackingEnabled ?? true)
+                            && !nativeVideoFallbackMain
+                        let workerRequestID = nextCGDisplayWorkerRequestID
+                        nextCGDisplayWorkerRequestID = workerRequestID == UInt64.max
+                            ? 1
+                            : workerRequestID + 1
+                        cgDisplayFrameWorker.submit(
+                            MacWebRTCScreenFrameWorker.Request(
+                                id: workerRequestID,
+                                sequenceNumber: fallbackFrameSequence.next(),
+                                sourceFrame: sourceFrameToPrepare,
+                                damageTrackingEnabled: damageTrackingEnabled,
+                                resetDamageTracker: resetCGDisplayDamageTracker,
+                                degradedJPEGProfile: nativeVideoFallbackMain
+                                    ? nativeWarmupFallbackJPEGProfile
+                                    : nil,
+                                jpegQuality: 0.55,
+                                keys: keys,
+                                secureCounter: secureCounter,
+                                secureStateFingerprint: secureStateFingerprint
+                            )
+                        )
+                        if sourceFrameToPrepare == nil {
+                            resetCGDisplayDamageTracker = false
+                        }
+                    }
+
+                    let workerSnapshot = cgDisplayFrameWorker.snapshot()
+                    let newlyDroppedPending = workerSnapshot.droppedPending
+                        &- lastCGDisplayWorkerDroppedPending
+                    if newlyDroppedPending > 0 {
+                        framesDroppedBackpressure += Int(
+                            min(newlyDroppedPending, UInt64(Int.max))
+                        )
+                        self.logger.debug(
+                            "⏳ WebRTC screen worker 丢弃旧 pending 帧: session=\(sessionID, privacy: .public) dropped=\(newlyDroppedPending, privacy: .public)"
+                        )
+                    }
+                    lastCGDisplayWorkerDroppedPending = workerSnapshot.droppedPending
+
+                    guard let prepared = completedCGDisplayFrame else {
+                        continue
+                    }
+                    guard prepared.secureStateFingerprint == secureStateFingerprint else {
+                        self.logger.error(
+                            "❌ WebRTC screen worker 密钥代次失配: session=\(sessionID, privacy: .public)"
+                        )
+                        break
+                    }
+                    cgDisplayCaptureMsTotal += prepared.captureMilliseconds
+                    jpegEncodeMsTotal += prepared.jpegEncodeMilliseconds
+                    if prepared.captureMilliseconds > 0 || prepared.jpegEncodeMilliseconds > 0 {
+                        cgDisplayFallbackFrames += 1
+                        // 纯 CGDisplay JPEG 回退驱动主画面时，按 worker 真实输出的
+                        // 帧像素尺寸发布/校正注入映射（观看端回传坐标位于该帧像素
+                        // 空间；映射解析处再换算为主屏全局点坐标，Retina 下
+                        // 像素≠点也因此正确）。尺寸/显示器未变时 publishIfChanged
+                        // 为 no-op；显示器配置变化会产出新尺寸帧并在此重新发布。
+                        if !videoPolicy.usesHardwareEncoder,
+                           !session.supportsNativeScreenVideoTrack,
+                           let lease = RemoteControlInjectionMappingStore.publishIfChanged(
+                               RemoteControlInjectionMapping(
+                                   displayID: CGMainDisplayID(),
+                                   visibleSize: CGSize(
+                                       width: prepared.frame.width,
+                                       height: prepared.frame.height
+                                   )
+                               ),
+                               for: inputOwner
+                           ) {
+                            cgDisplayInjectionMappingLease = lease
+                        }
+                    }
+                    pendingDamageReport = prepared.damageReport
+                    capturedFrame = prepared.frame
+                    preparedEncryptedScreenPayload = prepared.encryptedPayload
+                    preparedScreenFrameIsIndependent = prepared.isIndependentFrame
+                    if prepared.usedDegradedJPEGProfile {
+                        activeFallbackProducer = Self.webRTCFallbackBoundedJPEGWarmupProducer
+                        lastFallbackSignature = "jpeg \(prepared.frame.width)x\(prepared.frame.height)"
+                    }
+#endif
+                    guard let sd = capturedFrame else {
+                        continue
+                    }
+                    let nativeWarmupNativeReady =
+                        self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.nativeVideoTrackReady == true
+                    if Self.shouldDropNativeWarmupNonJPEGFallbackFrame(
+                        supportsNativeVideoTrack: session.supportsNativeScreenVideoTrack,
+                        nativeVideoTrackReady: nativeWarmupNativeReady,
+                        format: sd.format
+                    ) {
+                        nativeWarmupNonJPEGFallbackDrops += 1
+                        let now = Date()
+                        if now.timeIntervalSince(lastNativeWarmupNonJPEGFallbackDropReportAt) >= 1.0 {
+                            lastNativeWarmupNonJPEGFallbackDropReportAt = now
+                            self.logger.warning(
+                                """
+                                ⚠️ WebRTC native warmup dropped non-JPEG fallback before screen-channel send: \
+                                session=\(sessionID, privacy: .public) \
+                                format=\(sd.format ?? "unknown", privacy: .public) \
+                                size=\(sd.width, privacy: .public)x\(sd.height, privacy: .public) \
+                                producer=\(activeFallbackProducer, privacy: .public) \
+                                dropReason=native-warmup-non-jpeg-fallback
+                                """
+                            )
+                            self.appendWebRTCSessionDiagnostic(
+                                "screenFallbackDrop session=\(sessionID) dropReason=native-warmup-non-jpeg-fallback format=\(sd.format ?? "unknown") size=\(sd.width)x\(sd.height) producer=\(activeFallbackProducer)",
+                                sessionID: sessionID
+                            )
+                            self.appendSmokeStatus(
+                                "screen-drop session=\(sessionID) dropReason=native-warmup-non-jpeg-fallback format=\(sd.format ?? "unknown") size=\(sd.width)x\(sd.height)"
+                            )
+                        }
+                        continue
+                    }
+                    if let damageReport = pendingDamageReport,
+                       let damagePayload = try? JSONEncoder().encode(damageReport),
+                       let damageEnvelope = try? JSONEncoder().encode(
+                        RemoteMessageWire(type: .damageReport, payload: damagePayload)
+                       ) {
+                        do {
+                            guard self.isCurrentWebRTCScreenStreamingOwner(
+                                sessionID: sessionID,
+                                session: session,
+                                screenStreamingTaskToken: screenStreamingTaskToken,
+                                keys: keys
+                            ) else {
+                                break
+                            }
+                            let damageCiphertext = try encryptAppPayload(
+                                damageEnvelope,
+                                with: keys,
+                                packetType: .remoteControl
+                            )
+                            let paddedDamage = try TrafficPadding.wrapIfEnabled(damageCiphertext, label: "tx/webrtc-damage")
+                            try await session.sendFramedPayloadAsync(
+                                paddedDamage,
+                                maxChunkBytes: screenFrameChunkBytes,
+                                maxBufferedAmountBytes: screenSendMaxBufferedAmountBytes
+                            )
+                            guard self.isCurrentWebRTCScreenStreamingOwner(
+                                sessionID: sessionID,
+                                session: session,
+                                screenStreamingTaskToken: screenStreamingTaskToken,
+                                keys: keys
+                            ) else {
+                                break
+                            }
+                            bytesSent += paddedDamage.count + 4
+                            pendingDamageReport = nil
+                        } catch {
+                            self.logger.debug(
+                                "ℹ️ WebRTC damageReport 发送失败: session=\(sessionID, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                            )
+                        }
+                    }
+                    let formatLabel = sd.format ?? "unknown"
+                    let isIndependentFrame: Bool
+#if os(macOS)
+                    guard let preparedScreenFrameIsIndependent else {
+                        self.logger.error(
+                            "❌ WebRTC screen worker 缺少关键帧分类: session=\(sessionID, privacy: .public)"
+                        )
+                        break
+                    }
+                    isIndependentFrame = preparedScreenFrameIsIndependent
+#else
+                    isIndependentFrame = RemoteDesktopScreenFrameWire.containsSyncFrame(
+                        format: sd.format,
+                        imageData: sd.imageData,
+                        advertisedSyncFrame: sd.isSyncFrame
+                    )
+#endif
+                    let screenBufferedBeforeSend = useDedicatedScreenChannel
+                        ? session.screenDataChannelBufferedAmountBytes()
+                        : session.dataChannelBufferedAmountBytes()
+                    let nativeWarmupNativeReadyBeforeSend =
+                        self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.nativeVideoTrackReady == true
+                    if Self.shouldThrottleNativeWarmupJPEGFallback(
+                        supportsNativeVideoTrack: session.supportsNativeScreenVideoTrack,
+                        nativeVideoTrackReady: nativeWarmupNativeReadyBeforeSend,
+                        bufferedAmount: screenBufferedBeforeSend,
+                        maxBufferedAmountBytes: screenSendMaxBufferedAmountBytes
+                    ) {
+#if os(macOS)
+                        if formatLabel == "jpeg" {
+                            resetCGDisplayDamageTracker = true
+                        }
+#endif
+                        framesDroppedBackpressure += 1
+                        if Date().timeIntervalSince(lastBackpressureReportAt) >= 1.0 {
+                            self.logger.warning(
+                                "⚠️ WebRTC native warmup JPEG backpressure: drop encoded warmup frame before send. session=\(sessionID, privacy: .public) screenBuffered=\(Int(screenBufferedBeforeSend), privacy: .public) threshold=\(Int(Self.nativeWarmupJPEGBackpressureThreshold(maxBufferedAmountBytes: screenSendMaxBufferedAmountBytes)), privacy: .public) budget=\(Int(screenSendMaxBufferedAmountBytes), privacy: .public) chunkDropReason=native-warmup-jpeg-backpressure"
+                            )
+                            self.appendSmokeStatus(
+                                "stream-backpressure session=\(sessionID) screenBuffered=\(Int(screenBufferedBeforeSend)) budget=\(Int(screenSendMaxBufferedAmountBytes)) chunkDropReason=native-warmup-jpeg-backpressure dropped=\(framesDroppedBackpressure)"
+                            )
+                            lastBackpressureReportAt = Date()
+                        }
+                        continue
+                    }
+                    if screenBufferedBeforeSend > screenSendMaxBufferedAmountBytes,
+                       !isIndependentFrame {
+                        framesDroppedBackpressure += 1
+                        if Date().timeIntervalSince(lastBackpressureReportAt) >= 1.0 {
+                            self.logger.warning(
+                                "⚠️ WebRTC 屏幕通道背压丢弃 stale 非关键帧: session=\(sessionID, privacy: .public) screenBuffered=\(Int(screenBufferedBeforeSend), privacy: .public) budget=\(Int(screenSendMaxBufferedAmountBytes), privacy: .public) chunkDropReason=stale-nonkey-backpressure"
+                            )
+                            self.appendSmokeStatus(
+                                "stream-backpressure session=\(sessionID) screenBuffered=\(Int(screenBufferedBeforeSend)) budget=\(Int(screenSendMaxBufferedAmountBytes)) chunkDropReason=stale-nonkey-backpressure dropped=\(framesDroppedBackpressure)"
+                            )
+                            lastBackpressureReportAt = Date()
+                        }
+                        continue
+                    }
+                    if awaitingRefreshToken != nil,
+                       let requestedAt = awaitingRefreshRequestedAt {
+                        let waitMs = Int((Date().timeIntervalSince(requestedAt) * 1000).rounded())
+                        if isIndependentFrame {
+                            self.logger.info(
+                                "♻️ WebRTC 刷新请求已命中关键帧: session=\(sessionID, privacy: .public) refreshTokenState=present waitMs=\(waitMs, privacy: .public) predictiveBeforeSync=\(predictiveFramesSentAfterRefresh, privacy: .public) format=\(formatLabel, privacy: .public)"
+                            )
+                            awaitingRefreshToken = nil
+                            awaitingRefreshRequestedAt = nil
+                            predictiveFramesSentAfterRefresh = 0
+                            lastAwaitingRefreshReportAt = .distantPast
+                        } else {
+                            predictiveFramesSentAfterRefresh += 1
+                            if Date().timeIntervalSince(requestedAt) >= 1.0,
+                               Date().timeIntervalSince(lastAwaitingRefreshReportAt) >= 1.0 {
+                                self.logger.warning(
+                                    "⚠️ WebRTC 刷新请求后仍仅发送预测帧: session=\(sessionID, privacy: .public) refreshTokenState=present waitMs=\(waitMs, privacy: .public) predictiveSent=\(predictiveFramesSentAfterRefresh, privacy: .public) probable=missing-keyframe"
+                                )
+                                lastAwaitingRefreshReportAt = Date()
+                            }
+                        }
+                    }
+                    if formatLabel != lastSentFormat {
+                        self.appendSmokeStatus(
+                            "stream-format session=\(sessionID) format=\(formatLabel) channel=\(useDedicatedScreenChannel ? "screen" : "control")"
+                        )
+                        lastSentFormat = formatLabel
+                    }
+                    do {
+                        guard self.isCurrentWebRTCScreenStreamingOwner(
+                            sessionID: sessionID,
+                            session: session,
+                            screenStreamingTaskToken: screenStreamingTaskToken,
+                            keys: keys
+                        ) else {
+                            break
+                        }
+                        let sendStartedAt = Date()
+                        let enc: Data
+#if os(macOS)
+                        guard let preparedEncryptedScreenPayload else {
+                            self.logger.error(
+                                "❌ WebRTC screen worker 未提供加密载荷: session=\(sessionID, privacy: .public)"
+                            )
+                            break
+                        }
+                        enc = preparedEncryptedScreenPayload
+#else
+                        let plain = RemoteDesktopScreenFrameWire.encode(
+                            width: sd.width,
+                            height: sd.height,
+                            imageData: sd.imageData,
+                            timestamp: sd.timestamp,
+                            format: sd.format,
+                            isSyncFrame: sd.isSyncFrame,
+                            sequenceNumber: sd.sequenceNumber
+                        )
+                        enc = try encryptAppPayload(plain, with: keys, packetType: .remoteDesktop)
+#endif
+                        let padded = try TrafficPadding.wrapIfEnabled(enc, label: "tx/webrtc-screen")
+                        let payloadMagic = Self.describeWebRTCScreenPayloadMagic(padded)
+                        let wireFormat = useChunkedScreenWire ? WebRTCSession.screenChunkedWireFormat : "length-framed"
+                        let chunkCount: Int
+                        let framedBytes: Int
+                        var sentFrameId: UInt64?
+                        if useChunkedScreenWire {
+                            let maxPayloadBytes = max(1, screenFrameChunkBytes - WebRTCSession.screenChunkHeaderByteCount)
+                            chunkCount = max(1, (padded.count + maxPayloadBytes - 1) / maxPayloadBytes)
+                            framedBytes = padded.count + chunkCount * WebRTCSession.screenChunkHeaderByteCount
+                            sentFrameId = try await session.sendScreenChunkedPayloadAsync(
+                                padded,
+                                maxChunkBytes: screenFrameChunkBytes,
+                                maxBufferedAmountBytes: screenSendMaxBufferedAmountBytes
+                            )
+                        } else if useDedicatedScreenChannel {
+                            framedBytes = padded.count + 4
+                            chunkCount = max(1, (framedBytes + screenFrameChunkBytes - 1) / screenFrameChunkBytes)
+                            try await session.sendScreenFramedPayloadAsync(
+                                padded,
+                                maxChunkBytes: screenFrameChunkBytes,
+                                maxBufferedAmountBytes: screenSendMaxBufferedAmountBytes
+                            )
+                        } else {
+                            framedBytes = padded.count + 4
+                            chunkCount = max(1, (framedBytes + screenFrameChunkBytes - 1) / screenFrameChunkBytes)
+                            try await session.sendFramedPayloadAsync(
+                                padded,
+                                maxChunkBytes: screenFrameChunkBytes,
+                                maxBufferedAmountBytes: screenSendMaxBufferedAmountBytes
+                            )
+                        }
+                        guard self.isCurrentWebRTCScreenStreamingOwner(
+                            sessionID: sessionID,
+                            session: session,
+                            screenStreamingTaskToken: screenStreamingTaskToken,
+                            keys: keys
+                        ) else {
+                            break
+                        }
+                        lastSendLatencyMs = Int((Date().timeIntervalSince(sendStartedAt) * 1000).rounded())
+                        bytesSent += framedBytes
+                        framesSent += 1
+                        if framesSent == 1 {
+                            logWindowStart = Date()
+                        }
+                        if Self.isSmokeRuntimeEnabled,
+                           framesSent <= 3 {
+                            self.appendSmokeStatus(
+                                """
+                                screen-send session=\(sessionID) wire=\(wireFormat) \
+                                screenChannel=\(useDedicatedScreenChannel) screenChannelState=\(screenRoute.state) payloadMagic=\(payloadMagic) \
+                                frameId=\(sentFrameId.map(String.init) ?? "-") \
+                                framedBytes=\(framedBytes) chunkCount=\(chunkCount) \
+                                bytes=\(padded.count) format=\(formatLabel) \
+                                sendLatencyMs=\(lastSendLatencyMs) screenBuffered=\(Int(screenBufferedBeforeSend))
+                                """
+                            )
+                        }
+                        let elapsed = Date().timeIntervalSince(logWindowStart)
+                        if elapsed >= 5.0 {
+                            let upMBps = Double(bytesSent) / elapsed / 1024.0 / 1024.0
+                            let fps = Double(framesSent) / elapsed
+                            let fallbackLoopTickFPS = Double(fallbackLoopTicks) / elapsed
+                            let directEncodedFPS = Double(directEncodedFramesTaken) / elapsed
+                            let sckLatestFPS = Double(sckLatestFallbackFrames) / elapsed
+                            let latestSCKAgeMs = encodedFrameStore.latestAgeMs()
+                            let avgSCKLatestAgeMs = sckLatestFallbackFrames > 0
+                                ? Double(sckLatestAgeMsTotal) / Double(sckLatestFallbackFrames)
+                                : Double(latestSCKAgeMs ?? 0)
+                            let cgDisplayFPS = Double(cgDisplayFallbackFrames) / elapsed
+                            let avgCGDisplayCaptureMs = cgDisplayFallbackFrames > 0
+                                ? Double(cgDisplayCaptureMsTotal) / Double(cgDisplayFallbackFrames)
+                                : 0
+                            let avgJPEGEncodeMs = cgDisplayFallbackFrames > 0
+                                ? Double(jpegEncodeMsTotal) / Double(cgDisplayFallbackFrames)
+                                : 0
+                            let bufferedAmount = useDedicatedScreenChannel
+                                ? session.screenDataChannelBufferedAmountBytes()
+                                : session.dataChannelBufferedAmountBytes()
+                            self.logger.info(
+                                """
+                                📈 WebRTC 屏幕推流吞吐: session=\(sessionID, privacy: .public) \
+                                up=\(String(format: "%.2f", upMBps), privacy: .public)MB/s \
+                                fps=\(String(format: "%.1f", fps), privacy: .public) \
+                                wire=\(wireFormat, privacy: .public) screenChannel=\(useDedicatedScreenChannel, privacy: .public) \
+                                screenChannelState=\(screenRoute.state, privacy: .public) \
+                                frameId=\(sentFrameId.map(String.init) ?? "-", privacy: .public) \
+                                fallbackSentFPS=\(String(format: "%.1f", fps), privacy: .public) \
+                                fallbackProducer=\(activeFallbackProducer, privacy: .public) \
+                                fallbackSignature=\(lastFallbackSignature, privacy: .public) \
+                                fallbackLoopTickFPS=\(String(format: "%.1f", fallbackLoopTickFPS), privacy: .public) \
+                                directEncodedFPS=\(String(format: "%.1f", directEncodedFPS), privacy: .public) \
+                                sckLatestFPS=\(String(format: "%.1f", sckLatestFPS), privacy: .public) \
+                                sckLatestAgeMs=\(String(format: "%.1f", avgSCKLatestAgeMs), privacy: .public) \
+                                cgdisplayCaptureFPS=\(String(format: "%.1f", cgDisplayFPS), privacy: .public) \
+                                cgdisplayCaptureMs=\(String(format: "%.1f", avgCGDisplayCaptureMs), privacy: .public) \
+                                jpegEncodeMs=\(String(format: "%.1f", avgJPEGEncodeMs), privacy: .public) \
+                                sendSuccessFPS=\(String(format: "%.1f", fps), privacy: .public) \
+                                payloadMagic=\(payloadMagic, privacy: .public) screenBuffered=\(Int(bufferedAmount), privacy: .public) \
+                                sendLatencyMs=\(lastSendLatencyMs, privacy: .public) dropReason=\(nativeWarmupNonJPEGFallbackDrops > 0 ? "native-warmup-non-jpeg-fallback" : (framesDroppedBackpressure > 0 ? "backpressure" : "none"), privacy: .public) droppedBackpressure=\(framesDroppedBackpressure, privacy: .public) droppedNativeWarmupNonJPEG=\(nativeWarmupNonJPEGFallbackDrops, privacy: .public)
+                                """
+                            )
+                            self.appendSmokeStatus(
+                                """
+                                stream-stats session=\(sessionID) fps=\(String(format: "%.1f", fps)) \
+                                up_mbps=\(String(format: "%.2f", upMBps * 8.0)) \
+                                screenBuffered=\(Int(bufferedAmount)) \
+                                format=\(formatLabel) wire=\(wireFormat) \
+                                screenChannel=\(useDedicatedScreenChannel) screenChannelState=\(screenRoute.state) payloadMagic=\(payloadMagic) \
+                                fallbackProducer=\(activeFallbackProducer) fallbackSignature=\(lastFallbackSignature) \
+                                fallbackLoopTickFPS=\(String(format: "%.1f", fallbackLoopTickFPS)) \
+                                directEncodedFPS=\(String(format: "%.1f", directEncodedFPS)) \
+                                sckLatestFPS=\(String(format: "%.1f", sckLatestFPS)) \
+                                sckLatestAgeMs=\(String(format: "%.1f", avgSCKLatestAgeMs)) \
+                                cgdisplayCaptureFPS=\(String(format: "%.1f", cgDisplayFPS)) \
+                                cgdisplayCaptureMs=\(String(format: "%.1f", avgCGDisplayCaptureMs)) \
+                                jpegEncodeMs=\(String(format: "%.1f", avgJPEGEncodeMs)) \
+                                sendSuccessFPS=\(String(format: "%.1f", fps)) \
+                                frameId=\(sentFrameId.map(String.init) ?? "-") \
+                                framedBytes=\(framedBytes) chunkCount=\(chunkCount) \
+                                sendLatencyMs=\(lastSendLatencyMs) dropReason=\(nativeWarmupNonJPEGFallbackDrops > 0 ? "native-warmup-non-jpeg-fallback" : (framesDroppedBackpressure > 0 ? "backpressure" : "none")) droppedBackpressure=\(framesDroppedBackpressure) droppedNativeWarmupNonJPEG=\(nativeWarmupNonJPEGFallbackDrops)
+                                """
+                            )
+                            if self.remoteDesktopNetworkStatsEnabled {
+                                self.appendWebRTCSessionDiagnostic(
+                                    """
+                                    stream-stats session=\(sessionID) fps=\(String(format: "%.1f", fps)) \
+                                    screenBuffered=\(Int(bufferedAmount)) format=\(formatLabel) wire=\(wireFormat) \
+                                    screenChannel=\(useDedicatedScreenChannel) screenChannelState=\(screenRoute.state) payloadMagic=\(payloadMagic) \
+                                    fallbackProducer=\(activeFallbackProducer) fallbackSignature=\(lastFallbackSignature) \
+                                    fallbackLoopTickFPS=\(String(format: "%.1f", fallbackLoopTickFPS)) \
+                                    directEncodedFPS=\(String(format: "%.1f", directEncodedFPS)) \
+                                    sckLatestFPS=\(String(format: "%.1f", sckLatestFPS)) \
+                                    sckLatestAgeMs=\(String(format: "%.1f", avgSCKLatestAgeMs)) \
+                                    cgdisplayCaptureFPS=\(String(format: "%.1f", cgDisplayFPS)) \
+                                    cgdisplayCaptureMs=\(String(format: "%.1f", avgCGDisplayCaptureMs)) \
+                                    jpegEncodeMs=\(String(format: "%.1f", avgJPEGEncodeMs)) \
+                                    sendSuccessFPS=\(String(format: "%.1f", fps)) \
+                                    sendLatencyMs=\(lastSendLatencyMs) dropReason=\(nativeWarmupNonJPEGFallbackDrops > 0 ? "native-warmup-non-jpeg-fallback" : (framesDroppedBackpressure > 0 ? "backpressure" : "none")) droppedNativeWarmupNonJPEG=\(nativeWarmupNonJPEGFallbackDrops)
+                                    """,
+                                    sessionID: sessionID
+                                )
+                                WebRTCMediaDiagnosticWriter.append(
+                                    WebRTCMediaDiagnosticEvent(
+                                        sessionId: sessionID,
+                                        kind: "videoStats",
+                                        probable: nativeWarmupNonJPEGFallbackDrops > 0
+                                            ? "native-warmup-non-jpeg-fallback"
+                                            : (framesDroppedBackpressure > 0 ? "backpressure" : (fps <= 2.0 ? "low-fps" : nil)),
+                                        videoFPS: fps,
+                                        fallbackProducer: activeFallbackProducer,
+                                        nativeVideoHealth: nativeVideoHealthState.rawValue,
+                                        screenBuffered: Int(bufferedAmount)
+                                    )
+                                )
+                            }
+                            bytesSent = 0
+                            framesSent = 0
+                            framesDroppedBackpressure = 0
+                            nativeWarmupNonJPEGFallbackDrops = 0
+                            fallbackLoopTicks = 0
+                            directEncodedFramesTaken = 0
+                            sckLatestFallbackFrames = 0
+                            sckLatestAgeMsTotal = 0
+                            cgDisplayFallbackFrames = 0
+                            cgDisplayCaptureMsTotal = 0
+                            jpegEncodeMsTotal = 0
+                            logWindowStart = Date()
+                        }
+                    } catch WebRTCSession.WebRTCError.screenFrameBudgetExceeded(
+                        let framedBytes,
+                        let bufferedAmount,
+                        let maxBufferedAmountBytes
+                    ) {
+#if os(macOS)
+                        if sd.format?.lowercased() == "jpeg" {
+                            resetCGDisplayDamageTracker = true
+                        }
+#endif
+                        if failFastMediaFallbacks {
+                            recordStrictMediaValidationFailure(
+                                reason: "screen-frame-whole-budget-exceeded",
+                                probable: "datachannel-screen-backpressure",
+                                config: streamConfig
+                            )
+                            break
+                        }
+                        framesDroppedBackpressure += 1
+                        if Date().timeIntervalSince(lastBackpressureReportAt) >= 1.0 {
+                            self.logger.warning(
+                                "⚠️ WebRTC SBC2 整帧预算不足，丢弃当前屏幕帧: session=\(sessionID, privacy: .public) framedBytes=\(framedBytes, privacy: .public) screenBuffered=\(Int(bufferedAmount), privacy: .public) budget=\(Int(maxBufferedAmountBytes), privacy: .public) chunkDropReason=whole-frame-budget"
+                            )
+                            self.appendSmokeStatus(
+                                "stream-backpressure session=\(sessionID) screenBuffered=\(Int(bufferedAmount)) budget=\(Int(maxBufferedAmountBytes)) framedBytes=\(framedBytes) chunkDropReason=whole-frame-budget dropped=\(framesDroppedBackpressure)"
+                            )
+                            lastBackpressureReportAt = Date()
+                        }
+                        continue
+                    } catch {
+                        if Self.isSmokeRuntimeEnabled {
+                            self.appendSmokeStatus(
+                                "screen-send-failed session=\(sessionID) sendPartialFailure=1 error=\(error.localizedDescription)"
+                            )
+                        }
+                        self.logger.error("❌ WebRTC 屏幕推流发送失败: \(error.localizedDescription, privacy: .public)")
+                        break
+                    }
+                }
+                captureCallbackLease.revoke(token: screenStreamingTaskToken)
+#if canImport(WebRTCAudioDeviceBridge)
+                SBWebRTCSystemAudioDevice.shared().retireRecordedAudioOwner(
+                    withToken: nativeAudioOwnerToken
+                )
+#endif
+#if os(macOS)
+                streamingState.directSyntheticAudioToneSource?.stop()
+                streamingState.directSyntheticAudioToneSource = nil
+                await directAudioFallbackSender?.close()
+                directAudioFallbackSender = nil
+#endif
+#if os(macOS)
+                cgDisplayFrameWorker.stop()
+                // 对称于 SCK stop()：回退 worker 停止时清除 JPEG 路径的注入映射
+                // 租约（clear 只认自己的租约，不会误删后继流发布的映射）。
+                if let lease = cgDisplayInjectionMappingLease {
+                    RemoteControlInjectionMappingStore.clear(lease)
+                    cgDisplayInjectionMappingLease = nil
+                }
+                directCaptureStreamer?.stop(inputOwner: inputOwner)
+                directCaptureStreamer = nil
+                await directAudioFallbackSender?.close()
+                directAudioFallbackSender = nil
+                streamingState.directSyntheticAudioToneSource?.stop()
+                streamingState.directSyntheticAudioToneSource = nil
+                directSyntheticNativeVideoTask?.cancel()
+                await directSyntheticNativeVideoTask?.value
+                directSyntheticNativeVideoTask = nil
+                directNativeFramePacingTask?.cancel()
+                await directNativeFramePacingTask?.value
+                directNativeFramePacingTask = nil
+                directSyntheticNativeVideoStartedAt = .distantPast
+                streamingState.directRealtimeAudioAttachGeneration &+= 1
+                streamingState.directRealtimeAudioAttachTask?.cancel()
+                await streamingState.directRealtimeAudioAttachTask?.value
+                streamingState.directRealtimeAudioAttachTask = nil
+                streamingState.directRealtimePCMSubmissionPipe?.close()
+                streamingState.directRealtimePCMSubmissionPipe = nil
+                await streamingState.directRealtimeAudioSender?.close(reason: "webrtc-session-ended")
+                streamingState.directRealtimeAudioSender = nil
+#endif
+                encodedFrameStore.clear()
+                if let record = self.webrtcScreenStreamingTasksBySessionId[sessionID],
+                   record.token == screenStreamingTaskToken,
+                   record.sessionObjectIdentifier == ObjectIdentifier(session) {
+                    self.webrtcInteractionStreamingAllowedSessionIds.remove(sessionID)
+                    self.webrtcScreenStreamingTasksBySessionId.removeValue(forKey: sessionID)
+                }
+            }
+            self.webrtcScreenStreamingTasksBySessionId[sessionID] = WebRTCScreenStreamingTaskRecord(
+                token: screenStreamingTaskToken,
+                sessionObjectIdentifier: ObjectIdentifier(session),
+                callbackLease: captureCallbackLease,
+                nativeAudioOwnerToken: nativeAudioOwnerToken,
+                task: screenStreamingTask
+            )
+            #else
+            _ = keys
+            guard let remoteStreamConfiguration = self.webrtcRemoteStreamConfigurationBySessionId[sessionID],
+                  !remoteStreamConfiguration.isStopRequest else {
+                return
+            }
+            self.rejectWebRTCRemoteControlHostPayload(
+                sessionID: sessionID,
+                type: .streamConfiguration,
+                reason: "unsupported_platform"
+            )
+            #endif
+        }
+
+        var pairingBootstrapTask: Task<Void, Never>?
+        var pairingBootstrapTaskToken: UUID?
+        func isCurrentPairingBootstrapTaskOwner(_ taskToken: UUID) -> Bool {
+            pairingBootstrapTaskToken == taskToken
+                && self.isCurrentWebRTCControlLoopOwner(
+                    sessionID: sessionID,
+                    session: session,
+                    controlTaskToken: controlTaskToken
+                )
+        }
+        defer {
+            initialHandshakeTask?.cancel()
+            pairingBootstrapTaskToken = nil
+            pairingBootstrapTask?.cancel()
+        }
+
+        logger.info("🤝 WebRTC 控制通道：启动入站握手/消息循环 session=\(sessionID, privacy: .public)")
+
+        var lastInboundFrameLength = 0
+        var lastDecodedFrameLength = 0
+        var lastHandshakeDriverState = "none"
+        var lastControlLoopEvent = "start"
+
+        do {
+            while true {
+                try Task.checkCancellation()
+                let admittedFrame = try await stagedFrameReader.next()
+                guard self.isCurrentWebRTCControlLoopOwner(
+                    sessionID: sessionID,
+                    session: session,
+                    controlTaskToken: controlTaskToken
+                ) else {
+                    throw CancellationError()
+                }
+                let payload = admittedFrame.payload
+                lastInboundFrameLength = payload.count
+                if Self.isSmokeRuntimeEnabled {
+                    Self.emitSmokeLog("🧪 mac rx frame totalLen=\(payload.count)")
+                }
+
+                if case .boundSession(let carrierHeader) = admittedFrame.route {
+                    let boundSessionOwner = self.currentWebRTCBoundSessionOperationOwner(
+                        sessionID: sessionID
+                    )
+                    do {
+                        guard let keys = handshakeState.sessionKeys,
+                              let owner = boundSessionOwner,
+                              owner.session === session,
+                              owner.identity.controlTaskToken == controlTaskToken,
+                              Self.isSameWebRTCSecureSession(owner.keys, keys) else {
+                            throw WebRTCBoundSessionCarrierIntegrationError.ownerMismatch
+                        }
+                        let opened = try await decryptBoundSessionCarrier(
+                            payload,
+                            header: carrierHeader,
+                            with: keys
+                        )
+                        lastDecodedFrameLength = opened.payload.count
+                        try await self.consumeWebRTCBoundSessionRecord(
+                            opened.payload,
+                            header: carrierHeader,
+                            owner: owner
+                        )
+                    } catch is CancellationError {
+                        if let boundSessionOwner,
+                           self.isCurrentWebRTCBoundSessionOperationOwner(boundSessionOwner) {
+                            failCurrentControlLoop(
+                                reason: "bound_session_consumer_cancelled",
+                                disconnectKind: .explicit,
+                                statusMessage: "BoundSession transition cancelled"
+                            )
+                            return
+                        }
+                        throw CancellationError()
+                    } catch {
+                        logger.error(
+                            "BoundSession WebRTC carrier rejected: session=\(sessionID, privacy: .public)"
+                        )
+                        failCurrentControlLoop(
+                            reason: "bound_session_carrier_protocol_violation",
+                            disconnectKind: .explicit,
+                            statusMessage: "Invalid BoundSession WebRTC carrier"
+                        )
+                        return
+                    }
+                    // Packet type 6 is consume-only. It must never enter traffic
+                    // padding, handshake, app-control, file, media, or generic
+                    // application routing below.
+                    continue
+                }
+
+                let trafficUnwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx/webrtc")
+                let frame = HandshakePadding.unwrapIfNeeded(trafficUnwrapped, label: "rx/webrtc")
+                lastDecodedFrameLength = frame.count
+
+                if let activeDriver = handshakeState.driver {
+                    let driverState = await activeDriver.getCurrentState()
+                    guard handshakeState.driver === activeDriver,
+                          self.isCurrentWebRTCControlLoopOwner(
+                            sessionID: sessionID,
+                            session: session,
+                            controlTaskToken: controlTaskToken
+                          ) else {
+                        throw CancellationError()
+                    }
+                    lastHandshakeDriverState = String(describing: driverState)
+                    if case .waitingFinished(_, _, .initiator) = driverState,
+                       (try? HandshakeMessageA.decode(from: frame)) != nil {
+                        lastControlLoopEvent = "duplicate_message_a_while_waiting_finished"
+                        logger.warning(
+                            "♻️ WebRTC responder ignored duplicate fresh MessageA while waiting for Finished: session=\(sessionID, privacy: .public) peer=\(peerDeviceId, privacy: .public) frameBytes=\(frame.count, privacy: .public)"
+                        )
+                        continue
+                    }
+                }
+
+                if let keys = handshakeState.sessionKeys,
+                   !isLikelyHandshakeControlPacket(frame),
+                   !(handshakeState.driver != nil && isActiveHandshakeDriverFrame(frame)) {
+                    do {
+                        let openedPayload = try await decryptAppPayload(frame, with: keys)
+                        let plaintext = openedPayload.payload
+                        if openedPayload.packetType == .appControl,
+                           let msg = decodeCompatibilityAppMessage(plaintext) {
+                            if Self.isSmokeRuntimeEnabled {
+                                switch msg {
+                                case .usbPeerDiscoveryRequest, .usbPeerDiscoveryResponse, .handshakeConfigurationRequest, .handshakeConfigurationResponse:
+                                    Self.emitSmokeLog("mac app message=handshakeConfiguration rejectedChannel=webrtc")
+                                case .pairingIdentityExchange(let payload):
+                                    Self.emitSmokeLog("🧪 mac app message=pairingIdentityExchange deviceId=\(payload.deviceId) keys=\(payload.kemPublicKeys.count)")
+                                case .kemRefreshRequest(let payload):
+                                    Self.emitSmokeLog("🧪 mac app message=kemRefreshRequest target=\(payload.targetDeviceId)")
+                                case .signedKEMRefresh(let payload):
+                                    Self.emitSmokeLog("🧪 mac app message=signedKEMRefresh deviceId=\(payload.deviceId) keys=\(payload.kemPublicKeys.count)")
+                                case .kemRefreshFailure(let payload):
+                                    Self.emitSmokeLog("🧪 mac app message=kemRefreshFailure reasonCode=\(payload.reasonCode)")
+                                case .protocolIdentityBindingRequest(let payload):
+                                    Self.emitSmokeLog("🧪 mac app message=protocolIdentityBindingRequest target=\(payload.targetDeviceId)")
+                                case .signedProtocolIdentityBinding(let payload):
+                                    Self.emitSmokeLog("🧪 mac app message=signedProtocolIdentityBinding deviceId=\(payload.deviceId)")
+                                case .protocolIdentityBindingConfirm(let payload):
+                                    Self.emitSmokeLog("🧪 mac app message=protocolIdentityBindingConfirm transaction=\(payload.transactionId)")
+                                case .signedProtocolIdentityBindingFinalAck(let payload):
+                                    Self.emitSmokeLog("🧪 mac app message=signedProtocolIdentityBindingFinalAck accepted=\(payload.accepted)")
+                                case .heartbeat:
+                                    Self.emitSmokeLog("🧪 mac app message=heartbeat")
+                                case .authenticatedRouteBinding(let payload):
+                                    Self.emitSmokeLog("🧪 mac app message=authenticatedRouteBinding kind=\(payload.kind)")
+                                case .clipboard:
+                                    Self.emitSmokeLog("🧪 mac app message=clipboard")
+                                case .textMessage(let payload):
+                                    Self.emitSmokeLog("🧪 mac app message=textMessage id=\(payload.id)")
+                                case .textMessageReceipt(let payload):
+                                    Self.emitSmokeLog("🧪 mac app message=textMessageReceipt id=\(payload.messageID)")
+                                case .peerDisconnecting(let payload):
+                                    Self.emitSmokeLog("🧪 mac app message=peerDisconnecting deviceId=\(payload.deviceId ?? "nil")")
+                                case .ping(let payload):
+                                    Self.emitSmokeLog("🧪 mac app message=ping id=\(payload.id)")
+                                case .pong(let payload):
+                                    Self.emitSmokeLog("🧪 mac app message=pong id=\(payload.id)")
+	                                }
+	                            }
+                            if self.strictPQCClassicBootstrapOnlySessionIds.contains(sessionID) {
+                                let messageKind = bootstrapAppMessageKind(msg)
+                                switch WebRTCBootstrapAppMessagePolicy.admission(for: msg) {
+                                case .continueBootstrapSecurityFlow:
+                                    break
+                                case .consumeLivenessLocally:
+                                    switch msg {
+                                    case .heartbeat(let payload):
+                                            guard let authenticatedDeviceId = self
+                                                .authenticatedCrossNetworkDeviceId(
+                                                    sessionID: sessionID,
+                                                    claimedDeviceId: payload.deviceId
+                                                ) else {
+                                                failCurrentControlLoop(
+                                                    reason: "heartbeat_identity_mismatch",
+                                                    disconnectKind: .explicit,
+                                                    statusMessage: "WebRTC heartbeat identity did not match current-path authority"
+                                                )
+                                                return
+                                            }
+                                            self.webrtcRemoteDesktopHeartbeatAtBySessionId[sessionID] = Date()
+                                            self.updateCrossNetworkRemoteMetadata(
+                                                sessionID: sessionID,
+                                                authenticatedDeviceId: authenticatedDeviceId,
+                                                deviceName: payload.deviceName
+                                            )
+                                            self.noteWebRTCRemoteSecurityIdentity(
+                                                sessionID: sessionID,
+                                                accountDisplayName: payload.accountDisplayName,
+                                                nebulaId: payload.nebulaId,
+                                                deviceId: authenticatedDeviceId,
+                                                deviceName: payload.deviceName
+                                            )
+                                            logger.debug(
+                                                "ℹ️ WebRTC strictPQC classic bootstrap accepted control app message before PQC rekey: session=\(sessionID, privacy: .public) type=\(messageKind, privacy: .public) lastRekey=\(self.lastRekeyEvent ?? "-", privacy: .public)"
+                                            )
+                                            continue
+                                    case .ping(let payload):
+                                            self.webrtcRemoteDesktopHeartbeatAtBySessionId[sessionID] = Date()
+                                            logger.debug(
+                                                "ℹ️ WebRTC strictPQC classic bootstrap accepted control app message before PQC rekey: session=\(sessionID, privacy: .public) type=\(messageKind, privacy: .public) lastRekey=\(self.lastRekeyEvent ?? "-", privacy: .public)"
+                                            )
+                                            let reply = AppMessage.pong(.init(id: payload.id))
+                                            let outPlain = try JSONEncoder().encode(reply)
+                                            guard self.isCurrentWebRTCControlLoopSecureOwner(
+                                                sessionID: sessionID,
+                                                session: session,
+                                                controlTaskToken: controlTaskToken,
+                                                keys: keys
+                                            ) else {
+                                                throw CancellationError()
+                                            }
+                                            let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                            let outPadded = try TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-pong")
+                                            try await sendFramed(outPadded)
+                                            continue
+                                    case .pong, .peerDisconnecting:
+                                            self.webrtcRemoteDesktopHeartbeatAtBySessionId[sessionID] = Date()
+                                            logger.debug(
+                                                "ℹ️ WebRTC strictPQC classic bootstrap accepted control app message before PQC rekey: session=\(sessionID, privacy: .public) type=\(messageKind, privacy: .public) lastRekey=\(self.lastRekeyEvent ?? "-", privacy: .public)"
+                                            )
+                                            continue
+                                    default:
+                                        continue
+                                    }
+                                case .dropUntilPQCRekey:
+                                    logger.debug(
+                                        "ℹ️ WebRTC strictPQC classic bootstrap ignored non-bootstrap app message: session=\(sessionID, privacy: .public) type=\(messageKind, privacy: .public) lastRekey=\(self.lastRekeyEvent ?? "-", privacy: .public)"
+                                    )
+                                    continue
+                                }
+                            }
+		                            switch msg {
+		                            case .pairingIdentityExchange(let rawPayload):
+                                guard let payload = rawPayload.normalizedBootstrapPayload else {
+                                    logger.warning(
+                                        "⚠️ WebRTC pairingIdentityExchange ignored: empty declaredDeviceId or empty KEM public key session=\(sessionID, privacy: .public) peer=\(peerDeviceId, privacy: .public)"
+                                    )
+                                    break
+                                }
+                                guard let validatedAuthority = AuthenticatedProtocolIdentityBinding
+                                    .validatedCurrentPathPairingIdentityAuthority(
+                                        payload: payload,
+                                        authenticatedAuthority: handshakeState
+                                            .authenticatedRemoteAuthority,
+                                        expectedStableDeviceId:
+                                            self.currentPathExpectedRemoteAuthorityBySessionId[sessionID]?
+                                                .deviceId
+                                    ) else {
+                                    logger.error(
+                                        "⛔️ WebRTC pairing identity rejected before mutation: session=\(sessionID, privacy: .public) reason=current_path_authority_mismatch"
+                                    )
+                                    failCurrentControlLoop(
+                                        reason: "pairing_identity_authority_mismatch",
+                                        disconnectKind: .explicit,
+                                        statusMessage: "WebRTC pairing identity did not match the authenticated current-path authority"
+                                    )
+                                    return
+                                }
+                                guard let pairingAuthorityLease = handshakeState
+                                    .authenticatedRemoteAuthority else {
+                                    failCurrentControlLoop(
+                                        reason: "pairing_identity_authority_unavailable",
+                                        disconnectKind: .explicit,
+                                        statusMessage: "WebRTC pairing identity lost its authenticated authority"
+                                    )
+                                    return
+                                }
+                                let remoteFormatsSummary = (payload.remoteVideoFormats ?? []).joined(separator: ",")
+                                self.appendSmokeStatus(
+                                    "app-pairing-recv session=\(sessionID) formats=\(remoteFormatsSummary)"
+                                )
+                                let policyBindingKey = PairingTrustApprovalService.policyBindingKey(
+                                    declaredDeviceId: validatedAuthority.declaredDeviceId,
+                                    algorithmRawValue: validatedAuthority.protocolSigningAlgorithm.rawValue,
+                                    protocolPublicKeyFingerprint:
+                                        validatedAuthority.protocolPublicKeyFingerprint
+                                )
+                                let request = PairingTrustApprovalService.Request(
+                                    peerEndpoint: endpointDescription,
+                                    declaredDeviceId: validatedAuthority.declaredDeviceId,
+                                    policyBindingKey: policyBindingKey,
+                                    displayName: payload.deviceName
+                                        ?? validatedAuthority.declaredDeviceId,
+                                    model: payload.modelName,
+                                    platform: payload.platform,
+                                    osVersion: payload.osVersion,
+                                    kemKeyCount: payload.kemPublicKeys.count
+                                )
+                                let decision = await PairingTrustApprovalService.shared.decide(for: request)
+                                guard self.isCurrentWebRTCControlLoopOwner(
+                                    sessionID: sessionID,
+                                    session: session,
+                                    controlTaskToken: controlTaskToken
+                                ) else {
+                                    return
+                                }
+                                self.appendSmokeStatus(
+                                    "app-pairing-decision session=\(sessionID) decision=\(decision.rawValue)"
+                                )
+                                if Self.isSmokeRuntimeEnabled {
+                                    Self.emitSmokeLog("🧪 mac pairing decision=\(decision.rawValue)")
+                                }
+                                guard decision != PairingTrustApprovalService.Decision.reject else { break }
+                                pairingBootstrapTaskToken = nil
+                                pairingBootstrapTask?.cancel()
+                                let pairingTaskToken = UUID()
+                                pairingBootstrapTaskToken = pairingTaskToken
+                                pairingBootstrapTask = Task { @MainActor [weak self] in
+                                    guard let self else { return }
+                                    let pairingReservation: PairingIdentityExchangeCommitCoordinator.Reservation
+                                    do {
+                                        pairingReservation = try await PairingIdentityExchangeCommitCoordinator
+                                            .reserve(deviceIds: validatedAuthority.authorizedDeviceIds)
+                                    } catch {
+                                        failCurrentControlLoop(
+                                            reason: "pairing_commit_admission_unavailable",
+                                            disconnectKind: .explicit,
+                                            statusMessage: "WebRTC pairing commit admission was unavailable"
+                                        )
+                                        return
+                                    }
+                                    let transportIsCurrent: @MainActor @Sendable () -> Bool = {
+                                        isCurrentPairingBootstrapTaskOwner(pairingTaskToken)
+                                            && self.isCurrentWebRTCControlLoopSecureOwner(
+                                                sessionID: sessionID,
+                                                session: session,
+                                                controlTaskToken: controlTaskToken,
+                                                keys: keys
+                                            )
+                                    }
+                                    var commitReceipt: PairingIdentityExchangeCommitCoordinator.CommitReceipt?
+                                    do {
+                                        try Task.checkCancellation()
+                                        guard transportIsCurrent() else {
+                                            throw CancellationError()
+                                        }
+                                        let result = try await PairingIdentityExchangeCommitCoordinator
+                                            .commitAuthorityAndKEM(
+                                            reservation: pairingReservation,
+                                            payload: payload,
+                                            authority: pairingAuthorityLease,
+                                            displayName: payload.deviceName,
+                                            platform: payload.platform,
+                                            osVersion: payload.osVersion,
+                                            isCurrent: transportIsCurrent
+                                        )
+                                        guard case .committed(let receipt) = result else { return }
+                                        commitReceipt = receipt
+                                        try await PairingIdentityExchangeCommitCoordinator
+                                            .withMainActorCommittedReceipt(receipt) {
+                                        logger.info(
+                                            "🔑 WebRTC authority-bound pairing commit completed: declared=\(Self.protocolIdentityLogRedaction, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"
+                                        )
+                                        var fingerprints = self
+                                            .currentPathAdditionalProtocolFingerprintsBySessionId[sessionID]
+                                            ?? []
+                                        fingerprints.insert(validatedAuthority.protocolPublicKeyFingerprint)
+                                        self.currentPathAdditionalProtocolFingerprintsBySessionId[sessionID] = fingerprints
+
+                                        try await sendLocalPairingIdentityExchange(
+                                            keys: keys,
+                                            force: false,
+                                            stage: "pairing-reply"
+                                        )
+                                        guard await PairingIdentityExchangeCommitCoordinator.isCurrent(
+                                            receipt,
+                                            transportIsCurrent: transportIsCurrent
+                                        ) else { return }
+                                        if let delaySeconds = Self.hostPQCRekeySmokeDelaySeconds {
+                                            self.appendSmokeStatus(
+                                                "rekey-delay session=\(sessionID) seconds=\(delaySeconds)"
+                                            )
+                                            try await Task.sleep(
+                                                for: .milliseconds(Int(delaySeconds * 1000))
+                                            )
+                                            guard await PairingIdentityExchangeCommitCoordinator.isCurrent(
+                                                receipt,
+                                                transportIsCurrent: transportIsCurrent
+                                            ) else { return }
+                                        }
+                                        await maybeStartOutboundPQCRekeyIfNeeded(
+                                            from: payload,
+                                            validatedAuthority: validatedAuthority,
+                                            trigger: "pairing_exchange",
+                                            ownerSession: session,
+                                            ownerControlTaskToken: controlTaskToken
+                                        )
+                                        guard await PairingIdentityExchangeCommitCoordinator.isCurrent(
+                                            receipt,
+                                            transportIsCurrent: transportIsCurrent
+                                        ) else { return }
+                                        self.updateCrossNetworkRemoteMetadata(
+                                            sessionID: sessionID,
+                                            authenticatedDeviceId: validatedAuthority.declaredDeviceId,
+                                            deviceName: payload.deviceName
+                                        )
+                                        self.noteWebRTCRemoteSecurityIdentity(
+                                            sessionID: sessionID,
+                                            accountDisplayName: payload.accountDisplayName,
+                                            nebulaId: payload.nebulaId,
+                                            deviceId: validatedAuthority.declaredDeviceId,
+                                            deviceName: payload.deviceName
+                                        )
+                                        self.webrtcRemoteVideoFormatsBySessionId[sessionID] = Set(
+                                            (payload.remoteVideoFormats ?? []).map { $0.lowercased() }
+                                        )
+                                        }
+                                    } catch is CancellationError {
+                                        if commitReceipt == nil {
+                                            _ = await PairingIdentityExchangeCommitCoordinator
+                                                .rollback(pairingReservation)
+                                        }
+                                        return
+                                    } catch {
+                                        guard isCurrentPairingBootstrapTaskOwner(pairingTaskToken) else {
+                                            if commitReceipt == nil {
+                                                _ = await PairingIdentityExchangeCommitCoordinator
+                                                    .rollback(pairingReservation)
+                                            }
+                                            return
+                                        }
+                                        let diagnostic = self.sanitizeStatus(error.localizedDescription)
+                                        logger.warning(
+                                            "⚠️ WebRTC pairing bootstrap reply failed: session=\(sessionID, privacy: .public) error=\(diagnostic, privacy: .public)"
+                                        )
+                                        self.appendWebRTCSessionDiagnostic(
+                                            "app-pairing-send-failed session=\(sessionID) stage=pairing_reply error=\(diagnostic)",
+                                            sessionID: sessionID
+                                        )
+                                        self.appendSmokeStatus(
+                                            "app-pairing-send-failed session=\(sessionID) stage=pairing_reply error=\(diagnostic)"
+                                        )
+                                    }
+                                }
+		                            case .heartbeat(let payload):
+		                                guard let authenticatedDeviceId = self
+		                                    .authenticatedCrossNetworkDeviceId(
+		                                        sessionID: sessionID,
+		                                        claimedDeviceId: payload.deviceId
+		                                    ) else {
+	                                    failCurrentControlLoop(
+	                                        reason: "heartbeat_identity_mismatch",
+	                                        disconnectKind: .explicit,
+	                                        statusMessage: "WebRTC heartbeat identity did not match current-path authority"
+	                                    )
+	                                    return
+		                                }
+		                                let remoteFormatsSummary = (payload.remoteVideoFormats ?? []).joined(separator: ",")
+	                                self.appendSmokeStatus(
+                                    "app-heartbeat-recv session=\(sessionID) formats=\(remoteFormatsSummary)"
+                                )
+                                self.appendRemoteMediaHeartbeatSmokeStatus(
+                                    payload.webrtcMedia,
+                                    sessionID: sessionID
+                                )
+                                self.webrtcRemoteDesktopHeartbeatAtBySessionId[sessionID] = Date()
+                                self.updateCrossNetworkRemoteMetadata(
+                                    sessionID: sessionID,
+                                    authenticatedDeviceId: authenticatedDeviceId,
+                                    deviceName: payload.deviceName
+                                )
+                                self.noteWebRTCRemoteSecurityIdentity(
+                                    sessionID: sessionID,
+                                    accountDisplayName: payload.accountDisplayName,
+                                    nebulaId: payload.nebulaId,
+                                    deviceId: authenticatedDeviceId,
+                                    deviceName: payload.deviceName
+                                )
+                                if let formats = payload.remoteVideoFormats {
+                                    self.webrtcRemoteVideoFormatsBySessionId[sessionID] = Set(
+                                        formats.map { $0.lowercased() }
+                                    )
+                                }
+                                startScreenStreamingIfNeeded(keys: keys)
+                            case .ping(let payload):
+                                self.webrtcRemoteDesktopHeartbeatAtBySessionId[sessionID] = Date()
+                                startScreenStreamingIfNeeded(keys: keys)
+                                let reply = AppMessage.pong(.init(id: payload.id))
+                                let outPlain = try JSONEncoder().encode(reply)
+                                guard self.isCurrentWebRTCControlLoopSecureOwner(
+                                    sessionID: sessionID,
+                                    session: session,
+                                    controlTaskToken: controlTaskToken,
+                                    keys: keys
+                                ) else {
+                                    throw CancellationError()
+                                }
+                                let outCipher = try encryptAppPayload(outPlain, with: keys)
+                                let outPadded = try TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-pong")
+                                try await sendFramed(outPadded)
+                            case .pong:
+                                self.webrtcRemoteDesktopHeartbeatAtBySessionId[sessionID] = Date()
+                            case .authenticatedRouteBinding(let payload):
+                                guard self.isCurrentWebRTCControlLoopOwner(
+                                    sessionID: sessionID,
+                                    session: session,
+                                    controlTaskToken: controlTaskToken
+                                ) else {
+                                    return
+                                }
+                                self.applyAuthenticatedRouteBinding(
+                                    payload,
+                                    sessionID: sessionID,
+                                    localDeviceId: session.localDeviceId,
+                                    keys: keys
+                                )
+                            default:
+                                break
+	                            }
+	                            continue
+	                        } else if self.strictPQCClassicBootstrapOnlySessionIds.contains(sessionID) {
+	                            logger.debug(
+	                                "ℹ️ WebRTC strictPQC classic bootstrap ignored business payload before PQC rekey: session=\(sessionID, privacy: .public)"
+	                            )
+	                            continue
+		                        } else if openedPayload.packetType == .fileTransfer {
+                                let ft: CrossNetworkFileTransferMessage
+                                do {
+                                    ft = try CrossNetworkFileTransferWireDecoder.decode(plaintext)
+                                } catch {
+                                    self.appendSmokeStatus(
+                                        "fileTransferDecodeFailed session=\(sessionID) bytes=\(plaintext.count) error=\(sanitizeStatus(error.localizedDescription))"
+                                    )
+                                    self.logger.error(
+                                        "Authenticated WebRTC file-transfer envelope rejected"
+                                    )
+                                    let didCleanup = self.cleanupWebRTCSessionIfCurrentControlLoopOwner(
+                                        sessionID: sessionID,
+                                        session: session,
+                                        controlTaskToken: controlTaskToken,
+                                        reason: "invalid_file_transfer_envelope",
+                                        disconnectKind: .explicit
+                                    )
+                                    if didCleanup {
+                                        self.connectionStatus = .failed(
+                                            "Invalid file-transfer protocol envelope"
+                                        )
+                                        self.readiness = .idle
+                                    }
+                                    return
+                                }
+                                self.appendSmokeStatus(
+                                    "fileTransferRecv session=\(sessionID) op=\(ft.op.rawValue) transfer=\(sanitizeStatus(ft.transferId))"
+                                )
+                                guard let fileTransferOwner = self.currentWebRTCFileTransferOperationOwner(
+                                    sessionID: sessionID,
+                                    session: session,
+                                    keys: keys,
+                                    controlTaskToken: controlTaskToken
+                                ) else {
+                                    throw CancellationError()
+                                }
+                                guard RemoteDesktopSettingsManager.shared.settings.interactionSettings.enableFileTransfer else {
+                                    let response = CrossNetworkFileTransferMessage(
+                                        op: .error,
+                                        transferId: ft.transferId,
+                                        message: "remote_desktop_file_transfer_disabled_by_settings"
+                                    )
+                                    let outPlain = try CrossNetworkFileTransferWireEncoder.encode(response)
+                                    guard self.isCurrentWebRTCControlLoopSecureOwner(
+                                        sessionID: sessionID,
+                                        session: session,
+                                        controlTaskToken: controlTaskToken,
+                                        keys: keys
+                                    ) else {
+                                        throw CancellationError()
+                                    }
+                                    let outCipher = try encryptAppPayload(
+                                        outPlain,
+                                        with: keys,
+                                        packetType: .fileTransfer
+                                    )
+                                    let outPadded = try TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-ft-disabled")
+                                    try await sendFramed(outPadded)
+                                    guard self.isCurrentWebRTCControlLoopSecureOwner(
+                                        sessionID: sessionID,
+                                        session: session,
+                                        controlTaskToken: controlTaskToken,
+                                        keys: keys
+                                    ) else {
+                                        throw CancellationError()
+                                    }
+                                    self.failFileTransferWaiters(
+                                        owner: fileTransferOwner,
+                                        transferId: ft.transferId,
+                                        message: "remote_desktop_file_transfer_disabled_by_settings"
+                                    )
+                                    continue
+                                }
+			                            let sendFileTransferResponse: WebRTCInboundFileTransferReceiver.SendMessage = { response, label in
+			                                    guard self.isCurrentWebRTCControlLoopSecureOwner(
+                                                sessionID: sessionID,
+                                                session: session,
+                                                controlTaskToken: controlTaskToken,
+                                                keys: keys
+                                            ) else {
+                                                throw CancellationError()
+                                            }
+		                                    let outPlain = try CrossNetworkFileTransferWireEncoder.encode(response)
+	                                    let outCipher = try encryptAppPayload(
+                                        outPlain,
+                                        with: keys,
+                                        packetType: .fileTransfer
+                                    )
+		                                    let outPadded = try TrafficPadding.wrapIfEnabled(outCipher, label: label)
+		                                    try await sendFramed(outPadded)
+			                                    guard self.isCurrentWebRTCControlLoopSecureOwner(
+                                                sessionID: sessionID,
+                                                session: session,
+                                                controlTaskToken: controlTaskToken,
+                                                keys: keys
+                                            ) else {
+                                                throw CancellationError()
+                                            }
+		                                }
+	                                let failSenderWaiters: WebRTCInboundFileTransferReceiver.FailSenderWaiters = { transferId, message in
+		                                    guard self.isCurrentWebRTCFileTransferOperationOwner(
+                                                fileTransferOwner
+                                            ) else { return }
+		                                    self.failFileTransferWaiters(
+	                                        owner: fileTransferOwner,
+	                                        transferId: transferId,
+	                                        message: message
+	                                    )
+		                                }
+	                                let resumeSenderWaiter: WebRTCInboundFileTransferReceiver.ResumeSenderWaiter = { message in
+		                                    guard self.isCurrentWebRTCFileTransferOperationOwner(
+                                                fileTransferOwner
+                                            ) else { return }
+		                                    self.resumeFileTransferWaiter(
+                                                owner: fileTransferOwner,
+                                                message: message
+                                            )
+	                                }
+                                switch ft.op {
+                                case .metadata, .chunk, .complete, .cancel:
+                                    do {
+                                        try inboundFileTransferReceiver.enqueueInboundRequest(
+                                            ft,
+                                            encodedPayloadByteCount: plaintext.count,
+                                            sessionID: sessionID,
+                                            endpointDescription: endpointDescription,
+                                            keys: keys,
+                                            sendMessage: sendFileTransferResponse,
+                                            failSenderWaiters: failSenderWaiters,
+	                                            resumeSenderWaiter: resumeSenderWaiter,
+	                                            onFatalError: { error in
+                                                guard self.isCurrentWebRTCFileTransferOperationOwner(
+                                                    fileTransferOwner
+                                                ) else { return }
+	                                                self.logger.error(
+                                                    "WebRTC inbound file-transfer worker failed: \(error.localizedDescription, privacy: .public)"
+                                                )
+	                                                _ = self.cleanupWebRTCSessionIfCurrentControlLoopOwner(
+	                                                    sessionID: sessionID,
+	                                                    session: session,
+	                                                    controlTaskToken: controlTaskToken,
+	                                                    reason: "inbound_file_transfer_worker_failed",
+	                                                    disconnectKind: .explicit
+                                                )
+                                            }
+                                        )
+                                    } catch {
+                                        self.logger.error(
+                                            "WebRTC inbound file-transfer request rejected: \(error.localizedDescription, privacy: .public)"
+                                        )
+                                        let didCleanup = self.cleanupWebRTCSessionIfCurrentControlLoopOwner(
+                                            sessionID: sessionID,
+                                            session: session,
+                                            controlTaskToken: controlTaskToken,
+                                            reason: "invalid_inbound_file_transfer_request",
+                                            disconnectKind: .explicit
+                                        )
+                                        if didCleanup {
+                                            self.connectionStatus = .failed(
+                                                "Invalid inbound file-transfer request"
+                                            )
+                                            self.readiness = .idle
+                                        }
+                                        return
+                                    }
+                                case .error, .metadataAck, .chunkAck, .completeAck:
+                                    do {
+                                        try CrossNetworkFileTransferInboundAdmissionPolicy
+                                            .validateInboundResponse(ft)
+                                    } catch {
+                                        self.logger.error(
+                                            "WebRTC inbound file-transfer response rejected: \(error.localizedDescription, privacy: .public)"
+                                        )
+                                        let didCleanup = self.cleanupWebRTCSessionIfCurrentControlLoopOwner(
+                                            sessionID: sessionID,
+                                            session: session,
+                                            controlTaskToken: controlTaskToken,
+                                            reason: "invalid_inbound_file_transfer_response",
+                                            disconnectKind: .explicit
+                                        )
+                                        if didCleanup {
+                                            self.connectionStatus = .failed(
+                                                "Invalid inbound file-transfer response"
+                                            )
+                                            self.readiness = .idle
+                                        }
+                                        return
+                                    }
+                                    try await inboundFileTransferReceiver.handle(
+                                        ft,
+                                        sessionID: sessionID,
+                                        endpointDescription: endpointDescription,
+                                        keys: keys,
+                                        sendMessage: sendFileTransferResponse,
+                                        failSenderWaiters: failSenderWaiters,
+                                        resumeSenderWaiter: resumeSenderWaiter
+                                    )
+                                }
+	                            continue
+	                        } else if openedPayload.packetType == .remoteControl,
+                                      let rm = try? JSONDecoder().decode(RemoteMessageWire.self, from: plaintext) {
+                            if rm.type == .streamConfiguration,
+                               !self.isWebRTCRemoteControlSecurityApproved(
+                                sessionID: sessionID,
+                                session: session
+                               ),
+	                               let config = try? JSONDecoder().decode(RemoteDesktopStreamConfiguration.self, from: rm.payload) {
+	                            guard let pendingKeys = handshakeState.sessionKeys
+	                                    ?? self.webrtcSessionKeysBySessionId[sessionID],
+	                                  self.isCurrentWebRTCRemoteControlSession(
+	                                    sessionID: sessionID,
+	                                    session: session,
+	                                    keys: pendingKeys
+	                                  ) else {
+	                                return
+	                            }
+                                if let identity = config.remoteControlSecurityIdentity {
+                                    let authenticatedDeviceId = self
+                                        .currentPathExpectedRemoteAuthorityBySessionId[sessionID]?
+                                        .deviceId
+                                    self.noteWebRTCRemoteSecurityIdentity(
+                                        sessionID: sessionID,
+                                        accountDisplayName: identity.accountDisplayName,
+                                        nebulaId: identity.nebulaId,
+                                        deviceId: authenticatedDeviceId,
+                                        deviceName: identity.deviceName
+                                    )
+                                }
+                                let pendingDecision = RemoteDesktopStreamConfigurationTransactionPolicy
+                                    .ingressDecision(
+                                        incoming: config.streamConfigurationTransaction,
+                                        lastAccepted: self
+                                            .webrtcPendingRemoteStreamConfigurationBySessionId[sessionID]?
+                                            .streamConfigurationTransaction,
+                                        payloadMatchesLastAccepted: self
+                                            .webrtcPendingRemoteStreamConfigurationBySessionId[sessionID] == config
+                                    )
+                                switch pendingDecision {
+                                case .apply:
+                                    self.webrtcPendingRemoteStreamConfigurationBySessionId[sessionID] = config
+                                case .acknowledgeDuplicate:
+                                    break
+                                case .rejectMissingTransaction, .rejectConflictingDuplicate:
+	                                if self.isCurrentWebRTCRemoteControlSession(
+	                                    sessionID: sessionID,
+	                                    session: session,
+	                                    keys: pendingKeys
+	                                ) {
+	                                    failCurrentControlLoop(
+	                                        reason: "invalid_pending_stream_configuration_transaction",
+	                                        disconnectKind: .explicit,
+	                                        statusMessage: "Invalid pending stream configuration transaction"
+	                                    )
+	                                }
+                                    return
+                                }
+                                self.logger.info(
+                                    "⏳ WebRTC viewer 流配置已暂存，等待远控安全提示批准后再应用: session=\(sessionID, privacy: .public)"
+                                )
+                                self.appendWebRTCSessionDiagnostic(
+                                    "streamConfigurationDeferred session=\(sessionID) reason=awaiting_security_notice",
+                                    sessionID: sessionID
+                                )
+                                self.appendSmokeStatus(
+                                    "remoteControlStreamConfigDeferred session=\(sessionID) transport=webrtc reason=awaiting_security_notice"
+                                )
+                                continue
+                            }
+                            guard RemoteControlSecurityAdmissionPolicy.allowsInboundWebRTCPayload(
+                                rm.type,
+                                isApproved: self.isWebRTCRemoteControlSecurityApproved(
+                                    sessionID: sessionID,
+                                    session: session
+                                )
+                            ) else {
+                                self.logger.warning(
+                                    "⛔️ 未经批准的 WebRTC 远控消息被阻断: session=\(sessionID, privacy: .public) type=\(rm.type.rawValue, privacy: .public)"
+                                )
+                                self.appendSmokeStatus(
+                                    "remoteControlPayloadBlocked session=\(sessionID) transport=webrtc type=\(rm.type.rawValue)"
+                                )
+                                continue
+                            }
+                            switch rm.type {
+                            case .mouseEvent:
+#if os(macOS)
+                                guard self.isCurrentWebRTCControlLoopSecureOwner(
+                                    sessionID: sessionID,
+                                    session: session,
+                                    controlTaskToken: controlTaskToken,
+                                    keys: keys
+                                ) else {
+                                    return
+                                }
+                                guard Self.allowsWebRTCCommittedRemoteControlEffect(
+                                    .input,
+                                    configuration: self.webrtcRemoteStreamConfigurationBySessionId[sessionID]
+                                ) else {
+                                    self.rejectWebRTCRemoteControlHostPayload(
+                                        sessionID: sessionID,
+                                        type: rm.type,
+                                        reason: "stream_configuration_not_committed"
+                                    )
+                                    return
+                                }
+                                do {
+                                    let evt = try JSONDecoder().decode(MouseEventWire.self, from: rm.payload)
+                                    let inputResult = WebRTCRemoteControlInputEventBridge.handleMouseEvent(
+                                        evt,
+                                        owner: RemoteControlInputOwner(
+                                            transport: .webRTC,
+                                            sessionID: sessionID,
+                                            generation: controlTaskToken
+                                        )
+                                    )
+                                    if inputResult != .posted {
+                                        self.logger.warning(
+                                            "remote-input-rejected transport=webrtc kind=mouse reason=\(String(describing: inputResult), privacy: .public)"
+                                        )
+                                    } else if let owner = self
+                                        .webrtcProductEvidenceOwnersBySessionId[sessionID] {
+                                        let effect: ProductReleaseEvidenceInputEffect = switch evt.type {
+                                        case .scrollUp, .scrollDown: .scroll
+                                        case .leftMouseDown, .leftMouseUp, .rightMouseDown,
+                                             .rightMouseUp, .mouseMoved: .pointer
+                                        }
+                                        _ = ProductReleaseEvidenceRecorder.shared
+                                            .recordRemoteInputApplied(owner: owner, effect: effect)
+                                    }
+                                } catch {
+                                    self.rejectWebRTCRemoteControlHostPayload(
+                                        sessionID: sessionID,
+                                        type: rm.type,
+                                        reason: "invalid_payload"
+                                    )
+                                    return
+                                }
+#else
+                                self.rejectWebRTCRemoteControlHostPayload(
+                                    sessionID: sessionID,
+                                    type: rm.type,
+                                    reason: "unsupported_platform"
+                                )
+                                return
+#endif
+                            case .keyboardEvent:
+#if os(macOS)
+                                guard self.isCurrentWebRTCControlLoopSecureOwner(
+                                    sessionID: sessionID,
+                                    session: session,
+                                    controlTaskToken: controlTaskToken,
+                                    keys: keys
+                                ) else {
+                                    return
+                                }
+                                guard Self.allowsWebRTCCommittedRemoteControlEffect(
+                                    .input,
+                                    configuration: self.webrtcRemoteStreamConfigurationBySessionId[sessionID]
+                                ) else {
+                                    self.rejectWebRTCRemoteControlHostPayload(
+                                        sessionID: sessionID,
+                                        type: rm.type,
+                                        reason: "stream_configuration_not_committed"
+                                    )
+                                    return
+                                }
+                                do {
+                                    let evt = try JSONDecoder().decode(KeyboardEventWire.self, from: rm.payload)
+                                    let inputResult = WebRTCRemoteControlInputEventBridge.handleKeyboardEvent(
+                                        evt,
+                                        owner: RemoteControlInputOwner(
+                                            transport: .webRTC,
+                                            sessionID: sessionID,
+                                            generation: controlTaskToken
+                                        )
+                                    )
+                                    if inputResult != .posted {
+                                        self.logger.warning(
+                                            "remote-input-rejected transport=webrtc kind=keyboard reason=\(String(describing: inputResult), privacy: .public)"
+                                        )
+                                    } else if let owner = self
+                                        .webrtcProductEvidenceOwnersBySessionId[sessionID] {
+                                        _ = ProductReleaseEvidenceRecorder.shared
+                                            .recordRemoteInputApplied(owner: owner, effect: .keyboard)
+                                    }
+                                } catch {
+                                    self.rejectWebRTCRemoteControlHostPayload(
+                                        sessionID: sessionID,
+                                        type: rm.type,
+                                        reason: "invalid_payload"
+                                    )
+                                    return
+                                }
+#else
+                                self.rejectWebRTCRemoteControlHostPayload(
+                                    sessionID: sessionID,
+                                    type: rm.type,
+                                    reason: "unsupported_platform"
+                                )
+                                return
+#endif
+                            case .clipboard:
+#if os(macOS)
+                                guard self.isCurrentWebRTCControlLoopSecureOwner(
+                                    sessionID: sessionID,
+                                    session: session,
+                                    controlTaskToken: controlTaskToken,
+                                    keys: keys
+                                ) else {
+                                    return
+                                }
+                                guard Self.allowsWebRTCCommittedRemoteControlEffect(
+                                    .clipboard,
+                                    configuration: self.webrtcRemoteStreamConfigurationBySessionId[sessionID]
+                                ) else {
+                                    self.rejectWebRTCRemoteControlHostPayload(
+                                        sessionID: sessionID,
+                                        type: rm.type,
+                                        reason: "clipboard_not_admitted_by_committed_configuration"
+                                    )
+                                    return
+                                }
+                                do {
+                                    let payload = try JSONDecoder().decode(RemoteClipboardPayload.self, from: rm.payload)
+                                    configureWebRTCClipboardSyncIfNeeded(for: sessionID, session: session)
+                                    guard self.activeWebRTCClipboardSessionId == sessionID,
+                                          let token = self.activeWebRTCClipboardToken else {
+                                        throw RemoteControlError.permissionDenied
+                                    }
+                                    try ClipboardRedirectionManager.shared.setRemoteClipboard(
+                                        data: payload.data,
+                                        mimeType: payload.mimeType,
+                                        for: token
+                                    )
+                                } catch {
+                                    self.rejectWebRTCRemoteControlHostPayload(
+                                        sessionID: sessionID,
+                                        type: rm.type,
+                                        reason: "invalid_payload"
+                                    )
+                                    return
+                                }
+#else
+                                self.rejectWebRTCRemoteControlHostPayload(
+                                    sessionID: sessionID,
+                                    type: rm.type,
+                                    reason: "unsupported_platform"
+                                )
+                                return
+#endif
+		                            case .streamConfiguration:
+	                                if let config = try? JSONDecoder().decode(RemoteDesktopStreamConfiguration.self, from: rm.payload) {
+	                                    guard let activeKeysForAck = handshakeState.sessionKeys
+	                                            ?? self.webrtcSessionKeysBySessionId[sessionID],
+	                                          self.isCurrentWebRTCRemoteControlSession(
+	                                            sessionID: sessionID,
+	                                            session: session,
+	                                            keys: activeKeysForAck
+	                                          ),
+	                                          self.isWebRTCRemoteControlSecurityApproved(
+	                                            sessionID: sessionID,
+	                                            session: session
+	                                          ) else {
+	                                        return
+	                                    }
+		                                    let previousConfig = self.webrtcRemoteStreamConfigurationBySessionId[sessionID]
+		                                    let previousRawConfig = self.webrtcLastAcceptedRawStreamConfigurationBySessionId[sessionID]
+	                                    let plan = Self.planWebRTCStreamConfigurationIngress(
+		                                        config,
+		                                        previousConfig: previousConfig,
+		                                        previousRawConfig: previousRawConfig,
+	                                        advertisedFormats: self.webrtcRemoteVideoFormatsBySessionId[sessionID] ?? [],
+	                                        hasSessionKeys: true
+	                                    )
+	                                    let coordination = Self.coordinateWebRTCStreamConfigurationIngress(
+	                                        plan,
+	                                        commitExactStop: {
+	                                            self.commitExactWebRTCStreamStop(
+	                                                config,
+	                                                plan: plan,
+	                                                previousConfiguration: previousConfig,
+	                                                sessionID: sessionID,
+	                                                session: session
+	                                            )
+	                                        },
+	                                        reject: { rejection in
+	                                            guard self.isCurrentWebRTCRemoteControlSession(
+	                                                sessionID: sessionID,
+	                                                session: session,
+	                                                keys: activeKeysForAck
+	                                            ) else {
+	                                                return
+	                                            }
+	                                            switch rejection {
+	                                            case .invalidTransaction:
+	                                                failCurrentControlLoop(
+	                                                    reason: "invalid_stream_configuration_transaction",
+	                                                    disconnectKind: .explicit,
+	                                                    statusMessage: "Invalid stream configuration transaction"
+	                                                )
+	                                            case .missingAcknowledgement:
+	                                                failCurrentControlLoop(
+	                                                    reason: "missing_stream_configuration_acknowledgement",
+	                                                    disconnectKind: .explicit,
+	                                                    statusMessage: "Missing stream configuration acknowledgement"
+	                                                )
+	                                            }
+	                                        }
+	                                    )
+	                                    let acknowledgementAction: WebRTCStreamConfigurationIngressAcknowledgementAction
+	                                    switch coordination {
+	                                    case .handled:
+	                                        continue
+	                                    case .rejected:
+	                                        return
+	                                    case .acknowledgementRequired(let action):
+	                                        acknowledgementAction = action
+	                                    }
+	                                    switch acknowledgementAction.purpose {
+	                                    case .duplicate:
+	                                        let ack = acknowledgementAction.acknowledgement.payload(
+	                                            acceptedAt: Date().timeIntervalSince1970
+	                                        )
+	                                        do {
+	                                            try await self.sendWebRTCStreamConfigurationAcknowledgement(
+	                                                ack,
+	                                                sessionID: sessionID,
+	                                                session: session,
+	                                                keys: activeKeysForAck
+	                                            )
+	                                        } catch is CancellationError {
+	                                            return
+	                                        } catch {
+	                                            guard self.isCurrentWebRTCRemoteControlSession(
+	                                                sessionID: sessionID,
+	                                                session: session,
+	                                                keys: activeKeysForAck
+	                                            ) else {
+	                                                return
+	                                            }
+	                                            self.logger.warning(
+	                                                "⚠️ WebRTC duplicate streamConfiguration ACK 发送失败"
+	                                            )
+	                                        }
+	                                        continue
+	                                    case .commitAfterAcknowledgement:
+	                                        break
+	                                    }
+                                    if plan.audioEndpointPreservedForVideoRefresh {
+                                        self.appendWebRTCSessionDiagnostic(
+                                            "audioEndpointPreservedForVideoRefresh session=\(sessionID) refreshTokenState=\(Self.streamRefreshTokenLogState(config.streamRefreshToken))",
+                                            sessionID: sessionID
+                                        )
+	                                    }
+	                                    let effectiveConfig = plan.effectiveConfig
+	                                    if plan.shouldEnsureScreenDataChannel {
+	                                        do {
+	                                            try session.ensureScreenDataChannel()
+	                                        } catch {
+	                                            failCurrentControlLoop(
+	                                                reason: "screen_data_channel_configuration_failed",
+	                                                disconnectKind: .explicit,
+	                                                statusMessage: "WebRTC screen data channel configuration failed"
+	                                            )
+	                                            return
+	                                        }
+	                                    }
+	                                    self.logger.info(
+                                        """
+                                        🎛️ WebRTC 收到远控流策略: session=\(sessionID, privacy: .public) \
+                                        transport=\(effectiveConfig.screenFrameTransport ?? "legacy", privacy: .public) \
+                                        screenWire=\(effectiveConfig.screenChannelWireFormat ?? "length-framed", privacy: .public) \
+                                        preset=\(effectiveConfig.qualityPreset ?? "unknown", privacy: .public) \
+                                        nativeReady=\(effectiveConfig.nativeVideoTrackReady == true, privacy: .public) \
+                                        audioRequested=\(effectiveConfig.requestsRealtimeMediaAudio, privacy: .public) \
+                                        audioTransport=\(effectiveConfig.audioTransport ?? "nil", privacy: .public) \
+                                        audioEndpoint=\(effectiveConfig.mediaAudioEndpoint == nil ? "missing" : "present", privacy: .public) \
+                                        audioRelayToken=\(effectiveConfig.mediaAudioEndpoint?.relayToken == nil ? "missing" : "present", privacy: .public) \
+                                        audioMode=\(effectiveConfig.requestedMediaAudioMode.rawValue, privacy: .public) \
+                                        damage=\(effectiveConfig.damageTrackingEnabled ?? false, privacy: .public) \
+                                        cursor=\(effectiveConfig.separateCursorChannelEnabled ?? false, privacy: .public) \
+                                        overlay=\(effectiveConfig.interactionOverlayChannelEnabled ?? false, privacy: .public) \
+                                        jitter=\(effectiveConfig.jitterBufferFrames ?? 0, privacy: .public) \
+                                        recovery=\(effectiveConfig.lossRecoveryMode ?? "unknown", privacy: .public)
+                                        """
+                                    )
+                                    self.appendWebRTCSessionDiagnostic(
+                                        """
+                                        streamConfigReceived session=\(sessionID) transport=\(effectiveConfig.screenFrameTransport ?? "legacy") \
+                                        screenWire=\(effectiveConfig.screenChannelWireFormat ?? "length-framed") \
+                                        nativeReady=\(effectiveConfig.nativeVideoTrackReady == true) \
+                                        audioRequested=\(effectiveConfig.requestsRealtimeMediaAudio) \
+                                        audioEndpoint=\(effectiveConfig.mediaAudioEndpoint == nil ? "missing" : "present") \
+                                        audioRelayToken=\(effectiveConfig.mediaAudioEndpoint?.relayToken == nil ? "missing" : "present") \
+                                        refreshTokenState=\(Self.streamRefreshTokenLogState(effectiveConfig.streamRefreshToken))
+                                        """,
+                                        sessionID: sessionID
+                                    )
+	                                    let ack = acknowledgementAction.acknowledgement.payload(
+	                                        acceptedAt: Date().timeIntervalSince1970
+	                                    )
+	                                    do {
+	                                        try await self.sendWebRTCStreamConfigurationAcknowledgement(
+	                                            ack,
+	                                            sessionID: sessionID,
+	                                            session: session,
+	                                            keys: activeKeysForAck
+                                        )
+                                        self.appendWebRTCSessionDiagnostic(
+                                            "streamConfigurationAckSent session=\(sessionID) refreshTokenState=\(Self.streamRefreshTokenLogState(effectiveConfig.streamRefreshToken)) audioEndpoint=\(effectiveConfig.mediaAudioEndpoint == nil ? "missing" : "present")",
+                                            sessionID: sessionID
+                                        )
+                                    } catch is CancellationError {
+                                        return
+                                    } catch {
+	                                        guard self.isCurrentWebRTCRemoteControlSession(
+	                                            sessionID: sessionID,
+	                                            session: session,
+	                                            keys: activeKeysForAck
+	                                        ) else {
+	                                            return
+	                                        }
+                                        self.logger.warning(
+                                            "⚠️ WebRTC streamConfigurationAck 发送失败: session=\(sessionID, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                                        )
+                                        self.appendWebRTCSessionDiagnostic(
+                                            "streamConfigurationAckFailed session=\(sessionID) error=\(error.localizedDescription)",
+                                            sessionID: sessionID
+	                                        )
+	                                        continue
+                                    }
+	                                    guard self.isCurrentWebRTCRemoteControlSession(
+	                                        sessionID: sessionID,
+	                                        session: session,
+	                                        keys: activeKeysForAck
+	                                    ) else {
+	                                        return
+	                                    }
+	                                    self.commitWebRTCStreamConfigurationIngressState(
+	                                        config,
+	                                        plan: plan,
+	                                        sessionID: sessionID
+	                                    )
+                                        await self.recordWebRTCProductFrameIfRemoteRenderConfirmed(
+                                            sessionID: sessionID,
+                                            session: session,
+                                            keys: activeKeysForAck,
+                                            configuration: effectiveConfig
+                                        )
+                                    if plan.shouldMarkPendingStreamRefresh {
+                                        self.webrtcPendingStreamRefreshSessionIds.insert(sessionID)
+                                        if effectiveConfig.streamRefreshToken != nil {
+                                            self.logger.info(
+                                                "🪄 WebRTC 收到 viewer 关键帧刷新请求: session=\(sessionID, privacy: .public) refreshTokenState=present previousRefreshTokenState=\(Self.streamRefreshTokenLogState(previousConfig?.streamRefreshToken), privacy: .public)"
+                                            )
+                                        }
+                                    }
+	                                    if plan.shouldConfigureClipboard {
+#if os(macOS)
+	                                        self.configureWebRTCClipboardSyncIfNeeded(for: sessionID, session: session)
+#endif
+	                                    }
+	                                    if plan.shouldStartScreenStreamingIfNeeded {
+	                                        startScreenStreamingIfNeeded(keys: activeKeysForAck)
+	                                    }
+	                                }
+                            case .damageReport, .cursorUpdate, .overlayUpdate:
+                                break
+                            case .streamConfigurationAck:
+                                break
+                            case .screenData:
+                                break
+                            }
+                            continue
+                        } else {
+                            if Self.isSmokeRuntimeEnabled {
+                                let digest = SHA256.hash(data: plaintext)
+                                let fingerprint = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+                                Self.emitSmokeLog("🧪 mac app unknown payload length=\(plaintext.count) sha256Prefix=\(fingerprint)")
+                            }
+                            logger.error("❌ WebRTC 业务消息通过认证但未匹配允许的消息类型，终止会话")
+                            failCurrentControlLoop(
+                                reason: "authenticated_channel_unknown_message",
+                                disconnectKind: .explicit,
+                                statusMessage: "WebRTC authenticated channel protocol violation"
+                            )
+                            return
+                        }
+                    } catch is CancellationError {
+                        return
+                    } catch {
+                        if Self.isSmokeRuntimeEnabled {
+                            Self.emitSmokeLog("🧪 mac app decrypt/parse failed err=\(error.localizedDescription)")
+                        }
+                        guard (try? HandshakeMessageA.decode(from: frame)) != nil else {
+                            logger.error(
+                                "❌ 已认证 WebRTC 通道收到无法认证且不是有效 rekey MessageA 的帧，终止会话: \(error.localizedDescription, privacy: .public)"
+                            )
+                            failCurrentControlLoop(
+                                reason: "authenticated_channel_invalid_frame",
+                                disconnectKind: .explicit,
+                                statusMessage: "WebRTC authenticated channel validation failed"
+                            )
+                            return
+                        }
+                        logger.info("🔁 已认证 WebRTC 通道收到有效 rekey MessageA，切换到握手状态机")
+                    }
+                }
+
+                if handshakeState.driver == nil {
+                    let decodedMessageA: HandshakeMessageA?
+                    if Self.isSmokeRuntimeEnabled {
+                        do {
+                            decodedMessageA = try HandshakeMessageA.decode(from: frame)
+                        } catch {
+                            Self.emitSmokeLog("🧪 mac MessageA decode failed: \(error.localizedDescription)")
+                            decodedMessageA = nil
+                        }
+                    } else {
+                        decodedMessageA = try? HandshakeMessageA.decode(from: frame)
+                    }
+                    if let messageA = decodedMessageA {
+                        if Self.isSmokeRuntimeEnabled {
+                            let suiteSummary = messageA.supportedSuites.map(\.rawValue).joined(separator: ",")
+                            Self.emitSmokeLog("🧪 mac rx MessageA bytes=\(frame.count) suites=\(suiteSummary)")
+                            let preimageDigest = SHA256.hash(data: messageA.signaturePreimage)
+                                .map { String(format: "%02x", $0) }
+                                .joined()
+                                .prefix(16)
+                            let identitySummary = try? IdentityPublicKeys.decodeWithLegacyFallback(from: messageA.identityPublicKey)
+                            Self.emitSmokeLog(
+                                "🧪 mac rx MessageA sigAlg=\(identitySummary?.protocolAlgorithm.rawValue ?? "unknown") " +
+                                "pubBytes=\(identitySummary?.protocolPublicKey.count ?? messageA.identityPublicKey.count) " +
+                                "sigBytes=\(messageA.signature.count) " +
+                                "preimageSha256=\(preimageDigest)"
+                            )
+                        }
+                        if let establishedKeys = handshakeState.sessionKeys {
+                            handshakeState.previousSessionKeysBeforeRekey = establishedKeys
+                            self.webrtcRekeyInProgressSessionIds.insert(sessionID)
+#if os(macOS)
+                            self.releaseWebRTCRemoteInput(
+                                sessionID: sessionID,
+                                controlTaskToken: controlTaskToken,
+                                reason: "webrtc_rekey"
+                            )
+#endif
+                            self.stopWebRTCScreenStreaming(sessionID: sessionID)
+                            self.lastRekeyEvent = "received peer=\(peerDeviceId)"
+                            logger.info(
+                                "🔁 WebRTC 收到对端 rekey 请求，暂停旧会话业务流: session=\(sessionID, privacy: .public) peer=\(peerDeviceId, privacy: .public)"
+                            )
+                        }
+
+                        let hasHybridGroup = messageA.supportedSuites.contains { $0.isHybrid }
+                        let peerOnlyOffersHybrid = hasHybridGroup && messageA.supportedSuites.allSatisfy { $0.isHybrid }
+                        let handshakePolicy = try requiredCurrentPathLocalIdentity(
+                            for: sessionID
+                        ).handshakePolicy
+                        let inboundCandidateDeviceIds = orderedUniqueCandidateIds([
+                            peerDeviceId,
+                            endpointDescription,
+                            currentPathExpectedRemoteAuthorityBySessionId[sessionID]?.deviceId ?? ""
+                        ])
+                        let additionalAuthenticatedProtocolPublicKeys: [Data]
+                        if let currentPathAuthority = currentPathExpectedRemoteAuthorityBySessionId[sessionID],
+                           inboundCandidateDeviceIds.contains(currentPathAuthority.deviceId),
+                           Self.isExactMLDSA87Authority(currentPathAuthority),
+                           let publicKey = currentPathAuthority.protocolPublicKeyBytes {
+                            additionalAuthenticatedProtocolPublicKeys = [publicKey]
+                        } else {
+                            additionalAuthenticatedProtocolPublicKeys = []
+                        }
+                        let inboundProtocolIdentity: InboundProtocolIdentitySelection
+                        do {
+                            let protocolIdentityConfiguration = try currentPathProtocolIdentityConfiguration(
+                                for: sessionID
+                            )
+                            inboundProtocolIdentity = try InboundProtocolIdentitySelectionPolicy.resolve(
+                                messageA: messageA,
+                                candidateDeviceIds: inboundCandidateDeviceIds,
+                                additionalAuthenticatedProtocolPublicKeys: additionalAuthenticatedProtocolPublicKeys,
+                                activeLocalAlgorithm: protocolIdentityConfiguration.algorithm,
+                                activeLocalProtection: protocolIdentityConfiguration.protection
+                            )
+                            let usesConfiguredAuthority = inboundProtocolIdentity.algorithm
+                                    == protocolIdentityConfiguration.algorithm
+                                && inboundProtocolIdentity.protection
+                                    == protocolIdentityConfiguration.protection
+                            publishProtocolIdentityStatus(
+                                WebRTCOutboundProtocolIdentitySelection(
+                                    algorithm: inboundProtocolIdentity.algorithm,
+                                    protection: inboundProtocolIdentity.protection,
+                                    mode: usesConfiguredAuthority
+                                        ? .configuredAuthority
+                                        : .peerCompatibilityIdentity
+                                ),
+                                configured: protocolIdentityConfiguration,
+                                sessionID: sessionID
+                            )
+                        } catch {
+                            let rejectionMessage = error.localizedDescription
+                            logger.error(
+                                "❌ WebRTC 入站协议身份选择失败: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public). session=\(sessionID, privacy: .public) peer=\(peerDeviceId, privacy: .public)"
+                            )
+                            failCurrentControlLoop(
+                                reason: "inbound_protocol_identity_rejected",
+                                disconnectKind: .explicit,
+                                statusMessage: rejectionMessage
+                            )
+                            return
+                        }
+                        // This pre-selection gate only evaluates the peer offer shape.
+                        // Local PQC capability is derived below from the selected provider's offered suites.
+                        if let rejection = StrictPQCAdmissionGate.inboundRejection(
+                            policy: handshakePolicy,
+                            peerSupportedSuites: messageA.supportedSuites,
+                            localPQCSuitesAvailable: true
+                        ), rejection == .peerOfferedClassicOnly {
+                            logger.error(
+                                "❌ \(rejection.diagnosticMessage, privacy: .public). session=\(sessionID, privacy: .public) peer=\(peerDeviceId, privacy: .public)"
+                            )
+                            failCurrentControlLoop(
+                                reason: "strict_pqc_peer_offered_classic_only",
+                                disconnectKind: .explicit,
+                                statusMessage: rejection.diagnosticMessage
+                            )
+                            return
+                        }
+                        guard let responderSelection = Self.selectWebRTCInboundResponder(
+                            peerSupportedSuites: messageA.supportedSuites,
+                            policy: handshakePolicy,
+                            protocolIdentity: inboundProtocolIdentity
+                        ) else {
+                            let rejectionMessage = StrictPQCAdmissionRejection.localPQCUnavailable.diagnosticMessage
+                            logger.error(
+                                "❌ \(rejectionMessage, privacy: .public). session=\(sessionID, privacy: .public) peer=\(peerDeviceId, privacy: .public)"
+                            )
+                            failCurrentControlLoop(
+                                reason: "strict_pqc_inbound_responder_unavailable",
+                                disconnectKind: .explicit,
+                                statusMessage: rejectionMessage
+                            )
+                            return
+                        }
+                        if responderSelection.fellBackToClassic {
+                            SecurityEventEmitter.emitDetached(SecurityEvent(
+                                type: .cryptoDowngrade,
+                                severity: .warning,
+                                message: "WebRTC inbound handshake: peer advertises PQC but local PQC unavailable; falling back to Classic",
+                                context: [
+                                    "reason": "pqcProviderUnavailable",
+                                    "direction": "webrtc_responder_inbound",
+                                    "deviceId": peerDeviceId,
+                                    "policyRequirePQC": handshakePolicy.requirePQC ? "1" : "0",
+                                    "policyAllowClassicFallback": handshakePolicy.allowClassicFallback ? "1" : "0",
+                                    "policyMinimumTier": handshakePolicy.minimumTier.rawValue,
+                                    "fromStrategy": HandshakeAttemptStrategy.pqcOnly.rawValue,
+                                    "toStrategy": HandshakeAttemptStrategy.classicOnly.rawValue,
+                                    "strategy": HandshakeAttemptStrategy.classicOnly.rawValue,
+                                    "transcriptBinding": "1",
+                                    "downgradeResistance": "policy_gate+capability_evidence"
+                                ]
+                            ))
+                            logger.info(
+                                "🧩 WebRTC inboundFallback(classic): peer advertises PQC but local PQC unavailable; falling back to classic handshake. session=\(sessionID, privacy: .public) peer=\(peerDeviceId, privacy: .public)"
+                            )
+                        }
+                        let sigAAlgorithm = responderSelection.sigAAlgorithm
+                        let cryptoProvider = responderSelection.cryptoProvider
+                        let offeredSuites = responderSelection.offeredSuites
+                        let localPQCSuitesAvailable = offeredSuites.contains { $0.isPQCGroup }
+                        if let rejection = StrictPQCAdmissionGate.inboundRejection(
+                            policy: handshakePolicy,
+                            peerSupportedSuites: messageA.supportedSuites,
+                            localPQCSuitesAvailable: localPQCSuitesAvailable
+                        ) {
+                            logger.error(
+                                "❌ \(rejection.diagnosticMessage, privacy: .public). session=\(sessionID, privacy: .public) peer=\(peerDeviceId, privacy: .public)"
+                            )
+                            failCurrentControlLoop(
+                                reason: "strict_pqc_inbound_rejection",
+                                disconnectKind: .explicit,
+                                statusMessage: rejection.diagnosticMessage
+                            )
+                            return
+                        }
+                        let cryptoPolicy: CryptoPolicy = hasHybridGroup
+                            ? CryptoPolicy(
+                                minimumSecurityTier: peerOnlyOffersHybrid ? .hybridPreferred : .pqcPreferred,
+                                allowExperimentalHybrid: true,
+                                advertiseHybrid: true,
+                                requireHybridIfAvailable: peerOnlyOffersHybrid
+                            )
+                            : .default
+
+                        let identityProvider = DeviceIdentityHandshakeProvider(
+                            sigAAlgorithm: sigAAlgorithm,
+                            protocolSigningKeyProtection: inboundProtocolIdentity.protection,
+                            includeSecureEnclavePoP: handshakePolicy.requireSecureEnclavePoP
+                        )
+                        let inboundTrustProvider = CurrentPathHandshakeTrustProvider(
+                            expectedRemoteAuthority: currentPathExpectedRemoteAuthorityBySessionId[sessionID],
+                            fallbackPeerIDs: inboundCandidateDeviceIds,
+                            additionalTrustedFingerprints: handshakeTrustedProtocolFingerprints(
+                                for: sessionID,
+                                candidateDeviceIds: inboundCandidateDeviceIds
+                            )
+                        )
+
+                        handshakeState.driver = try HandshakeDriver(
+                            transport: transport,
+                            cryptoProvider: cryptoProvider,
+                            protocolSignatureProvider: ProtocolSignatureProviderSelector.select(for: sigAAlgorithm),
+                            identityProvider: identityProvider,
+                            sigAAlgorithm: sigAAlgorithm,
+                            offeredSuites: offeredSuites,
+                            policy: handshakePolicy,
+                            cryptoPolicy: cryptoPolicy,
+                            trustProvider: inboundTrustProvider
+                        )
+                        if Self.isSmokeRuntimeEnabled {
+                            Self.emitSmokeLog("🧪 mac driver init sigA=\(sigAAlgorithm.rawValue) requirePQC=\(handshakePolicy.requirePQC) provider=\(String(describing: type(of: cryptoProvider)))")
+                        }
+                        if handshakeState.previousSessionKeysBeforeRekey != nil, self.lastRekeyEvent == nil {
+                            let suiteSummary = messageA.supportedSuites.map(\.rawValue).joined(separator: ",")
+                            self.lastRekeyEvent = "driver suites=\(suiteSummary)"
+                        }
+                        logger.info("🤝 WebRTC 入站 HandshakeDriver 初始化完成: sigA=\(sigAAlgorithm.rawValue, privacy: .public) peer=\(peerDeviceId, privacy: .public) policyRequirePQC=\(handshakePolicy.requirePQC, privacy: .public)")
+                    } else {
+                        continue
+                    }
+                }
+
+                guard let activeDriver = handshakeState.driver else { continue }
+                guard isActiveHandshakeDriverFrame(frame) else {
+                    logger.debug(
+                        "ℹ️ 跳过非握手控制帧，避免污染握手状态机: session=\(sessionID, privacy: .public) bytes=\(frame.count, privacy: .public)"
+                    )
+                    continue
+                }
+                await activeDriver.handleMessage(frame, from: peer)
+                guard handshakeState.driver === activeDriver,
+                      self.isCurrentWebRTCControlLoopOwner(
+                        sessionID: sessionID,
+                        session: session,
+                        controlTaskToken: controlTaskToken
+                      ) else {
+                    throw CancellationError()
+                }
+                let st = await activeDriver.getCurrentState()
+                guard handshakeState.driver === activeDriver,
+                      self.isCurrentWebRTCControlLoopOwner(
+                        sessionID: sessionID,
+                        session: session,
+                        controlTaskToken: controlTaskToken
+                      ) else {
+                    throw CancellationError()
+                }
+                lastHandshakeDriverState = String(describing: st)
+                if Self.isSmokeRuntimeEnabled {
+                    Self.emitSmokeLog("🧪 mac driver state=\(String(describing: st))")
+                }
+                switch st {
+                case .waitingFinished(_, let keys, _):
+                    if handshakeState.previousSessionKeysBeforeRekey != nil,
+                       !(self.lastRekeyEvent?.contains("raw=") ?? false) {
+                        self.lastRekeyEvent = "messageB negotiated=\(keys.negotiatedSuite.rawValue)"
+                    }
+                case .established(let keys):
+                    let authenticatedAuthority = await activeDriver
+                        .getAuthenticatedRemoteAuthority()
+                    guard handshakeState.driver === activeDriver,
+                          self.isCurrentWebRTCControlLoopOwner(
+                            sessionID: sessionID,
+                            session: session,
+                            controlTaskToken: controlTaskToken
+                          ) else {
+                        throw CancellationError()
+                    }
+                    handshakeState.authenticatedRemoteAuthority = authenticatedAuthority
+                    let wasInboundRekey = handshakeState.previousSessionKeysBeforeRekey != nil
+                    let strictPQCRequired = HandshakePolicy.recommendedDefault(
+                        compatibilityModeEnabled: UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
+                    ).requirePQC
+                    if wasInboundRekey, strictPQCRequired, !keys.negotiatedSuite.isPQCGroup {
+                        logger.error(
+                            "⛔️ WebRTC inbound PQC rekey negotiated Classic under strictPQC; closing session: session=\(sessionID, privacy: .public) suite=\(keys.negotiatedSuite.rawValue, privacy: .public)"
+                        )
+                        handshakeState.driver = nil
+                        handshakeState.previousSessionKeysBeforeRekey = nil
+                        self.webrtcRekeyInProgressSessionIds.remove(sessionID)
+                        self.strictPQCClassicBootstrapOnlySessionIds.remove(sessionID)
+                        self.lastRekeyEvent = "rejected classic suite=\(keys.negotiatedSuite.rawValue)"
+                        failCurrentControlLoop(
+                            reason: "strict_pqc_rekey_negotiated_classic",
+                            disconnectKind: .explicit,
+                            statusMessage: "Strict PQC rekey negotiated Classic suite: \(keys.negotiatedSuite.rawValue)"
+                        )
+                        return
+                    }
+                    handshakeState.sessionKeys = keys
+                    handshakeState.driver = nil
+                    handshakeState.previousSessionKeysBeforeRekey = nil
+                    self.webrtcRekeyInProgressSessionIds.remove(sessionID)
+                    if keys.negotiatedSuite.isPQCGroup {
+                        self.strictPQCClassicBootstrapOnlySessionIds.remove(sessionID)
+                    }
+                    let isStrictClassicAuthorityBootstrap =
+                        self.strictPQCClassicBootstrapOnlySessionIds.contains(sessionID)
+                        && !keys.negotiatedSuite.isPQCGroup
+                    if isStrictClassicAuthorityBootstrap {
+                        self.lastRekeyEvent = "bootstrapOnly suite=\(keys.negotiatedSuite.rawValue)"
+                        self.webrtcSessionKeysBySessionId[sessionID] = keys
+                        logger.warning(
+                            "⏳ WebRTC inbound strictPQC classic authority bootstrap is bootstrap-only: session=\(sessionID, privacy: .public) event=pqcRekeyPending suite=\(keys.negotiatedSuite.rawValue, privacy: .public)"
+                        )
+                        continue
+                    }
+                    self.strictPQCClassicBootstrapOnlySessionIds.remove(sessionID)
+                    self.lastRekeyEvent = "complete suite=\(keys.negotiatedSuite.rawValue)"
+                    self.webrtcSessionKeysBySessionId[sessionID] = keys
+                    self.connectionStatus = .connected
+                    self.readiness = .handshakeComplete(
+                        sessionId: sessionID,
+                        negotiatedSuite: keys.negotiatedSuite.rawValue
+                    )
+                    self.markCrossNetworkPresenceConnected(
+                        sessionID: sessionID,
+                        negotiatedSuite: keys.negotiatedSuite.rawValue
+                    )
+                    self.updatePreparedSessionSnapshot(
+                        sessionID: sessionID,
+                        phase: .handshakeComplete,
+                        negotiatedSuite: keys.negotiatedSuite.rawValue
+                    )
+	                    startOutboundHeartbeatIfNeeded()
+	                    await sendLocalAuthenticatedRouteBindings(keys: keys, stage: "inbound-rekey")
+	                    guard self.isCurrentWebRTCControlLoopOwner(
+	                        sessionID: sessionID,
+	                        session: session,
+	                        controlTaskToken: controlTaskToken
+	                    ) else {
+	                        throw CancellationError()
+	                    }
+	                    startScreenStreamingIfNeeded(keys: keys)
+	                    let rekeyCompletionEvent = keys.negotiatedSuite.isPQCGroup
+	                        ? "pqcRekeyComplete"
+	                        : "classicRekeyComplete"
+	                    let rekeyCompletionLabel = keys.negotiatedSuite.isPQCGroup
+	                        ? "PQC"
+	                        : "classic compatibility"
+	                    logger.info(
+	                        "✅ WebRTC inbound \(rekeyCompletionLabel, privacy: .public) rekey completed: session=\(sessionID, privacy: .public) event=\(rekeyCompletionEvent, privacy: .public) suite=\(keys.negotiatedSuite.rawValue, privacy: .public)"
+	                    )
+                case .failed(let reason):
+                    if let fallbackKeys = handshakeState.previousSessionKeysBeforeRekey {
+                        let strictPQCRequired = HandshakePolicy.recommendedDefault(
+                            compatibilityModeEnabled: UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
+                        ).requirePQC
+                        if strictPQCRequired && !fallbackKeys.negotiatedSuite.isPQCGroup {
+                            logger.error(
+                                "⛔️ WebRTC inbound PQC rekey failed under strictPQC; closing classic bootstrap-only session: session=\(sessionID, privacy: .public) event=pqcRekeyFailed reason=\(String(describing: reason), privacy: .public)"
+                            )
+                            handshakeState.previousSessionKeysBeforeRekey = nil
+                            handshakeState.driver = nil
+                            self.webrtcRekeyInProgressSessionIds.remove(sessionID)
+                            self.lastRekeyEvent = "failed strict reason=\(String(describing: reason))"
+                            failCurrentControlLoop(
+                                reason: "strict_pqc_rekey_failed",
+                                disconnectKind: .explicit,
+                                statusMessage: "Strict PQC rekey failed: \(reason)"
+                            )
+                            return
+                        }
+                        logger.warning(
+                            "⚠️ WebRTC rekey 失败，保留既有会话: session=\(sessionID, privacy: .public) event=pqcRekeyFailed reason=\(String(describing: reason), privacy: .public)"
+                        )
+                        handshakeState.sessionKeys = fallbackKeys
+                        handshakeState.previousSessionKeysBeforeRekey = nil
+                        handshakeState.driver = nil
+                        self.webrtcRekeyInProgressSessionIds.remove(sessionID)
+                        self.lastRekeyEvent = "failed reason=\(String(describing: reason))"
+                        self.webrtcSessionKeysBySessionId[sessionID] = fallbackKeys
+                        startOutboundHeartbeatIfNeeded()
+                        await sendLocalAuthenticatedRouteBindings(keys: fallbackKeys, stage: "inbound-rekey-fallback")
+                        guard self.isCurrentWebRTCControlLoopOwner(
+                            sessionID: sessionID,
+                            session: session,
+                            controlTaskToken: controlTaskToken
+                        ) else {
+                            throw CancellationError()
+                        }
+                        startScreenStreamingIfNeeded(keys: fallbackKeys)
+                        continue
+                    }
+
+                    failCurrentControlLoop(
+                        reason: "handshake_failed",
+                        disconnectKind: .explicit,
+                        statusMessage: "WebRTC handshake failed: \(reason)"
+                    )
+                    return
+                default:
+                    break
+                }
+            }
+        } catch is CancellationError {
+            return
+        } catch let error as BoundSessionWebRTCCarrierErrorV1 {
+            logger.error(
+                "BoundSession WebRTC staged admission rejected: session=\(sessionID, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+            )
+            failCurrentControlLoop(
+                reason: "bound_session_carrier_staged_admission_violation",
+                disconnectKind: .explicit,
+                statusMessage: "Invalid BoundSession WebRTC carrier framing"
+            )
+            return
+        } catch {
+            logger.warning(
+                """
+                ⚠️ WebRTC 控制通道结束: session=\(sessionID, privacy: .public) \
+                peer=\(peerDeviceId, privacy: .public) error=\(error.localizedDescription, privacy: .public) \
+                lastFrameLen=\(lastInboundFrameLength, privacy: .public) decodedFrameLen=\(lastDecodedFrameLength, privacy: .public) \
+                driverState=\(lastHandshakeDriverState, privacy: .public) lastEvent=\(lastControlLoopEvent, privacy: .public) \
+                lastRekey=\(self.lastRekeyEvent ?? "-", privacy: .public)
+                """
+            )
+            let didCleanup = self.cleanupWebRTCSessionIfCurrentControlLoopOwner(
+                sessionID: sessionID,
+                session: session,
+                controlTaskToken: controlTaskToken,
+                reason: "control_channel_failed",
+                disconnectKind: .transient
+            )
+            if didCleanup {
+                self.connectionStatus = .failed("WebRTC control channel failed: \(error.localizedDescription)")
+                self.readiness = .idle
+            }
+        }
+    }
+
     private func establishP2PConnectionWithCode(code: String, deviceInfo: CrossNetworkDeviceInfo) async throws -> RemoteConnection {
         logger.info("建立 P2P 连接（连接码模式）")
-        
+
  // 类似二维码模式，但使用连接码查询的设备信息
         let parameters = NWParameters.quic(alpn: ["skybridge-p2p"])
-        
+
         let iceCandidate = try await negotiateICEWithCode(
             code: code,
             deviceInfo: deviceInfo
         )
-        
+
         let endpoint = NWEndpoint.hostPort(
             host: NWEndpoint.Host(iceCandidate.host),
             port: NWEndpoint.Port(integerLiteral: iceCandidate.port)
         )
-        
+
         let connection = NWConnection(to: endpoint, using: parameters)
-        connection.start(queue: .global(qos: .userInitiated))
-        
-        try await waitForConnection(connection)
-        
+        connection.start(queue: DispatchQueue.global(qos: .userInitiated))
+
+        try await CrossNetworkConnectionRuntimeSupport.waitForConnection(connection)
+
         return RemoteConnection(
             id: code,
             deviceName: deviceInfo.deviceName,
-            connection: connection,
-            encryptionKey: try Self.deriveSharedSecret(
-                localPrivateKey: Curve25519.KeyAgreement.PrivateKey(),
-                remotePublicKey: deviceInfo.publicKey
-            )
+            transport: .nw(connection)
         )
     }
-    
+
     private func negotiateICE(sessionID: String, remotePublicKey: Data) async throws -> ICECandidate {
  // 1. 首先尝试获取本地地址（用于局域网直连）
-        let localAddresses = getLocalIPAddresses()
-        
+        let localAddresses = CrossNetworkConnectionRuntimeSupport.localIPAddresses()
+
  // 2. 尝试使用 STUN 获取公网地址
-        if let stunResult = await STUNService.shared.getPublicAddress() {
+        do {
+            let stunResult = try await STUNService.shared.getPublicAddress()
             logger.info("🌐 STUN 返回公网地址: \(stunResult.address):\(stunResult.port)")
             return ICECandidate(
                 host: stunResult.address,
                 port: stunResult.port,
                 type: .srflx // Server Reflexive (STUN 反射地址)
             )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as STUNServiceError {
+            // A failed STUN probe permits the explicit ICE host-candidate
+            // fallback, but remains observable and distinct from cancellation.
+            logger.warning("STUN 公网候选探测失败，尝试 host candidate: \(error.localizedDescription, privacy: .public)")
+        } catch {
+            throw error
         }
-        
+
+        try Task.checkCancellation()
+
  // 3. 回退到本地地址
         if let firstLocal = localAddresses.first {
             logger.info("📍 使用本地地址: \(firstLocal)")
@@ -412,323 +13683,192 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 type: .host
             )
         }
-        
+
         throw CrossNetworkConnectionError.networkError
     }
-    
+
     private func negotiateICEWithCode(code: String, deviceInfo: CrossNetworkDeviceInfo) async throws -> ICECandidate {
  // 与 negotiateICE 相同的逻辑
         return try await negotiateICE(sessionID: code, remotePublicKey: deviceInfo.publicKey)
     }
-    
- /// 获取本地 IP 地址列表
-    private func getLocalIPAddresses() -> [String] {
-        var addresses: [String] = []
-        var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        
-        guard getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr else {
-            return addresses
-        }
-        defer { freeifaddrs(ifaddr) }
-        
-        var ptr = firstAddr
-        while true {
-            let interface = ptr.pointee
-            let addrFamily = interface.ifa_addr.pointee.sa_family
-            
-            if addrFamily == UInt8(AF_INET) {
-                let name = String(cString: interface.ifa_name)
-                if name.hasPrefix("en") || name.hasPrefix("bridge") {
-                    var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                    getnameinfo(
-                        interface.ifa_addr,
-                        socklen_t(interface.ifa_addr.pointee.sa_len),
-                        &hostname,
-                        socklen_t(hostname.count),
-                        nil,
-                        0,
-                        NI_NUMERICHOST
-                    )
-                    let address = String(decoding: hostname.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }, as: UTF8.self)
-                    if !address.isEmpty && !address.hasPrefix("127.") {
-                        addresses.append(address)
-                    }
-                }
-            }
-            
-            guard let next = interface.ifa_next else { break }
-            ptr = next
-        }
-        
-        return addresses
-    }
-    
-    private func waitForConnection(_ connection: NWConnection) async throws {
-        try await withCheckedThrowingContinuation { continuation in
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    continuation.resume()
-                case .failed(let error):
-                    continuation.resume(throwing: error)
-                default:
-                    break
-                }
-            }
-        }
-    }
-    
+
  // MARK: - 监听逻辑
-    
+
     private func startListeningForConnection(sessionID: String, privateKey: Curve25519.KeyAgreement.PrivateKey) {
         logger.info("开始监听连接请求：\(sessionID)")
-        
+
         let listener = ConnectionListener(sessionID: sessionID, privateKey: privateKey)
         activeListeners.append(listener)
-        
-        Task {
+
+        Task { [weak self] in
             await listener.start { [weak self] connection in
                 guard let self = self else { return }
                 await MainActor.run {
                     self.currentConnection = connection
                     self.connectionStatus = .connected
+                    self.readiness = .handshakeComplete(
+                        sessionId: connection.id,
+                        negotiatedSuite: "quic-transport"
+                    )
+                    self.updatePreparedSessionSnapshot(
+                        sessionID: connection.id,
+                        phase: .handshakeComplete,
+                        deviceName: connection.deviceName,
+                        negotiatedSuite: "quic-transport"
+                    )
                 }
             }
         }
     }
-    
+
     private func startListeningForCodeConnection(code: String, privateKey: Curve25519.KeyAgreement.PrivateKey) {
         logger.info("开始监听连接码请求：\(code)")
-        
+
         let listener = ConnectionListener(sessionID: code, privateKey: privateKey)
         activeListeners.append(listener)
-        
-        Task {
+
+        Task { [weak self] in
             await listener.start { [weak self] connection in
                 guard let self = self else { return }
                 await MainActor.run {
                     self.currentConnection = connection
                     self.connectionStatus = .connected
+                    self.readiness = .handshakeComplete(
+                        sessionId: connection.id,
+                        negotiatedSuite: "quic-transport"
+                    )
+                    self.updatePreparedSessionSnapshot(
+                        sessionID: connection.id,
+                        phase: .handshakeComplete,
+                        deviceName: connection.deviceName,
+                        negotiatedSuite: "quic-transport"
+                    )
                 }
             }
         }
     }
-    
+
  // MARK: - iCloud 连接辅助
-    
-    private func createConnectionOffer(sessionID: String) async throws -> ConnectionOffer {
-        return ConnectionOffer(
+
+    private func createConnectionOffer(
+        sessionID: String,
+        localAuthorityDeviceId: String
+    ) -> ConnectionOffer {
+        ConnectionOffer(
             sessionID: sessionID,
-            fromDevice: deviceFingerprint,
+            fromDevice: localAuthorityDeviceId,
             iceCandidates: [],
             timestamp: Date()
         )
     }
-    
-    private func waitForAnswer(deviceID: String, timeout: TimeInterval) async throws -> ConnectionAnswer {
+
+    private func waitForAnswer(
+        localAuthorityDeviceId: String,
+        timeout: TimeInterval
+    ) async throws -> ConnectionAnswer {
  // 轮询 iCloud KV Store
         let startTime = Date()
         while Date().timeIntervalSince(startTime) < timeout {
             let kvStore = NSUbiquitousKeyValueStore.default
             kvStore.synchronize()
-            
-            if let answerData = kvStore.data(forKey: "skybridge.answer.\(deviceFingerprint)"),
+
+            if let answerData = kvStore.data(
+                forKey: "skybridge.answer.\(localAuthorityDeviceId)"
+            ),
                let answer = try? JSONDecoder().decode(ConnectionAnswer.self, from: answerData) {
                 return answer
             }
-            
-            try await Task.sleep(nanoseconds: 1_000_000_000) // 1秒
+
+            try await Task.sleep(for: .seconds(1))
         }
-        
+
         throw CrossNetworkConnectionError.timeout
     }
-    
+
     private func finalizeConnection(offer: ConnectionOffer, answer: ConnectionAnswer) async throws -> RemoteConnection {
- // 使用 offer/answer 建立最终连接
+        // iCloud KV offer/answer 路径：从 answer 中提取 ICE 候选，选择最优地址建立 QUIC 连接。
+        // 若 answer 中无可达候选（跨网场景），应走 WebRTC DataChannel 回退路径。
         let parameters = NWParameters.quic(alpn: ["skybridge-p2p"])
-        
- // 简化实现
+
+        guard let firstCandidate = answer.iceCandidates.first,
+              let colonIndex = firstCandidate.lastIndex(of: ":"),
+              let port = UInt16(firstCandidate[firstCandidate.index(after: colonIndex)...]) else {
+            logger.warning("⚠️ iCloud answer 无有效 ICE 候选，回退到 WebRTC 路径")
+            throw CrossNetworkConnectionError.networkError
+        }
+        let host = String(firstCandidate[..<colonIndex])
+
         let endpoint = NWEndpoint.hostPort(
-            host: .ipv4(.loopback),
-            port: 5000
+            host: NWEndpoint.Host(host),
+            port: NWEndpoint.Port(integerLiteral: port)
         )
-        
+
         let connection = NWConnection(to: endpoint, using: parameters)
-        connection.start(queue: .global(qos: .userInitiated))
-        
-        try await waitForConnection(connection)
-        
+        connection.start(queue: DispatchQueue.global(qos: .userInitiated))
+
+        try await CrossNetworkConnectionRuntimeSupport.waitForConnection(connection)
+
         return RemoteConnection(
             id: offer.sessionID,
             deviceName: "Remote Device",
-            connection: connection,
-            encryptionKey: SymmetricKey(size: .bits256)
+            transport: .nw(connection)
         )
     }
-    
+
  // MARK: - 工具方法
-    
-    private static func generateDeviceFingerprint() -> String {
- // 生成唯一设备指纹（基于硬件信息）
-        let deviceInfo = "\(Host.current().localizedName ?? "")\(ProcessInfo.processInfo.hostName)"
-        let hash = SHA256.hash(data: deviceInfo.utf8Data)
-        return hash.compactMap { String(format: "%02x", $0) }.joined().prefix(16).uppercased()
+
+    private func enforceCurrentPathTrustBinding(
+        deviceId: String,
+        protocolPublicKeyFingerprint: String,
+        authenticatedConnectionCodeRebindAllowed: Bool = false
+    ) throws {
+        if let conflict = TrustSyncService.shared.evaluateCurrentPathBinding(
+            deviceId: deviceId,
+            protocolPublicKeyFingerprint: protocolPublicKeyFingerprint
+        ) {
+            if authenticatedConnectionCodeRebindAllowed,
+               Self.shouldAllowAuthenticatedConnectionCodeRebind(for: conflict) {
+                logger.warning(
+                    "⚠️ allow connection-code current-path authority rebind: deviceId=\(Self.protocolIdentityLogRedaction, privacy: .public) fingerprint=\(Self.protocolIdentityLogRedaction, privacy: .public) conflict=\(String(describing: conflict), privacy: .public)"
+                )
+                return
+            }
+            switch conflict {
+            case .identityConflict:
+                throw NSError(
+                    domain: "CrossNetworkConnectionManager",
+                    code: 8401,
+                    userInfo: [NSLocalizedDescriptionKey: "连接目标 authoritative key 与现有 deviceId 绑定冲突"]
+                )
+            case .deviceIdMigrationRequired:
+                throw NSError(
+                    domain: "CrossNetworkConnectionManager",
+                    code: 8402,
+                    userInfo: [NSLocalizedDescriptionKey: "连接目标 deviceId 与已 pinned authoritative key 不匹配"]
+                )
+            case .quarantinedIdentity:
+                throw NSError(
+                    domain: "CrossNetworkConnectionManager",
+                    code: 8403,
+                    userInfo: [NSLocalizedDescriptionKey: "连接目标身份处于隔离/待重新验证状态"]
+                )
+            case .revokedIdentity:
+                throw NSError(
+                    domain: "CrossNetworkConnectionManager",
+                    code: 8404,
+                    userInfo: [NSLocalizedDescriptionKey: "连接目标身份已撤销"]
+                )
+            }
+        }
     }
-    
-    private static func generateShortCode() -> String {
- // 生成 6 位字母数字码（排除易混淆字符：0/O, 1/I/l）
-        let charset = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-        return String((0..<6).compactMap { _ in charset.randomElement() })
-    }
-    
-    private static func buildCanonicalSignaturePayload(
-        id: String,
-        name: String,
-        type: P2PDeviceType,
-        address: String,
-        port: UInt16,
-        osVersion: String,
-        capabilities: [String],
-        timestamp: Double,
-        fingerprintHex: String
-    ) -> Data {
- // 规范化负载构造，确保签名与验签一致
-        let capsJoined = capabilities.joined(separator: ",")
-        let canonical = "id=\(id)|name=\(name)|type=\(type.rawValue)|address=\(address)|port=\(port)|os=\(osVersion)|cap=\(capsJoined)|ts=\(timestamp)|fp=\(fingerprintHex)"
-        return canonical.data(using: .utf8) ?? Data()
-    }
-    
-    private static func isValidDeviceFingerprint(_ fingerprint: String) -> Bool {
- // 验证设备指纹格式
-        return fingerprint.count == 16 && fingerprint.allSatisfy { $0.isHexDigit }
-    }
-    
-    private static func deriveSharedSecret(localPrivateKey: Curve25519.KeyAgreement.PrivateKey, remotePublicKey: Data) throws -> SymmetricKey {
-        let remoteKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: remotePublicKey)
-        let sharedSecret = try localPrivateKey.sharedSecretFromKeyAgreement(with: remoteKey)
-        return sharedSecret.hkdfDerivedSymmetricKey(
-            using: SHA256.self,
-            salt: Data(),
-            sharedInfo: Data(),
-            outputByteCount: 32
+
+    private func logVerifiedQRCodeKEMIgnored(_ qrData: DynamicQRCodeData) {
+        let kemKeys = qrData.normalizedKEMPublicKeys
+        guard !kemKeys.isEmpty else { return }
+
+        logger.info(
+            "🔑 已验证二维码包含 PQC KEM，但不会导入 KEM trust；P2P KEM 恢复必须走 PIB-1 SAS + SKR-1 signed LAN refresh: device=\(qrData.deviceID, privacy: .public) keys=\(kemKeys.count, privacy: .public)"
         )
     }
+
 }
-
-// MARK: - 数据结构
-
-/// 动态二维码数据结构
-struct DynamicQRCodeData: Codable {
- // 数据结构版本，用于兼容升级
-    let version: Int
- // 会话标识
-    let sessionID: String
- // 设备名称
-    let deviceName: String
- // 设备指纹（稳定ID）
-    let deviceFingerprint: String
- // 密钥协商公钥（Curve25519）
-    let publicKey: Data
- // 签名公钥（P256.Signing）
-    let signingPublicKey: Data?
- // P256 ECDSA 原始签名
-    let signature: Data?
- // 签名时间戳（秒）
-    let signatureTimestamp: Double?
- // ICE服务器列表
-    let iceServers: [String]
- // 二维码过期时间
-    let expiresAt: Date
-}
-
-
-/// 设备信息（连接码查询结果）- 重命名以避免与FileTransfer中的DeviceInfo冲突
-/// 符合Swift 6.2.1的Sendable要求
-struct CrossNetworkDeviceInfo: Sendable {
-    let deviceFingerprint: String
-    let deviceName: String
-    let publicKey: Data
-}
-
-/// ICE 候选
-struct ICECandidate {
-    let host: String
-    let port: UInt16
-    let type: CandidateType
-    
-    enum CandidateType {
-        case host, srflx, relay
-    }
-}
-
-/// 连接 Offer
-struct ConnectionOffer: Codable {
-    let sessionID: String
-    let fromDevice: String
-    let iceCandidates: [String]
-    let timestamp: Date
-}
-
-/// 连接 Answer
-struct ConnectionAnswer: Codable {
-    let sessionID: String
-    let toDevice: String
-    let iceCandidates: [String]
-    let timestamp: Date
-}
-
-/// 远程连接对象
-public struct RemoteConnection: Sendable {
-    public let id: String
-    public let deviceName: String
-    public let connection: NWConnection
-    public let encryptionKey: SymmetricKey
-}
-
-/// 连接监听器
-actor ConnectionListener {
-    let sessionID: String
-    let privateKey: Curve25519.KeyAgreement.PrivateKey
-    
-    init(sessionID: String, privateKey: Curve25519.KeyAgreement.PrivateKey) {
-        self.sessionID = sessionID
-        self.privateKey = privateKey
-    }
-    
-    func start(onConnection: @escaping @Sendable (RemoteConnection) async -> Void) async {
- // 监听逻辑（简化）
-    }
-}
-
-/// 信号服务器客户端
-actor SignalServerClient {
-    func registerSession(sessionID: String, deviceFingerprint: String, publicKey: Data, validDuration: TimeInterval) async throws -> String {
- // 注册会话到信号服务器
-        return sessionID
-    }
-    
-    func registerConnectionCode(code: String, deviceFingerprint: String, deviceName: String, publicKey: Data, validDuration: TimeInterval) async throws -> String {
- // 注册连接码
-        return code
-    }
-    
-    func queryConnectionCode(code: String) async throws -> CrossNetworkDeviceInfo {
- // 查询连接码对应的设备信息
-        return CrossNetworkDeviceInfo(
-            deviceFingerprint: "1234567890ABCDEF",
-            deviceName: "Remote Mac",
-            publicKey: Data()
-        )
-    }
-}
-
-/// 跨网络连接错误
-public enum CrossNetworkConnectionError: Error {
-    case invalidQRCode
-    case qrCodeExpired
-    case invalidSignature
-    case invalidDevice
-    case timeout
-    case networkError
-}
-

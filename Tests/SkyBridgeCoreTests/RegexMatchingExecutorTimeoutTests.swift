@@ -112,7 +112,7 @@ final class RegexMatchingExecutorTimeoutTests: XCTestCase {
  /// For unit testing, we use a pattern that's slow enough to trigger the
  /// timeout race but not so slow that it blocks the test indefinitely.
     func testTimeoutMechanismTriggered_InProcess() async throws {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         let limits = createTestLimits(timeout: 0.05) // 50ms timeout
         let executor = RegexMatchingExecutor.createForTesting(limits: limits)
         
@@ -142,7 +142,7 @@ final class RegexMatchingExecutorTimeoutTests: XCTestCase {
         
         await executor.terminate()
         #else
-        throw XCTSkip("Test requires DEBUG build for createForTesting()")
+        throw XCTSkip("Test requires DEBUG or SKYBRIDGE_TESTING for createForTesting()")
         #endif
     }
     
@@ -154,7 +154,7 @@ final class RegexMatchingExecutorTimeoutTests: XCTestCase {
  /// In production, XPC isolation provides hard timeout by process termination.
  /// In testing mode, we verify the error handling path works correctly.
     func testTimeoutErrorHandling() async throws {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         let limits = createTestLimits(timeout: 0.05) // 50ms timeout
         let executor = RegexMatchingExecutor.createForTesting(limits: limits)
         
@@ -174,7 +174,7 @@ final class RegexMatchingExecutorTimeoutTests: XCTestCase {
         
         await executor.terminate()
         #else
-        throw XCTSkip("Test requires DEBUG build for createForTesting()")
+        throw XCTSkip("Test requires DEBUG or SKYBRIDGE_TESTING for createForTesting()")
         #endif
     }
     
@@ -185,7 +185,7 @@ final class RegexMatchingExecutorTimeoutTests: XCTestCase {
  /// This test verifies that when a timeout occurs (simulated by very short timeout),
  /// the RegexMatchingError.timeout is properly thrown.
     func testVeryShortTimeoutTriggersError() async throws {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
  // Use extremely short timeout to force timeout to win the race
         let limits = SecurityLimits(
             maxTotalFiles: 10_000,
@@ -249,7 +249,7 @@ final class RegexMatchingExecutorTimeoutTests: XCTestCase {
         
         await executor.terminate()
         #else
-        throw XCTSkip("Test requires DEBUG build for createForTesting()")
+        throw XCTSkip("Test requires DEBUG or SKYBRIDGE_TESTING for createForTesting()")
         #endif
     }
     
@@ -258,7 +258,7 @@ final class RegexMatchingExecutorTimeoutTests: XCTestCase {
  /// **Requirements: 2.10, 2.11**
  /// Verifies that timeout mechanism doesn't interfere with normal operation.
     func testFastPatternCompletesWithoutTimeout_InProcess() async throws {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         let limits = createTestLimits(timeout: 1.0) // 1 second timeout
         let executor = RegexMatchingExecutor.createForTesting(limits: limits)
         
@@ -277,7 +277,7 @@ final class RegexMatchingExecutorTimeoutTests: XCTestCase {
         
         await executor.terminate()
         #else
-        throw XCTSkip("Test requires DEBUG build for createForTesting()")
+        throw XCTSkip("Test requires DEBUG or SKYBRIDGE_TESTING for createForTesting()")
         #endif
     }
     
@@ -286,7 +286,7 @@ final class RegexMatchingExecutorTimeoutTests: XCTestCase {
  /// **Requirements: 2.9**
  /// Verifies that oversized input is rejected before matching begins.
     func testInputSizeLimitEnforced() async throws {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
  // Create limits with small input limit
         let limits = SecurityLimits(
             maxTotalFiles: 10_000,
@@ -346,7 +346,7 @@ final class RegexMatchingExecutorTimeoutTests: XCTestCase {
         
         await executor.terminate()
         #else
-        throw XCTSkip("Test requires DEBUG build for createForTesting()")
+        throw XCTSkip("Test requires DEBUG or SKYBRIDGE_TESTING for createForTesting()")
         #endif
     }
     
@@ -354,7 +354,7 @@ final class RegexMatchingExecutorTimeoutTests: XCTestCase {
  ///
  /// Verifies error handling for malformed regex patterns.
     func testInvalidPatternRejected() async throws {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         let limits = createTestLimits()
         let executor = RegexMatchingExecutor.createForTesting(limits: limits)
         
@@ -372,7 +372,7 @@ final class RegexMatchingExecutorTimeoutTests: XCTestCase {
         
         await executor.terminate()
         #else
-        throw XCTSkip("Test requires DEBUG build for createForTesting()")
+        throw XCTSkip("Test requires DEBUG or SKYBRIDGE_TESTING for createForTesting()")
         #endif
     }
     
@@ -381,7 +381,7 @@ final class RegexMatchingExecutorTimeoutTests: XCTestCase {
  /// **Requirements: 2.10, 2.11**
  /// Verifies that executor can handle multiple operations correctly.
     func testMultipleSequentialMatches() async throws {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         let limits = createTestLimits(timeout: 0.5)
         let executor = RegexMatchingExecutor.createForTesting(limits: limits)
         
@@ -413,7 +413,7 @@ final class RegexMatchingExecutorTimeoutTests: XCTestCase {
         
         await executor.terminate()
         #else
-        throw XCTSkip("Test requires DEBUG build for createForTesting()")
+        throw XCTSkip("Test requires DEBUG or SKYBRIDGE_TESTING for createForTesting()")
         #endif
     }
     
@@ -421,7 +421,7 @@ final class RegexMatchingExecutorTimeoutTests: XCTestCase {
  ///
  /// Verifies that match results include captured group information.
     func testCapturedGroupsReturned() async throws {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         let limits = createTestLimits()
         let executor = RegexMatchingExecutor.createForTesting(limits: limits)
         
@@ -447,7 +447,7 @@ final class RegexMatchingExecutorTimeoutTests: XCTestCase {
         
         await executor.terminate()
         #else
-        throw XCTSkip("Test requires DEBUG build for createForTesting()")
+        throw XCTSkip("Test requires DEBUG or SKYBRIDGE_TESTING for createForTesting()")
         #endif
     }
     
@@ -457,7 +457,7 @@ final class RegexMatchingExecutorTimeoutTests: XCTestCase {
  ///
  /// Verifies executor handles high throughput correctly.
     func testHighThroughputFastPatterns() async throws {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         let limits = createTestLimits(timeout: 0.5)
         let executor = RegexMatchingExecutor.createForTesting(limits: limits)
         
@@ -472,7 +472,7 @@ final class RegexMatchingExecutorTimeoutTests: XCTestCase {
         
         await executor.terminate()
         #else
-        throw XCTSkip("Test requires DEBUG build for createForTesting()")
+        throw XCTSkip("Test requires DEBUG or SKYBRIDGE_TESTING for createForTesting()")
         #endif
     }
     
@@ -480,7 +480,7 @@ final class RegexMatchingExecutorTimeoutTests: XCTestCase {
  ///
  /// Verifies executor handles concurrent access correctly.
     func testConcurrentMatches() async throws {
-        #if DEBUG
+        #if DEBUG || SKYBRIDGE_TESTING
         let limits = createTestLimits(timeout: 1.0)
         let executor = RegexMatchingExecutor.createForTesting(limits: limits)
         
@@ -512,7 +512,7 @@ final class RegexMatchingExecutorTimeoutTests: XCTestCase {
         
         await executor.terminate()
         #else
-        throw XCTSkip("Test requires DEBUG build for createForTesting()")
+        throw XCTSkip("Test requires DEBUG or SKYBRIDGE_TESTING for createForTesting()")
         #endif
     }
 }

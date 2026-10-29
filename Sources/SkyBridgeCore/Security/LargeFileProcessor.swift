@@ -146,7 +146,41 @@ public actor LargeFileProcessor {
         
         return (normal, large)
     }
-    
+
+ /// Partition files into normal and large categories while preserving each
+ /// URL's original input offset.
+ ///
+ /// Mirrors `partition(urls:)`'s routing but carries the input index alongside
+ /// each URL so duplicate URLs are handled correctly and never collapsed.
+ ///
+ /// - Parameter pairs: (offset, url) pairs from `urls.enumerated()`
+ /// - Returns: Tuple of (normalPairs, largePairs)
+    private func partition(
+        pairs: [(offset: Int, url: URL)]
+    ) -> (normal: [(offset: Int, url: URL)], large: [(offset: Int, url: URL)]) {
+        var normal: [(offset: Int, url: URL)] = []
+        var large: [(offset: Int, url: URL)] = []
+
+        for pair in pairs {
+            let classification = classify(url: pair.url)
+
+ // Skip inaccessible files (they'll be handled as errors later)
+            guard classification.isAccessible else {
+                normal.append(pair)  // Let error handling deal with it
+                continue
+            }
+
+            switch classification.sizeClass {
+            case .normal:
+                normal.append(pair)
+            case .large:
+                large.append(pair)
+            }
+        }
+
+        return (normal, large)
+    }
+
  // MARK: - Sequential Processing
     
  /// Process files with appropriate concurrency based on size.
@@ -166,36 +200,38 @@ public actor LargeFileProcessor {
         maxConcurrent: Int = 4,
         operation: @escaping @Sendable (URL) async -> T
     ) async -> [T] {
- // Partition files
-        let (normalURLs, largeURLs) = partition(urls: urls)
-        
- // Create result storage with index mapping
+ // Partition files, carrying each URL's original input offset so duplicate
+ // URLs are handled correctly and never collapsed onto a single index.
+        let (normalPairs, largePairs) = partition(
+            pairs: urls.enumerated().map { (offset: $0.offset, url: $0.element) }
+        )
+
+ // Create result storage keyed by original input offset
         var results: [Int: T] = [:]
-        let urlToIndex = Dictionary(uniqueKeysWithValues: urls.enumerated().map { ($0.element, $0.offset) })
-        
+
  // Process normal files concurrently
         await withTaskGroup(of: (Int, T).self) { group in
             var activeCount = 0
-            var pendingNormal = normalURLs.makeIterator()
-            
+            var pendingNormal = normalPairs.makeIterator()
+
  // Start initial batch
-            while activeCount < maxConcurrent, let url = pendingNormal.next() {
+            while activeCount < maxConcurrent, let pair = pendingNormal.next() {
                 activeCount += 1
-                let index = urlToIndex[url]!
+                let (index, url) = pair
                 group.addTask {
                     let result = await operation(url)
                     return (index, result)
                 }
             }
-            
+
  // Process remaining normal files
             for await (index, result) in group {
                 results[index] = result
                 activeCount -= 1
-                
-                if let url = pendingNormal.next() {
+
+                if let pair = pendingNormal.next() {
                     activeCount += 1
-                    let nextIndex = urlToIndex[url]!
+                    let (nextIndex, url) = pair
                     group.addTask {
                         let result = await operation(url)
                         return (nextIndex, result)
@@ -203,14 +239,13 @@ public actor LargeFileProcessor {
                 }
             }
         }
-        
+
  // Process large files sequentially (one at a time)
-        for url in largeURLs {
-            let index = urlToIndex[url]!
+        for (index, url) in largePairs {
             let result = await operation(url)
             results[index] = result
         }
-        
+
  // Return results in original order
         return urls.indices.compactMap { results[$0] }
     }

@@ -1,3 +1,4 @@
+#if DEBUG || SKYBRIDGE_TESTING
 import Foundation
 import os.log
 import Accelerate
@@ -633,3 +634,4 @@ public struct BenchmarkResults: Sendable {
         self.performanceImprovement = performanceImprovement
     }
 }
+#endif

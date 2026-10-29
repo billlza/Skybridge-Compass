@@ -23,7 +23,14 @@ public class PQCKeyMigrationTool {
         case replaceOQSKey     // 替换OQS密钥
         case testOnly          // 仅测试，不实际迁移
     }
-    
+
+ /// 确定性（可被 rollbackMigration 发现）的 OQS 私钥备份服务名。
+ /// 旧实现用 `Date().timeIntervalSince1970` 拼接，导致备份无法被回滚定位——改为固定后缀。
+    private static func oqsBackupService(_ algorithm: String) -> String {
+        let param = algorithm == "ML-DSA-65" ? "65" : "87"
+        return "\(PQCKeyTags.service("MLDSA", param, "Priv"))-backup-v1"
+    }
+
  // MARK: - OQS到Apple迁移
     
  /// 将OQS密钥迁移到Apple CryptoKit格式
@@ -33,6 +40,7 @@ public class PQCKeyMigrationTool {
         algorithm: String,
         strategy: MigrationStrategy = .keepBothKeys
     ) async throws {
+        #if HAS_APPLE_PQC_SDK
         
         logger.info("🔄 开始密钥迁移: \(peerId), 算法: \(algorithm)")
         
@@ -54,7 +62,7 @@ public class PQCKeyMigrationTool {
         
  // 2. 创建备份（如果需要且密钥存在）
         if let key = oqsPrivKey, (strategy == .keepBothKeys || strategy == .replaceOQSKey) {
-            let backupService = "\(oqsPrivService)-backup-\(Date().timeIntervalSince1970)"
+            let backupService = oqsBackupService(algorithm)
  // KeychainManager 方法是 nonisolated 的，不需要 await
             let success = KeychainManager.shared.importKey(
                 data: key,
@@ -64,10 +72,13 @@ public class PQCKeyMigrationTool {
             if !success {
                 throw MigrationError.backupFailed
             }
-            logger.info("💾 OQS密钥已备份")
+            logger.info("💾 OQS密钥已备份: \(backupService)")
         }
-        
+
  // 3. 生成新的Apple原生密钥
+ //    注意：这并非「转码」。OQS 的扩展私钥无法导入 Apple 基于种子(seed)的
+ //    integrityCheckedRepresentation，因此迁移本质上是一次「重新生成身份(re-key)」。
+ //    迁移完成后【必须】与对端重新建立信任(re-pin)，否则对端原先固定的旧公钥会拒绝新签名。
         let appleKey: Data
         let applePubKey: Data
         
@@ -128,9 +139,14 @@ public class PQCKeyMigrationTool {
             userInfo: [
                 "peerId": peerId,
                 "algorithm": algorithm,
-                "provider": "Apple CryptoKit"
+                "provider": "Apple CryptoKit",
+ // 迁移是一次 re-key（身份变更）：调用方据此触发与对端的重新配对/信任刷新。
+                "requiresRePinning": true
             ]
         )
+        #else
+        throw MigrationError.unsupportedPlatform
+        #endif
     }
     
  // MARK: - 批量迁移
@@ -165,6 +181,7 @@ public class PQCKeyMigrationTool {
         peerId: String,
         algorithm: String
     ) async throws -> Bool {
+        #if HAS_APPLE_PQC_SDK
         
         logger.info("🔍 验证迁移后的密钥: \(peerId)")
         
@@ -198,6 +215,9 @@ public class PQCKeyMigrationTool {
         default:
             throw MigrationError.migrationFailed("不支持的算法: \(algorithm)")
         }
+        #else
+        throw MigrationError.unsupportedPlatform
+        #endif
     }
     
  // MARK: - 回滚
@@ -209,15 +229,39 @@ public class PQCKeyMigrationTool {
     ) async throws {
         
         logger.info("↩️ 回滚迁移: \(peerId)")
-        
- // 查找最新的备份
+
         let oqsPrivService = PQCKeyTags.service("MLDSA", algorithm == "ML-DSA-65" ? "65" : "87", "Priv")
-        let _ = "\(oqsPrivService)-backup-"  // 备份模式标识符
-        
- // 实际实现需要扫描Keychain查找备份
- // 这里简化为演示
-        
-        logger.info("✅ 迁移已回滚")
+        let backupService = oqsBackupService(algorithm)
+
+ // 1) 从确定性命名的备份恢复 OQS 私钥（不再是 no-op 桩）
+        guard let backup = KeychainManager.shared.exportKey(service: backupService, account: peerId) else {
+            logger.error("❌ 未找到可回滚的 OQS 备份: \(backupService)")
+            throw MigrationError.keyNotFound
+        }
+        guard KeychainManager.shared.importKey(data: backup, service: oqsPrivService, account: peerId) else {
+            throw MigrationError.migrationFailed("无法从备份恢复 OQS 私钥")
+        }
+
+ // 2) 移除迁移期间生成的 Apple 密钥，使后续 provider 选择回退到 OQS（best-effort）
+        let param = algorithm == "ML-DSA-65" ? "65" : "87"
+        try? KeychainManager.shared.deleteAPIKey(
+            service: PQCKeyTags.service("Apple-MLDSA", param, "Mem"), account: peerId)
+        try? KeychainManager.shared.deleteAPIKey(
+            service: PQCKeyTags.service("Apple-MLDSA", param, "Pub"), account: peerId)
+
+ // 3) 通知调用方：身份已回退到 OQS，仍需与对端重新建立信任(re-pin)
+        NotificationCenter.default.post(
+            name: .pqcKeyMigrated,
+            object: nil,
+            userInfo: [
+                "peerId": peerId,
+                "algorithm": algorithm,
+                "provider": "OQS/liboqs",
+                "rolledBack": true,
+                "requiresRePinning": true
+            ]
+        )
+        logger.info("✅ 迁移已回滚，已从备份恢复 OQS 私钥")
     }
 }
 
@@ -248,4 +292,3 @@ public struct MigrationReport {
         """
     }
 }
-

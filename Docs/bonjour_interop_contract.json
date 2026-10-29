@@ -1,0 +1,130 @@
+{
+  "schemaVersion": 2,
+  "source": "SkyBridgeProtocolCore.BonjourInteropProtocolContract",
+  "serviceTypes": {
+    "legacyQuicPrimary": "_skybridge._udp",
+    "control": "_skybridge._tcp",
+    "fileTransfer": "_skybridge-xfer._tcp",
+    "remoteControl": "_skybridge-rd._tcp",
+    "legacyInvalidFileTransfer": "_skybridge-transfer._tcp",
+    "legacyInvalidRemoteControl": "_skybridge-remote._tcp",
+    "companionLink": "_companion-link._tcp"
+  },
+  "discovery": {
+    "appleDefaultServiceTypes": [
+      "_skybridge._tcp",
+      "_skybridge-xfer._tcp",
+      "_skybridge-rd._tcp"
+    ],
+    "windowsCompatibilityQueryOrder": [
+      "_skybridge._udp",
+      "_skybridge._tcp",
+      "_skybridge-xfer._tcp",
+      "_skybridge-rd._tcp",
+      "_skybridge-transfer._tcp",
+      "_skybridge-remote._tcp"
+    ]
+  },
+  "serviceTypeMigration": {
+    "writerVersion": 2,
+    "legacyInvalidLabelsAreInputOnly": true,
+    "maximumApplicationLabelBytes": 15
+  },
+  "capabilities": {
+    "base": [
+      "clipboard",
+      "clipboard_sync"
+    ],
+    "fileTransfer": [
+      "file",
+      "file_transfer",
+      "classic_approval_v1",
+      "classic_resume"
+    ],
+    "remoteControl": [
+      "screen_sharing",
+      "remote_desktop",
+      "rdview",
+      "remote_control",
+      "rdcontrol"
+    ]
+  },
+  "txt": {
+    "advertisementVersion": "2",
+    "maximumWireBytes": 200,
+    "deviceIdLength": {
+      "minimum": 16,
+      "maximumProtocol": 128,
+      "maximumTypicalControlAdvertisement": 82
+    },
+    "allowedPlatformTokens": [
+      "macos",
+      "ios",
+      "ipados",
+      "android",
+      "windows",
+      "linux"
+    ],
+    "canonicalEmittedFields": [
+      "version",
+      "deviceId",
+      "pubKeyFP",
+      "platform"
+    ],
+    "controlAdditionalEmittedFields": [
+      "hs_soa"
+    ],
+    "pubKeyFPSemantics": "algorithm-tagged-protocol-signing-public-key-fingerprint",
+    "mutablePresentationAndCapabilitiesSource": "authenticated-handshake",
+    "portsSource": "dns-sd-srv",
+    "acceptedLegacyDeviceIdentityKeys": [
+      "deviceId",
+      "id",
+      "deviceID",
+      "device_id",
+      "uuid",
+      "uniqueId",
+      "unique_id"
+    ],
+    "acceptedLegacyPubKeyFingerprintKeys": [
+      "pubKeyFP",
+      "pubKeyFp",
+      "pub_key_fp",
+      "identityFingerprint",
+      "publicKeyFingerprint"
+    ],
+    "pubKeyFingerprintPattern": "^[0-9a-f]{64}$",
+    "acceptedLegacyFileTransferPortKeys": [
+      "transferPort",
+      "fileTransferPort",
+      "file_transfer_port",
+      "port"
+    ],
+    "acceptedLegacyRemoteControlPortKeys": [
+      "remotePort",
+      "remoteControlPort",
+      "remote_port",
+      "port"
+    ],
+    "acceptedLegacyRemoteVideoFormatKeys": [
+      "remoteVideoFormats",
+      "remote_video_formats",
+      "remoteformats",
+      "remotevideoformats",
+      "remotevideformats"
+    ]
+  },
+  "remoteVideoFormats": {
+    "allowedTokens": [
+      "jpeg",
+      "h264",
+      "hevc"
+    ]
+  },
+  "routeProvenance": {
+    "txtPortsAreDiagnosticOnly": true,
+    "actionableRoutesRequireResolvedDnsSdEndpoint": true,
+    "capabilitiesDoNotCreateRoutes": true,
+    "pubKeyFingerprintIsTrustHintOnly": true
+  }
+}

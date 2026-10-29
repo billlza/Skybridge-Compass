@@ -36,6 +36,9 @@ public actor SecurityEventEmitter {
     
  /// Maximum pending events per subscriber
     private let maxPendingPerSubscriber: Int
+
+ /// Whether events from this emitter should be recorded to the global audit trail.
+    private let recordsToAuditTrail: Bool
     
  /// Minimum interval between meta-events (rate limiting)
     private let metaEventMinInterval: Duration = .seconds(1)
@@ -59,11 +62,31 @@ public actor SecurityEventEmitter {
  /// Initialize with custom limits (primarily for testing)
     public init(
         maxQueueSize: Int = SecurityLimits.default.maxEventQueueSize,
-        maxPendingPerSubscriber: Int = SecurityLimits.default.maxPendingPerSubscriber
+        maxPendingPerSubscriber: Int = SecurityLimits.default.maxPendingPerSubscriber,
+        recordsToAuditTrail: Bool = true
     ) {
         self.maxQueueSize = maxQueueSize
         self.maxPendingPerSubscriber = maxPendingPerSubscriber
+        self.recordsToAuditTrail = recordsToAuditTrail
     }
+
+#if DEBUG || SKYBRIDGE_TESTING
+    // MARK: - Test Helpers
+
+    /// Create an emitter instance for unit tests with custom queue limits.
+    ///
+    /// Note: kept `internal` so production app targets importing `SkyBridgeCore` cannot call it.
+    nonisolated internal static func createForTesting(
+        maxQueueSize: Int = SecurityLimits.default.maxEventQueueSize,
+        maxPendingPerSubscriber: Int = SecurityLimits.default.maxPendingPerSubscriber
+    ) -> SecurityEventEmitter {
+        SecurityEventEmitter(
+            maxQueueSize: maxQueueSize,
+            maxPendingPerSubscriber: maxPendingPerSubscriber,
+            recordsToAuditTrail: false
+        )
+    }
+#endif
     
  // MARK: - Public API
     
@@ -76,8 +99,10 @@ public actor SecurityEventEmitter {
  ///
  /// - Parameter event: The security event to emit
     public func emit(_ event: SecurityEvent) async {
-        // Always record to internal audit trail sink (even with zero UI subscribers)
-        await AuditTrail.shared.record(event)
+        if recordsToAuditTrail {
+            // Always record to internal audit trail sink (even with zero UI subscribers)
+            await AuditTrail.shared.record(event)
+        }
         if subscribers.isEmpty { return }
  // Meta-events bypass the queue entirely
         if event.isMetaEvent {
@@ -169,6 +194,17 @@ public actor SecurityEventEmitter {
         subscribers.count
     }
 
+#if DEBUG || SKYBRIDGE_TESTING
+    /// Reset emitter state for unit tests (clears queue, subscribers, and overflow counters).
+    internal func resetForTesting() {
+        queuedEvents.removeAll()
+        subscribers.removeAll()
+        droppedSinceLastMetaEvent = 0
+        lastOverflowMetaEventTime = nil
+        Self.hasSubscribersFlag.store(false, ordering: .relaxed)
+    }
+#endif
+
     
  // MARK: - Internal Methods
     
@@ -222,16 +258,6 @@ public actor SecurityEventEmitter {
         await deliverToAllSubscribersDirect(metaEvent)
     }
     
- /// Clear all queued events (for testing)
-    internal func clearQueue() {
-        queuedEvents.removeAll()
-        droppedSinceLastMetaEvent = 0
-    }
-    
- /// Clear all subscribers (for testing)
-    internal func clearSubscribers() {
-        subscribers.removeAll()
-    }
 }
 
 // MARK: - SubscriberActor
@@ -303,12 +329,15 @@ internal actor SubscriberActor {
         
  // Add to queue
         pendingEvents.append(event)
-        
+
  // Start processing if not already
         if !isProcessing {
-            await processQueue()
+            isProcessing = true
+            Task {
+                await processQueue()
+            }
         }
-        
+
         return true
     }
     
@@ -328,14 +357,11 @@ internal actor SubscriberActor {
     }
     
  // MARK: - Private Methods
-    
+
  /// Process the pending queue serially
     private func processQueue() async {
-        guard !isProcessing else { return }
-        isProcessing = true
-        
         defer { isProcessing = false }
-        
+
         while !pendingEvents.isEmpty {
             let event = pendingEvents.removeFirst()
             await handler(event)
@@ -350,27 +376,3 @@ internal actor SubscriberActor {
 
 // SecurityEventEmitter is an actor, so it's implicitly Sendable
 // SubscriberActor is an actor, so it's implicitly Sendable
-
-// MARK: - Testing Support
-
-#if DEBUG
-extension SecurityEventEmitter {
- /// Create a test instance with custom limits
-    public static func createForTesting(
-        maxQueueSize: Int = 100,
-        maxPendingPerSubscriber: Int = 50
-    ) -> SecurityEventEmitter {
-        SecurityEventEmitter(
-            maxQueueSize: maxQueueSize,
-            maxPendingPerSubscriber: maxPendingPerSubscriber
-        )
-    }
-    
- /// Reset the shared instance state (for testing)
-    public func resetForTesting() async {
-        clearQueue()
-        clearSubscribers()
-        lastOverflowMetaEventTime = nil
-    }
-}
-#endif

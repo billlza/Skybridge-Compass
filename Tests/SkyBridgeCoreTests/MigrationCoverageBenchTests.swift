@@ -55,12 +55,10 @@ final class MigrationCoverageBenchTests: XCTestCase {
     }
 
     private func writeCSV(rows: [String]) throws {
-        let artifactsDir = URL(fileURLWithPath: "Artifacts")
+        let artifactsDir = ArtifactDate.writableArtifactsDirectory()
         try FileManager.default.createDirectory(at: artifactsDir, withIntermediateDirectories: true)
 
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy-MM-dd"
-        let dateString = dateFormatter.string(from: Date())
+        let dateString = ArtifactDate.current()
         let csvPath = artifactsDir.appendingPathComponent("migration_coverage_\(dateString).csv")
 
         var content = "scenario,precondition_type,pairing_channel,pairing_verified,has_trust_record,has_legacy_key,expected_satisfied,iterations,allowed_count,rejected_count\n"

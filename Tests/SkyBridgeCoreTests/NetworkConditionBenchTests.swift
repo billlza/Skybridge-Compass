@@ -335,12 +335,10 @@ final class NetworkConditionBenchTests: XCTestCase {
 
     /// Write results to CSV
     private func writeNetworkConditionCSV(_ stats: [NetworkConditionStats]) throws {
-        let artifactsDir = URL(fileURLWithPath: "Artifacts")
+        let artifactsDir = ArtifactDate.writableArtifactsDirectory()
         try FileManager.default.createDirectory(at: artifactsDir, withIntermediateDirectories: true)
 
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy-MM-dd"
-        let dateString = dateFormatter.string(from: Date())
+        let dateString = ArtifactDate.current()
 
         let csvPath = artifactsDir.appendingPathComponent("network_condition_\(dateString).csv")
 

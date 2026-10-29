@@ -1,3 +1,6 @@
+// macOS-exclusive: built on macOS-only frameworks (see SkyBridgeCore iOS portability
+// notes). Excluded from other platforms; no behaviour changes on macOS.
+#if os(macOS)
 // PerformanceModeManager.swift
 // SkyBridge Compass Pro
 //
@@ -1221,3 +1224,4 @@ public class AdaptivePerformanceMonitor: ObservableObject {
         return reasons.isEmpty ? "智能性能调节" : reasons.joined(separator: "、")
     }
 }
+#endif

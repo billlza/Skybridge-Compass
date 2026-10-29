@@ -1,6 +1,30 @@
 \documentclass[10pt,journal,compsoc]{IEEEtran}
+
+% === CRITICAL: ToUnicode mapping for correct text extraction ===
+% cmap must be loaded BEFORE font packages to ensure proper character mapping
+\usepackage{cmap}
+\input{glyphtounicode}
+\pdfgentounicode=1
+
+% Override Palatino with Times (required for IEEE TDSC)
+\usepackage{mathptmx}
+\usepackage{fix-cm}
+\usepackage[T1]{fontenc}  % Better font encoding for text extraction
+\usepackage[tracking=false,letterspace=0]{microtype}  % Disable letterspace to prevent char spreading
+\microtypesetup{expansion=false}  % Disable font expansion for tt fonts
+
 \usepackage{booktabs}
 \usepackage{url}
+\usepackage{xurl}
+\urlstyle{same}
+\Urlmuskip=0mu
+% Reset xurl's default lowercase breaks and use controlled break points only
+\makeatletter
+% Note: Removed hyphen from UrlBreaks to prevent soft-hyphen artifacts (U+00AD) in extracted text
+\def\UrlBreaks{\do\.\do\@\do\/\do\\\do\!\do\_\do\|\do\;\do\>\do\]\do\)\do\,\do\?\do\'\do\+\do\=\do\#}
+% Prefer breaking at path separators and colons
+\def\UrlBigBreaks{\do\/\do\:}
+\makeatother
 \usepackage{array}
 \usepackage{calc}
 \usepackage{graphicx}
@@ -12,6 +36,8 @@
     pdfsubject={},
     pdfkeywords={}
 }
+\hbadness=10000
+\vbadness=10000
 \usepackage{xr}
 \usepackage{placeins}
 % Allow supplementary to reference main-paper labels when the .aux exists.
@@ -35,6 +61,11 @@
 }
 \makeatother
 \pagestyle{headings}
+\raggedbottom
+
+% Paragraph breaking tuning for narrow IEEE columns.
+\tolerance=1000
+\emergencystretch=1em
 
 % Float-page spacing tuning: reduce inter-float separation slightly to avoid
 % overfull vbox on float-only pages.
@@ -43,26 +74,56 @@
 \setlength{\@fpbot}{0pt plus 1fil}
 \setlength{\@dblfptop}{0pt}
 \setlength{\@dblfpbot}{0pt plus 1fil}
-\setlength{\@fpsep}{6pt plus 2pt minus 2pt}
-\setlength{\@dblfpsep}{6pt plus 2pt minus 2pt}
-\setlength{\dblfloatsep}{6pt plus 2pt minus 2pt}
+\setlength{\@fpsep}{0pt plus 1pt minus 1pt}
+\setlength{\@dblfpsep}{0pt plus 1pt minus 1pt}
+\setlength{\dblfloatsep}{0pt plus 1pt minus 1pt}
 \setlength{\dbltextfloatsep}{8pt plus 2pt minus 2pt}
 \setlength{\textfloatsep}{8pt plus 2pt minus 2pt}
 \setlength{\floatsep}{8pt plus 2pt minus 2pt}
 \setlength{\intextsep}{8pt plus 2pt minus 2pt}
 \makeatother
 
+% Supplementary tables are table-heavy; allow denser float packing to avoid
+% excessive whitespace (e.g., 1 short table consuming an entire page).
+\renewcommand{\topfraction}{0.95}
+\renewcommand{\dbltopfraction}{0.95}
+\renewcommand{\textfraction}{0.05}
+% Permit float-only pages earlier to avoid "Text page contains only floats"
+% warnings under table-dense sections.
+\renewcommand{\floatpagefraction}{0.80}
+\renewcommand{\dblfloatpagefraction}{0.80}
+\setcounter{topnumber}{10}
+\setcounter{dbltopnumber}{10}
+\setcounter{totalnumber}{20}
+
+% Our compile gate treats any LaTeX warning as fatal. For table-dense
+% supplementary materials, LaTeX may warn "Text page N contains only floats"
+% even when the output is acceptable (table-only pages). Silence that one
+% warning to keep the gate focused on real issues (undefined refs, overfull
+% boxes, etc.).
+\makeatletter
+\let\SB@orig@latex@warning@no@line\@latex@warning@no@line
+\def\@latex@warning@no@line#1{%
+  \in@{contains only floats}{#1}%
+  \ifin@\else
+    \SB@orig@latex@warning@no@line{#1}%
+  \fi
+}
+\makeatother
+
 \newcommand{\real}[1]{#1}
 \newcommand{\artifacturl}{https://github.com/billlza/Skybridge-Compass}
 \newcommand{\artifacturlshort}{https://github.com/billlza/Skybridge-Compass}
-\newcommand{\artifacttag}{tdsc-2026-01-0318-ios-sim-fix-\allowbreak{}20260211}
-\newcommand{\artifactsha}{b16fe9386ff0}
-\newcommand{\artifactshafull}{b16fe9386ff047d17ba9a518b2c331f64493971e}
+\newcommand{\artifacttag}{6576e954a5bb}
+\newcommand{\artifactsha}{6576e954a5bb}
+\newcommand{\artifactshafull}{6576e954a5bb7b9c42a367ba43f086d383e5f495}
 \newcommand{\artifactzipurl}{\artifacturl/archive/\artifactshafull.zip}
-\newcommand{\artifactzipsha}{460813da\allowbreak{}9ade5b79\allowbreak{}b333c94a\allowbreak{}1b76e14e\allowbreak{}6b522f63\allowbreak{}0be1a6f0\allowbreak{}decb9845\allowbreak{}def3f258}
+\newcommand{\artifactzipsha}{8b568316\allowbreak{}81518171\allowbreak{}af846691\allowbreak{}0bd8893a\allowbreak{}88312936\allowbreak{}26241f7a\allowbreak{}416b2522\allowbreak{}afe4ef42}
 \newcommand{\artifacttarurl}{\artifacturl/archive/\artifactshafull.tar.gz}
-\newcommand{\artifacttarsha}{443b8ac9\allowbreak{}0ffe42f7\allowbreak{}57d65f1d\allowbreak{}79cd3d18\allowbreak{}3b7d7ce5\allowbreak{}02dd8bcd\allowbreak{}31cdb016\allowbreak{}1016f380}
-\newcommand{\artifactdateXWing}{2026-01-16}
+\newcommand{\artifacttarsha}{fe6088e4\allowbreak{}6a9da610\allowbreak{}3ad6d1d5\allowbreak{}8aebb654\allowbreak{}3cbb1a0c\allowbreak{}5370232b\allowbreak{}53a6e246\allowbreak{}87fa3b33}
+\newcommand{\artifactdate}{2026-01-23}
+\newcommand{\artifactdateXWing}{2026-01-23}
+\input{generated/claims_macros}
 \providecommand{\tightlist}{%
 	  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
 
@@ -90,8 +151,38 @@ This document provides extended data tables referenced in the main paper. All da
 \item Tables~\ref{tab:supp-repeatability-latency}--\ref{tab:supp-repeatability-rtt} (Repeatability): Supports Section~\ref{sec:evaluation}. Tables report observed batch count $B$ and (when $B \ge 2$) 95\% confidence intervals across batches; set \texttt{SKYBRIDGE\_BENCH\_BATCHES=3}--\texttt{5} to reproduce multi-batch CIs.
 \item Table~\ref{tab:supp-traffic-padding} (Traffic Padding): Supports Section~\ref{sec:evaluation} (traffic analysis mitigation quantization/overhead)
 \item Table~\ref{tab:supp-realnet-microstudy} (Real-network micro-study): STUN path + 12~kB-class payload measurements across Wi-Fi / hotspot labels (generated from \texttt{Artifacts/realnet\_*}). (Cross-NAT inbound-reachability depends on ISP/upstream equipment and may be infeasible without administrative control; see note below.)
+\item Table~\ref{tab:supp-ec2-direct} (Dedicated EC2 direct-path validation): external Linux direct TCP run (no tunnel) with \texttt{n=50} per payload for the pinned artifact date.
+\item Table~\ref{tab:supp-kernel-emulation} (Kernel-level emulation cross-check): dummynet/netem comparison under shared profile IDs, supporting Section~\ref{sec:network-conditions}.
+\item Table~\ref{tab:supp-ios-microbench-devices} (iOS microbench metadata): per-device hardware/software/thermal metadata and run configuration for the schema v3 JSON artifacts supporting Table~\ref{tab:ios-microbench}. For the frozen artifact date (\texttt{2026-01-23}), the iOS compatibility-matrix gate passes for the tested iPad/iPhone deployment set (no schema-version incompatibility observed).
+\item Table~\ref{tab:supp-v2-v1-compare} (v1/v2 bridge comparison): liboqs PQC v1 baseline versus v2 FS latency/RTT and payload-byte delta, supporting main-paper Section~\ref{sec:evaluation}.
+\item Tables~\ref{tab:supp-platform-support}--\ref{tab:supp-cross-platform-policy} (Platform/runtime matrix): Apple provider availability plus Android/Ubuntu version-tier suite policy mapping used by negotiation.
+\item Table~\ref{tab:supp-cross-platform-contract} (Cross-platform contract consistency): static source-based checker output across iOS/macOS, Android, and Ubuntu for suite parity, encoding, fallback guardrails, and trust path.
+\item Table~\ref{tab:supp-interop-matrix} (Cross-platform interop matrix): measured external Linux direct/tunnel rows plus static Android/Ubuntu contract-consistency pair rows under a shared artifact date.
+\item Table~\ref{tab:supp-boundary-stress} (Boundary-stress cases and operator runbook): explicit in-model vs out-of-model classification for pairing social engineering, endpoint compromise classes, and audit-log abuse, with expected event signals and required operator actions.
+\item Table~\ref{tab:supp-boundary-stress-empirical} (Boundary-stress empirical invariants): machine-checkable rates for input perturbation, concurrency/race, adversarial-network timeout suppression, and evidence-schema integrity from \texttt{boundary\_stress\_<date>.csv}.
+\item Table~\ref{tab:supp-formal-code-traceability} (Formal-to-code traceability): mapping of theorem-facing lemmas/events to implementation-level enforcement points and artifacts.
+\item Tables~\ref{tab:supp-message-field-validation}--\ref{tab:artifact-map} (Protocol/Audit Appendices): wire-format validation rules, suite identifiers, PQC coverage and platform support matrices, key-size references, security event taxonomy, and an implementation-to-file mapping. These materials support auditability and reproducibility claims in main paper Sections~\ref{sec:handshake-state-machine}, \ref{sec:security-model}, and \ref{sec:implementation}.
+\item Tables moved from the main paper to satisfy page budget: Table~\ref{tab:novelty-delta}, Table~\ref{tab:migration-design-space}, Table~\ref{tab:claim-evidence-strength}, Table~\ref{tab:migration-provider-matrix}, Table~\ref{tab:migration-fleet-behavior}, Table~\ref{tab:failure-mode-robustness}, Table~\ref{tab:ablation-by-property}, Table~\ref{tab:suite-negotiation-scenarios}, Table~\ref{tab:system-impact}, Table~\ref{tab:ios-microbench}, Table~\ref{tab:aead-mapping}, Table~\ref{tab:network-conditions}.
 \end{itemize}
 
+% The supplementary is table-heavy. In IEEEtran two-column mode, wide tables
+% typically use table* floats, which can lead to one-table-per-page whitespace.
+% Switch to single-column for the remainder to allow denser float packing.
+\onecolumn
+	
+\subsection*{Main-paper Tables Moved to Supplementary (Page Budget)}
+\input{supp_tables/s14_novelty_delta}
+\input{supp_tables/s15_migration_design_space}
+\input{supp_tables/s16_claim_evidence_strength}
+\input{supp_tables/s17_migration_provider_matrix}
+\input{supp_tables/s18_migration_fleet_behavior}
+\input{supp_tables/s19_failure_mode_robustness}
+\input{supp_tables/s20_aead_mapping}
+\input{supp_tables/s21_network_conditions}
+\input{supp_tables/s22_ablation_by_property}
+\input{supp_tables/s23_suite_negotiation_scenarios}
+\input{supp_tables/s24_system_impact}
+	
 \input{supp_tables/s1_latency}
 
 \input{supp_tables/s2_rtt}
@@ -101,23 +192,47 @@ This document provides extended data tables referenced in the main paper. All da
 \input{supp_tables/s7_traffic_padding}
 
 \input{supp_tables/s8_traffic_padding_sensitivity}
-
-\FloatBarrier
-
 \IfFileExists{supp_tables/s9_realnet_microstudy.tex}{\input{supp_tables/s9_realnet_microstudy}}{\noindent\textit{(Real-network micro-study table not present: run \texttt{Scripts/run\_real\_network\_probe.swift} and \texttt{Scripts/run\_real\_network\_e2e.swift}, then \texttt{python3 Scripts/aggregate\_realnet.py}.)}\par}
+
+\begin{table}[!tp]
+\centering
+\scriptsize
+\caption{Dedicated EC2 direct-path validation (external Linux, no tunnel, \texttt{ARTIFACT\_DATE=2026-01-23}). Endpoint: \texttt{54.92.79.99:44444}; harness: \texttt{Scripts/run\_real\_network\_e2e\_linux.py}; \texttt{n=50} per payload (PQC payload label 12{,}002~B is the liboqs payload-only handshake; CryptoKit is 12{,}009~B in this snapshot).}
+\label{tab:supp-ec2-direct}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Payload (B) & Success rate & p50 total (ms) & p95 total (ms) & p99 total (ms) \\
+\midrule
+687   & 1.0000 & 130.601 & 139.426 & 140.970 \\
+12{,}002 & 1.0000 & 132.925 & 140.858 & 148.236 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\IfFileExists{supp_tables/s10_kernel_emulation.tex}{\input{supp_tables/s10_kernel_emulation}}{\noindent\textit{(Kernel-emulation table not present: run \texttt{Scripts/run\_network\_emulation\_kernel.sh}, then \texttt{python3 Scripts/aggregate\_kernel\_emulation.py}.)}\par}
+
+\IfFileExists{supp_tables/s11_ios_microbench_devices.tex}{\input{supp_tables/s11_ios_microbench_devices}}{\noindent\textit{(iOS microbench metadata table not present: export schema-v3 JSON files such as \texttt{ios\_microbench\_2026-01-23\_ipad16\_3.json} and \texttt{ios\_microbench\_2026-01-23\_iphone17\_1.json}, then run \texttt{python3 Scripts/aggregate\_ios\_microbench.py}.)}\par}
+
+\input{tables/ios_microbench}
+
+\IfFileExists{supp_tables/s12_v2_v1_compare.tex}{\input{supp_tables/s12_v2_v1_compare}}{\noindent\textit{(v1/v2 bridge comparison table not present: run \texttt{Scripts/run\_paper\_eval.sh} to regenerate \texttt{handshake\_bench}, \texttt{handshake\_rtt}, and \texttt{message\_sizes} artifacts.)}\par}
+
+\IfFileExists{supp_tables/s13_interop_matrix.tex}{\input{supp_tables/s13_interop_matrix}}{\noindent\textit{(cross-platform interop matrix table not present: run \texttt{python3 Scripts/aggregate\_interop\_matrix.py --artifact-date 2026-01-23} after generating \texttt{interop\_consistency} and \texttt{realnet\_e2e\_summary} artifacts.)}\par}
 
 \noindent\textit{Note: Cross-NAT direct inbound tests (no overlay/relay) are not universally feasible. In particular, double-NAT topologies (ISP router/modem upstream) and IPv6 inbound filtering can prevent any inbound reachability even when devices have global IPv6 addresses. In such environments, all client samples time out with empty connect-time fields, and we omit those rows from the main table to avoid conflating ``connectivity unavailable'' with protocol performance.}
 
 \textbf{Wire Size Summary:}
 \begin{itemize}
 \item Classic: $293 + 318 + 2 \times 38 = 687$~B
-\item PQC: $6507 + 5419 + 2 \times 38 = 12{,}002$~B
-\item X-Wing (\texttt{\artifactdateXWing} snapshot): $6609 + 5510 + 2 \times 38 = 12{,}195$~B
+\item PQC (liboqs): $6507 + 5419 + 2 \times 38 = 12{,}002$~B
+\item PQC (CryptoKit): $6514 + 5419 + 2 \times 38 = 12{,}009$~B
+\item X-Wing (\texttt{\artifactdateXWing} snapshot): $6641 + 5419 + 2 \times 38 = 12{,}136$~B
+\item Real-network micro-study payload labels use the payload-only sizes above; the transport harness adds a fixed 4-byte length prefix that is excluded from these labels.
 \end{itemize}
 
 \subsection*{Table~\ref{tab:supp-loopback-wire}: Loopback Wire-Size Baselines}
 
-\begin{table}[!t]
+\begin{table}[!tp]
 \centering
 \caption{Loopback wire-size baselines from pcap capture (N=1000). Wire bytes count full packet lengths observed on the loopback interface; TLS/QUIC/DTLS values are cert-dependent.}
 \label{tab:supp-loopback-wire}
@@ -136,9 +251,20 @@ SkyBridge (CryptoKit) & 19{,}009 & 19{,}257 \\
 \end{tabular}
 \end{table}
 
+BaselineBenchRunner measures \emph{time-to-ready}
+(\texttt{NWConnection.ready}) for fresh loopback connections. Each sample
+creates a new connection and records elapsed time from connect start to
+ready. We report N=1000 after 10 warmup iterations. 0-RTT/session
+resumption is not explicitly enabled and results reflect
+\texttt{Network.framework} defaults. QUIC uses ALPN \texttt{sbq} with a
+single bidirectional stream and no application data
+(\texttt{BASELINE\_KICKOFF\_BYTES=0}). Loopback wire-size values are
+reproducible from pcap capture via
+\texttt{Scripts/\allowbreak run\_\allowbreak baseline\_\allowbreak bench.sh}.
+
 Values are cert-dependent (localhost certificate). Noise-XX wire size is
 pattern-dependent and reflects the XX pattern used in this baseline.
-SkyBridge loopback wire sizes include framing and transport overhead;
+SkyBridge loopback wire sizes include framing and transport overhead (and may include SBP1 handshake padding);
 payload-only sizes are reported in Table~\ref{tab:supp-message-sizes}.
 
 \subsection*{Table~\ref{tab:supp-repeatability-latency}: Repeatability Across Batches (Latency)}
@@ -147,7 +273,7 @@ payload-only sizes are reported in Table~\ref{tab:supp-message-sizes}.
 
 \subsection*{Table~\ref{tab:supp-repeatability-rtt}: Repeatability Across Batches (RTT)}
 
-\noindent\textit{Interpretation note:} CryptoKit PQC RTT exhibits higher \emph{between-batch} variance than Classic/liboqs in our environment (Apple Silicon, macOS 26.x), so its across-batch 95\% CI can be substantially wider even when each batch uses N=1000 iterations. This reflects run-to-run scheduler/load sensitivity rather than an arithmetic error; raw batch values are directly recorded in \texttt{Artifacts/handshake\_rtt\_<date>.csv}.
+\noindent\textit{Interpretation note:} CryptoKit PQC RTT exhibits higher \emph{between-batch} variance than Classic/liboqs in our environment (Apple Silicon, macOS 26.x), so its across-batch 95\% CI can be substantially wider. Per-batch iteration counts are configuration-dependent in this artifact snapshot (Classic/liboqs N=1000, CryptoKit N=5000). This reflects run-to-run scheduler/load sensitivity rather than an arithmetic error; raw batch values are directly recorded in \texttt{Artifacts/handshake\_rtt\_2026-01-23.csv}.
 
 \input{supp_tables/s6_repeatability_rtt}
 
@@ -156,15 +282,70 @@ payload-only sizes are reported in Table~\ref{tab:supp-message-sizes}.
 All data is generated from the artifact CSV files:
 \begin{itemize}
 \raggedright
-\item \texttt{Artifacts/\allowbreak handshake\_\allowbreak bench\_\allowbreak <date>.csv} (Tables~\ref{tab:supp-latency}, \ref{tab:supp-repeatability-latency})
-\item \texttt{Artifacts/\allowbreak handshake\_\allowbreak rtt\_\allowbreak <date>.csv} (Tables~\ref{tab:supp-rtt}, \ref{tab:supp-repeatability-rtt})
-\item \texttt{Artifacts/\allowbreak message\_\allowbreak sizes\_\allowbreak <date>.csv} (Table~\ref{tab:supp-message-sizes})
-\item \texttt{Artifacts/\allowbreak traffic\_\allowbreak padding\_\allowbreak <date>.csv} (Table~\ref{tab:supp-traffic-padding})
-\item \texttt{Artifacts/\allowbreak traffic\_\allowbreak padding\_\allowbreak sensitivity\_\allowbreak <date>.csv} (Table~\ref{tab:supp-traffic-padding-sensitivity})
-\item \texttt{Artifacts/\allowbreak baseline\_\allowbreak summary\_\allowbreak <timestamp>.csv} (Table~\ref{tab:supp-loopback-wire})
+\item \texttt{Artifacts/\allowbreak handshake\_\allowbreak bench\_2026-01-23.csv} (Tables~\ref{tab:supp-latency}, \ref{tab:supp-repeatability-latency})
+\item \texttt{Artifacts/\allowbreak handshake\_\allowbreak rtt\_2026-01-23.csv} (Tables~\ref{tab:supp-rtt}, \ref{tab:supp-repeatability-rtt})
+\item \texttt{Artifacts/\allowbreak message\_\allowbreak sizes\_2026-01-23.csv} (Table~\ref{tab:supp-message-sizes})
+\item \texttt{Artifacts/\allowbreak traffic\_\allowbreak padding\_2026-01-23.csv} (Table~\ref{tab:supp-traffic-padding})
+\item \texttt{Artifacts/\allowbreak traffic\_\allowbreak padding\_\allowbreak sensitivity\_2026-01-23.csv} (Table~\ref{tab:supp-traffic-padding-sensitivity})
+\item \texttt{Artifacts/\allowbreak network\_\allowbreak emulation\_\allowbreak kernel\_2026-01-23.csv} (Table~\ref{tab:supp-kernel-emulation})
+\item \texttt{Artifacts/\allowbreak ios\_\allowbreak microbench\_2026-01-23.csv} (Table~\ref{tab:ios-microbench}, Table~\ref{tab:supp-ios-microbench-devices})
+\item \texttt{Artifacts/\allowbreak realnet\_\allowbreak microstudy\_2026-01-23.csv} (Table~\ref{tab:supp-realnet-microstudy})
+\item \texttt{Artifacts/\allowbreak interop\_\allowbreak consistency\_2026-01-23.json} and \texttt{Artifacts/\allowbreak interop\_\allowbreak cross\_\allowbreak platform\_2026-01-23.csv} (Table~\ref{tab:supp-cross-platform-contract}, Table~\ref{tab:supp-interop-matrix})
+\item \texttt{Artifacts/\allowbreak boundary\_\allowbreak stress\_2026-02-24.csv} (Table~\ref{tab:supp-boundary-stress-empirical})
+\item \texttt{Artifacts/\allowbreak baseline\_\allowbreak summary\_*.csv} (Table~\ref{tab:supp-loopback-wire})
+\item \texttt{Artifacts/\allowbreak soa\_\allowbreak interop\_2026-02-22.csv} (Table~\ref{tab:soa-interop})
 \end{itemize}
 
-These files can be regenerated using \texttt{Scripts/\allowbreak run\_\allowbreak paper\_\allowbreak eval.sh} from the artifact repository; \texttt{Scripts/\allowbreak make\_\allowbreak tables.py} uses the main-paper-pinned \texttt{\string\artifactdate} (or an explicit \texttt{ARTIFACT\_DATE}) to avoid accidentally mixing datasets. System-level impact artifacts (\texttt{system\_impact\_\ldots}) are generated by a separate benchmark suite and are pinned consistently in the main paper via \texttt{\string\artifactdateSystemImpact}.
+Regenerate the benchmark CSVs with
+\texttt{Scripts/\allowbreak run\_\allowbreak paper\_\allowbreak eval.sh}
+from the artifact repository. Then build all paper/supplementary tables with
+\texttt{Scripts/\allowbreak make\_\allowbreak tables.py}, which uses the
+main-paper pinned artifact date (or explicit \texttt{ARTIFACT\_DATE}) to avoid
+mixing datasets across runs. System-level impact artifacts
+(\texttt{system\_impact\_\ldots}) are produced by a dedicated suite, but follow
+the same artifact-date suffix convention used in the main paper.
+
+\subsection*{Evidence Layering for This Revision}
+
+Main-paper claims and all primary figures/tables are anchored to the
+\texttt{2026-01-23} dataset family listed above. Any expanded checks
+introduced during revision are reported as \textbf{additional validation}
+in Supplementary sections and are used to strengthen robustness discussion;
+they do not replace or redefine the main-paper primary statistics.
+We separate source-quality, paper-integrity, and release-readiness gates
+to avoid cross-domain false failures and to preserve auditability.
+New zero-warning and layered-gate reports are
+\textbf{release-readiness auxiliary artifacts}; they are additive and do
+not change the core artifact schema (\texttt{handshake\_bench\_*},
+\texttt{handshake\_rtt\_*}, \texttt{message\_sizes\_*}, and
+claims/macro datasets).
+
+\subsection*{Frozen Invariants for the Upgrade Track}
+\begin{itemize}\tightlist
+\item wire format unchanged (MessageA/MessageB/Finished)
+\item suite IDs unchanged (including wireId assignments)
+\item canonical message vectors unchanged
+\item artifact date fixed at \texttt{2026-01-23}
+\item primary experimental numbers unchanged
+\item threat model unchanged
+\item policy semantics unchanged (strict/prefer/classic)
+\item fallback deny semantics unchanged
+\item main paper claims unchanged
+\end{itemize}
+
+\subsection*{Layered Gate Definitions and Failure Attribution}
+\begin{itemize}\tightlist
+\item \textbf{source-quality gate:} SwiftPM build/test, iOS build/test lane,
+  and zero-warning enforcement only for source/toolchain outcomes.
+\item \textbf{paper-integrity gate:} isolated paper compilation, claim/numeric
+  consistency checks, and PDF quality checks (Type3/text extraction/metadata)
+  without writing back tracked PDF outputs.
+\item \textbf{release-readiness gate:} aggregation-only layer over the two
+  domain gates; no additional cross-domain checks are injected.
+\item \textbf{failure attribution contract:} reports always expose
+  \texttt{failed\_domain}, \texttt{failed\_check\_id}, and
+  \texttt{owner\_hint} (code/paper/script/environment) for auditability.
+\end{itemize}
 
 Artifact release:
 \begin{itemize}\tightlist
@@ -215,10 +396,10 @@ initiatorNonce || responderNonce ||\\
 suiteWireIdLE)
 \end{quote}
 
-To prevent short-window replay attacks, implementations SHOULD cache
-recent \texttt{handshakeId} values (or the
-\texttt{(initiatorNonce,\ responderNonce)} pair) and reject duplicates
-within a configurable window (default: 5 minutes).
+To prevent short-window replay attacks, implementations SHOULD cache recent
+\texttt{handshakeId} values and reject duplicates within a configurable window
+(default: 5 minutes). Alternatively, they may cache the
+(\texttt{initiatorNonce}, \texttt{responderNonce}) pair.
 
 \textbf{Key Share Binding:}
 \begin{itemize}\tightlist
@@ -277,7 +458,7 @@ within a configurable window (default: 5 minutes).
   cause \texttt{sigB} verification to fail.
 \end{itemize}
 
-\begin{table*}[!t]
+\begin{table*}[!tp]
 \centering
 \caption{Message field validation rules.}
 \label{tab:supp-message-field-validation}
@@ -332,7 +513,7 @@ deployments (byte-for-byte deterministic). V2 TLV is an optional
 transcript-hashing format for forward compatibility and is exercised by
 regression tests; it is not used on the wire in v1.
 
-\begin{table*}[!t]
+\begin{table*}[!tp]
 \centering
 \caption{Encoding scope (V1 vs V2).}
 \label{tab:supp-encoding-scope}
@@ -359,7 +540,7 @@ transcript binding. Data-plane AEAD is negotiated separately and is
 fixed to AES-256-GCM in v1. Algorithm suite identifiers use a
 structured 16-bit wire format enabling forward compatibility:
 
-\begin{table*}[!t]
+\begin{table*}[!tp]
 \centering
 \caption{Suite identifier ranges and components.}
 \label{tab:supp-suite-identifiers}
@@ -395,9 +576,10 @@ ML-DSA-65 for PQC/hybrid suites and Ed25519 for classic suites. Secure
 Enclave P-256 ECDSA is used only for optional device proof-of-possession
 and is not used for the main protocol signatures (\texttt{sigA}/\texttt{sigB}).
 
-\begin{table*}[!t]
+\begin{table*}[!tp]
 \centering
 \tiny
+\setlength{\tabcolsep}{3pt}
 \caption{Post-quantum coverage by policy and established suite (v1). ``PQC confidentiality'' refers to resistance against store-now-decrypt-later adversaries \emph{while long-term KEM private keys remain uncompromised}; v1 does not claim PFS for KEM-based PQC suites.}
 \label{tab:supp-pqc-coverage}
 \begin{tabular}{@{}
@@ -405,7 +587,9 @@ and is not used for the main protocol signatures (\texttt{sigA}/\texttt{sigB}).
   >{\raggedright\arraybackslash}p{0.15\linewidth}
   >{\raggedright\arraybackslash}p{0.23\linewidth}
   >{\raggedright\arraybackslash}p{0.22\linewidth}
-  ccc@{}}
+  >{\centering\arraybackslash}p{0.05\linewidth}
+  >{\centering\arraybackslash}p{0.05\linewidth}
+  >{\centering\arraybackslash}p{0.05\linewidth}@{}}
 \toprule
 Policy & Outcome & KEM / key establishment & Protocol signature (\texttt{sigA}/\texttt{sigB}) & PQ conf. & PQ auth. & PFS \\
 \midrule
@@ -429,11 +613,11 @@ than causing parse failures. This allows older clients to gracefully
 reject unsupported suites during negotiation.
 
 Transport/MTU considerations: handshake messages are length-prefixed and
-carried on reliable control channels (TCP or QUIC streams), so
-fragmentation is handled by the transport layer rather than by the
-handshake format itself. QUIC datagrams are reserved for latency-critical
-media frames; when datagrams are used for other payloads, senders must
-respect the maximum datagram size and chunk accordingly.
+carried on reliable control channels (TCP or QUIC streams). Fragmentation
+and reassembly are handled by transport, not by the handshake format.
+QUIC datagrams are reserved for latency-critical media frames; for other
+payload types, senders must respect the maximum datagram size and chunk
+accordingly.
 
 \subsection*{KEM-DEM Envelope}
 
@@ -589,15 +773,15 @@ allocation.
 
 \subsection*{Platform Support Matrix}
 
-\begin{table*}[!t]
+\begin{table*}[!tp]
 \centering
-\caption{Platform support matrix.}
+\caption{Platform/runtime support matrix (Apple + cross-platform runtime policy).}
 \label{tab:supp-platform-support}
 \begin{tabular}{@{}
-  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2326}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.3256}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.2791}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.1628}}@{}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.20}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.24}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.28}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.28}}@{}}
 \toprule\noalign{}
 \begin{minipage}[b]{\linewidth}\raggedright
 Platform
@@ -614,15 +798,64 @@ macOS 14--15 & OQSPQCProvider & ML-KEM-768, ML-DSA-65 & liboqs fallback \\
 macOS 14--15 & ClassicProvider & X25519, Ed25519 & If liboqs unavailable \\
 iOS 26+ & ApplePQCProvider & ML-KEM-768, ML-KEM-1024\textsuperscript{1}, ML-DSA-65, ML-DSA-87\textsuperscript{1} & Native CryptoKit \\
 iOS 17--18 & ClassicProvider & X25519, Ed25519 & liboqs not bundled \\
+Android 17+ & Runtime tier policy & X-Wing\textsuperscript{2} $\rightarrow$ ML-KEM-768 (liboqs) $\rightarrow$ X25519 & Prefer hybrid if available; fallback is evented + cooldown-limited \\
+Android 14--16 & Runtime tier policy & ML-KEM-768 (liboqs) $\rightarrow$ X25519 & PQC first, then classic fallback under policy gate \\
+Android 13 and below & Runtime tier policy & X25519, Ed25519 & Classic-only baseline \\
+Ubuntu 24--25 & Runtime tier policy & X-Wing\textsuperscript{2} $\rightarrow$ ML-KEM-768 (liboqs) $\rightarrow$ X25519 & Prefer hybrid if available; per-peer fallback cooldown enforced \\
+Ubuntu 22--23 & Runtime tier policy & ML-KEM-768 (liboqs) $\rightarrow$ X25519 & PQC first, then classic fallback under policy gate \\
+Ubuntu 20--21 & Runtime tier policy & X25519, Ed25519 & Classic-only baseline \\
 \bottomrule
 \end{tabular}
 \end{table*}
 
 \textsuperscript{1} ML-KEM-1024 and ML-DSA-87 are available in CryptoKit
-on Apple 26+ but not currently used by our implementation. X-Wing
-hybrid KEM (wireId 0x0001) is reserved for future use. Secure Enclave
-PQC keys are only available on Apple 26+; earlier versions fall back to
-software PQC and P-256 Secure Enclave PoP.
+on Apple 26+ but not currently used by our implementation.
+\textsuperscript{2} X-Wing (wireId 0x0001) is negotiated only when
+runtime/provider support is available on both peers; otherwise tiered
+fallback selects ML-KEM-768 or classic according to policy.
+
+Compatibility markers \texttt{0x0102} (ML-KEM-768-FS) and \texttt{0x1002}
+(P-256 marker) are parsed in the current Android/Ubuntu snapshot for
+forward compatibility and catalog parity, but remain non-negotiable by
+default until full end-to-end contract support is enabled.
+
+\begin{table}[!tp]
+\centering
+\scriptsize
+\caption{Cross-platform contract-consistency snapshot (\texttt{ARTIFACT\_DATE=2026-01-23}). Generated by \texttt{Scripts/check\_cross\_platform\_interop.py}.}
+\label{tab:supp-cross-platform-contract}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.44\linewidth}>{\centering\arraybackslash}p{0.10\linewidth}>{\raggedright\arraybackslash}p{0.32\linewidth}@{}}
+\toprule
+Check & Result & Notes \\
+\midrule
+Suite catalog parity (IDs 0x0001, 0x0101, 0x0102, 0x1001, 0x1002) & PASS & iOS/macOS, Android, Ubuntu aligned \\
+Wire endianness (UInt16 little-endian fields) & PASS & Encoding/decoding contract aligned \\
+Signature-selection contract (PQC $\rightarrow$ ML-DSA-65, classic $\rightarrow$ Ed25519) & PASS & Cross-platform rule alignment \\
+Timeout-triggered fallback blocked & PASS & Timeout not in default fallback gate \\
+Per-peer fallback cooldown guard & PASS & Explicit cooldown paths present \\
+Trust-pinning path & PASS & Pinned identity-fingerprint path present \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table*}[!tp]
+\centering
+\scriptsize
+\caption{Cross-platform runtime suite-policy matrix used in this revision.}
+\label{tab:supp-cross-platform-policy}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Platform range & Preferred suite order & Fallback policy note \\
+\midrule
+Android 17+ & X-Wing (if supported) $\rightarrow$ ML-KEM-768 (liboqs) $\rightarrow$ X25519 & Classic fallback requires whitelist reason + per-peer cooldown \\
+Android 14--16 & ML-KEM-768 (liboqs) $\rightarrow$ X25519 & PQC-first, classic as controlled fallback \\
+Android 13 and below & X25519 only & Classic-only baseline \\
+Ubuntu 24--25 & X-Wing (if supported) $\rightarrow$ ML-KEM-768 (liboqs) $\rightarrow$ X25519 & Classic fallback requires whitelist reason + per-peer cooldown \\
+Ubuntu 22--23 & ML-KEM-768 (liboqs) $\rightarrow$ X25519 & PQC-first, classic as controlled fallback \\
+Ubuntu 20--21 & X25519 only & Classic-only baseline \\
+\bottomrule
+\end{tabular}
+\end{table*}
 
 \subsection*{Native PQC Integration}
 
@@ -633,7 +866,11 @@ inspired by HPKE but does not implement the full RFC 9180
 specification. On Apple 26+ platforms, CryptoKit exposes HPKE cipher
 suites including X-Wing (ML-KEM-768 with X25519), enabling a
 standards-aligned replacement for our compatibility envelope. This
-layer can then be replaced with direct CryptoKit PQ-HPKE calls.
+layer can then be replaced with direct CryptoKit PQ-HPKE calls. The
+Apple provider path does not redefine the protocol contract, does not
+alter the primary evidence base of the paper, and is evaluated only as
+an implementation capability mapping under existing negotiation and
+policy semantics.
 
 \subsection*{Conditional Compilation Strategy}
 
@@ -672,9 +909,10 @@ private keys never leave the Secure Enclave.
 keys are only available on macOS 26+ via CryptoKit. On macOS 14--15, PQC
 operations fall back to liboqs (software), and Secure Enclave is used
 only for P-256 ECDSA proof-of-possession keys. When Secure Enclave PQC
-is used, the implementation relies on CryptoKit key types
-\texttt{SecureEnclave.MLDSA*} and \texttt{SecureEnclave.MLKEM*}, which are
-gated by the macOS 26+ SDK and runtime availability checks.
+is enabled, the implementation relies on CryptoKit key types
+\texttt{SecureEnclave.\allowbreak MLDSA*} and
+\texttt{SecureEnclave.\allowbreak MLKEM*}, both gated by macOS 26+ SDK
+and runtime availability checks.
 
 \subsection*{Signing Key Hierarchy}
 
@@ -769,7 +1007,8 @@ runtime through \texttt{HandshakeDriver} initialization validation.
 To support interoperability between PQC-capable and classic-only
 devices, we employ a two-attempt strategy: (1) PQC attempt with ML-DSA-65
 signatures, then (2) classic fallback with Ed25519 if the PQC attempt
-fails due to provider unavailability or suite negotiation failure. In
+fails due to provider unavailability or \emph{local pre-send}
+suite-negotiation failure. In
 particular, for a classic-only peer without a pinned PQC KEM public key
 from pairing, the PQC attempt fails locally during \texttt{MessageA}
 construction (no key shares $\rightarrow$ \texttt{suiteNegotiationFailed}),
@@ -788,20 +1027,42 @@ so fallback is immediate and is not driven by network timeout.
 \textbf{Fallback Security (default policy classic fallback):}
 Not all failures trigger default-mode classic fallback.
 
-\textbf{Allowed:}
-\begin{itemize}\tightlist
-\item \texttt{pqcProvider\allowbreak Unavailable}
-\item \texttt{suiteNot\allowbreak Supported}
-\item \texttt{suite\allowbreak Negotiation\allowbreak Failed}
-\end{itemize}
+\begin{table}[!tp]
+\centering
+\scriptsize
+\caption{Default-policy classic fallback eligibility (paired peers).}
+\label{tab:supp-default-fallback-eligibility}
+\begingroup
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{@{}p{0.33\linewidth}p{0.12\linewidth}p{0.51\linewidth}@{}}
+\toprule
+Reason code / class & Eligible? & Gate semantics and notes \\
+\midrule
+\texttt{pqcProvider\allowbreak Unavailable} & ALLOW & Local provider/API instantiation failure in the \emph{pre-send} branch; emits \texttt{crypto\allowbreak Downgrade} with reason and cooldown context. \\
+\texttt{suiteNot\allowbreak Supported} & ALLOW & Local capability mismatch in the \emph{pre-send} branch (e.g., no supported PQC suite for the peer's pinned KEM material); emits \texttt{crypto\allowbreak Downgrade}. \\
+\texttt{suite\allowbreak Negotiation\allowbreak Failed} & ALLOW (pre-send only) & Only the local \emph{pre-send} construction/selection branch is fallback-eligible; if observed after remote input it is treated as network-derived and fallback is denied. \\
+\texttt{timeout} & DENY & Explicitly blocked under default policy to prevent loss-induced downgrade. \\
+\texttt{signature\allowbreak Verification\allowbreak Failed} & DENY & After-send/network-derived; emit typed failure events only (not downgrade-labeled). \\
+\texttt{identity\allowbreak Mismatch} & DENY & After-send/network-derived; emit typed failure events only (not downgrade-labeled). \\
+\texttt{replay\allowbreak Detected} & DENY & After-send/network-derived; emit typed failure events only (not downgrade-labeled). \\
+\bottomrule
+\end{tabular}
+\endgroup
+\end{table}
 
-\textbf{Blocked:}
-\begin{itemize}\tightlist
-\item \texttt{timeout}
-\item \texttt{signature\allowbreak Verification\allowbreak Failed}
-\item \texttt{identity\allowbreak Mismatch}
-\item \texttt{replay\allowbreak Detected}
-\end{itemize}
+\noindent\textit{Local-only definition:} In this paper, ``local-only''
+means the failure is observed at the initiator-side attempt-switch
+boundary before emitting MessageA in the current attempt (i.e., before
+any on-wire handshake bytes are sent under that attempt). This prevents
+an active network attacker from converting packet loss or malformed
+inputs into a fallback-eligible condition.
+
+\noindent\textit{DoS note:} Endpoint load or resource exhaustion can
+still cause local provider instantiation to fail. We treat such cases as
+availability (DoS) rather than a secrecy failure; when fallback is
+allowed it is always explicit (downgrade-labeled), rate-limited, and
+therefore audit-visible. Deployments that must never establish classic
+business sessions should use strict Compliance Mode.
 
 Timeout-based fallback is explicitly blocked to prevent attackers from
 forcing downgrade through packet dropping. Per-peer fallback is
@@ -819,7 +1080,7 @@ as \texttt{handshake\_fallback} security events.
 
 \subsection*{ML-DSA Key Sizes}
 
-\begin{table}[!t]
+\begin{table}[!tp]
 \centering
 \caption{ML-DSA-65 Key Sizes (FIPS 204 Compliance).}
 \label{tab:supp-ml-dsa-key-sizes}
@@ -836,7 +1097,7 @@ Signature & 3309 B & 3309 B & OK \\
 
 \subsection*{Key Size Reference}
 
-\begin{table*}[!t]
+\begin{table*}[!tp]
 \centering
 \caption{Key size reference.}
 \label{tab:supp-key-size-reference}
@@ -883,7 +1144,7 @@ exercised by our current benchmark suite.
 
 \subsection*{Security Event Types}
 
-\begin{table*}[!t]
+\begin{table*}[!tp]
 \centering
 \caption{Security event types.}
 \label{tab:supp-security-event-types}
@@ -913,57 +1174,132 @@ Trigger
 \end{tabular}
 \end{table*}
 
+\subsection*{Boundary Stress Cases and Operator Runbook}
+
+\begin{table*}[!tp]
+\centering
+\caption{Boundary-stress cases: model scope, expected audit signals, and operator actions.}
+\label{tab:supp-boundary-stress}
+\begin{tabular}{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.19}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.15}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.26}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.23}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.17}}@{}}
+\toprule
+Boundary-stress case & Model status & Expected signal surface & Required operator action & Claim impact \\
+\midrule
+Pairing social engineering (user pins attacker key) & Out-of-model (pairing assumption failure) & No cryptographic alert at pairing time; later key-change conflicts may appear as \texttt{identityMismatch} & Revoke trust record, require authenticated re-pairing (QR/PIN or equivalent), quarantine previously trusted channel & Authentication claims do not apply until re-pair completes \\
+Endpoint compromise (read-only key/material exposure) & Partially out-of-model (endpoint integrity degraded) & Potential abnormal \texttt{cryptoDowngrade}\allowbreak/\allowbreak\texttt{handshakeFailed} bursts; possible forensics-only detection & Enter strict mode where feasible, rotate affected long-term keys, investigate endpoint posture before restoring trust & Secrecy claims degrade to compromise window assumptions \\
+Endpoint compromise (signing-capable attacker) & Out-of-model for protocol-level peer trust & Handshake-level signatures may still verify; compromise usually inferred from external telemetry & Immediate endpoint quarantine, key revocation/rotation, forced re-pairing for all peers & Mutual-authentication guarantees no longer hold for compromised endpoint \\
+Audit-log injection/truncation attempt on local store & In-model for integrity checking of emitted records; out-of-model for fully privileged host tamper & Hash-chain discontinuity or missing mandatory fields for downgrade events & Treat chain break as incident, preserve evidence snapshot, fail closed for automated compliance checks & Audit replayability claims hold only while logging substrate integrity assumptions hold \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+Rows marked out-of-model are not covered by theorem-level security
+claims in main-paper Section~\ref{sec:security-model}; they are included
+to make deployment response obligations explicit.
+
+\IfFileExists{supp_tables/s25_boundary_stress_empirical.tex}{\input{supp_tables/s25_boundary_stress_empirical}}{\noindent\textit{(Boundary-stress empirical table not present: run \texttt{SKYBRIDGE\_RUN\_BOUNDARY\_STRESS=1 swift test --filter SkyBridgeCoreTests.BoundaryStressBenchTests}, then \texttt{python3 Scripts/aggregate\_boundary\_stress.py --artifact-date <date>}.)}\par}
+
 \subsection*{X-Wing Wire Size (Measured)}
 
 X-Wing is a hybrid KEM combining X25519 + ML-KEM-768. In our v1
 handshake, the initiator carries only a KEM ciphertext in MessageA;
 thus X-Wing increases the MessageA keyshare from 1088~B (ML-KEM-768) to
-1120~B (X25519~32~B + ML-KEM-768~1088~B), while MessageB remains
+1216~B in the \texttt{2026-01-23} snapshot, while MessageB remains
 keyshare-free. We measure X-Wing directly via the native CryptoKit
 provider (wireId 0x0001) and report per-field sizes in Supplementary
 Table~\ref{tab:supp-message-sizes} (\texttt{MessageA.XWing}/\texttt{MessageB.XWing}),
 using the X-Wing snapshot dated \texttt{\artifactdateXWing}. The field
 breakdown is:
 \begin{itemize}\tightlist
-\item MessageA.XWing: $3309$ (signature) + $1120$ (keyshare) + $1956$
-  (identity) + $224$ (overhead) $= 6609$~B
+\item MessageA.XWing: $3309$ (signature) + $1216$ (keyshare) + $1956$
+  (identity) + $160$ (overhead) $= 6641$~B
 \item MessageB.XWing: $3309$ (signature) + $0$ (keyshare) + $1956$
-  (identity) + $245$ (overhead) $= 5510$~B
+  (identity) + $154$ (overhead) $= 5419$~B
 \item Finished: $38$~B
 \end{itemize}
-Total handshake size is \textbf{12,195~B}. Within the same snapshot, the
-PQC baseline is 12,163~B, so X-Wing adds +32~B. The +193~B delta vs the
-12,002~B baseline in the main paper reflects the +32~B keyshare and a
-snapshot delta of +161~B from earlier framing overhead.
+Total handshake size is \textbf{12,136~B}. Relative to the payload-only
+liboqs baseline (12,002~B), the +134~B delta reflects +128~B X-Wing
+keyshare expansion and +6~B framing overhead in this snapshot. The
+CryptoKit PQC payload-only baseline is 12,009~B in this snapshot
+(Supplementary Table~\ref{tab:supp-message-sizes}).
 
 \subsection*{Reproducibility}
 
 \textbf{Test Commands.}
-One-shot evaluation:
-\texttt{Scripts/\allowbreak run\_\allowbreak paper\_\allowbreak eval.sh}.
-Individual suites:
-\texttt{swift test --filter TestName}.
-Representative suite names:
+\begin{itemize}\tightlist
+\item One-shot evaluation:
+\texttt{Scripts/\allowbreak run\_\allowbreak paper\_\allowbreak eval.sh}
+\item Individual suite run:
+\texttt{swift test} with \texttt{--filter TestName}
+\item Representative suite names:
 \begin{itemize}\tightlist
 \item \texttt{HandshakeBenchmarkTests}
 \item \texttt{HandshakeFaultInjectionBenchTests}
 \item \texttt{PolicyDowngradeBenchTests}
 \item \texttt{MessageSizeSnapshotTests}
 \end{itemize}
-All CSV outputs are date-stamped under \texttt{Artifacts/}. To prevent mixing datasets across runs, set a fixed date suffix:
-\texttt{ARTIFACT\_DATE=YYYY-MM-DD} (or \texttt{SKYBRIDGE\_ARTIFACT\_DATE}).
+\item CSV outputs are date-stamped under \texttt{Artifacts/}. To pin one
+dataset, set
+\texttt{ARTIFACT\_DATE=2026-01-23} or
+\texttt{SKYBRIDGE\_ARTIFACT\_DATE=2026-01-23}.
+\end{itemize}
+
+\textbf{System-impact artifact hygiene (snapshot 2026-01-23).}
+For \texttt{Artifacts/system\_impact\_2026-01-23.csv}, we removed one duplicated
+embedded header row (a legacy append artifact) before table generation; no
+other data rows were modified. Final file summary:
+\begin{itemize}\tightlist
+\item 13{,}801 total lines (1 header + 13{,}800 data rows)
+\item Per-suite row counts consistent with benchmark design:
+\texttt{ideal}=1000, \texttt{rtt100\_j50}=1000,
+\texttt{rtt50\_j20}=2600
+\item No fully duplicated data rows were found
+\end{itemize}
 
 \textbf{Repeatability (Multi-batch).}
-Repeatability tables report observed batch count $B$ and (when $B \ge 2$) mean $\pm$ 95\% confidence intervals across independent batches.
-To reproduce multi-batch CIs, rerun with process restarts:
-\texttt{ARTIFACT\_DATE=YYYY-MM-DD SKYBRIDGE\_BENCH\_BATCHES=3--5 bash Scripts/run\_paper\_eval.sh}.
+Repeatability tables report observed batch count $B$ and
+(when $B \ge 2$) mean $\pm$ 95\% confidence intervals across independent
+batches. To reproduce multi-batch CIs, rerun with process restarts:
+\texttt{ARTIFACT\_DATE=2026-01-23}
+\texttt{SKYBRIDGE\_BENCH\_BATCHES=3--5}
+\texttt{bash Scripts/\allowbreak run\_\allowbreak paper\_\allowbreak eval.sh}.
 
 \textbf{Real-network micro-study (External validity).}
-We provide two lightweight scripts:
-(i) \texttt{Scripts/run\_real\_network\_probe.swift} (STUN RTT + conservative NAT classification),
-and (ii) \texttt{Scripts/run\_real\_network\_e2e.swift} (TCP connect + first-byte + completion timing for a 12~kB-class payload).
-Pin filenames with \texttt{ARTIFACT\_DATE=YYYY-MM-DD}, run them across labels (same Wi-Fi / cross-NAT / hotspot), then aggregate into a Supplementary table via:
-\texttt{python3 Scripts/aggregate\_realnet.py}.
+We use two lightweight scripts:
+\begin{itemize}\tightlist
+\item \texttt{Scripts/\allowbreak run\_\allowbreak real\_\allowbreak network\_\allowbreak probe.swift}:
+STUN RTT + conservative NAT classification
+\item \texttt{Scripts/\allowbreak run\_\allowbreak real\_\allowbreak network\_\allowbreak e2e.swift}:
+TCP connect + first-byte + completion timing for payload-only handshake
+baselines (classic 687~B; PQC 12{,}002~B liboqs / 12{,}009~B CryptoKit; transport uses a fixed 4-byte length prefix)
+\end{itemize}
+Pin filenames with \texttt{ARTIFACT\_DATE=2026-01-23}, run across labels
+(same Wi-Fi / cross-NAT / hotspot), then aggregate with
+\texttt{python3 Scripts/\allowbreak aggregate\_\allowbreak realnet.py}.
+
+\textbf{iOS on-device microbench import.}
+Run the iOS app path
+\texttt{Settings} $\rightarrow$ \texttt{PQC} $\rightarrow$
+\texttt{Self-test/Bench} (warmup=10, N=1000, B=3). Export:
+\begin{itemize}\tightlist
+\item \texttt{ios\_microbench\_<date>\_ipad16\_3.json}
+\item \texttt{ios\_microbench\_<date>\_iphone17\_1.json}
+\end{itemize}
+Use \texttt{<date>=2026-01-23} for the frozen artifact snapshot.
+Place files under \texttt{Artifacts/}, then run
+\texttt{python3 Scripts/\allowbreak aggregate\_\allowbreak ios\_\allowbreak microbench.py}.
+
+\textbf{Kernel-level emulation cross-check.}
+Run \texttt{Scripts/\allowbreak run\_\allowbreak network\_\allowbreak emulation\_\allowbreak kernel.sh}
+(requires sudo/network-admin capability), then aggregate with
+\texttt{python3 Scripts/\allowbreak aggregate\_\allowbreak kernel\_\allowbreak emulation.py}.
+Shared profile IDs come from
+\texttt{Scripts/\allowbreak netem\_\allowbreak profiles.json}; reorder is
+netem-only and dummynet entries are marked \textit{n/a}.
 
 \textbf{Note on inbound reachability.}
 Some home networks do not provide an inbound-reachable IPv4 address (e.g., double NAT behind an ISP router, CGNAT, DS-Lite, or WAN IPv4 shown as \texttt{0.0.0.0}). In these cases, IPv4 port-forwarding experiments will fail (client samples report \texttt{timeout} with empty \texttt{connect\_ms}). For a true cross-NAT condition without modifying upstream equipment, prefer IPv6 direct connectivity (when available) with an explicit IPv6 firewall allow-rule for TCP \texttt{44444}. If only an overlay/relay path is feasible, label the condition accordingly (e.g., \texttt{cross\_nat\_via\_relay}) and interpret results as overlay-mediated connectivity rather than raw Internet inbound reachability.
@@ -984,34 +1320,100 @@ compile-fail harness tests correctly produce compile errors.
 (4) Legacy P-256 requires authenticated channel or existing TrustRecord;
 (5) All fallback and legacy acceptance events include full audit context.
 
+\textbf{SOA-specific regression extension (this revision):}
+we additionally run \texttt{SOAInteroperabilityBenchTests}
+(\texttt{N=100} per row) to verify deterministic concurrent-open
+arbitration, authenticated supersede binding checks, established-guard
+release semantics, supersede rate limiting, and legacy/new MessageA
+compatibility with raw TLV passthrough
+(\path{Artifacts/soa_interop_2026-02-22.csv}).
+
+\subsection*{Formal-to-Code Traceability}
+
+\begin{table*}[!tp]
+\centering
+\scriptsize
+\caption{Formal-to-code traceability for theorem-facing migration guarantees.}
+\label{tab:supp-formal-code-traceability}
+\begin{tabular}{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.24}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.24}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.30}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.22}}@{}}
+\toprule
+Formal claim / lemma & Model events & Implementation anchor & Artifact/check anchor \\
+\midrule
+`TimeoutCannotTriggerClassicFallback` & \texttt{TimeoutObserved} + \texttt{FallbackDenied(timeout)} & \path{Sources/SkyBridgeCore/P2P/TwoAttemptHandshakeManager.swift} (timeout deny path and fallback blacklist) & \path{Artifacts/migration_threat_harness_2026-01-23.csv} (timeout attack rows); Fig.~\ref{fig:downgrade-matrix} \\
+`FallbackRateLimitEnforced` & \texttt{CooldownChecked} + \texttt{CooldownPermit} & \path{Sources/SkyBridgeCore/P2P/TwoAttemptHandshakeManager.swift} (per-peer cooldown gate) & \path{Artifacts/migration_fleet_behavior_2026-01-23.csv}; Table~\ref{tab:migration-fleet-behavior} \\
+`DowngradeEventRequiredWithContext` & \texttt{DowngradeEventCtx} & \path{Sources/SkyBridgeCore/Security/SecurityEventEmitter.swift} + \path{Sources/SkyBridgeCore/P2P/TwoAttemptHandshakeManager.swift} (downgrade event fields) & \path{Artifacts/migration_threat_harness_2026-01-23.csv} (ECR/PCR); Table~\ref{tab:ablation-by-property} \\
+`BootstrapControlOnlyUntilPQCRekey` & \texttt{BootstrapControlChannel}, \texttt{BusinessTrafficBlocked}, \texttt{PQCRekeyCompleted}, \texttt{BusinessTrafficEnabled} & \path{Sources/SkyBridgeCore/P2P/TwoAttemptHandshakeManager.swift} + \path{Sources/SkyBridgeCore/P2P/HandshakeDriver.swift} (strict bootstrap/rekey gating) & \path{formal/skybridge_v2.spthy}; \path{Artifacts/tamarin_skybridge_v2_summary_2026-01-23.txt} \\
+`ConcurrentOpenSingleFlight` & \texttt{SupersedeAccepted} + \texttt{LocalWinnerRetained} & \path{Sources/SkyBridgeCore/P2P/PeerSessionArbiter.swift} + \path{Sources/SkyBridgeCore/P2P/HandshakeDriver.swift} (byte-ordered tuple arbitration) & \path{Artifacts/soa_interop_2026-02-22.csv}; Table~\ref{tab:soa-interop} \\
+`AuthenticatedSupersedeBinding` & \texttt{BindingCheckPassed} & \path{Sources/SkyBridgeCore/P2P/HandshakeDriver.swift} + \path{Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift} (signature-first + canonical pair binding) & \path{Artifacts/soa_interop_2026-02-22.csv} (forged-target row); Table~\ref{tab:soa-interop} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection*{Extended Future Directions}
+
+Moved from main paper Sec. 8.2 due to page limit.
+
+\begin{enumerate}
+\setcounter{enumi}{3}
+\item
+  \textbf{Traffic Analysis Mitigations:} Reduce two-attempt
+  identifiability via optional padding or constant-size framing, while
+  preserving strict Compliance-Mode semantics for deployments that
+  require zero classic establishment.
+\item
+  \textbf{Real-Network and Kernel-Emulation Expansion:} Extend the
+  current micro-study and kernel cross-check to larger cohorts, more ISP
+  topologies, and longer sessions; compare TCP vs QUIC control channels
+  under matched profile IDs and evaluate stability over multi-day runs.
+  Immediate targets are to add at least one additional non-overlay
+  real-network labels and to calibrate dummynet profile separation with
+  non-localhost endpoints plus independent packet-capture validation.
+\item
+  \textbf{Formal Verification:} Apply model checking to the handshake
+  state machine to prove absence of deadlocks and race conditions.
+\item
+  \textbf{Performance Optimization:} Profile ML-KEM-768 encapsulation
+  latency and explore hardware acceleration opportunities.
+\item
+  \textbf{Certificate-Based Identity:} Integrate with device
+  certificates for enterprise deployment scenarios.
+\end{enumerate}
+
 \subsection*{Artifact Map}
 
 Table~\ref{tab:artifact-map} maps implementation components to source
 files in the artifact repository (\href{\artifacturl}{\artifacturlshort},
 ref=\texttt{\artifacttag}, commit=\texttt{\artifactsha}).
 
-\begin{table}[!t]
+\begin{table}[!ht]
 \centering
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{0.95}
 \caption{Implementation artifact map.}
 \label{tab:artifact-map}
-\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.35\columnwidth}>{\raggedright\arraybackslash\footnotesize}p{0.58\columnwidth}@{}}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.28\linewidth}>{\raggedright\arraybackslash}p{0.68\linewidth}@{}}
 \toprule
 Component & File (Lines) \\
 \midrule
-Provider Protocol & {\scriptsize\path{Sources/SkyBridgeCore/P2P/CryptoProviderProtocol.swift}} (L24--113) \\
-Handshake Types & {\scriptsize\path{Sources/SkyBridgeCore/P2P/HandshakeTypes.swift}} (L297--320) \\
-Provider Factory & {\scriptsize\path{Sources/SkyBridgeCore/P2P/CryptoProviderFactory.swift}} (L18--179) \\
-Handshake Driver & {\scriptsize\path{Sources/SkyBridgeCore/P2P/HandshakeDriver.swift}} (L258--338, L1042--1145) \\
-Handshake Context & {\scriptsize\path{Sources/SkyBridgeCore/P2P/HandshakeContext.swift}} (L27--100, L862--933) \\
-Secure Bytes & {\scriptsize\path{Sources/SkyBridgeCore/P2P/SecureBytes.swift}} (L25--99) \\
-Message Signatures & {\scriptsize\path{Sources/SkyBridgeCore/P2P/HandshakeMessages.swift}} (L557--569, L801--821) \\
-Apple PQC Provider & {\scriptsize\path{Sources/SkyBridgeCore/P2P/Providers/ApplePQCProvider.swift}} (L27--152) \\
-Security Events & {\scriptsize\path{Sources/SkyBridgeCore/Security/SecurityEventEmitter.swift}} (L22--136) \\
-SE Signing & {\scriptsize\path{Sources/SkyBridgeCore/P2P/SecureEnclaveSigningCallback.swift}} (L40--94) \\
-Signature Selector & {\scriptsize\path{Sources/SkyBridgeCore/P2P/PreNegotiationSignatureSelector.swift}} (L69--96) \\
-Route-Aware Discovery & {\scriptsize\path{Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift}} (L278--457) \\
-Connection State Guarding & {\scriptsize\path{Sources/SkyBridgeCore/DeviceDiscovery/UnifiedOnlineDeviceManager.swift}} (L940--989) \\
-Active Transfer Route Selection & {\scriptsize\path{Sources/SkyBridgeCore/FileTransfer/FileTransferManager.swift}} (L104--213) \\
+Provider Protocol & \path{Sources/SkyBridgeCore/P2P/CryptoProviderProtocol.swift} (L24--113) \\
+Handshake Types & \path{Sources/SkyBridgeCore/P2P/HandshakeTypes.swift} (L297--320) \\
+Provider Factory & \path{Sources/SkyBridgeCore/P2P/CryptoProviderFactory.swift} (L18--179) \\
+Handshake Driver & \path{Sources/SkyBridgeCore/P2P/HandshakeDriver.swift} (L258--338, L1042--1145) \\
+Handshake Context & \path{Sources/SkyBridgeCore/P2P/HandshakeContext.swift} (L27--100, L862--933) \\
+Secure Bytes & \path{Sources/SkyBridgeCore/P2P/SecureBytes.swift} (L25--99) \\
+Message Signatures & \path{Sources/SkyBridgeCore/P2P/HandshakeMessages.swift} (L557--569, L801--821) \\
+Apple PQC Provider & \path{Sources/SkyBridgeCore/P2P/Providers/ApplePQCProvider.swift} (L27--152) \\
+Security Events & \path{Sources/SkyBridgeCore/Security/SecurityEventEmitter.swift} (L22--136) \\
+SE Signing & \path{Sources/SkyBridgeCore/P2P/SecureEnclaveSigningCallback.swift} (L40--94) \\
+Signature Selector & \path{Sources/SkyBridgeCore/P2P/PreNegotiationSignatureSelector.swift} (L69--96) \\
+Route-Aware Discovery & \path{Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift} (L278--457) \\
+Connection State Guarding & \path{Sources/SkyBridgeCore/DeviceDiscovery/UnifiedOnlineDeviceManager.swift} (L940--989) \\
+Active Transfer Route Selection & \path{Sources/SkyBridgeCore/FileTransfer/FileTransferManager.swift} (L104--213) \\
 \bottomrule
 \end{tabular}
 \end{table}

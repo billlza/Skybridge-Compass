@@ -11,21 +11,46 @@ public struct AuthSession: Codable, Hashable, Sendable {
     public let refreshToken: String?
  /// 唯一的用户标识。
     public let userIdentifier: String
- /// 当前登录用户的展示名称。
+/// 规范化的 Nebula ID（若会话来源提供）。
+    public let nebulaId: String?
+/// 当前登录用户的展示名称。
     public let displayName: String
- /// 会话创建时间，便于判断过期策略。
+/// 已经由服务端确认并可回读的头像 URL。
+    public let avatarURL: String?
+/// 会话创建时间，便于判断过期策略。
     public let issuedAt: Date
 
     public init(accessToken: String,
                 refreshToken: String?,
                 userIdentifier: String,
+                nebulaId: String? = nil,
                 displayName: String,
+                avatarURL: String? = nil,
                 issuedAt: Date = Date()) {
         self.accessToken = accessToken
         self.refreshToken = refreshToken
         self.userIdentifier = userIdentifier
+        self.nebulaId = nebulaId
         self.displayName = displayName
+        self.avatarURL = avatarURL
         self.issuedAt = issuedAt
+    }
+
+    public var isAuthenticatedForProtectedServices: Bool {
+        let token = accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !token.isEmpty
+            && token != "guest_token"
+            && token != "pending_verification"
+    }
+}
+
+/// 远程可视会话的交互边界。
+public enum RemoteSessionKind: String, Codable, Hashable, Sendable {
+    case interactiveDesktop
+    case readOnlyCamera
+
+    public var supportsRemoteInput: Bool {
+        self == .interactiveDesktop
     }
 }
 
@@ -34,6 +59,7 @@ public struct RemoteSessionSummary: Identifiable, Hashable, Sendable {
     public let id: UUID
     public let targetName: String
     public let protocolDescription: String
+    public let kind: RemoteSessionKind
     public let bandwidthMbps: Double
     public let frameLatencyMilliseconds: Double
  /// 会话连接状态（统一来源于管理器）
@@ -43,6 +69,7 @@ public struct RemoteSessionSummary: Identifiable, Hashable, Sendable {
         id: UUID,
         targetName: String,
         protocolDescription: String,
+        kind: RemoteSessionKind = .interactiveDesktop,
         bandwidthMbps: Double,
         frameLatencyMilliseconds: Double,
         status: SessionStatus
@@ -50,6 +77,7 @@ public struct RemoteSessionSummary: Identifiable, Hashable, Sendable {
         self.id = id
         self.targetName = targetName
         self.protocolDescription = protocolDescription
+        self.kind = kind
         self.bandwidthMbps = bandwidthMbps
         self.frameLatencyMilliseconds = frameLatencyMilliseconds
         self.status = status
@@ -67,6 +95,7 @@ public enum SessionStatus: String, Codable, Hashable, Sendable {
 /// 设备连接方式
 public enum DeviceConnectionType: String, Codable, Hashable, Sendable, CaseIterable {
     case wifi = "Wi-Fi"
+    case cellular = "蜂窝"
     case ethernet = "有线"
     case usb = "USB"
     case thunderbolt = "雷雳"
@@ -78,6 +107,8 @@ public enum DeviceConnectionType: String, Codable, Hashable, Sendable, CaseItera
         switch self {
         case .wifi:
             return "wifi"
+        case .cellular:
+            return "antenna.radiowaves.left.and.right"
         case .ethernet:
             return "cable.connector.horizontal"
         case .usb:
@@ -96,6 +127,8 @@ public enum DeviceConnectionType: String, Codable, Hashable, Sendable, CaseItera
         switch self {
         case .wifi:
             return "blue"
+        case .cellular:
+            return "green"
         case .ethernet:
             return "orange"
         case .usb:
@@ -107,6 +140,157 @@ public enum DeviceConnectionType: String, Codable, Hashable, Sendable, CaseItera
         case .unknown:
             return "gray"
         }
+    }
+}
+
+/// 当前设备对外广播的网络链路状态。
+///
+/// `signalStrength` 使用 0...1 的归一化真实测量值；若来源提供 RSSI，则保留在 `rssi`
+/// 并由展示层按 Wi-Fi RSSI 范围换算成信号格。没有真实测量值时保持 nil。
+public struct DeviceNetworkLinkStatus: Codable, Hashable, Sendable {
+    public enum Kind: String, Codable, Hashable, Sendable {
+        case wifi
+        case cellular
+        case ethernet
+        case unknown
+
+        public var connectionType: DeviceConnectionType {
+            switch self {
+            case .wifi:
+                return .wifi
+            case .cellular:
+                return .cellular
+            case .ethernet:
+                return .ethernet
+            case .unknown:
+                return .unknown
+            }
+        }
+    }
+
+    public let kind: Kind
+    public let radioAccessTechnology: String?
+    public let signalStrength: Double?
+    public let rssi: Int?
+
+    public init(
+        kind: Kind,
+        radioAccessTechnology: String? = nil,
+        signalStrength: Double? = nil,
+        rssi: Int? = nil
+    ) {
+        self.kind = kind
+        self.radioAccessTechnology = Self.sanitizedRadioAccessTechnology(radioAccessTechnology)
+        self.signalStrength = Self.normalizedSignalStrength(signalStrength)
+        self.rssi = rssi
+    }
+
+    public var connectionType: DeviceConnectionType {
+        kind.connectionType
+    }
+
+    public var displayLabel: String {
+        switch kind {
+        case .wifi:
+            return "Wi-Fi"
+        case .cellular:
+            return radioAccessTechnology ?? "蜂窝"
+        case .ethernet:
+            return "以太网"
+        case .unknown:
+            return radioAccessTechnology ?? "未知"
+        }
+    }
+
+    public var iconName: String {
+        switch kind {
+        case .wifi:
+            return "wifi"
+        case .cellular:
+            return "antenna.radiowaves.left.and.right"
+        case .ethernet:
+            return "cable.connector.horizontal"
+        case .unknown:
+            return "questionmark.circle"
+        }
+    }
+
+    public var normalizedSignalStrength: Double? {
+        if let signalStrength {
+            return signalStrength
+        }
+        guard let rssi else { return nil }
+        return Self.normalizedRSSI(rssi)
+    }
+
+    public var advertisementFields: [String: String] {
+        var fields: [String: String] = [
+            "linkKind": kind.rawValue,
+            "networkType": kind.rawValue
+        ]
+        if let radioAccessTechnology {
+            fields["radioAccessTechnology"] = radioAccessTechnology
+            fields["cellularTechnology"] = radioAccessTechnology
+        }
+        if let signalStrength {
+            fields["signalStrength"] = Self.formatSignalFraction(signalStrength)
+            fields["signalUnit"] = "fraction"
+        }
+        if let rssi {
+            fields["rssi"] = String(rssi)
+            fields["signalUnit"] = "dbm"
+        }
+        return fields
+    }
+
+    public static func kind(fromAdvertisement raw: String?) -> Kind? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !raw.isEmpty else {
+            return nil
+        }
+        switch raw {
+        case "wifi", "wi-fi", "wlan", "awdl":
+            return .wifi
+        case "cellular", "cell", "mobile", "wwan", "4g", "5g", "lte", "5guw", "5g uw":
+            return .cellular
+        case "ethernet", "wired", "wire", "lan":
+            return .ethernet
+        default:
+            return .unknown
+        }
+    }
+
+    public static func normalizedSignalStrength(_ raw: Double?) -> Double? {
+        guard let raw, raw.isFinite else { return nil }
+        let fraction = raw > 1.0 ? raw / 100.0 : raw
+        return min(1.0, max(0.0, fraction))
+    }
+
+    public static func normalizedRSSI(_ rssi: Int) -> Double {
+        let minRSSI = -100.0
+        let maxRSSI = -30.0
+        let clamped = min(maxRSSI, max(minRSSI, Double(rssi)))
+        return (clamped - minRSSI) / (maxRSSI - minRSSI)
+    }
+
+    private static func sanitizedRadioAccessTechnology(_ raw: String?) -> String? {
+        guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        let allowed = value.unicodeScalars.allSatisfy { scalar in
+            CharacterSet.alphanumerics.contains(scalar)
+                || CharacterSet.whitespaces.contains(scalar)
+                || scalar == UnicodeScalar("-")
+                || scalar == UnicodeScalar("_")
+        }
+        guard allowed else { return nil }
+        let collapsed = value.replacingOccurrences(of: "_", with: " ")
+        return collapsed.uppercased()
+    }
+
+    private static func formatSignalFraction(_ value: Double) -> String {
+        String(format: "%.3f", min(1.0, max(0.0, value)))
     }
 }
 
@@ -126,14 +310,23 @@ public struct DiscoveredDevice: Identifiable, Hashable, Sendable {
     public private(set) var name: String
     public private(set) var ipv4: String?
     public private(set) var ipv6: String?
+    public var platformName: String?
+    public var osVersion: String?
+    public var modelName: String?
+    public var chip: String?
     public var services: [String]
     public var portMap: [String: Int]
+    public var remoteVideoFormats: Set<String>
  /// 设备连接方式集合（一台设备可能有多种连接方式）
     public var connectionTypes: Set<DeviceConnectionType>
  /// 设备唯一标识符（用于去重，如序列号、MAC地址等）
     public var uniqueIdentifier: String?
- /// 链路强度（0-100），来源于真实测量（RSSI或RTT映射）
+ /// 真实可拨路由标识符（例如 Bonjour service instance），与稳定身份分开保存。
+    public var routeIdentifiers: [String]
+ /// 链路强度（0-100），仅来源于已发布或已认证的链路元数据；未知时保持 nil。
     public var signalStrength: Double?
+ /// 对端声明的真实网络链路状态；没有公开/协议来源时保持 nil，不做猜测。
+    public var networkLinkStatus: DeviceNetworkLinkStatus?
  /// 设备来源（默认 unknown，不断断逻辑化）
     public var source: DeviceSource = DeviceSource.unknown
  /// 是否为本机设备（只读对外，内部唯一写入点 _setIsLocalInternal）
@@ -152,11 +345,18 @@ public struct DiscoveredDevice: Identifiable, Hashable, Sendable {
         name: String,
         ipv4: String?,
         ipv6: String?,
+        platformName: String? = nil,
+        osVersion: String? = nil,
+        modelName: String? = nil,
+        chip: String? = nil,
         services: [String],
         portMap: [String: Int],
+        remoteVideoFormats: Set<String> = [],
         connectionTypes: Set<DeviceConnectionType> = [DeviceConnectionType.unknown],
         uniqueIdentifier: String? = nil,
+        routeIdentifiers: [String] = [],
         signalStrength: Double? = nil,
+        networkLinkStatus: DeviceNetworkLinkStatus? = nil,
         source: DeviceSource = DeviceSource.unknown,
         isLocalDevice: Bool = false,
         deviceId: String? = nil,
@@ -167,11 +367,18 @@ public struct DiscoveredDevice: Identifiable, Hashable, Sendable {
         self.name = name
         self.ipv4 = ipv4
         self.ipv6 = ipv6
+        self.platformName = platformName
+        self.osVersion = osVersion
+        self.modelName = modelName
+        self.chip = chip
         self.services = services
         self.portMap = portMap
+        self.remoteVideoFormats = remoteVideoFormats
         self.connectionTypes = connectionTypes
         self.uniqueIdentifier = uniqueIdentifier
+        self.routeIdentifiers = Self.normalizedRouteIdentifiers(routeIdentifiers)
         self.signalStrength = signalStrength
+        self.networkLinkStatus = networkLinkStatus
         self.source = source
         self.isLocalDevice = isLocalDevice
         self.deviceId = deviceId
@@ -182,6 +389,36 @@ public struct DiscoveredDevice: Identifiable, Hashable, Sendable {
  /// 内部唯一写口（DiscoveryManager 调用）
     public mutating func _setIsLocalInternal(_ v: Bool) {
         self.isLocalDevice = v
+    }
+
+    public mutating func mergeRouteIdentifiers(_ identifiers: [String]) {
+        routeIdentifiers = Self.mergedRouteIdentifiers(routeIdentifiers, identifiers)
+    }
+
+    /// Strong identity and real dial-route aliases used to resolve an authenticated peer.
+    /// The local discovery record UUID is intentionally excluded because it is not a peer identity.
+    public var connectionRouteCandidates: [String] {
+        Self.mergedRouteIdentifiers(
+            [deviceId, uniqueIdentifier].compactMap { $0 },
+            routeIdentifiers + [ipv4, ipv6].compactMap { $0 }
+        )
+    }
+
+    public static func mergedRouteIdentifiers(_ lhs: [String], _ rhs: [String]) -> [String] {
+        var merged: [String] = []
+        var seen = Set<String>()
+        for routeIdentifier in lhs + rhs {
+            let trimmed = routeIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let key = trimmed.lowercased()
+            guard seen.insert(key).inserted else { continue }
+            merged.append(trimmed)
+        }
+        return merged
+    }
+
+    private static func normalizedRouteIdentifiers(_ identifiers: [String]) -> [String] {
+        mergedRouteIdentifiers([], identifiers)
     }
     
  /// 公开唯一写口（供 DiscoveryManager 调用）
@@ -208,6 +445,7 @@ public struct DiscoveredDevice: Identifiable, Hashable, Sendable {
         if connectionTypes.contains(.ethernet) { return .ethernet }
         if connectionTypes.contains(.usb) { return .usb }
         if connectionTypes.contains(.wifi) { return .wifi }
+        if connectionTypes.contains(.cellular) { return .cellular }
         if connectionTypes.contains(.bluetooth) { return .bluetooth }
         return DeviceConnectionType.unknown
     }

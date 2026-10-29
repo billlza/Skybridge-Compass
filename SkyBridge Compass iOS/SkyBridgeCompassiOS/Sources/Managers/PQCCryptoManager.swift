@@ -1,0 +1,661 @@
+//
+// PQCCryptoManager.swift
+// SkyBridgeCompassiOS
+//
+// PQC 加密管理器 - 后量子密码学加密管理
+// 使用 CryptoProvider 架构，与 macOS 完全兼容
+//
+
+import Foundation
+import SkyBridgeProtocolCore
+import CryptoKit
+import Security
+
+public enum PQCProviderPreference: String, CaseIterable, Identifiable, Sendable, Equatable {
+    case mlkem
+    case xwingHybrid
+    case qPeriaptBeta
+
+    public var id: String { rawValue }
+}
+
+public struct PQCProviderAvailability: Sendable, Equatable {
+    public let isAvailable: Bool
+    public let detail: String
+
+    public init(isAvailable: Bool, detail: String) {
+        self.isAvailable = isAvailable
+        self.detail = detail
+    }
+}
+
+/// PQC 加密管理器 - 后量子密码学加密管理
+/// 使用 ML-KEM-768 (Kyber) 和 ML-DSA-65 (Dilithium) 算法
+@available(iOS 17.0, *)
+@MainActor
+public class PQCCryptoManager: ObservableObject {
+    public static let instance = PQCCryptoManager()
+    private var applyingProviderPreference = false
+    
+    // MARK: - Published Properties
+    
+    @Published public var hasKeyPair: Bool = false
+    @Published public var keyGenerationDate: Date?
+    @Published public var enforcePQCHandshake: Bool = true {
+        didSet {
+            // "Enforce PQC" is defined as strictPQC in the paper (no classic fallback).
+            // Keep the UI + behavior consistent: turning this on force-disables classic fallback.
+            if enforcePQCHandshake {
+                allowClassicFallbackForCompatibility = false
+            }
+        }
+    }
+    /// 兼容旧设备：允许在 PQC 握手失败时回退 classic（不推荐；论文/26.2 默认关闭）
+    @Published public var allowClassicFallbackForCompatibility: Bool = false {
+        didSet {
+            if allowClassicFallbackForCompatibility {
+                allowClassicFallbackForCompatibility = false
+            }
+            UserDefaults.standard.set(false, forKey: "pqc_allow_classic_fallback")
+        }
+    }
+    @Published public var autoKeyRotation: Bool = false
+    @Published public var keyRotationDays: Int = 30
+    @Published public private(set) var currentTier: CryptoTier = .classic
+    @Published public private(set) var currentSuite: CryptoSuite = .x25519Ed25519
+    
+    // MARK: - Private Properties
+    
+    /// 当前使用的 CryptoProvider
+    private var cryptoProvider: any CryptoProvider
+    
+    /// KEM 密钥对
+    private var kemPrivateKey: SecureBytes?
+    private var kemPublicKey: Data?
+    
+    /// 签名密钥对
+    private var signingPrivateKey: SecureBytes?
+    private var signingPublicKey: Data?
+    
+    // Keychain 存储（统一使用 Core/Security/KeychainManager.swift）
+    
+    private let keychainManager = KeychainManager.shared
+    private var keychainLoadError: Error?
+    
+    private init() {
+        // 初始化 CryptoProvider
+        self.cryptoProvider = CryptoProviderFactory.make(policy: Self.selectionPolicy(enforcePQC: true, allowClassicFallbackForCompatibility: false))
+        self.currentTier = cryptoProvider.tier
+        self.currentSuite = cryptoProvider.activeSuite
+        
+        do {
+            try loadKeysFromKeychain()
+        } catch {
+            keychainLoadError = error
+            SkyBridgeLogger.shared.error("❌ PQC Keychain 密钥加载失败: \(error.localizedDescription)")
+        }
+        UserDefaults.standard.set(false, forKey: "pqc_allow_classic_fallback")
+        allowClassicFallbackForCompatibility = false
+    }
+    
+    // MARK: - Public Methods
+    
+    /// 初始化 PQC 系统
+    public func initialize() async throws {
+        // 重新检测能力并选择最佳 Provider
+        let selectedProvider = CryptoProviderFactory.make(policy: Self.selectionPolicy(
+            enforcePQC: enforcePQCHandshake,
+            allowClassicFallbackForCompatibility: allowClassicFallbackForCompatibility
+        ))
+        clearInMemoryKeyMaterial()
+        self.cryptoProvider = selectedProvider
+        self.currentTier = selectedProvider.tier
+        self.currentSuite = selectedProvider.activeSuite
+        self.keychainLoadError = nil
+
+        do {
+            try loadKeysFromKeychain()
+        } catch {
+            self.keychainLoadError = error
+            throw error
+        }
+        
+        if !hasKeyPair {
+            try await generateKeyPair()
+        }
+        
+        SkyBridgeLogger.shared.info("✅ PQC 加密系统已初始化 (Tier: \(currentTier.rawValue), Suite: \(currentSuite.rawValue))")
+    }
+
+    public static func currentProviderPreference(
+        userDefaults: UserDefaults = .standard
+    ) -> PQCProviderPreference {
+        if userDefaults.bool(forKey: PQCProviderPreferenceStorageKeys.preferQPeriaptBeta) {
+            return .qPeriaptBeta
+        }
+        if userDefaults.bool(forKey: PQCProviderPreferenceStorageKeys.preferXWingHybrid) {
+            return .xwingHybrid
+        }
+        return .mlkem
+    }
+
+    public func providerAvailability(
+        _ preference: PQCProviderPreference
+    ) -> PQCProviderAvailability {
+        let capability = CryptoProviderFactory.detectCapability()
+        let qPeriaptOSAvailable: Bool
+        if #available(iOS 26.0, *) {
+            qPeriaptOSAvailable = true
+        } else {
+            qPeriaptOSAvailable = false
+        }
+        let qPeriaptIdentityEligible =
+            (try? ProtocolSigningIdentityPolicy.requiredConfiguration())?
+                .algorithm == .mlDSA65
+        return Self.providerAvailability(
+            preference,
+            capability: capability,
+            qPeriaptOSAvailable: qPeriaptOSAvailable,
+            qPeriaptIdentityEligible: qPeriaptIdentityEligible
+        )
+    }
+
+    internal static func providerAvailability(
+        _ preference: PQCProviderPreference,
+        capability: CryptoProviderFactory.Capability,
+        qPeriaptOSAvailable: Bool,
+        qPeriaptIdentityEligible: Bool
+    ) -> PQCProviderAvailability {
+        switch preference {
+        case .mlkem:
+            let available = capability.hasApplePQC || capability.hasLiboqs
+            return PQCProviderAvailability(
+                isAvailable: available,
+                detail: available
+                    ? "可用；优先 Apple ML-KEM，必要时使用已编译的 liboqs"
+                    : "不可用；当前构建没有 Apple PQC 或 liboqs runtime"
+            )
+        case .xwingHybrid:
+            return PQCProviderAvailability(
+                isAvailable: capability.hasAppleXWing,
+                detail: capability.hasAppleXWing
+                    ? "可用；Apple X-Wing runtime 自检通过"
+                    : "不可用；需要 iOS 26+、HAS_APPLE_PQC_SDK 与 X-Wing runtime 自检通过"
+            )
+        case .qPeriaptBeta:
+            guard qPeriaptOSAvailable else {
+                return PQCProviderAvailability(
+                    isAvailable: false,
+                    detail: "不可用；Q-Periapt ABI2 需要 iOS 26+"
+                )
+            }
+            guard qPeriaptIdentityEligible else {
+                return PQCProviderAvailability(
+                    isAvailable: false,
+                    detail: "不可用；请先应用 ML-DSA-65 主协议身份"
+                )
+            }
+            return PQCProviderAvailability(
+                isAvailable: true,
+                detail: "可配置；应用时必须通过签名策略、Keychain CAS 与原生 ABI2 自检"
+            )
+        }
+    }
+
+    /// Applies one exclusive provider preference and proves that it became
+    /// active. Failed selection restores both the durable preference and the
+    /// previous runtime so settings cannot claim a provider that is not in use.
+    public func applyProviderPreference(_ preference: PQCProviderPreference,
+                                        expectedRevision: String? = nil,
+                                        isBusy: @MainActor () -> Bool = { false },
+                                        revalidate: HandshakeConfigurationService.Revalidate = {}) async throws {
+        guard !applyingProviderPreference else { throw HandshakeConfigurationError.busy }
+        guard !isBusy() else { throw HandshakeConfigurationError.transferActive }
+        applyingProviderPreference = true
+        defer { applyingProviderPreference = false }
+        if let expectedRevision, try handshakeConfigurationSnapshot().revision != expectedRevision {
+            throw HandshakeConfigurationError.revisionChanged
+        }
+        if preference == .qPeriaptBeta {
+            let identityConfiguration = try ProtocolSigningIdentityPolicy.requiredConfiguration()
+            guard identityConfiguration.algorithm == .mlDSA65 else {
+                throw PQCProviderPreferenceError.qPeriaptRequiresMLDSA65
+            }
+            guard try await QPeriaptIOSRuntime.prepareProductionSession() == .activated else {
+                throw PQCProviderPreferenceError.requestedProviderUnavailable(preference)
+            }
+        }
+
+        try Task.checkCancellation()
+        try await revalidate()
+        guard !isBusy() else { throw HandshakeConfigurationError.transferActive }
+        if let expectedRevision, try handshakeConfigurationSnapshot().revision != expectedRevision {
+            throw HandshakeConfigurationError.revisionChanged
+        }
+        let previousPolicy = try PQCModePolicyStore.standard.snapshot()
+        let modePreference: PQCModeSelection.Preference = preference == .qPeriaptBeta ? .qperiapt : (preference == .xwingHybrid ? .xwing : .mlkem)
+        _ = try PQCModePolicyStore.standard.setPreference(modePreference)
+        do {
+            try await initialize()
+            guard Self.activeProviderMatches(
+                preference,
+                tier: currentTier,
+                suite: currentSuite
+            ) else {
+                throw PQCProviderPreferenceError.requestedProviderUnavailable(preference)
+            }
+        } catch {
+            let applyErrorClass = String(reflecting: Swift.type(of: error))
+            _ = try PQCModePolicyStore.standard.setPreference(previousPolicy.selection.preference)
+            do {
+                try await initialize()
+            } catch {
+                throw PQCProviderPreferenceError.rollbackFailed(
+                    applyErrorClass: applyErrorClass,
+                    rollbackErrorClass: String(reflecting: Swift.type(of: error))
+                )
+            }
+            throw error
+        }
+    }
+
+    private static func selectionPolicy(
+        enforcePQC: Bool,
+        allowClassicFallbackForCompatibility: Bool
+    ) -> CryptoProviderFactory.SelectionPolicy {
+        guard enforcePQC else { return .classicOnly }
+        return .requirePQC
+    }
+
+    private nonisolated static func generateAndPersistPrimaryKeyPairs(
+        using provider: any CryptoProvider,
+        keychainManager: KeychainManager,
+        suite: CryptoSuite
+    ) async throws -> (kem: KeyPair, sig: KeyPair) {
+        async let kem = provider.generateKeyPair(for: .keyExchange)
+        async let sig = provider.generateKeyPair(for: .signing)
+        let generated = try await (kem: kem, sig: sig)
+
+        try keychainManager.savePrivateKey(generated.kem.privateKey.bytes, identifier: "pqc.kem.private.\(suite.wireId)")
+        try keychainManager.savePublicKey(generated.kem.publicKey.bytes, identifier: "pqc.kem.public.\(suite.wireId)")
+        try keychainManager.savePrivateKey(generated.sig.privateKey.bytes, identifier: "pqc.sig.private.\(suite.wireId)")
+        try keychainManager.savePublicKey(generated.sig.publicKey.bytes, identifier: "pqc.sig.public.\(suite.wireId)")
+        return generated
+    }
+    
+    /// 生成密钥对
+    public func generateKeyPair() async throws {
+        SkyBridgeLogger.shared.info("🔑 正在生成密钥对 (Suite: \(currentSuite.rawValue))...")
+
+        // 冷启动性能：将重型密钥生成和 Keychain 落盘都放到后台阶段，避免阻塞主线程/UI。
+        let provider = cryptoProvider
+        let suite = currentSuite
+        let keychainManager = keychainManager
+        let (kemKeyPair, sigKeyPair) = try await Task.detached(priority: .userInitiated) {
+            try await Self.generateAndPersistPrimaryKeyPairs(
+                using: provider,
+                keychainManager: keychainManager,
+                suite: suite
+            )
+        }.value
+
+        kemPrivateKey?.zeroize()
+        signingPrivateKey?.zeroize()
+        kemPrivateKey = SecureBytes(data: kemKeyPair.privateKey.bytes)
+        kemPublicKey = kemKeyPair.publicKey.bytes
+        signingPrivateKey = SecureBytes(data: sigKeyPair.privateKey.bytes)
+        signingPublicKey = sigKeyPair.publicKey.bytes
+
+        hasKeyPair = true
+        keyGenerationDate = Date()
+
+        SkyBridgeLogger.shared.info("✅ 密钥对生成完成 (KEM Public: \(kemPublicKey?.count ?? 0) bytes, Signing Public: \(signingPublicKey?.count ?? 0) bytes)")
+    }
+    
+    /// 重新生成密钥对
+    public func regenerateKeyPair() async throws {
+        // 清零旧密钥
+        kemPrivateKey?.zeroize()
+        signingPrivateKey?.zeroize()
+        
+        // 删除旧密钥
+        keychainManager.deleteKey(identifier: "pqc.kem.private.\(currentSuite.wireId)")
+        keychainManager.deleteKey(identifier: "pqc.kem.public.\(currentSuite.wireId)")
+        keychainManager.deleteKey(identifier: "pqc.sig.private.\(currentSuite.wireId)")
+        keychainManager.deleteKey(identifier: "pqc.sig.public.\(currentSuite.wireId)")
+        
+        hasKeyPair = false
+        
+        // 生成新密钥
+        try await generateKeyPair()
+    }
+    
+    /// 获取 KEM 公钥
+    public func getKEMPublicKey() async throws -> Data {
+        guard let publicKey = kemPublicKey else {
+            throw PQCError.noPublicKey
+        }
+        return publicKey
+    }
+    
+    /// 获取签名公钥
+    public func getSigningPublicKey() async throws -> Data {
+        guard let publicKey = signingPublicKey else {
+            throw PQCError.noPublicKey
+        }
+        return publicKey
+    }
+    
+    /// 执行 KEM 封装（用于建立共享密钥）
+    public func kemEncapsulate(remotePublicKey: Data) async throws -> (encapsulatedKey: Data, sharedSecret: SecureBytes) {
+        SkyBridgeLogger.shared.info("🔐 执行 KEM 封装 (Suite: \(currentSuite.rawValue))...")
+        
+        let result = try await cryptoProvider.kemEncapsulate(recipientPublicKey: remotePublicKey)
+        
+        SkyBridgeLogger.shared.info("✅ KEM 封装完成")
+        return result
+    }
+    
+    /// 执行 KEM 解封装
+    public func kemDecapsulate(encapsulatedKey: Data) async throws -> SecureBytes {
+        guard let privateKey = kemPrivateKey else {
+            throw PQCError.noPrivateKey
+        }
+        
+        SkyBridgeLogger.shared.info("🔐 执行 KEM 解封装...")
+        
+        let sharedSecret = try await cryptoProvider.kemDecapsulate(
+            encapsulatedKey: encapsulatedKey,
+            privateKey: privateKey
+        )
+        
+        SkyBridgeLogger.shared.info("✅ KEM 解封装完成")
+        return sharedSecret
+    }
+    
+    /// 签名数据
+    public func sign(data: Data) async throws -> Data {
+        guard let privateKey = signingPrivateKey else {
+            throw PQCError.noPrivateKey
+        }
+        
+        let keyHandle = SigningKeyHandle.softwareKey(privateKey.copyData())
+        return try await cryptoProvider.sign(data: data, using: keyHandle)
+    }
+    
+    /// 验证签名
+    public func verify(data: Data, signature: Data, publicKey: Data) async throws -> Bool {
+        return try await cryptoProvider.verify(data: data, signature: signature, publicKey: publicKey)
+    }
+    
+    /// HPKE 封装（完整的 KEM-DEM）
+    public func hpkeSeal(plaintext: Data, recipientPublicKey: Data, info: Data) async throws -> HPKESealedBox {
+        return try await cryptoProvider.hpkeSeal(
+            plaintext: plaintext,
+            recipientPublicKey: recipientPublicKey,
+            info: info
+        )
+    }
+    
+    /// HPKE 解封装
+    public func hpkeOpen(sealedBox: HPKESealedBox, info: Data) async throws -> Data {
+        guard let privateKey = kemPrivateKey else {
+            throw PQCError.noPrivateKey
+        }
+        
+        return try await cryptoProvider.hpkeOpen(
+            sealedBox: sealedBox,
+            privateKey: privateKey,
+            info: info
+        )
+    }
+    
+    /// 验证设备
+    public func verifyDevice(_ device: DiscoveredDevice, code: String) async throws {
+        guard code.count == 6, code.allSatisfy(\.isNumber) else {
+            throw PQCError.invalidCode
+        }
+
+        do {
+            try await P2PConnectionManager.instance
+                .approveCurrentAuthenticatedSessionTrust(
+                    for: device,
+                    verificationCode: code,
+                    requirePQC: enforcePQCHandshake
+                )
+        } catch {
+            SkyBridgeLogger.shared.warning(
+                "❌ 设备验证失败: errorType=\(String(describing: type(of: error)))"
+            )
+            throw PQCError.verificationFailed
+        }
+
+        SkyBridgeLogger.shared.info("✅ 设备验证成功: deviceRedacted=1")
+    }
+    
+    /// 获取当前 Provider 信息
+    public var providerInfo: String {
+        "\(cryptoProvider.providerName) (\(currentTier.rawValue))"
+    }
+    
+    /// 是否使用 PQC
+    public var isPQCActive: Bool {
+        currentTier == .qperiaptPQC
+            || currentTier == .nativePQC
+            || currentTier == .liboqsPQC
+    }
+    
+    // MARK: - Private Methods
+
+    private static func activeProviderMatches(
+        _ preference: PQCProviderPreference,
+        tier: CryptoTier,
+        suite: CryptoSuite
+    ) -> Bool {
+        switch preference {
+        case .mlkem:
+            return (tier == .nativePQC || tier == .liboqsPQC)
+                && suite.providerCompatibilitySuite
+                    == CryptoSuite.mlkem768.providerCompatibilitySuite
+        case .xwingHybrid:
+            return tier == .nativePQC
+                && suite.providerCompatibilitySuite
+                    == CryptoSuite.xwing.providerCompatibilitySuite
+        case .qPeriaptBeta:
+            return tier == .qperiaptPQC && suite == .qperiaptABI2PolicyBound
+        }
+    }
+
+    private func clearInMemoryKeyMaterial() {
+        kemPrivateKey?.zeroize()
+        signingPrivateKey?.zeroize()
+        kemPrivateKey = nil
+        kemPublicKey = nil
+        signingPrivateKey = nil
+        signingPublicKey = nil
+        hasKeyPair = false
+        keyGenerationDate = nil
+    }
+    
+    private func loadKeysFromKeychain() throws {
+        // 尝试加载当前 suite 的密钥
+        let kemPrivateData = try loadPQCKeyIfPresent(identifier: "pqc.kem.private.\(currentSuite.wireId)", isPrivate: true)
+        let kemPublicData = try loadPQCKeyIfPresent(identifier: "pqc.kem.public.\(currentSuite.wireId)", isPrivate: false)
+        let sigPrivateData = try loadPQCKeyIfPresent(identifier: "pqc.sig.private.\(currentSuite.wireId)", isPrivate: true)
+        let sigPublicData = try loadPQCKeyIfPresent(identifier: "pqc.sig.public.\(currentSuite.wireId)", isPrivate: false)
+
+        switch (kemPrivateData, kemPublicData, sigPrivateData, sigPublicData) {
+        case (nil, nil, nil, nil):
+            return
+        case let (kemPrivateData?, kemPublicData?, sigPrivateData?, sigPublicData?):
+            let creationDate = try keychainManager.keyCreationDate(account: "pqc.kem.private.\(currentSuite.wireId)")
+            kemPrivateKey = SecureBytes(data: kemPrivateData)
+            kemPublicKey = kemPublicData
+            signingPrivateKey = SecureBytes(data: sigPrivateData)
+            signingPublicKey = sigPublicData
+            hasKeyPair = true
+            
+            keyGenerationDate = creationDate
+            
+            SkyBridgeLogger.shared.info("✅ 从 Keychain 加载密钥成功")
+        default:
+            throw KeychainError.incompleteKeyMaterial("PQC primary KEM/signing key set is incomplete for suite \(currentSuite.wireId)")
+        }
+    }
+
+    private func loadPQCKeyIfPresent(identifier: String, isPrivate: Bool) throws -> Data? {
+        do {
+            if isPrivate {
+                return try keychainManager.loadPrivateKey(identifier: identifier)
+            }
+            return try keychainManager.loadPublicKey(identifier: identifier)
+        } catch KeychainError.itemNotFound {
+            return nil
+        }
+    }
+
+
+}
+
+public enum PQCProviderPreferenceError: Error, LocalizedError, Sendable {
+    case qPeriaptRequiresMLDSA65
+    case requestedProviderUnavailable(PQCProviderPreference)
+    case rollbackFailed(applyErrorClass: String, rollbackErrorClass: String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .qPeriaptRequiresMLDSA65:
+            return "Q-Periapt ABI2 需要先启用并应用 ML-DSA-65 主协议身份"
+        case .requestedProviderUnavailable(let preference):
+            return "\(Self.displayName(for: preference)) 当前不可用，设置未更改"
+        case .rollbackFailed(let applyErrorClass, let rollbackErrorClass):
+            return "Provider 切换失败且运行时回滚失败（apply=\(applyErrorClass), rollback=\(rollbackErrorClass)）"
+        }
+    }
+
+    private static func displayName(for preference: PQCProviderPreference) -> String {
+        switch preference {
+        case .mlkem:
+            return "ML-KEM"
+        case .xwingHybrid:
+            return "X-Wing 混合加密"
+        case .qPeriaptBeta:
+            return "Q-Periapt"
+        }
+    }
+}
+
+// MARK: - PQC Error
+
+public enum PQCError: Error, LocalizedError {
+    case noPublicKey
+    case noPrivateKey
+    case keyGenerationFailed
+    case invalidCode
+    case verificationFailed
+    case providerNotAvailable
+    
+    public var errorDescription: String? {
+        switch self {
+        case .noPublicKey: return "没有公钥"
+        case .noPrivateKey: return "没有私钥"
+        case .keyGenerationFailed: return "密钥生成失败"
+        case .invalidCode: return "验证码无效"
+        case .verificationFailed: return "验证失败"
+        case .providerNotAvailable: return "PQC Provider 不可用"
+        }
+    }
+}
+
+
+extension PQCCryptoManager {
+    public func strictlyMatchesSelectedMode() throws -> Bool {
+        try PQCModePolicyStore.standard.snapshot().selection.strictlyMatchSelectedMode
+    }
+    public func setStrictlyMatchSelectedMode(_ enabled: Bool) throws {
+        guard !applyingProviderPreference, !IOSHandshakeConfiguration.isBusy else { throw HandshakeConfigurationError.busy }
+        _ = try PQCModePolicyStore.standard.setStrictMatch(enabled)
+        objectWillChange.send()
+    }
+    public func handshakeConfigurationSnapshot(busy: Bool = false) throws -> HandshakeConfigurationSnapshot {
+        let preference = Self.currentProviderPreference()
+        let signature = try ProtocolSigningIdentityPolicy.requiredConfiguration().algorithm
+        let profile: HandshakeProfile = preference == .qPeriaptBeta ? .qperiapt : (preference == .xwingHybrid ? .xwing : .mlkem)
+        let mode = try PQCModePolicyStore.standard.snapshot()
+        let revision = HandshakeConfigurationWire.revision(for: "\(profile.rawValue):\(signature.rawValue):\(mode.selection.strictlyMatchSelectedMode):\(mode.revision.uuidString)", defaults: .standard)
+        let options: [HandshakeProfileOption] = [(.qperiapt, PQCProviderPreference.qPeriaptBeta), (.xwing, .xwingHybrid), (.mlkem, .mlkem)].map { profile, preference in
+            let availability = providerAvailability(preference)
+            return .init(profile, selectable: availability.isAvailable, reason: availability.detail)
+        } + [.init(.classic, selectable: false, reason: "严格 PQC 策略已禁用 Classic")]
+        return .init(revision: revision, configuredProfile: profile, providerSuite: currentSuite.rawValue,
+                     options: options, busy: busy || applyingProviderPreference)
+    }
+}
+
+@MainActor
+enum IOSHandshakeConfiguration {
+    static let usbDiscoveryResponder = USBPeerDiscoveryResponder()
+    static var isBusy: Bool {
+        FileTransferManager.instance.isTransferring || InboundFileTransferApprovalService.shared.pendingRequest != nil
+            || RemoteDesktopManager.instance.currentConnection != nil
+    }
+    static func snapshot() throws -> HandshakeConfigurationSnapshot {
+        try PQCCryptoManager.instance.handshakeConfigurationSnapshot(busy: isBusy)
+    }
+    static func apply(_ profile: HandshakeProfile, revision: String, revalidate: HandshakeConfigurationService.Revalidate) async throws -> HandshakeConfigurationSnapshot {
+        guard profile != .classic else { throw HandshakeConfigurationError.classicDisabled }
+        let preference: PQCProviderPreference = profile == .qperiapt ? .qPeriaptBeta : (profile == .xwing ? .xwingHybrid : .mlkem)
+        try await PQCCryptoManager.instance.applyProviderPreference(preference, expectedRevision: revision, isBusy: { isBusy }, revalidate: revalidate)
+        return try snapshot()
+    }
+    static func trusted(_ identity: HandshakeManagementIdentity) async throws -> Bool {
+        try identity.validate()
+        return try await PairingIdentityAuthorityMutationBarrier.readAfterActiveMutation {
+            guard TrustedDeviceStore.shared.isAuthorityPersistenceAvailable else {
+                throw HandshakeConfigurationError.storageUnavailable
+            }
+            return TrustedDeviceStore.shared.uniqueCanonicalTrustedDeviceId(for: identity.deviceID) != nil
+                && TrustedDeviceStore.shared.currentPathTrustRecord(fingerprint: identity.fingerprint,
+                                                                   matchingDeviceId: identity.deviceID) != nil
+        }
+    }
+    static func revokeManagement(for device: TrustedDeviceStore.TrustedDevice) throws {
+        let ids = ([device.id] + (device.currentDeviceId.map { [$0] } ?? []) + (device.knownDeviceIds ?? []))
+            .compactMap { UUID(uuidString: $0)?.uuidString.lowercased() }
+        let pins = (device.protocolIdentityPins ?? []).map(\.fingerprint)
+            + (device.protocolPublicKeyFingerprint.map { [$0] } ?? [])
+        guard !ids.isEmpty, !pins.isEmpty else { throw HandshakeConfigurationError.identityMismatch }
+        for id in Set(ids) {
+            for fingerprint in Set(pins.map { $0.lowercased() }) {
+                let key = id + ":" + fingerprint
+                try writeGrant(key, allowed: false)
+                try service.revokeFileManagement(grantKey: key)
+                guard try !readGrant(key) else { throw HandshakeConfigurationError.storageUnavailable }
+            }
+        }
+    }
+    static func readGrant(_ key: String) throws -> Bool {
+        do { return try HandshakeManagementGrant.decode(KeychainManager.shared.exportKeyStrict(
+            service: HandshakeManagementGrant.service, account: HandshakeManagementGrant.account(key)), key: key) }
+        catch { throw HandshakeConfigurationError.storageUnavailable }
+    }
+    static func writeGrant(_ key: String, allowed: Bool) throws {
+        let data = try JSONEncoder().encode(HandshakeManagementGrant(identityKey: key, allowed: allowed))
+        guard KeychainManager.shared.importKey(data: data, service: HandshakeManagementGrant.service,
+            account: HandshakeManagementGrant.account(key)) else { throw HandshakeConfigurationError.storageUnavailable }
+    }
+    static let service = HandshakeConfigurationService(
+        identity: { try await P2PConnectionManager.instance.handshakeManagementIdentity() },
+        trusted: { try await trusted($0) },
+        verify: { data, signature, identity in
+            try identity.validate()
+            guard let algorithm = ProtocolSigningAlgorithm(rawValue: identity.algorithm) else { throw HandshakeConfigurationError.identityMismatch }
+            return try await ProtocolSignatureProviderSelector.select(for: algorithm).verify(data, signature: signature, publicKey: identity.publicKey)
+        },
+        sign: { try await P2PConnectionManager.instance.signHandshakeManagement($0) },
+        snapshot: { try snapshot() }, apply: { try await apply($0, revision: $1, revalidate: $2) },
+        readGrant: { try readGrant($0) }, writeGrant: { try writeGrant($0, allowed: $1) },
+        approve: { await HandshakeConfigurationApproval.shared.decide($0, profile: $1) },
+        approveFiles: { await HandshakeConfigurationApproval.shared.decide($0, profile: nil) },
+        fileApprovalSupported: true)
+}

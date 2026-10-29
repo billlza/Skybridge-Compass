@@ -1,3 +1,8 @@
+// macOS-exclusive: this file is built on frameworks that exist only on macOS
+// (AppKit / IOKit / ScreenCaptureKit / CoreWLAN / MetalFX / ServiceManagement /
+// ApplicationServices). It is excluded from other platforms so SkyBridgeCore can be
+// the single shared core for iOS as well. No behaviour changes on macOS.
+#if os(macOS)
 import Foundation
 import Metal
 import MetalKit
@@ -294,13 +299,20 @@ public final class Metal4RenderingEngine: NSObject, ObservableObject {
             guard let device = device else {
                 throw RenderingError.deviceNotSupported
             }
-            guard let library = device.makeDefaultLibrary() else {
-                throw RenderingError.shaderCompilationFailed("无法加载默认着色器库")
-            }
+            let library = try SkyBridgeMetalShaderLibrary.load(
+                device: device,
+                bundle: SkyBridgeResourceBundleLocator.core,
+                sourceResourceNames: ["WeatherShaders"],
+                requiredFunctionNames: [
+                    "particle_update_compute",
+                    "particle_vertex",
+                    "particle_fragment"
+                ]
+            )
             self.library = library
             log.info("着色器库加载完成")
         } catch {
-            renderingError = error as? RenderingError
+            renderingError = (error as? RenderingError) ?? .shaderCompilationFailed(error.localizedDescription)
             log.error("着色器库加载失败: \(error.localizedDescription)")
         }
     }
@@ -866,3 +878,4 @@ private func matrix_perspective_left_hand(fovyRadians fovy: Float, aspectRatio: 
         simd_float4(0, 0, zs, 1),
         simd_float4(0, 0, -nearZ * zs, 0)))
 }
+#endif

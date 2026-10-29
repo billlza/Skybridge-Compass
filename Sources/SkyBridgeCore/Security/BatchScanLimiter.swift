@@ -1,3 +1,8 @@
+// macOS-exclusive: built on macOS-only APIs (AppKit / IOKit / ScreenCaptureKit / CoreWLAN /
+// MetalFX / ServiceManagement / ApplicationServices / CoreGraphics display services).
+// Excluded from other platforms so SkyBridgeCore can be the single shared core for iOS as
+// well. No behaviour changes on macOS.
+#if os(macOS)
 // MARK: - BatchScanLimiter.swift
 // SkyBridge Compass - Security Hardening
 // Copyright © 2024 SkyBridge. All rights reserved.
@@ -104,6 +109,63 @@ public actor BatchScanLimiter {
         self.limits = limits
         self.symlinkResolver = SymlinkResolver(limits: limits)
     }
+
+#if DEBUG || SKYBRIDGE_TESTING
+    // MARK: - Test Helpers
+
+    /// Create a limiter instance for unit tests with configurable (usually higher) limits.
+    ///
+    /// Note: kept `internal` so production app targets importing `SkyBridgeCore` cannot call it.
+    nonisolated internal static func createForTesting(
+        maxTotalFiles: Int = SecurityLimits.default.maxTotalFiles,
+        maxTotalBytes: Int64 = SecurityLimits.default.maxTotalBytes,
+        maxSymlinkDepth: Int = SecurityLimits.default.maxSymlinkDepth,
+        globalTimeout: TimeInterval = SecurityLimits.default.globalTimeout
+    ) -> BatchScanLimiter {
+        let d = SecurityLimits.default
+        let limits = SecurityLimits(
+            maxTotalFiles: maxTotalFiles,
+            maxTotalBytes: maxTotalBytes,
+            globalTimeout: globalTimeout,
+            maxRegexPatternLength: d.maxRegexPatternLength,
+            maxRegexPatternCount: d.maxRegexPatternCount,
+            maxRegexGroups: d.maxRegexGroups,
+            maxRegexQuantifiers: d.maxRegexQuantifiers,
+            maxRegexAlternations: d.maxRegexAlternations,
+            maxRegexLookaheads: d.maxRegexLookaheads,
+            perPatternTimeout: d.perPatternTimeout,
+            perPatternInputLimit: d.perPatternInputLimit,
+            maxTotalHistoryBytes: d.maxTotalHistoryBytes,
+            tokenBucketRate: d.tokenBucketRate,
+            tokenBucketBurst: d.tokenBucketBurst,
+            maxMessageBytes: d.maxMessageBytes,
+            decodeDepthLimit: d.decodeDepthLimit,
+            decodeArrayLengthLimit: d.decodeArrayLengthLimit,
+            decodeStringLengthLimit: d.decodeStringLengthLimit,
+            droppedMessagesThreshold: d.droppedMessagesThreshold,
+            droppedMessagesWindow: d.droppedMessagesWindow,
+            pakeRecordTTL: d.pakeRecordTTL,
+            pakeMaxRecords: d.pakeMaxRecords,
+            pakeCleanupInterval: d.pakeCleanupInterval,
+            maxSymlinkDepth: maxSymlinkDepth,
+            maxRetryCount: d.maxRetryCount,
+            maxRetryDelay: d.maxRetryDelay,
+            maxExtractedFiles: d.maxExtractedFiles,
+            maxTotalExtractedBytes: d.maxTotalExtractedBytes,
+            maxNestingDepth: d.maxNestingDepth,
+            maxCompressionRatio: d.maxCompressionRatio,
+            maxExtractionTime: d.maxExtractionTime,
+            maxBytesPerFile: d.maxBytesPerFile,
+            largeFileThreshold: d.largeFileThreshold,
+            hashTimeoutQuick: d.hashTimeoutQuick,
+            hashTimeoutStandard: d.hashTimeoutStandard,
+            hashTimeoutDeep: d.hashTimeoutDeep,
+            maxEventQueueSize: d.maxEventQueueSize,
+            maxPendingPerSubscriber: d.maxPendingPerSubscriber
+        )
+        return BatchScanLimiter(limits: limits)
+    }
+#endif
     
  /// Pre-check batch scan request.
  ///
@@ -422,23 +484,5 @@ public enum BatchScanError: Error, Sendable {
     case timeout(elapsed: TimeInterval)
     case limitExceeded(PreCheckResult.LimitExceeded)
     case cancelled
-}
-
-// MARK: - Testing Support
-
-#if DEBUG
-extension BatchScanLimiter {
- /// Create a limiter with custom limits for testing
-    public static func createForTesting(
-        maxTotalFiles: Int = 100,
-        maxTotalBytes: Int64 = 1024 * 1024 * 1024,
-        maxSymlinkDepth: Int = 10
-    ) -> BatchScanLimiter {
-        var config = SecurityLimitsConfig()
-        config.maxTotalFiles = maxTotalFiles
-        config.maxTotalBytes = maxTotalBytes
-        config.maxSymlinkDepth = maxSymlinkDepth
-        return BatchScanLimiter(limits: config.toSecurityLimits())
-    }
 }
 #endif

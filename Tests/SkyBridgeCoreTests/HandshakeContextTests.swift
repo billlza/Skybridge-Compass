@@ -12,6 +12,82 @@ import CryptoKit
 @testable import SkyBridgeCore
 
 @available(macOS 14.0, iOS 17.0, *)
+private actor IdentityCapture {
+    private var captured: IdentityPublicKeys?
+
+    func store(_ identityKeys: IdentityPublicKeys) {
+        captured = identityKeys
+    }
+
+    func snapshot() -> IdentityPublicKeys? {
+        captured
+    }
+}
+
+@available(macOS 14.0, iOS 17.0, *)
+private actor SuspendedVerificationGate {
+    private var verificationContinuation: CheckedContinuation<Void, Never>?
+    private var suspensionWaiters: [CheckedContinuation<Void, Never>] = []
+    private var isSuspended = false
+
+    func suspendVerification() async {
+        isSuspended = true
+        let waiters = suspensionWaiters
+        suspensionWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+
+        await withCheckedContinuation { continuation in
+            verificationContinuation = continuation
+        }
+    }
+
+    func waitUntilSuspended() async {
+        guard !isSuspended else { return }
+        await withCheckedContinuation { continuation in
+            suspensionWaiters.append(continuation)
+        }
+    }
+
+    func resumeVerification() {
+        verificationContinuation?.resume()
+        verificationContinuation = nil
+    }
+}
+
+@available(macOS 14.0, iOS 17.0, *)
+private struct SuspendedVerificationProvider: ProtocolSignatureProvider {
+    let signatureAlgorithm: ProtocolSigningAlgorithm = .ed25519
+    let gate: SuspendedVerificationGate
+
+    func sign(_ data: Data, key: SigningKeyHandle) async throws -> Data {
+        try await ClassicSignatureProvider().sign(data, key: key)
+    }
+
+    func verify(_ data: Data, signature: Data, publicKey: Data) async throws -> Bool {
+        await gate.suspendVerification()
+        return true
+    }
+}
+
+@available(macOS 14.0, iOS 17.0, *)
+private struct RawWireOnlyVerificationProvider: ProtocolSignatureProvider {
+    let signatureAlgorithm: ProtocolSigningAlgorithm = .ed25519
+    let acceptedPreimage: Data
+    let acceptedSignature: Data
+
+    func sign(_ data: Data, key: SigningKeyHandle) async throws -> Data {
+        _ = data
+        _ = key
+        return acceptedSignature
+    }
+
+    func verify(_ data: Data, signature: Data, publicKey: Data) async throws -> Bool {
+        _ = publicKey
+        return data == acceptedPreimage && signature == acceptedSignature
+    }
+}
+
+@available(macOS 14.0, iOS 17.0, *)
 final class HandshakeContextTests: XCTestCase {
     
  // MARK: - Property 5: Handshake Context Isolation
@@ -46,6 +122,49 @@ final class HandshakeContextTests: XCTestCase {
         
  // Clean up
         await context.zeroize()
+    }
+
+    func testResponderVerifiesExplicitLegacyPolicyWireWithoutNormalization() async throws {
+        let signature = Data(repeating: 0xA4, count: 64)
+        let identity = IdentityPublicKeys(
+            protocolPublicKey: Data(repeating: 0x42, count: 32),
+            protocolAlgorithm: .ed25519
+        )
+        let message = HandshakeMessageA(
+            supportedSuites: [.x25519Ed25519],
+            keyShares: [
+                HandshakeKeyShare(
+                    suite: .x25519Ed25519,
+                    shareBytes: Data(repeating: 0x11, count: 32)
+                )
+            ],
+            clientNonce: Data(repeating: 0x22, count: 32),
+            policy: .default,
+            capabilities: CryptoCapabilities(
+                supportedKEM: ["X25519"],
+                supportedSignature: ["Ed25519"],
+                supportedAuthProfiles: [AuthProfile.classic.displayName],
+                supportedAEAD: ["AES-GCM"],
+                pqcAvailable: false,
+                platformVersion: "14.0",
+                providerType: .classic
+            ),
+            signature: signature,
+            identityPublicKey: identity.encoded
+        )
+        let nonCanonical = try messageAWireByRemovingLegacyOptionalPolicyBool(message)
+        let decoded = try HandshakeMessageA.decode(from: nonCanonical.wire)
+        XCTAssertEqual(decoded.signaturePreimage, nonCanonical.rawSignaturePreimage)
+
+        let responder = try await HandshakeContext.create(
+            role: .responder,
+            cryptoProvider: ClassicCryptoProvider(),
+            protocolSignatureProvider: RawWireOnlyVerificationProvider(
+                acceptedPreimage: nonCanonical.rawSignaturePreimage,
+                acceptedSignature: signature
+            )
+        )
+        try await responder.processMessageA(decoded)
     }
     
  /// Test that zeroize clears all sensitive data
@@ -150,7 +269,9 @@ final class HandshakeContextTests: XCTestCase {
             identityKeyHandle: .softwareKey(responderSigningKey.privateKey.bytes),
             identityPublicKey: encodeIdentityPublicKey(responderSigningKey.publicKey.bytes)
         )
-        let messageB = buildResult.message
+        // Exercise the real wire decoder: nested Data fields may preserve a
+        // non-zero startIndex and must remain safe for capability decoding.
+        let messageB = try HandshakeMessageB.decode(from: buildResult.message.encoded)
         buildResult.sharedSecret.zeroize()
         
         _ = try await initiator.processMessageB(messageB)
@@ -443,13 +564,14 @@ final class HandshakeContextTests: XCTestCase {
             signatureProvider: provider
         )
         
+        let identityKeyPair = try await provider.generateKeyPair(for: .signing)
         let initiatorKey = P256.Signing.PrivateKey()
         let initiatorCallback = P256SigningCallback(privateKeyRawRepresentation: initiatorKey.rawRepresentation)
         let policy = HandshakePolicy(requireSecureEnclavePoP: true)
         
         let messageA = try await initiator.buildMessageA(
-            identityKeyHandle: .callback(initiatorCallback),
-            identityPublicKey: encodeIdentityPublicKey(initiatorKey.publicKey.derRepresentation, algorithm: .p256ECDSA),
+            identityKeyHandle: .softwareKey(identityKeyPair.privateKey.bytes),
+            identityPublicKey: encodeIdentityPublicKey(identityKeyPair.publicKey.bytes),
             policy: policy,
             secureEnclaveKeyHandle: .callback(initiatorCallback)
         )
@@ -490,6 +612,8 @@ final class HandshakeContextTests: XCTestCase {
             signatureProvider: provider
         )
         
+        let initiatorIdentityKeyPair = try await provider.generateKeyPair(for: .signing)
+        let responderIdentityKeyPair = try await provider.generateKeyPair(for: .signing)
         let initiatorKey = P256.Signing.PrivateKey()
         let responderKey = P256.Signing.PrivateKey()
         let initiatorCallback = P256SigningCallback(privateKeyRawRepresentation: initiatorKey.rawRepresentation)
@@ -497,8 +621,8 @@ final class HandshakeContextTests: XCTestCase {
         let policy = HandshakePolicy(requireSecureEnclavePoP: true)
         
         let messageA = try await initiator.buildMessageA(
-            identityKeyHandle: .callback(initiatorCallback),
-            identityPublicKey: encodeIdentityPublicKey(initiatorKey.publicKey.derRepresentation, algorithm: .p256ECDSA),
+            identityKeyHandle: .softwareKey(initiatorIdentityKeyPair.privateKey.bytes),
+            identityPublicKey: encodeIdentityPublicKey(initiatorIdentityKeyPair.publicKey.bytes),
             policy: policy,
             secureEnclaveKeyHandle: .callback(initiatorCallback)
         )
@@ -510,8 +634,8 @@ final class HandshakeContextTests: XCTestCase {
         )
         
         let buildResult = try await responder.buildMessageB(
-            identityKeyHandle: .callback(responderCallback),
-            identityPublicKey: encodeIdentityPublicKey(responderKey.publicKey.derRepresentation, algorithm: .p256ECDSA),
+            identityKeyHandle: .softwareKey(responderIdentityKeyPair.privateKey.bytes),
+            identityPublicKey: encodeIdentityPublicKey(responderIdentityKeyPair.publicKey.bytes),
             policy: policy,
             secureEnclaveKeyHandle: .callback(responderCallback)
         )
@@ -539,6 +663,332 @@ final class HandshakeContextTests: XCTestCase {
         
         await initiator.zeroize()
         await responder.zeroize()
+    }
+
+    func testProcessMessageAPostSignatureValidationReceivesDecodedIdentityKeys() async throws {
+        let provider = ClassicCryptoProvider()
+        let initiator = try await HandshakeContext.create(
+            role: .initiator,
+            cryptoProvider: provider
+        )
+        let responder = try await HandshakeContext.create(
+            role: .responder,
+            cryptoProvider: provider
+        )
+
+        let initiatorSigningKey = try await provider.generateKeyPair(for: .signing)
+        let expectedIdentity = IdentityPublicKeys(
+            protocolPublicKey: initiatorSigningKey.publicKey.bytes,
+            protocolAlgorithm: .ed25519,
+            secureEnclavePublicKey: nil
+        )
+        let messageA = try await initiator.buildMessageA(
+            identityKeyHandle: .softwareKey(initiatorSigningKey.privateKey.bytes),
+            identityPublicKey: encodeIdentityPublicKey(initiatorSigningKey.publicKey.bytes)
+        )
+        let capture = IdentityCapture()
+
+        try await responder.processMessageA(
+            messageA,
+            postSignatureValidation: { identityKeys in
+                await capture.store(identityKeys)
+            }
+        )
+
+        let capturedIdentity = await capture.snapshot()
+        XCTAssertEqual(capturedIdentity, expectedIdentity)
+
+        await initiator.zeroize()
+        await responder.zeroize()
+    }
+
+    func testProcessMessageAPostSignatureValidationFailureScrubsAllState() async throws {
+        let provider = ClassicCryptoProvider()
+        let initiator = try await HandshakeContext.create(
+            role: .initiator,
+            cryptoProvider: provider
+        )
+        let responder = try await HandshakeContext.create(
+            role: .responder,
+            cryptoProvider: provider
+        )
+        let signingKey = try await provider.generateKeyPair(for: .signing)
+        let messageA = try await initiator.buildMessageA(
+            identityKeyHandle: .softwareKey(signingKey.privateKey.bytes),
+            identityPublicKey: encodeIdentityPublicKey(signingKey.publicKey.bytes)
+        )
+
+        do {
+            try await responder.processMessageA(
+                messageA,
+                postSignatureValidation: { _ in
+                    throw HandshakeError.failed(
+                        .identityMismatch(expected: "pinned-identity", actual: "received-identity")
+                    )
+                }
+            )
+            XCTFail("A failed trust-boundary callback must reject MessageA")
+        } catch let HandshakeError.failed(reason) {
+            guard case .identityMismatch = reason else {
+                XCTFail("Expected identityMismatch, got \(reason)")
+                return
+            }
+        }
+
+        let isZeroized = await responder.isZeroized
+        let peerKeyShares = await responder.peerKeyShares
+        let negotiatedSuite = await responder.negotiatedSuite
+        let peerCapabilities = await responder.peerCapabilities
+        let authenticatedAuthority = await responder.getAuthenticatedRemoteAuthority()
+        XCTAssertTrue(isZeroized)
+        XCTAssertTrue(peerKeyShares.isEmpty)
+        XCTAssertNil(negotiatedSuite)
+        XCTAssertNil(peerCapabilities)
+        XCTAssertNil(authenticatedAuthority)
+        await initiator.zeroize()
+    }
+
+    func testProcessMessageAZeroizeDuringSuspendedVerificationCannotResurrectState() async throws {
+        let provider = ClassicCryptoProvider()
+        let initiator = try await HandshakeContext.create(
+            role: .initiator,
+            cryptoProvider: provider
+        )
+        let gate = SuspendedVerificationGate()
+        let responder = try await HandshakeContext.create(
+            role: .responder,
+            cryptoProvider: provider,
+            protocolSignatureProvider: SuspendedVerificationProvider(gate: gate)
+        )
+        let signingKey = try await provider.generateKeyPair(for: .signing)
+        let messageA = try await initiator.buildMessageA(
+            identityKeyHandle: .softwareKey(signingKey.privateKey.bytes),
+            identityPublicKey: encodeIdentityPublicKey(signingKey.publicKey.bytes)
+        )
+
+        let processingTask = Task {
+            try await responder.processMessageA(messageA)
+        }
+        await gate.waitUntilSuspended()
+        await responder.zeroize()
+        await gate.resumeVerification()
+
+        do {
+            try await processingTask.value
+            XCTFail("Suspended verification must not commit after context invalidation")
+        } catch HandshakeError.contextZeroized {
+            // Expected: the lifecycle generation changed while verification awaited.
+        }
+
+        let isZeroized = await responder.isZeroized
+        let peerKeyShares = await responder.peerKeyShares
+        let negotiatedSuite = await responder.negotiatedSuite
+        let peerCapabilities = await responder.peerCapabilities
+        let authenticatedAuthority = await responder.getAuthenticatedRemoteAuthority()
+        XCTAssertTrue(isZeroized)
+        XCTAssertTrue(peerKeyShares.isEmpty)
+        XCTAssertNil(negotiatedSuite)
+        XCTAssertNil(peerCapabilities)
+        XCTAssertNil(authenticatedAuthority)
+        await initiator.zeroize()
+    }
+
+    func testProcessMessageBPostSignatureValidationReceivesDecodedIdentityKeys() async throws {
+        let provider = ClassicCryptoProvider()
+        let initiator = try await HandshakeContext.create(
+            role: .initiator,
+            cryptoProvider: provider
+        )
+        let responder = try await HandshakeContext.create(
+            role: .responder,
+            cryptoProvider: provider
+        )
+
+        let initiatorSigningKey = try await provider.generateKeyPair(for: .signing)
+        let responderSigningKey = try await provider.generateKeyPair(for: .signing)
+        let expectedIdentity = IdentityPublicKeys(
+            protocolPublicKey: responderSigningKey.publicKey.bytes,
+            protocolAlgorithm: .ed25519,
+            secureEnclavePublicKey: nil
+        )
+
+        let messageA = try await initiator.buildMessageA(
+            identityKeyHandle: .softwareKey(initiatorSigningKey.privateKey.bytes),
+            identityPublicKey: encodeIdentityPublicKey(initiatorSigningKey.publicKey.bytes)
+        )
+        try await responder.processMessageA(messageA)
+
+        let buildResult = try await responder.buildMessageB(
+            identityKeyHandle: .softwareKey(responderSigningKey.privateKey.bytes),
+            identityPublicKey: encodeIdentityPublicKey(responderSigningKey.publicKey.bytes)
+        )
+        let messageB = buildResult.message
+        buildResult.sharedSecret.zeroize()
+
+        let capture = IdentityCapture()
+        _ = try await initiator.processMessageB(
+            messageB,
+            postSignatureValidation: { identityKeys in
+                await capture.store(identityKeys)
+            }
+        )
+
+        let capturedIdentity = await capture.snapshot()
+        XCTAssertEqual(capturedIdentity, expectedIdentity)
+        let responderCapabilities = await initiator.peerCapabilities
+        XCTAssertTrue(
+            responderCapabilities?.supportedKEM.contains("X25519") == true,
+            "Authenticated MessageB capabilities must be retained after validation"
+        )
+
+        await initiator.zeroize()
+        await responder.zeroize()
+    }
+
+    func testProcessMessageBRejectsAuthenticatedCapabilitiesThatContradictSelectedSuite() async throws {
+        let provider = ClassicCryptoProvider()
+        let initiator = try await HandshakeContext.create(
+            role: .initiator,
+            cryptoProvider: provider
+        )
+        let initiatorSigningKey = try await provider.generateKeyPair(for: .signing)
+        let responderSigningKey = try await provider.generateKeyPair(for: .signing)
+
+        let messageA = try await initiator.buildMessageA(
+            identityKeyHandle: .softwareKey(initiatorSigningKey.privateKey.bytes),
+            identityPublicKey: encodeIdentityPublicKey(initiatorSigningKey.publicKey.bytes)
+        )
+        let recipientPublicKey = try XCTUnwrap(
+            messageA.keyShares.first(where: { $0.suite == .x25519Ed25519 })?.shareBytes
+        )
+        let contradictoryCapabilities = CryptoCapabilities(
+            supportedKEM: ["ML-KEM-768"],
+            supportedSignature: ["Ed25519"],
+            supportedAuthProfiles: [AuthProfile.classic.displayName],
+            supportedAEAD: ["AES-256-GCM"],
+            pqcAvailable: false,
+            platformVersion: "macOS 26.0",
+            providerType: .classic
+        )
+        let sealResult = try await provider.kemDemSealWithSecret(
+            plaintext: contradictoryCapabilities.deterministicEncode(),
+            recipientPublicKey: recipientPublicKey,
+            info: Data("handshake-payload".utf8)
+        )
+        defer { sealResult.sharedSecret.zeroize() }
+
+        let identityPublicKey = encodeIdentityPublicKey(responderSigningKey.publicKey.bytes)
+        let unsignedMessageB = HandshakeMessageB(
+            selectedSuite: .x25519Ed25519,
+            responderShare: sealResult.sealedBox.encapsulatedKey,
+            serverNonce: Data(repeating: 0x42, count: 32),
+            encryptedPayload: sealResult.sealedBox,
+            signature: Data(),
+            identityPublicKey: identityPublicKey
+        )
+        let transcriptHashA = Data(SHA256.hash(data: messageA.transcriptBytes))
+        let signature = try await provider.sign(
+            data: unsignedMessageB.signaturePreimage(transcriptHashA: transcriptHashA),
+            using: .softwareKey(responderSigningKey.privateKey.bytes)
+        )
+        let messageB = HandshakeMessageB(
+            version: unsignedMessageB.version,
+            selectedSuite: unsignedMessageB.selectedSuite,
+            responderShare: unsignedMessageB.responderShare,
+            serverNonce: unsignedMessageB.serverNonce,
+            encryptedPayload: unsignedMessageB.encryptedPayload,
+            signature: signature,
+            identityPublicKey: unsignedMessageB.identityPublicKey
+        )
+
+        do {
+            _ = try await initiator.processMessageB(messageB)
+            XCTFail("Authenticated capabilities that omit the selected KEM must fail closed")
+        } catch let HandshakeError.failed(reason) {
+            guard case .invalidMessageFormat(let message) = reason else {
+                XCTFail("Expected invalidMessageFormat, got \(reason)")
+                return
+            }
+            XCTAssertTrue(message.contains("Responder capabilities do not match MessageB"))
+        }
+        let acceptedCapabilities = await initiator.peerCapabilities
+        XCTAssertNil(acceptedCapabilities)
+        let acceptedAuthority = await initiator.getAuthenticatedRemoteAuthority()
+        XCTAssertNil(acceptedAuthority)
+        let isZeroized = await initiator.isZeroized
+        let negotiatedSuite = await initiator.negotiatedSuite
+        let peerKeyShares = await initiator.peerKeyShares
+        XCTAssertTrue(isZeroized)
+        XCTAssertNil(negotiatedSuite)
+        XCTAssertTrue(peerKeyShares.isEmpty)
+        await initiator.zeroize()
+    }
+
+    func testProcessMessageARejectsDuplicateDirectKeySharesWithoutTrap() async throws {
+        let provider = ClassicCryptoProvider()
+        let initiator = try await HandshakeContext.create(
+            role: .initiator,
+            cryptoProvider: provider
+        )
+        let responder = try await HandshakeContext.create(
+            role: .responder,
+            cryptoProvider: provider
+        )
+        let signingKey = try await provider.generateKeyPair(for: .signing)
+        let validMessage = try await initiator.buildMessageA(
+            identityKeyHandle: .softwareKey(signingKey.privateKey.bytes),
+            identityPublicKey: encodeIdentityPublicKey(signingKey.publicKey.bytes)
+        )
+        let keyShare = try XCTUnwrap(validMessage.keyShares.first)
+        let unsigned = HandshakeMessageA(
+            version: validMessage.version,
+            supportedSuites: [.x25519Ed25519, .p256ECDSA],
+            keyShares: [keyShare, keyShare],
+            clientNonce: validMessage.clientNonce,
+            policy: validMessage.policy,
+            capabilities: validMessage.capabilities,
+            signature: Data(),
+            identityPublicKey: validMessage.identityPublicKey,
+            extensionsRaw: validMessage.extensionsRaw,
+            initiatorContribution: validMessage.initiatorContribution
+        )
+        let signature = try await provider.sign(
+            data: unsigned.signaturePreimage,
+            using: .softwareKey(signingKey.privateKey.bytes)
+        )
+        let duplicateMessage = HandshakeMessageA(
+            version: unsigned.version,
+            supportedSuites: unsigned.supportedSuites,
+            keyShares: unsigned.keyShares,
+            clientNonce: unsigned.clientNonce,
+            policy: unsigned.policy,
+            capabilities: unsigned.capabilities,
+            signature: signature,
+            identityPublicKey: unsigned.identityPublicKey,
+            extensionsRaw: unsigned.extensionsRaw,
+            initiatorContribution: unsigned.initiatorContribution
+        )
+
+        do {
+            try await responder.processMessageA(duplicateMessage)
+            XCTFail("Duplicate direct key shares must fail closed")
+        } catch let HandshakeError.failed(reason) {
+            guard case .invalidMessageFormat(let message) = reason else {
+                XCTFail("Expected invalidMessageFormat, got \(reason)")
+                return
+            }
+            XCTAssertTrue(message.contains("Duplicate keyShare"))
+        }
+
+        let isZeroized = await responder.isZeroized
+        let peerKeyShares = await responder.peerKeyShares
+        let negotiatedSuite = await responder.negotiatedSuite
+        let authority = await responder.getAuthenticatedRemoteAuthority()
+        XCTAssertTrue(isZeroized)
+        XCTAssertTrue(peerKeyShares.isEmpty)
+        XCTAssertNil(negotiatedSuite)
+        XCTAssertNil(authority)
+        await initiator.zeroize()
     }
 }
 
@@ -763,7 +1213,7 @@ final class HandshakeMessagesTests: XCTestCase {
             }
         }
     }
-    
+
  /// Test MessageA rejects truncated data
     func testMessageARejectsTruncatedData() {
         let shortData = Data([1, 0x10, 0x01]) // Only version and suite
@@ -779,4 +1229,59 @@ final class HandshakeMessagesTests: XCTestCase {
             }
         }
     }
+}
+
+private enum NonCanonicalMessageATestError: Error {
+    case malformedFixture
+}
+
+private func messageAWireByRemovingLegacyOptionalPolicyBool(
+    _ message: HandshakeMessageA
+) throws -> (wire: Data, rawSignaturePreimage: Data) {
+    var transcript = message.transcriptBytes
+    var offset = 1
+
+    func readUInt16(at index: Int) throws -> Int {
+        guard index >= 0, index + 2 <= transcript.count else {
+            throw NonCanonicalMessageATestError.malformedFixture
+        }
+        return Int(transcript[index]) | (Int(transcript[index + 1]) << 8)
+    }
+
+    let supportedCount = try readUInt16(at: offset)
+    offset += 2 + supportedCount * 2
+    let keyShareCount = try readUInt16(at: offset)
+    offset += 2
+    for _ in 0..<keyShareCount {
+        guard offset + 4 <= transcript.count else {
+            throw NonCanonicalMessageATestError.malformedFixture
+        }
+        let shareLength = try readUInt16(at: offset + 2)
+        offset += 4 + shareLength
+    }
+    offset += 32
+    let capabilitiesLength = try readUInt16(at: offset)
+    offset += 2 + capabilitiesLength
+
+    let policyLengthOffset = offset
+    let policyLength = try readUInt16(at: policyLengthOffset)
+    guard policyLength > 0,
+          policyLengthOffset + 2 + policyLength <= transcript.count else {
+        throw NonCanonicalMessageATestError.malformedFixture
+    }
+    let shortenedPolicyLength = policyLength - 1
+    transcript.remove(at: policyLengthOffset + 2 + policyLength - 1)
+    transcript[policyLengthOffset] = UInt8(shortenedPolicyLength & 0xff)
+    transcript[policyLengthOffset + 1] = UInt8((shortenedPolicyLength >> 8) & 0xff)
+
+    var wire = transcript
+    let signatureLength = message.signature.count
+    wire.append(UInt8(signatureLength & 0xff))
+    wire.append(UInt8((signatureLength >> 8) & 0xff))
+    wire.append(message.signature)
+    wire.append(contentsOf: [0, 0])
+
+    var rawPreimage = Data("SkyBridge-A".utf8)
+    rawPreimage.append(transcript)
+    return (wire, rawPreimage)
 }

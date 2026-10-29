@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "component": "Q-Periapt",
+  "version": "0.1.0-alpha.2",
+  "release_revision": "r1",
+  "abi_major": 2,
+  "release_tag": "v0.1.0-alpha.2-r1",
+  "release_url": "https://github.com/billlza/q-periapt/releases/tag/v0.1.0-alpha.2-r1",
+  "source_commit": "5664fd86a617f92b620ea37e7692d3417d0e307d",
+  "github_release": {
+    "immutable": true,
+    "attestation_verified": true
+  },
+  "upstream_artifact": {
+    "filename": "CQPeriapt.xcframework.zip",
+    "sha256": "4480061244b5844cd1ff2349c05d261d0455db68c459449be33cbab63c94be0f",
+    "manifest_sha256": "0eafcf6989fe40835e9f2550098d1165d958b6bbe27373ba5ead9ee1a1757439",
+    "apple_distribution_sha256": "5d92029803d66864b1b964ccb539f6e613a97be57b084cc845e178cbcb2b415b",
+    "sha256sums_sha256": "253a5888eb0f4eaae301ce2b7d59e1554369c4eeaa594f5939cdd6b9b0874e98",
+    "header_sha256": "6e5be78c9b43fa245777eabd84dea4a137ecd6ebdb0266fa018a8aa4e3f1771f",
+    "abi_contract_sha256": "a8b49d6df4f0fc3b80eeb5ae3e200cbab94842128926e47e0aace036f90651f9",
+    "developer_id_authority": "Developer ID Application: Zi ang Li (YKUPL7Z869)",
+    "developer_team_id": "YKUPL7Z869",
+    "certificate_sha256": "806673908a3ddcd558dcc8d3ef055085f1fff100bda0acfb2e1315afd652ac8d",
+    "code_directory_hash": "86ad573a34e57e02e7d34ab203d3fa750e917395",
+    "rust_toolchain": "1.96.1"
+  },
+  "static_libraries": {
+    "macos-arm64_x86_64/libq_periapt_ffi_abi2.a": "7c64f5ff2bd166458bf68d95667066bf85612737a6d65f885fe1038157bdc6cb",
+    "ios-arm64/libq_periapt_ffi_abi2.a": "7088a0b5a26becd28728136dcf5fe2d0ce736914ee112f11ef3bfa7710ed6d6a",
+    "ios-arm64_x86_64-simulator/libq_periapt_ffi_abi2.a": "ff7b7e6c47a96d0a53e4ca940b3be1d9bdcdfc7f1975ceb28f6813086f476335"
+  },
+  "consumer_verification": {
+    "macos_runtime_tests": "3/3",
+    "macos_universal_link": [
+      "arm64",
+      "x86_64"
+    ],
+    "ios_device_link": [
+      "arm64"
+    ],
+    "ios_simulator_link": [
+      "arm64",
+      "x86_64"
+    ],
+    "warning_or_error_diagnostics": 0,
+    "contains_raw_device_runtime_proof": false
+  },
+  "skybridge_derivation": {
+    "reason": "Avoid SwiftPM module.modulemap output collision with liboqs while preserving the CQPeriapt wrapper as the sole module boundary.",
+    "removed_paths": [
+      "*/Headers/module.modulemap",
+      "_CodeSignature"
+    ],
+    "linked_static_library_bytes_changed": false,
+    "retains_upstream_container_signature": false,
+    "final_product_responsibility": "The containing macOS app must be signed and notarized; the containing iOS app must be signed and provisioned."
+  },
+  "release_classification": "research alpha prerelease; beta and default-off in SkyBridge"
+}

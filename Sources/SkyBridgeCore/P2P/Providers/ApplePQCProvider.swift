@@ -245,7 +245,7 @@ public struct ApplePQCCryptoProvider: CryptoProvider, Sendable {
         encapsulatedKey: Data,
         privateKey: SecureBytes
     ) async throws -> SecureBytes {
-        let keyData = privateKey.noCopyData()
+        let keyData = privateKey.copyData()
         let privateKeyObj: MLKEM768.PrivateKey
         do {
             privateKeyObj = try MLKEM768.PrivateKey(integrityCheckedRepresentation: keyData)
@@ -291,7 +291,7 @@ public struct ApplePQCCryptoProvider: CryptoProvider, Sendable {
  // 1. 解析私钥 (使用 integrityCheckedRepresentation)
         let myPrivateKey: MLKEM768.PrivateKey
         do {
-            let keyData = privateKey.noCopyData()
+            let keyData = privateKey.copyData()
             myPrivateKey = try MLKEM768.PrivateKey(integrityCheckedRepresentation: keyData)
         } catch {
             throw CryptoProviderError.invalidKeyLength(
@@ -345,7 +345,7 @@ public struct ApplePQCCryptoProvider: CryptoProvider, Sendable {
  // 1. 解析私钥 (使用 integrityCheckedRepresentation)
         let myPrivateKey: MLKEM768.PrivateKey
         do {
-            let keyData = privateKey.noCopyData()
+            let keyData = privateKey.copyData()
             myPrivateKey = try MLKEM768.PrivateKey(integrityCheckedRepresentation: keyData)
         } catch {
             throw CryptoProviderError.invalidKeyLength(
@@ -481,7 +481,7 @@ public struct ApplePQCCryptoProvider: CryptoProvider, Sendable {
         }
         let publicKey = privateKey.publicKey
         
-        return KeyPair(
+        return try KeyPair(
             publicKey: KeyMaterial(
                 suite: activeSuite,
                 usage: .keyExchange,
@@ -508,7 +508,7 @@ public struct ApplePQCCryptoProvider: CryptoProvider, Sendable {
         }
         let publicKey = privateKey.publicKey
         
-        return KeyPair(
+        return try KeyPair(
             publicKey: KeyMaterial(
                 suite: activeSuite,
                 usage: .signing,
@@ -537,6 +537,16 @@ public struct AppleXWingCryptoProvider: CryptoProvider, Sendable {
     private static let hkdfSaltLabel = "SkyBridge-KDF-Salt-v1|"
     
     public init() {}
+
+    public static func selfTest() -> Bool {
+        do {
+            let _ = try XWingMLKEM768X25519.PrivateKey.generate()
+            let _ = try MLDSA65.PrivateKey()
+            return true
+        } catch {
+            return false
+        }
+    }
 
     private static func hkdfSalt(info: Data) -> Data {
         var data = Data(hkdfSaltLabel.utf8)
@@ -586,7 +596,7 @@ public struct AppleXWingCryptoProvider: CryptoProvider, Sendable {
         privateKey: SecureBytes,
         info: Data
     ) async throws -> Data {
-        let keyData = privateKey.noCopyData()
+        let keyData = privateKey.copyData()
         let myPrivateKey = try XWingMLKEM768X25519.PrivateKey(integrityCheckedRepresentation: keyData)
         
         let sharedSecret = try myPrivateKey.decapsulate(sealedBox.encapsulatedKey)
@@ -624,7 +634,7 @@ public struct AppleXWingCryptoProvider: CryptoProvider, Sendable {
         encapsulatedKey: Data,
         privateKey: SecureBytes
     ) async throws -> SecureBytes {
-        let keyData = privateKey.noCopyData()
+        let keyData = privateKey.copyData()
         let myPrivateKey = try XWingMLKEM768X25519.PrivateKey(integrityCheckedRepresentation: keyData)
         let sharedSecret = try myPrivateKey.decapsulate(encapsulatedKey)
         let sharedSecretBytes = sharedSecret.withUnsafeBytes { Data($0) }
@@ -658,14 +668,14 @@ public struct AppleXWingCryptoProvider: CryptoProvider, Sendable {
         case .keyExchange:
             let privateKey = try XWingMLKEM768X25519.PrivateKey.generate()
             let publicKey = privateKey.publicKey
-            return KeyPair(
+            return try KeyPair(
                 publicKey: KeyMaterial(suite: activeSuite, usage: .keyExchange, bytes: publicKey.rawRepresentation),
                 privateKey: KeyMaterial(suite: activeSuite, usage: .keyExchange, bytes: privateKey.integrityCheckedRepresentation)
             )
         case .signing:
             let privateKey = try MLDSA65.PrivateKey()
             let publicKey = privateKey.publicKey
-            return KeyPair(
+            return try KeyPair(
                 publicKey: KeyMaterial(suite: activeSuite, usage: .signing, bytes: publicKey.rawRepresentation),
                 privateKey: KeyMaterial(suite: activeSuite, usage: .signing, bytes: privateKey.integrityCheckedRepresentation)
             )

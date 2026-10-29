@@ -203,7 +203,7 @@ public enum P2PNetworkState: String, Codable, CaseIterable, Sendable {
 
 // MARK: - 连接质量指标
 public struct P2PConnectionQuality: Codable, Sendable {
- /// 延迟（毫秒）
+ /// 延迟（秒）
     public let latency: TimeInterval
  /// 丢包率（0-1）
     public let packetLoss: Double
@@ -230,11 +230,11 @@ public struct P2PConnectionQuality: Codable, Sendable {
     
  /// 连接质量等级
     public var qualityLevel: ConnectionQualityLevel {
-        if stabilityScore >= 80 && latency < 50 && packetLoss < 0.01 {
+        if stabilityScore >= 80 && latency < 0.05 && packetLoss < 0.01 {
             return .excellent
-        } else if stabilityScore >= 60 && latency < 100 && packetLoss < 0.05 {
+        } else if stabilityScore >= 60 && latency < 0.10 && packetLoss < 0.05 {
             return .good
-        } else if stabilityScore >= 40 && latency < 200 && packetLoss < 0.10 {
+        } else if stabilityScore >= 40 && latency < 0.20 && packetLoss < 0.10 {
             return .fair
         } else {
             return .poor

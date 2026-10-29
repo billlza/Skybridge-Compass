@@ -1,0 +1,22 @@
+\begin{table*}[!t]
+\centering
+\scriptsize
+\caption{Reviewer-facing novelty boundary: prior-art defaults vs.\ claimed system-level delta.}
+\label{tab:novelty-delta}
+\begin{tabular}{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.22}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.33}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.29}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 6\tabcolsep) * \real{0.16}}@{}}
+\toprule
+Capability axis & Prior-art default (protocol/framework level) & Delta claimed in this work & Evidence anchor \\
+\midrule
+Negotiation and transcript binding & Mature protocol support exists (e.g., TLS/QUIC/Noise transcript integrity) & Reused foundation; not claimed as novel by itself & Table~\ref{tab:baseline-comparison} \\
+Policy non-bypass at entry points & Usually enforced in caller/application glue & Policy-bound session API + compile/runtime guards to block bypass paths & Section~\ref{sec:implementation}; Supplementary Regression Testing \\
+Fallback eligibility semantics & Downgrade prevention exists, but fallback causes and scope are often implementation-defined & Local-only, pre-send eligibility boundary; timeout/network-derived causes are fallback-ineligible & Table~\ref{tab:fallback-locality}; Fig.~\ref{fig:downgrade-matrix} \\
+Audit semantics for downgrade vs failure & Alert/event schemas are commonly externalized & Downgrade-labeled events only on accepted fallback; non-fallback failures remain typed but not downgrade-labeled & Table~\ref{tab:intro-event-typing}; Fig.~\ref{fig:event-traces} \\
+Operator strictness realizations & Single strictness mode or ad hoc compatibility behavior & Two explicit strict modes (Compliance / Bootstrap-Assisted) with mandatory PQC rekey gate before business traffic & Fig.~\ref{fig:policy-downgrade}; Section~\ref{sec:implementation} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+

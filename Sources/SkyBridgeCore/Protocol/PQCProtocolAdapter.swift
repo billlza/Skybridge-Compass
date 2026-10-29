@@ -1,7 +1,8 @@
 // PQCProtocolAdapter.swift
 // SkyBridgeCore
 //
-// PQC 跨平台协议适配器 - 封装现有 PQCProvider 为统一跨平台接口
+// Legacy ML-DSA-65 compatibility/test adapter. This is not the active
+// main-protocol identity authority and must not feed production capability UI.
 // Created for web-agent-integration spec 9
 
 import Foundation
@@ -73,7 +74,11 @@ public enum CrossPlatformSignatureVariant: String, Codable, Sendable, CaseIterab
 
 // MARK: - PQC 协议适配器
 
-/// PQC 跨平台协议适配器 - 提供统一的跨平台 PQC 接口
+/// Legacy ML-DSA-65-only compatibility/test surface.
+///
+/// Production handshake, TrustRecord, file-transfer, and settings paths use
+/// `CommittedLocalProtocolIdentitySnapshot` plus exact raw-key authority and
+/// never derive capability from this adapter.
 @available(macOS 14.0, *)
 public actor PQCProtocolAdapter {
     
@@ -82,6 +87,11 @@ public actor PQCProtocolAdapter {
     private let logger = Logger(subsystem: "com.skybridge.quantum", category: "PQCProtocolAdapter")
     private let provider: PQCProvider?
     private let supportedSuites: [CrossPlatformPQCSuite]
+    private let supportedKEMVariants: Set<CrossPlatformKEMVariant>
+    private let supportedSignatureVariants: Set<CrossPlatformSignatureVariant>
+    /// This legacy adapter intentionally remains ML-DSA-65-only. It is not a
+    /// statement about the active production identity, which may be ML-DSA-87.
+    private static let legacyCompatibilitySignatureVariants: Set<CrossPlatformSignatureVariant> = [.mldsa65]
     
  /// 当前使用的算法套件
     public private(set) var currentSuite: CrossPlatformPQCSuite
@@ -102,42 +112,86 @@ public actor PQCProtocolAdapter {
         self.provider = PQCProviderFactory.makeProvider()
         
         if let p = provider {
-            switch p.backend {
-            case .applePQC:
- // Apple PQC 支持所有套件
-                self.supportedSuites = [.classic, .pqc, .hybrid]
-                self.currentSuite = .hybrid
-            case .liboqs:
- // OQS 支持经典和纯 PQC（HPKE 降级实现）
-                self.supportedSuites = [.classic, .pqc]
-                self.currentSuite = .pqc
-            case .none:
-                self.supportedSuites = [.classic]
-                self.currentSuite = .classic
-            }
+            self.supportedSuites = Self.supportedSuites(for: p)
+            self.supportedKEMVariants = Self.supportedKEMVariants(for: p)
+            self.supportedSignatureVariants = Self.supportedSignatureVariants(for: p)
+            self.currentSuite = Self.defaultSuite(for: p, supportedSuites: supportedSuites)
         } else {
             self.supportedSuites = [.classic]
+            self.supportedKEMVariants = []
+            self.supportedSignatureVariants = []
             self.currentSuite = .classic
         }
     }
     
- /// 使用指定 provider 初始化（用于测试）
-    public init(provider: PQCProvider?, suite: CrossPlatformPQCSuite = .hybrid) {
+ #if DEBUG || SKYBRIDGE_TESTING
+ /// 使用指定 provider 初始化（仅用于测试）
+    public init(provider: PQCProvider?, suite requestedSuite: CrossPlatformPQCSuite? = nil) {
         self.provider = provider
-        self.currentSuite = suite
         
         if let p = provider {
-            switch p.backend {
-            case .applePQC:
-                self.supportedSuites = [.classic, .pqc, .hybrid]
-            case .liboqs:
-                self.supportedSuites = [.classic, .pqc]
-            case .none:
-                self.supportedSuites = [.classic]
-            }
+            let suites = Self.supportedSuites(for: p)
+            self.supportedSuites = suites
+            self.supportedKEMVariants = Self.supportedKEMVariants(for: p)
+            self.supportedSignatureVariants = Self.supportedSignatureVariants(for: p)
+            let fallbackSuite = Self.defaultSuite(for: p, supportedSuites: suites)
+            self.currentSuite = requestedSuite.flatMap { suites.contains($0) ? $0 : nil } ?? fallbackSuite
         } else {
             self.supportedSuites = [.classic]
+            self.supportedKEMVariants = []
+            self.supportedSignatureVariants = []
+            self.currentSuite = .classic
         }
+    }
+ #endif
+
+    private static func supportedKEMVariants(for provider: PQCProvider) -> Set<CrossPlatformKEMVariant> {
+        guard let reporter = provider as? any PQCProviderCapabilityReporting else { return [] }
+        return Set(reporter.supportedKEMVariants.compactMap(CrossPlatformKEMVariant.init(rawValue:)))
+    }
+
+    private static func supportedSignatureVariants(
+        for provider: PQCProvider
+    ) -> Set<CrossPlatformSignatureVariant> {
+        guard let reporter = provider as? any PQCProviderCapabilityReporting else { return [] }
+        let providerVariants = Set(
+            reporter.supportedSignatureAlgorithms.compactMap(CrossPlatformSignatureVariant.init(rawValue:))
+        )
+        return providerVariants.intersection(legacyCompatibilitySignatureVariants)
+    }
+
+    private static func supportedSuites(for provider: PQCProvider) -> [CrossPlatformPQCSuite] {
+        guard provider is any PQCProviderCapabilityReporting,
+              !supportedKEMVariants(for: provider).isEmpty,
+              !supportedSignatureVariants(for: provider).isEmpty else {
+            return [.classic]
+        }
+        switch provider.backend {
+        case .applePQC:
+            var suites: [CrossPlatformPQCSuite] = [.classic, .pqc]
+            if provider.suite == .hybridXWing || PQCProviderFactory.supportsSuite(.hybridXWing) {
+                suites.append(.hybrid)
+            }
+            return suites
+        case .liboqs:
+            return [.classic, .pqc]
+        case .none:
+            return [.classic]
+        }
+    }
+
+    private static func defaultSuite(
+        for provider: PQCProvider,
+        supportedSuites: [CrossPlatformPQCSuite]
+    ) -> CrossPlatformPQCSuite {
+        let providerSuite = CrossPlatformPQCSuite(from: provider.suite)
+        if supportedSuites.contains(providerSuite) {
+            return providerSuite
+        }
+        if supportedSuites.contains(.pqc) {
+            return .pqc
+        }
+        return .classic
     }
     
  // MARK: - Suite Management
@@ -174,6 +228,9 @@ public actor PQCProtocolAdapter {
         guard currentSuite != .classic else {
             throw PQCProtocolError.operationNotSupportedInClassicMode("KEM")
         }
+        guard supportedKEMVariants.contains(variant) else {
+            throw PQCProtocolError.unsupportedKEMVariant(variant.rawValue)
+        }
         
         let result = try await provider.kemEncapsulate(peerId: peerId, kemVariant: variant.rawValue)
         logger.debug("✅ KEM 封装完成: peerId=\(peerId), variant=\(variant.rawValue)")
@@ -197,6 +254,9 @@ public actor PQCProtocolAdapter {
         
         guard currentSuite != .classic else {
             throw PQCProtocolError.operationNotSupportedInClassicMode("KEM")
+        }
+        guard supportedKEMVariants.contains(variant) else {
+            throw PQCProtocolError.unsupportedKEMVariant(variant.rawValue)
         }
         
         let result = try await provider.kemDecapsulate(peerId: peerId, encapsulated: encapsulated, kemVariant: variant.rawValue)
@@ -223,6 +283,9 @@ public actor PQCProtocolAdapter {
         
         guard currentSuite != .classic else {
             throw PQCProtocolError.operationNotSupportedInClassicMode("Sign")
+        }
+        guard supportedSignatureVariants.contains(variant) else {
+            throw PQCProtocolError.unsupportedSignatureVariant(variant.rawValue)
         }
         
         let signature = try await provider.sign(data: data, peerId: peerId, algorithm: variant.rawValue)
@@ -252,10 +315,53 @@ public actor PQCProtocolAdapter {
             logger.warning("⚠️ 经典模式不支持 PQC 签名验证")
             return false
         }
+        guard supportedSignatureVariants.contains(variant) else {
+            logger.warning("⚠️ Provider 未声明请求的 PQC 签名变体")
+            return false
+        }
         
         let result = await provider.verify(data: data, signature: signature, peerId: peerId, algorithm: variant.rawValue)
         logger.debug("✅ 签名验证完成: result=\(result), variant=\(variant.rawValue)")
         return result
+    }
+
+    /// Projects an authenticated TrustRecord key into the provider's
+    /// session-local verification cache. This does not discover or persist
+    /// trust and must be called only after the surrounding handshake succeeds.
+    public func registerAuthenticatedSigningPublicKey(
+        _ publicKey: Data,
+        peerId: String,
+        variant: CrossPlatformSignatureVariant = .mldsa65
+    ) async throws {
+        guard supportedSignatureVariants.contains(variant) else {
+            throw PQCProtocolError.unsupportedSignatureVariant(variant.rawValue)
+        }
+        guard let consumer = provider as? any AuthenticatedPQCSigningKeyConsumer else {
+            throw PQCProtocolError.authenticatedSigningKeyRegistrationUnavailable
+        }
+        try await consumer.registerAuthenticatedSigningPublicKey(
+            publicKey,
+            peerId: peerId,
+            algorithm: variant.rawValue
+        )
+    }
+
+    /// Returns the public half generated by a prior local signing operation.
+    /// The receiver must authenticate it out of band before registration.
+    public func localSigningPublicKey(
+        peerId: String,
+        variant: CrossPlatformSignatureVariant = .mldsa65
+    ) async throws -> Data {
+        guard supportedSignatureVariants.contains(variant) else {
+            throw PQCProtocolError.unsupportedSignatureVariant(variant.rawValue)
+        }
+        guard let source = provider as? any PQCLocalSigningPublicKeyProviding else {
+            throw PQCProtocolError.localSigningPublicKeyUnavailable
+        }
+        return try await source.localSigningPublicKey(
+            peerId: peerId,
+            algorithm: variant.rawValue
+        )
     }
     
  // MARK: - HPKE Operations
@@ -352,8 +458,8 @@ extension PQCProtocolAdapter {
     public func generateCapabilityDeclaration() -> PQCCapabilityDeclaration {
         PQCCapabilityDeclaration(
             supportedSuites: supportedSuites.map(\.rawValue),
-            supportedKEMVariants: CrossPlatformKEMVariant.allCases.map(\.rawValue),
-            supportedSignatureVariants: CrossPlatformSignatureVariant.allCases.map(\.rawValue),
+            supportedKEMVariants: supportedKEMVariants.map(\.rawValue).sorted(),
+            supportedSignatureVariants: supportedSignatureVariants.map(\.rawValue).sorted(),
             preferredSuite: currentSuite.rawValue,
             backend: backend.rawValue
         )
@@ -383,7 +489,7 @@ extension PQCProtocolAdapter {
     
  /// 协商 KEM 变体
     public func negotiateKEMVariant(with remoteVariants: [String]) -> CrossPlatformKEMVariant? {
-        let localVariants = Set(CrossPlatformKEMVariant.allCases.map(\.rawValue))
+        let localVariants = Set(supportedKEMVariants.map(\.rawValue))
         let remoteSet = Set(remoteVariants)
         let common = localVariants.intersection(remoteSet)
         
@@ -398,14 +504,11 @@ extension PQCProtocolAdapter {
     
  /// 协商签名算法变体
     public func negotiateSignatureVariant(with remoteVariants: [String]) -> CrossPlatformSignatureVariant? {
-        let localVariants = Set(CrossPlatformSignatureVariant.allCases.map(\.rawValue))
+        let localVariants = Set(supportedSignatureVariants.map(\.rawValue))
         let remoteSet = Set(remoteVariants)
         let common = localVariants.intersection(remoteSet)
         
- // 优先选择更高安全级别
-        if common.contains(CrossPlatformSignatureVariant.mldsa87.rawValue) {
-            return .mldsa87
-        } else if common.contains(CrossPlatformSignatureVariant.mldsa65.rawValue) {
+        if common.contains(CrossPlatformSignatureVariant.mldsa65.rawValue) {
             return .mldsa65
         }
         return nil
@@ -418,6 +521,8 @@ extension PQCProtocolAdapter {
 public enum PQCProtocolError: Error, LocalizedError, Sendable {
     case providerNotAvailable
     case unsupportedSuite(String)
+    case unsupportedKEMVariant(String)
+    case unsupportedSignatureVariant(String)
     case operationNotSupportedInClassicMode(String)
     case hpkeRequiresHybridMode
     case noCommonSuite
@@ -427,6 +532,8 @@ public enum PQCProtocolError: Error, LocalizedError, Sendable {
     case verificationFailed(String)
     case hpkeSealFailed(String)
     case hpkeOpenFailed(String)
+    case authenticatedSigningKeyRegistrationUnavailable
+    case localSigningPublicKeyUnavailable
     
     public var errorDescription: String? {
         switch self {
@@ -434,6 +541,10 @@ public enum PQCProtocolError: Error, LocalizedError, Sendable {
             return "PQC provider 不可用"
         case .unsupportedSuite(let suite):
             return "不支持的算法套件: \(suite)"
+        case .unsupportedKEMVariant(let variant):
+            return "不支持的 KEM 变体: \(variant)"
+        case .unsupportedSignatureVariant(let variant):
+            return "不支持的签名变体: \(variant)"
         case .operationNotSupportedInClassicMode(let op):
             return "经典模式不支持 \(op) 操作"
         case .hpkeRequiresHybridMode:
@@ -452,6 +563,10 @@ public enum PQCProtocolError: Error, LocalizedError, Sendable {
             return "HPKE Seal 失败: \(reason)"
         case .hpkeOpenFailed(let reason):
             return "HPKE Open 失败: \(reason)"
+        case .authenticatedSigningKeyRegistrationUnavailable:
+            return "PQC provider does not accept authenticated remote signing keys"
+        case .localSigningPublicKeyUnavailable:
+            return "PQC provider does not expose a local signing public key"
         }
     }
 }

@@ -32,10 +32,18 @@ public struct NotificationBellView: View {
  // 事件详情弹窗状态
     @State private var showEventDetailAlert: Bool = false
     @State private var selectedEventDetail: String? = nil
-    
+
     public init() {}
-    
+
     public var body: some View { bellContent }
+
+    private func t(_ key: String) -> String {
+        LocalizationManager.shared.localizedString(key)
+    }
+
+    private func tf(_ key: String, _ args: CVarArg...) -> String {
+        String(format: t(key), locale: LocalizationManager.shared.locale, arguments: args)
+    }
 
  /// 主体视图内容（拆分以降低类型推断复杂度）
     private var bellContent: some View {
@@ -73,19 +81,19 @@ public struct NotificationBellView: View {
         .popover(isPresented: $showPopover, arrowEdge: .top) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text("通知中心")
+                    Text(t("notifications.center.title"))
                         .font(.headline)
                     Spacer()
-                    Button("清空") {
+                    Button(t("action.clear")) {
                         events.removeAll()
                         unreadCount = 0
                     }
                     .buttonStyle(.borderless)
                 }
                 .padding(.bottom, 4)
-                
+
                 if events.isEmpty {
-                    Text("暂无通知")
+                    Text(t("notifications.center.empty"))
                         .foregroundColor(.secondary)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                         .padding(.vertical, 40)
@@ -119,7 +127,7 @@ public struct NotificationBellView: View {
             }
             .padding(12)
             .frame(width: 360)
-            .onAppear { 
+            .onAppear {
                 unreadCount = 0
             }
         }
@@ -130,26 +138,25 @@ public struct NotificationBellView: View {
             scheduleHourlyWellness()
  // 可选：启用实时天气获取（包含AQI），避免阻塞主线程
             if settingsManager.enableRealTimeWeather, !weatherIntegration.isInitialized {
-                Task {
+                await StartupCoordinator.shared.waitUntilLaunchSettled()
  // 启动集成天气（wttr.in/Open‑Meteo + AQI），用于雨天等提醒
-                    await weatherIntegration.start()
+                await weatherIntegration.start()
  // 启动完成后立即触发一次天气建议，避免用户需要等待定时器
-                    if let cond = weatherIntegration.currentWeather?.condition {
-                        let t = mapConditionToWeatherType(cond)
+                if let cond = weatherIntegration.currentWeather?.condition {
+                    let t = mapConditionToWeatherType(cond)
  // 仅在首次或上次建议超过30分钟时立即提醒，避免短时间内重复
-                        let shouldImmediate = {
-                            if let last = lastHourlyAdvice { return Date().timeIntervalSince(last) >= 1800 }
-                            return true
-                        }()
-                        if shouldImmediate {
+                    let shouldImmediate = {
+                        if let last = lastHourlyAdvice { return Date().timeIntervalSince(last) >= 1800 }
+                        return true
+                    }()
+                    if shouldImmediate {
  // 若为雨天或暴风雨，立即触发雨伞提醒
-                            switch t {
-                            case .rain, .heavyRain, .thunderstorm:
-                                sendWeatherAdvice()
-                                lastHourlyAdvice = Date()
-                            default:
-                                break
-                            }
+                        switch t {
+                        case .rain, .heavyRain, .thunderstorm:
+                            sendWeatherAdvice()
+                            lastHourlyAdvice = Date()
+                        default:
+                            break
                         }
                     }
                 }
@@ -165,47 +172,67 @@ public struct NotificationBellView: View {
                   let port = note.userInfo?["port"] as? UInt16,
                   let isVerified = note.userInfo?["isVerified"] as? Bool else { return }
             if notifiedConnectableDevices[deviceId] != nil { return }
-            let trustText = isVerified ? "已验签" : "未验证"
-            var detail = "\(name) · \(address):\(port) · \(trustText)"
-            if let reason = note.userInfo?["verificationFailedReason"] as? String, !reason.isEmpty { detail += " · 原因: \(reason)" }
+            let trustText = isVerified ? t("notifications.discovery.trust.verified") : t("notifications.discovery.trust.unverified")
+            var detail = tf("notifications.discovery.detail", name, address, String(Int(port)), trustText)
+            if let reason = note.userInfo?["verificationFailedReason"] as? String, !reason.isEmpty {
+                detail += " · " + tf("notifications.discovery.reason", reason)
+            }
             if settingsManager.onlyNotifyVerifiedDevices {
                 if isVerified {
-                    appendEvent(title: "📡 发现可连接设备", detail: detail, success: true, icon: "antenna.radiowaves.left.and.right")
+                    appendEvent(title: t("notifications.discovery.title"), detail: detail, success: true, icon: "antenna.radiowaves.left.and.right")
                     notifiedConnectableDevices[deviceId] = now
                 }
             } else {
                 let isWarn = !isVerified
-                appendEvent(title: isWarn ? "📡 发现可连接设备（未验证）" : "📡 发现可连接设备", detail: detail, success: !isWarn, icon: isWarn ? "exclamationmark.shield.fill" : "antenna.radiowaves.left.and.right", warning: isWarn)
+                appendEvent(
+                    title: isWarn ? t("notifications.discovery.title.unverified") : t("notifications.discovery.title"),
+                    detail: detail,
+                    success: !isWarn,
+                    icon: isWarn ? "exclamationmark.shield.fill" : "antenna.radiowaves.left.and.right",
+                    warning: isWarn
+                )
                 notifiedConnectableDevices[deviceId] = now
             }
         }
  // 订阅关键事件
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("FileTransferCompleted"))) { note in
-            let fileName = (note.userInfo?["fileName"] as? String) ?? "未知文件"
+            let fileName = (note.userInfo?["fileName"] as? String) ?? t("notifications.common.unknownFile")
             let fileSize = (note.userInfo?["fileSize"] as? Int64) ?? 0
-            appendEvent(title: "文件传输完成", detail: "\(fileName) · \(byteCount(fileSize))", success: true, icon: "checkmark.circle.fill")
+            let direction = (note.userInfo?["direction"] as? String) ?? ""
+            let localPath = (note.userInfo?["localPath"] as? String)
+            var detail = "\(fileName) · \(byteCount(fileSize))"
+            if let localPath, !localPath.isEmpty, direction == "incoming" {
+                detail += " · " + tf("notifications.fileTransfer.savedTo", localPath)
+            }
+            appendEvent(title: t("notifications.fileTransfer.completed"), detail: detail, success: true, icon: "checkmark.circle.fill")
         }
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("FileTransferFailed"))) { note in
-            let fileName = (note.userInfo?["fileName"] as? String) ?? "未知文件"
-            let error = (note.userInfo?["error"] as? String) ?? "未知错误"
-            appendEvent(title: "文件传输失败", detail: "\(fileName) · \(error)", success: false, icon: "xmark.circle.fill")
+            let fileName = (note.userInfo?["fileName"] as? String) ?? t("notifications.common.unknownFile")
+            let error = (note.userInfo?["error"] as? String) ?? t("notifications.common.unknownError")
+            appendEvent(title: t("notifications.fileTransfer.failed"), detail: "\(fileName) · \(error)", success: false, icon: "xmark.circle.fill")
         }
         .onReceive(NotificationCenter.default.publisher(for: .fileChunkVerified)) { note in
-            appendEvent(from: note, fallbackTitle: "分块校验通过", success: true, icon: "checkmark.seal")
+            appendEvent(from: note, fallbackTitle: t("notifications.chunkVerification.passed"), success: true, icon: "checkmark.seal")
         }
         .onReceive(NotificationCenter.default.publisher(for: .fileChunkVerifyFailed)) { note in
-            appendEvent(from: note, fallbackTitle: "分块校验失败", success: false, icon: "xmark.seal")
+            appendEvent(from: note, fallbackTitle: t("notifications.chunkVerification.failed"), success: false, icon: "xmark.seal")
         }
         .onReceive(NotificationCenter.default.publisher(for: .fileMerkleVerified)) { note in
             let ok = (note.userInfo?["ok"] as? Bool) ?? false
-            appendEvent(from: note, fallbackTitle: ok ? "Merkle 校验通过" : "Merkle 校验失败", success: ok, icon: ok ? "checkmark.seal" : "exclamationmark.triangle")
+            appendEvent(
+                from: note,
+                fallbackTitle: ok ? t("notifications.merkleVerification.passed") : t("notifications.merkleVerification.failed"),
+                success: ok,
+                icon: ok ? "checkmark.seal" : "exclamationmark.triangle"
+            )
         }
         .onReceive(NotificationCenter.default.publisher(for: NetworkFrameworkEnhancements.certificateValidationNotification)) { note in
             let ok = (note.userInfo?["ok"] as? Bool) ?? false
             let reason = (note.userInfo?["reason"] as? String) ?? ""
             let elapsed = (note.userInfo?["elapsed"] as? TimeInterval) ?? 0
-            let title = ok ? "证书校验通过" : "证书校验失败"
-            let detail = reason.isEmpty ? String(format: "耗时 %.0fms", elapsed*1000) : "\(reason) · " + String(format: "%.0fms", elapsed*1000)
+            let title = ok ? t("notifications.certificate.passed") : t("notifications.certificate.failed")
+            let timing = tf("notifications.certificate.elapsed", String(format: "%.0f", elapsed * 1000))
+            let detail = reason.isEmpty ? timing : "\(reason) · \(timing)"
             appendEvent(title: title, detail: detail, success: ok, icon: ok ? "lock.shield" : "lock.slash")
         }
         .onReceive(NotificationCenter.default.publisher(for: .fileMerkleTiming)) { note in
@@ -215,13 +242,13 @@ public struct NotificationBellView: View {
             let chunk = (note.userInfo?["chunkSize"] as? Int) ?? 0
             let elapsed = (note.userInfo?["elapsedMs"] as? Double) ?? 0
             let metal = (note.userInfo?["metalAvailable"] as? Bool) ?? false
-            let title = phase == "verify" ? "Merkle 校验耗时" : "Merkle 计算耗时"
+            let title = phase == "verify" ? t("notifications.merkleTiming.verify") : t("notifications.merkleTiming.compute")
             let detail = "\(file) · \(byteCount(size)) · chunk=\(byteCount(Int64(chunk))) · " + String(format: "%.0fms", elapsed) + (metal ? " · Metal" : "")
             appendEvent(title: title, detail: detail, success: true, icon: "timer")
         }
         )
     }
-    
+
 private func appendEvent(from note: Notification, fallbackTitle: String, success: Bool, icon: String) {
         var detail: String? = nil
         if let info = note.userInfo {
@@ -231,9 +258,9 @@ private func appendEvent(from note: Notification, fallbackTitle: String, success
             let actual = info["actual"] as? String
             let error = info["error"] as? String
             var parts: [String] = []
-            if let t = transferId { parts.append("ID:\(t)") }
-            if let c = chunkIndex { parts.append("Chunk:\(c)") }
-            if let e = expected, let a = actual { parts.append("期望/实际: \(e.prefix(8)) / \(a.prefix(8))") }
+            if let t = transferId { parts.append(tf("notifications.common.id", t)) }
+            if let c = chunkIndex { parts.append(tf("notifications.common.chunk", String(c))) }
+            if let e = expected, let a = actual { parts.append(tf("notifications.common.expectedActual", String(e.prefix(8)), String(a.prefix(8)))) }
             if let err = error { parts.append(err) }
             if !parts.isEmpty { detail = parts.joined(separator: " · ") }
         }
@@ -246,15 +273,15 @@ private func appendEvent(from note: Notification, fallbackTitle: String, success
         if events.count > maxEvents { events.removeLast(events.count - maxEvents) }
         if !showPopover { unreadCount += 1 }
     }
-    
+
  // MARK: - 欢迎消息
-    
+
     private var welcomeMessage: String {
         let userName = authModel.currentSession?.displayName ?? NSUserName()
         let timeGreeting = getTimeGreeting()
-        return "\(userName)，\(timeGreeting)！"
+        return tf("notifications.welcome.greeting", userName, timeGreeting)
     }
-    
+
     private var welcomeIcon: String {
         let hour = Calendar.current.component(.hour, from: Date())
         switch hour {
@@ -269,44 +296,44 @@ private func appendEvent(from note: Notification, fallbackTitle: String, success
         default: return "hand.wave.fill"  // 默认
         }
     }
-    
+
     private func getTimeGreeting() -> String {
         let hour = Calendar.current.component(.hour, from: Date())
         switch hour {
  // 使用 24 小时明确分段，文案更贴合语义并便于扩展。
-        case 0..<5: return "夜深了"
-        case 5..<7: return "清晨好"
-        case 7..<12: return "早上好"
-        case 12..<14: return "中午好"
-        case 14..<18: return "下午好"
-        case 18..<21: return "晚上好"
-        case 21..<24: return "夜深了"
-        default: return "你好"
+        case 0..<5: return t("notifications.greeting.lateNight")
+        case 5..<7: return t("notifications.greeting.earlyMorning")
+        case 7..<12: return t("notifications.greeting.morning")
+        case 12..<14: return t("notifications.greeting.noon")
+        case 14..<18: return t("notifications.greeting.afternoon")
+        case 18..<21: return t("notifications.greeting.evening")
+        case 21..<24: return t("notifications.greeting.lateNight")
+        default: return t("notifications.greeting.default")
         }
     }
-    
+
  // MARK: - 启动欢迎和休息提醒
-    
+
     private func sendWelcomeMessageIfNeeded() {
  // 检查是否已经发送过启动欢迎消息（本次会话内）
         if !hasShownWelcome {
             let userName = authModel.currentSession?.displayName ?? NSUserName()
             let greeting = getTimeGreeting()
-            let message = "\(userName)，\(greeting)！欢迎使用 SkyBridge Compass"
-            appendEvent(title: message, detail: "开始您的跨设备连接之旅", success: true, icon: welcomeIcon)
+            let message = tf("notifications.welcome.title", userName, greeting)
+            appendEvent(title: message, detail: t("notifications.welcome.detail"), success: true, icon: welcomeIcon)
             hasShownWelcome = true
         }
     }
-    
+
     private func scheduleRestReminders() {
  // 启动后台任务检查休息提醒
         Task {
             while true {
                 try? await Task.sleep(nanoseconds: 300_000_000_000) // 每5分钟检查一次
-                
+
                 let now = Date()
                 let timeSinceStart = now.timeIntervalSince(appStartTime)
-                
+
  // 检查是否超过1小时
                 if timeSinceStart >= restReminderInterval {
  // 检查是否已经发送过休息提醒（避免重复发送）
@@ -316,12 +343,12 @@ private func appendEvent(from note: Notification, fallbackTitle: String, success
                             continue // 距离上次提醒不足1小时，跳过
                         }
                     }
-                    
+
  // 发送休息提醒
                     sendRestReminder()
                     lastRestReminder = now
                 }
-                
+
  // 连续使用满3小时的强提示（每3小时仅提示一次）
                 if timeSinceStart >= (3 * 3600) {
                     if let last3h = lastThreeHourReminder {
@@ -337,7 +364,7 @@ private func appendEvent(from note: Notification, fallbackTitle: String, success
             }
         }
     }
-    
+
  /// 每小时健康与天气提示（丰富程度增强：夜深了提示、天气防护建议）
     private func scheduleHourlyWellness() {
         Task {
@@ -349,39 +376,39 @@ private func appendEvent(from note: Notification, fallbackTitle: String, success
                     return true
                 }()
                 if !shouldSend { continue }
-                
+
  // 夜深了（22:00~05:00）主动提示休息
                 let hour = Calendar.current.component(.hour, from: now)
                 if hour >= 22 || hour < 5 {
-                    appendEvent(title: "🌙 夜深了，注意休息", detail: "建议放松眼睛，保证睡眠质量", success: true, icon: "moon.stars.fill")
+                    appendEvent(title: t("notifications.wellness.lateNight.title"), detail: t("notifications.wellness.lateNight.detail"), success: true, icon: "moon.stars.fill")
                 }
-                
+
  // 天气防护建议（依据实时天气或退化为通用提示）
                 sendWeatherAdvice()
-                
+
                 lastHourlyAdvice = now
             }
         }
     }
-    
+
     private func sendRestReminder() {
         let reminders = [
-            ("🌊 您已连续使用1小时", "休息片刻，喝杯水，保护您的眼睛", "cup.and.saucer.fill"),
-            ("⏰ 使用时长提醒", "起来走动一下吧，久坐不利于健康", "figure.walk"),
-            ("🍃 健康小贴士", "眺望远方，让眼睛得到放松", "eye.fill"),
-            ("💡 建议休息", "做几个深呼吸，缓解疲劳", "lungs.fill"),
-            ("☕️ 休息一下", "起身活动，保持最佳状态", "hand.raised.fill")
+            (t("notifications.rest.1h.title"), t("notifications.rest.1h.detail"), "cup.and.saucer.fill"),
+            (t("notifications.rest.duration.title"), t("notifications.rest.duration.detail"), "figure.walk"),
+            (t("notifications.rest.tip.title"), t("notifications.rest.tip.detail"), "eye.fill"),
+            (t("notifications.rest.breathe.title"), t("notifications.rest.breathe.detail"), "lungs.fill"),
+            (t("notifications.rest.break.title"), t("notifications.rest.break.detail"), "hand.raised.fill")
         ]
-        
+
         let randomReminder = reminders.randomElement() ?? reminders[0]
         appendEvent(title: randomReminder.0, detail: randomReminder.1, success: true, icon: randomReminder.2)
     }
-    
+
  /// 连续三小时强提醒
     private func sendThreeHourReminder() {
-        appendEvent(title: "⏳ 连续使用3小时", detail: "建议充分休息、补充水分并活动一下", success: true, icon: "figure.walk")
+        appendEvent(title: t("notifications.rest.3h.title"), detail: t("notifications.rest.3h.detail"), success: true, icon: "figure.walk")
     }
-    
+
  /// 天气防护建议（晴天防晒、雨天防雨、雪天防雪、雾霾/雾建议佩戴口罩）
     private func sendWeatherAdvice() {
  // 优先使用集成天气的数据源（wttr.in / Open‑Meteo），避免WeatherKit未初始化导致类型为unknown
@@ -397,37 +424,37 @@ private func appendEvent(from note: Notification, fallbackTitle: String, success
         if let aqi {
             let thresholds = aqiThresholdsForCurrentLocation()
             if aqi >= thresholds.veryUnhealthy {
-                appendEvent(title: "🛑 空气质量极差 (AQI: \(aqi))", detail: "建议减少外出，佩戴口罩并关闭门窗", success: true, icon: "aqi.high")
+                appendEvent(title: tf("notifications.weather.aqi.veryUnhealthy.title", String(aqi)), detail: t("notifications.weather.aqi.veryUnhealthy.detail"), success: true, icon: "aqi.high")
             } else if aqi >= thresholds.unhealthy {
-                appendEvent(title: "⚠️ 空气质量较差 (AQI: \(aqi))", detail: "建议佩戴口罩，尽量减少户外活动", success: true, icon: "aqi.high")
+                appendEvent(title: tf("notifications.weather.aqi.unhealthy.title", String(aqi)), detail: t("notifications.weather.aqi.unhealthy.detail"), success: true, icon: "aqi.high")
             } else if aqi >= thresholds.sensitive {
-                appendEvent(title: "提示：空气质量偏高 (AQI: \(aqi))", detail: "敏感人群建议佩戴口罩，适当减少外出", success: true, icon: "aqi.medium")
+                appendEvent(title: tf("notifications.weather.aqi.sensitive.title", String(aqi)), detail: t("notifications.weather.aqi.sensitive.detail"), success: true, icon: "aqi.medium")
             } else if aqi >= thresholds.caution {
-                appendEvent(title: "提示：空气质量一般 (AQI: \(aqi))", detail: "建议适度缩短户外时长，关注实时空气质量", success: true, icon: "aqi.low")
+                appendEvent(title: tf("notifications.weather.aqi.caution.title", String(aqi)), detail: t("notifications.weather.aqi.caution.detail"), success: true, icon: "aqi.low")
             }
         }
         switch weatherType {
         case .clear, .partlyCloudy:
             if uv >= settingsManager.uvThresholdStrong {
-                appendEvent(title: "☀️ 强紫外线提醒", detail: "建议涂抹防晒霜、佩戴太阳镜并减少日照", success: true, icon: "sun.max.fill")
+                appendEvent(title: t("notifications.weather.uv.strong.title"), detail: t("notifications.weather.uv.strong.detail"), success: true, icon: "sun.max.fill")
             } else if uv >= settingsManager.uvThresholdModerate {
-                appendEvent(title: "☀️ 防晒提醒", detail: "紫外线较强，外出注意防晒与遮阳", success: true, icon: "sun.max.fill")
+                appendEvent(title: t("notifications.weather.uv.moderate.title"), detail: t("notifications.weather.uv.moderate.detail"), success: true, icon: "sun.max.fill")
             } else {
-                appendEvent(title: "☀️ 天气晴好", detail: "适合外出，注意合理安排日照时间", success: true, icon: "sun.max.fill")
+                appendEvent(title: t("notifications.weather.clear.title"), detail: t("notifications.weather.clear.detail"), success: true, icon: "sun.max.fill")
             }
         case .rain, .heavyRain:
-            appendEvent(title: "🌧️ 防雨提醒", detail: "出门请带伞，注意道路湿滑", success: true, icon: "cloud.rain.fill")
+            appendEvent(title: t("notifications.weather.rain.title"), detail: t("notifications.weather.rain.detail"), success: true, icon: "cloud.rain.fill")
         case .snow, .heavySnow:
-            appendEvent(title: "❄️ 防雪提醒", detail: "注意保暖与防滑，谨防低温冻伤", success: true, icon: "snowflake")
+            appendEvent(title: t("notifications.weather.snow.title"), detail: t("notifications.weather.snow.detail"), success: true, icon: "snowflake")
         case .haze, .fog:
-            appendEvent(title: "🌫️ 雾霾/大雾提醒", detail: "建议佩戴口罩，减少外出并注意行车安全", success: true, icon: "aqi.medium")
+            appendEvent(title: t("notifications.weather.haze.title"), detail: t("notifications.weather.haze.detail"), success: true, icon: "aqi.medium")
         case .thunderstorm:
  // 雷暴天气同样提醒携带雨具并减少外出
-            appendEvent(title: "⛈️ 雷暴提醒", detail: "减少外出，携带雨具并注意防雷安全", success: true, icon: "cloud.bolt.rain.fill")
+            appendEvent(title: t("notifications.weather.thunderstorm.title"), detail: t("notifications.weather.thunderstorm.detail"), success: true, icon: "cloud.bolt.rain.fill")
         default:
  // 通用提示：根据时间段提供轻量建议
             let tod = getTimeGreeting()
-            appendEvent(title: "🧭 天气提示", detail: "当前时段（\(tod)），请根据实际天气合理安排出行", success: true, icon: "info.circle")
+            appendEvent(title: t("notifications.weather.generic.title"), detail: tf("notifications.weather.generic.detail", tod), success: true, icon: "info.circle")
         }
     }
 
@@ -517,5 +544,3 @@ private func byteCount(_ bytes: Int64) -> String {
     }
     return String(format: idx == 0 ? "%.0f%@" : "%.1f%@", value, units[idx])
 }
-
-

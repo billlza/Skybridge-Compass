@@ -1,0 +1,669 @@
+name: macos-release-readiness
+
+on:
+  pull_request:
+    paths:
+      - ".github/actionlint.yaml"
+      - ".github/workflows/macos-release-readiness.yml"
+      - ".github/workflows/macos-release-publish.yml"
+      - ".github/workflows/real-device-release-gate.yml"
+      - ".github/workflows/ios-app-store-export.yml"
+      - "supabase/**"
+      - ".github/workflows/supabase-security.yml"
+      - "Package.swift"
+      - "Packages/**"
+      - "project.yml"
+      - "SkyBridgeWidgets.xcodeproj/**"
+      - "XcodeSupport/**"
+      - "SkyBridge Compass iOS/**"
+      - "Sources/**"
+      - "Tests/**"
+      - "Scripts/**"
+      - "fastlane/**"
+      - "README.md"
+      - "rust/**"
+  push:
+    paths:
+      - ".github/actionlint.yaml"
+      - ".github/workflows/macos-release-readiness.yml"
+      - ".github/workflows/macos-release-publish.yml"
+      - ".github/workflows/real-device-release-gate.yml"
+      - ".github/workflows/ios-app-store-export.yml"
+      - "supabase/**"
+      - ".github/workflows/supabase-security.yml"
+      - "Package.swift"
+      - "Packages/**"
+      - "project.yml"
+      - "SkyBridgeWidgets.xcodeproj/**"
+      - "XcodeSupport/**"
+      - "SkyBridge Compass iOS/**"
+      - "Sources/**"
+      - "Tests/**"
+      - "Scripts/**"
+      - "fastlane/**"
+      - "README.md"
+      - "rust/**"
+  workflow_dispatch:
+    inputs:
+      release_build_id:
+        description: "Positive integer CFBundleVersion for this immutable signed candidate"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-release-readiness-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  supabase-security:
+    uses: ./.github/workflows/supabase-security.yml
+
+  macos-signing-inputs:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-26
+    timeout-minutes: 10
+    outputs:
+      certificate-sha1: ${{ steps.signing-inputs.outputs.certificate-sha1 }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Verify Supplied Signing Certificate and Profiles
+        id: signing-inputs
+        env:
+          DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_CERT_P12_BASE64 }}
+          DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_CERT_PASSWORD }}
+          MACOS_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_PROVISION_PROFILE_BASE64 }}
+          MACOS_WIDGET_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_WIDGET_PROVISION_PROFILE_BASE64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          signing_input_dir="$(mktemp -d "$RUNNER_TEMP/signing-inputs.XXXXXX")"
+          trap '/bin/rm -rf "$signing_input_dir"' EXIT
+          printf '%s' "$DEVELOPER_ID_CERT_P12_BASE64" | base64 --decode > "$signing_input_dir/identity.p12"
+          printf '%s' "$MACOS_PROVISION_PROFILE_BASE64" | base64 --decode > "$signing_input_dir/app.provisionprofile"
+          printf '%s' "$MACOS_WIDGET_PROVISION_PROFILE_BASE64" | base64 --decode > "$signing_input_dir/widget.provisionprofile"
+          /usr/bin/openssl pkcs12 -in "$signing_input_dir/identity.p12" -clcerts -nokeys \
+            -passin env:DEVELOPER_ID_CERT_PASSWORD -out "$signing_input_dir/certificate.pem"
+          bash Scripts/check_macos_release_signing_inputs.sh \
+            "$signing_input_dir/certificate.pem" \
+            "$signing_input_dir/app.provisionprofile" \
+            "$signing_input_dir/widget.provisionprofile" | tee "$signing_input_dir/result.log"
+          certificate_sha1="$(sed -n 's/^Developer ID certificate fingerprint: //p' "$signing_input_dir/result.log")"
+          [[ "$certificate_sha1" =~ ^[A-F0-9]{40}$ ]] || exit 1
+          echo "certificate-sha1=$certificate_sha1" >> "$GITHUB_OUTPUT"
+
+  macos-preflight:
+    needs: supabase-security
+    runs-on: macos-26
+    timeout-minutes: 150
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      SKYBRIDGE_REQUIRED_XCODE_VERSION: "26.6"
+      SKYBRIDGE_REQUIRED_XCODE_BUILD: "17F113"
+      SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: "6.3.3"
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode 26.6 / Swift 6.3.3 Toolchain
+        run: |
+          [[ -d "$DEVELOPER_DIR" ]] || { echo "::error::Required Xcode 26.6 is missing at $DEVELOPER_DIR"; exit 1; }
+          sudo xcode-select -s "$DEVELOPER_DIR"
+          bash Scripts/verify_xcode_toolchain.sh
+
+      - name: Validate macOS Release Version Configuration
+        run: bash Scripts/check_macos_release_version.sh
+
+      - name: Validate iOS Release Version Configuration
+        run: |
+          bash Scripts/check_ios_release_version.sh
+          bash Scripts/test_ios_release_version.sh
+
+      - name: Self-Test iOS XCTest Guardrail
+        run: bash Scripts/test_check_ios_test_configuration.sh
+
+      - name: Self-Test Swift Filter Guardrail
+        run: bash Scripts/test_run_swift_test_filter.sh
+
+      - name: Self-Test Notarization Outcome Reconciliation
+        run: python3 -B -W error -m unittest discover -s Scripts -p test_notarytool_helpers.py
+
+      - name: Self-Test Apple P2P No-Trap Guardrail
+        run: python3 Scripts/test_check_p2p_no_traps.py
+
+      - name: Enforce Apple P2P No-Trap Guardrail
+        run: python3 Scripts/check_p2p_no_traps.py
+
+      - name: Self-Test Real-Device Release Acceptance Artifacts
+        run: python3 -W error Scripts/test_validate_real_device_release_acceptance_artifact.py
+
+      - name: Self-Test Normal-Product Release Evidence Log
+        run: python3 -W error Scripts/test_validate_product_release_evidence_log.py
+
+      - name: Self-Test Release Environment Protection
+        run: python3 Scripts/test_validate_release_environment_protection.py
+
+      - name: Self-Test Release Keychain Restoration
+        run: python3 -W error Scripts/test_release_keychain_state.py
+
+      - name: Self-Test Profile-Bound Release Signing Identity
+        run: python3 -W error Scripts/test_macos_release_signing_inputs.py
+
+      - name: Self-Test Release Acceptance Manifest Finalization
+        run: python3 Scripts/test_finalize_release_acceptance_manifests.py
+
+      - name: Self-Test iOS Same-Archive Release Transaction
+        run: python3 Scripts/test_ios_app_store_release_transaction.py
+
+      - name: Self-Test iOS Distribution Product Boundary
+        run: python3 Scripts/test_verify_ios_distribution_product.py
+
+      - name: Self-Test Physical iOS Device Selection Boundary
+        run: PYTHONPATH=Scripts python3 Scripts/test_devicectl_device_selection.py
+
+      - name: Self-Test Release Output Directory Boundary
+        run: PYTHONPATH=Scripts python3 Scripts/test_validate_release_output_directory.py
+
+      - name: Self-Test FreeRDP Runtime Closure Provenance Gate
+        run: python3 Scripts/test_verify_packaged_freerdp_runtime.py
+
+      - name: Self-Test Real-Device Evidence Workflow Contract
+        run: python3 -W error Scripts/test_real_device_release_workflow_contract.py
+
+      - name: Self-Test Real-Device Public Artifact Redaction
+        run: bash Scripts/test_real_device_smoke_redaction.sh
+
+      - name: Validate GitHub Actions Workflows
+        # The macOS runner image ships no Go toolchain, so install the pinned
+        # official actionlint binary and verify its published SHA-256 digest
+        # before executing anything.
+        run: |
+          set -euo pipefail
+          case "$(/usr/bin/uname -m)" in
+            arm64)
+              actionlint_archive="actionlint_1.7.12_darwin_arm64.tar.gz"
+              actionlint_sha256="aba9ced2dee8d27fecca3dc7feb1a7f9a52caefa1eb46f3271ea66b6e0e6953f"
+              ;;
+            x86_64)
+              actionlint_archive="actionlint_1.7.12_darwin_amd64.tar.gz"
+              actionlint_sha256="5b44c3bc2255115c9b69e30efc0fecdf498fdb63c5d58e17084fd5f16324c644"
+              ;;
+            *)
+              echo "::error::Unsupported runner architecture for the pinned actionlint binary."
+              exit 1
+              ;;
+          esac
+          actionlint_dir="$(mktemp -d)"
+          curl -fsSL --retry 3 -o "$actionlint_dir/$actionlint_archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v1.7.12/$actionlint_archive"
+          echo "$actionlint_sha256  $actionlint_dir/$actionlint_archive" | shasum -a 256 -c -
+          tar -xzf "$actionlint_dir/$actionlint_archive" -C "$actionlint_dir" actionlint
+          "$actionlint_dir/actionlint" -config-file .github/actionlint.yaml
+
+      - name: Self-Test Immutable macOS Candidate Identity
+        run: python3 Scripts/test_macos_release_candidate_identity.py
+
+      - name: Self-Test Real-Device Evidence File-Set Contract
+        run: python3 -W error Scripts/test_stage_real_device_release_evidence.py
+
+      - name: Self-Test macOS Release Handoff Boundary
+        run: python3 Scripts/test_extract_macos_release_handoff.py
+
+      - name: Self-Test Real-Device Smoke Performance Contract
+        run: bash Scripts/test_real_device_smoke_performance_gate.sh
+
+      - name: Self-Test Immutable macOS Update Publisher
+        run: bash Scripts/test_publish_macos_update_release.sh
+
+      - name: Validate iOS XCTest Configuration
+        run: bash Scripts/check_ios_test_configuration.sh --static-only
+
+      - name: Raise Simulator Process Capacity
+        # The hosted macOS runner boots with a per-user process budget that
+        # CoreSimulator can judge too small to boot any simulator at all
+        # (POSIX 67: "insufficient system resources", observed as
+        # maxUserProcs 1333 vs ~1240 already running). Raise the limits
+        # best-effort, reset CoreSimulator so stale device processes are
+        # released, and print the resulting budget for diagnosis.
+        run: |
+          set -uo pipefail
+          echo "limits before: maxproc=$(sysctl -n kern.maxproc) maxprocperuid=$(sysctl -n kern.maxprocperuid)"
+          sudo launchctl limit maxproc 2500 2500 \
+            || echo "::warning::launchctl limit maxproc was refused"
+          sudo sysctl -w kern.maxproc=2500 \
+            || echo "::warning::kern.maxproc is not writable on this host"
+          sudo sysctl -w kern.maxprocperuid=2176 \
+            || echo "::warning::kern.maxprocperuid is not writable on this host"
+          sudo /usr/bin/killall -9 com.apple.CoreSimulator.CoreSimulatorService 2>/dev/null \
+            || true
+          echo "limits after: maxproc=$(sysctl -n kern.maxproc) maxprocperuid=$(sysctl -n kern.maxprocperuid)"
+          echo "running user processes: $(ps -u "$(id -u)" -o pid= | wc -l | tr -d ' ')"
+
+      - name: Run iOS XCTest Lane
+        run: bash "SkyBridge Compass iOS/Scripts/test_lane_ios.sh"
+
+      - name: Require iPhoneOS Apple PQC and Secure Enclave Symbols
+        shell: bash
+        run: |
+          set -euo pipefail
+          source Scripts/apple_pqc_sdk_probe.sh
+          skybridge_require_apple_pqc_sdk_symbol_probe iphoneos
+          [[ "${SKYBRIDGE_PQC_INCLUDED_SECURE_ENCLAVE:-0}" == "1" ]] || {
+            echo "::error::iPhoneOS release build requires the Secure Enclave ML-DSA symbol surface."
+            exit 1
+          }
+
+      - name: Build Generic iOS Release Without Signing
+        run: |
+          xcodebuild \
+            -project "SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj" \
+            -scheme "SkyBridgeCompass-iOS" \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "${RUNNER_TEMP}/skybridge-ios-generic-release" \
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            GCC_TREAT_WARNINGS_AS_ERRORS=YES \
+            SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK \
+            build
+
+      - name: Run Localization Notification Isolation Regression Tests
+        run: bash Scripts/run_swift_test_filter.sh SkyBridgeCoreTests.LocalizationManagerNotificationIsolationTests
+
+      - name: Run Swift Package Tests
+        run: swift test -Xswiftc -warnings-as-errors
+
+      - name: Run CameraKit Package Tests
+        run: swift test --package-path Packages/SkyBridgeCameraKit -Xswiftc -warnings-as-errors
+
+      - name: Build macOS Release Product
+        run: swift build -c release --product SkyBridgeCompassApp -Xswiftc -warnings-as-errors
+
+  os27-source-contracts:
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      SKYBRIDGE_REQUIRED_XCODE_VERSION: "26.6"
+      SKYBRIDGE_REQUIRED_XCODE_BUILD: "17F113"
+      SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: "6.3.3"
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Checkout Pinned Q-Periapt Source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: billlza/q-periapt
+          ref: fabe003ddc3507b88af7a67a7138344e4b9634fd
+          path: External/pqt_hybrid_suite
+          persist-credentials: false
+
+      - name: Link Q-Periapt Cargo Path Dependency
+        run: |
+          [[ -f "External/pqt_hybrid_suite/Cargo.toml" ]] || { echo "::error::Pinned q-periapt checkout is missing Cargo.toml"; exit 1; }
+          [[ -f "External/pqt_hybrid_suite/crates/q-periapt-backends/Cargo.toml" ]] || { echo "::error::Pinned q-periapt checkout is missing q-periapt-backends"; exit 1; }
+          sibling_path="$PWD/../pqt_hybrid_suite"
+          if [[ -e "$sibling_path" && ! -L "$sibling_path" ]]; then
+            echo "::error::Refusing to replace non-symlink q-periapt sibling path: $sibling_path"
+            exit 1
+          fi
+          ln -sfn "$PWD/External/pqt_hybrid_suite" "$sibling_path"
+          [[ -f "../pqt_hybrid_suite/crates/q-periapt-backends/Cargo.toml" ]] || { echo "::error::q-periapt sibling path dependency is not reachable"; exit 1; }
+
+      - name: Verify Stable Xcode 26.6 Toolchain
+        run: |
+          [[ -d "$DEVELOPER_DIR" ]] || { echo "::error::Required Xcode 26.6 is missing at $DEVELOPER_DIR"; exit 1; }
+          bash Scripts/verify_xcode_toolchain.sh
+
+      - name: Install Q-Periapt Artifact Inspection Toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          QPERIAPT_INSPECTION_TOOLCHAIN="$(python3 - <<'PY'
+          import json
+          import pathlib
+
+          record = json.loads(
+              pathlib.Path("VendorProvenance/QPeriapt/abi2-v0.1.5.json").read_text(encoding="utf-8")
+          )
+          print(record["upstream_artifact"]["rust_toolchain"])
+          PY
+          )"
+          rustup toolchain install \
+            "$QPERIAPT_INSPECTION_TOOLCHAIN" \
+            --profile minimal \
+            --component llvm-tools-preview
+
+      - name: Run OS27 Source Contracts
+        run: bash Scripts/run_os27_beta_compatibility.sh --verify-source-contracts
+
+  macos-signed-release-candidate:
+    needs: [macos-preflight, os27-source-contracts, macos-signing-inputs]
+    runs-on: macos-26
+    timeout-minutes: 120
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      needs.macos-preflight.result == 'success' &&
+      needs.os27-source-contracts.result == 'success' &&
+      needs.macos-signing-inputs.result == 'success'
+    permissions:
+      contents: read
+      actions: read
+
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      SKYBRIDGE_REQUIRED_XCODE_VERSION: "26.6"
+      SKYBRIDGE_REQUIRED_XCODE_BUILD: "17F113"
+      SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: "6.3.3"
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode 26.6 / Swift 6.3.3 Toolchain
+        if: needs.macos-preflight.result == 'success'
+        run: |
+          [[ -d "$DEVELOPER_DIR" ]] || { echo "::error::Required Xcode 26.6 is missing at $DEVELOPER_DIR"; exit 1; }
+          sudo xcode-select -s "$DEVELOPER_DIR"
+          bash Scripts/verify_xcode_toolchain.sh
+
+      - name: Resolve Explicit Release Version and Build Transaction
+        if: needs.macos-preflight.result == 'success'
+        shell: bash
+        env:
+          REQUESTED_BUILD_ID: ${{ inputs.release_build_id }}
+        run: |
+          set -euo pipefail
+          source_version="$(bash Scripts/check_macos_release_version.sh)"
+
+          [[ "$REQUESTED_BUILD_ID" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::release_build_id must be a positive integer."
+            exit 1
+          }
+          {
+            echo "SKYBRIDGE_RELEASE_VERSION=$source_version"
+            echo "SKYBRIDGE_RELEASE_BUILD_ID=$REQUESTED_BUILD_ID"
+          } >> "$GITHUB_ENV"
+
+      - name: Validate Release Signing Secrets
+        if: needs.macos-preflight.result == 'success'
+        env:
+          DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_CERT_P12_BASE64 }}
+          DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_CERT_PASSWORD }}
+          MACOS_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_PROVISION_PROFILE_BASE64 }}
+          MACOS_WIDGET_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_WIDGET_PROVISION_PROFILE_BASE64 }}
+          NOTARYTOOL_KEY_P8_BASE64: ${{ secrets.NOTARYTOOL_KEY_P8_BASE64 }}
+          NOTARYTOOL_KEY_ID: ${{ secrets.NOTARYTOOL_KEY_ID }}
+          NOTARYTOOL_ISSUER: ${{ secrets.NOTARYTOOL_ISSUER }}
+        run: |
+          missing=()
+          for key in \
+            DEVELOPER_ID_CERT_P12_BASE64 \
+            DEVELOPER_ID_CERT_PASSWORD \
+            MACOS_PROVISION_PROFILE_BASE64 \
+            MACOS_WIDGET_PROVISION_PROFILE_BASE64 \
+            NOTARYTOOL_KEY_P8_BASE64 \
+            NOTARYTOOL_KEY_ID \
+            NOTARYTOOL_ISSUER
+          do
+            if [[ -z "${!key:-}" ]]; then
+              missing+=("$key")
+            fi
+          done
+
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::Missing required macOS release gate secrets: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Import Developer ID Certificate
+        if: needs.macos-preflight.result == 'success'
+        env:
+          DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_CERT_P12_BASE64 }}
+          DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_CERT_PASSWORD }}
+          EXPECTED_SIGNING_CERTIFICATE_SHA1: ${{ needs.macos-signing-inputs.outputs.certificate-sha1 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          KEYCHAIN_PATH="$RUNNER_TEMP/skybridge-release.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+          echo "::add-mask::$KEYCHAIN_PASSWORD"
+          CERT_PATH="$RUNNER_TEMP/developer-id.p12"
+          ORIGINAL_KEYCHAIN_LIST_PATH="$RUNNER_TEMP/original-user-keychains.txt"
+          ORIGINAL_DEFAULT_KEYCHAIN_PATH="$RUNNER_TEMP/original-default-keychain.txt"
+
+          {
+            echo "KEYCHAIN_PATH=$KEYCHAIN_PATH"
+            echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD"
+            echo "ORIGINAL_KEYCHAIN_LIST_PATH=$ORIGINAL_KEYCHAIN_LIST_PATH"
+            echo "ORIGINAL_DEFAULT_KEYCHAIN_PATH=$ORIGINAL_DEFAULT_KEYCHAIN_PATH"
+          } >> "$GITHUB_ENV"
+
+          security list-keychains -d user > "$ORIGINAL_KEYCHAIN_LIST_PATH"
+          security default-keychain -d user > "$ORIGINAL_DEFAULT_KEYCHAIN_PATH"
+          python3 Scripts/release_keychain_state.py \
+            --list-snapshot "$ORIGINAL_KEYCHAIN_LIST_PATH" \
+            --default-snapshot "$ORIGINAL_DEFAULT_KEYCHAIN_PATH"
+          echo "RELEASE_KEYCHAIN_STATE_VERIFIED=1" >> "$GITHUB_ENV"
+
+          echo "$DEVELOPER_ID_CERT_P12_BASE64" | base64 --decode > "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$DEVELOPER_ID_CERT_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security \
+            -T /usr/bin/xcodebuild
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH" > "$RUNNER_TEMP/imported-signing-identities.txt"
+          SIGNING_IDENTITY="$(python3 Scripts/select_macos_release_signing_identity.py \
+            --identities "$RUNNER_TEMP/imported-signing-identities.txt" \
+            --fingerprint "$EXPECTED_SIGNING_CERTIFICATE_SHA1")"
+
+          {
+            echo "SIGNING_IDENTITY=$SIGNING_IDENTITY"
+          } >> "$GITHUB_ENV"
+
+      - name: Install macOS Provisioning Profile
+        if: needs.macos-preflight.result == 'success'
+        env:
+          MACOS_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_PROVISION_PROFILE_BASE64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          PROFILE_PATH="$PROFILE_DIR/skybridge-release.provisionprofile"
+          mkdir -p "$PROFILE_DIR"
+          echo "$MACOS_PROVISION_PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
+          echo "SKYBRIDGE_MACOS_PROVISIONPROFILE_PATH=$PROFILE_PATH" >> "$GITHUB_ENV"
+
+      - name: Install Widget Provisioning Profile
+        if: needs.macos-preflight.result == 'success'
+        env:
+          MACOS_WIDGET_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_WIDGET_PROVISION_PROFILE_BASE64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          PROFILE_PATH="$PROFILE_DIR/skybridge-widget-release.provisionprofile"
+          mkdir -p "$PROFILE_DIR"
+          echo "$MACOS_WIDGET_PROVISION_PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
+          echo "SKYBRIDGE_WIDGET_PROVISIONPROFILE_PATH=$PROFILE_PATH" >> "$GITHUB_ENV"
+
+      - name: Install Notary API Key
+        if: needs.macos-preflight.result == 'success'
+        env:
+          NOTARYTOOL_KEY_P8_BASE64: ${{ secrets.NOTARYTOOL_KEY_P8_BASE64 }}
+          NOTARYTOOL_KEY_ID: ${{ secrets.NOTARYTOOL_KEY_ID }}
+          NOTARYTOOL_ISSUER: ${{ secrets.NOTARYTOOL_ISSUER }}
+        run: |
+          set -euo pipefail
+          umask 077
+          NOTARY_KEY_PATH="$RUNNER_TEMP/notarytool-authkey.p8"
+          echo "$NOTARYTOOL_KEY_P8_BASE64" | base64 --decode > "$NOTARY_KEY_PATH"
+          {
+            echo "NOTARYTOOL_KEY=$NOTARY_KEY_PATH"
+            echo "NOTARYTOOL_KEY_ID=$NOTARYTOOL_KEY_ID"
+            echo "NOTARYTOOL_ISSUER=$NOTARYTOOL_ISSUER"
+          } >> "$GITHUB_ENV"
+
+      - name: Build Signed + Notarized Release DMG
+        if: needs.macos-preflight.result == 'success'
+        env:
+          SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE: "web_session"
+          SKYBRIDGE_REQUIRE_APP_GROUPS: "1"
+          SKYBRIDGE_REQUIRE_WIDGET_EXTENSION: "1"
+          SKYBRIDGE_XCODEBUILD_KEEP_NOISE: "1"
+        run: |
+          bash Scripts/build_dmg.sh \
+            --build-id "$SKYBRIDGE_RELEASE_BUILD_ID" \
+            --identity "$SIGNING_IDENTITY" \
+            --notarize-app \
+            --notarize-dmg \
+            --require-notarization
+
+      - name: Validate Signed Candidate Package Boundary
+        if: needs.macos-preflight.result == 'success'
+        env:
+          SKYBRIDGE_RELEASE_GATE_REQUIRE_NOTARIZATION: "1"
+        run: |
+          bash Scripts/check_macos_release_readiness.sh \
+            --require-notarization \
+            --package-integrity-only
+
+      - name: Create Immutable Candidate Identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_path="dist/SkyBridge Compass Pro.app"
+          dmg_path="dist/SkyBridgeCompassPro-${SKYBRIDGE_RELEASE_VERSION}.dmg"
+          identity_path="dist/macos-release-candidate.json"
+          [[ ! -e "$identity_path" && ! -L "$identity_path" ]] || {
+            echo "::error::Candidate identity output already exists."
+            exit 1
+          }
+          python3 Scripts/macos_release_candidate_identity.py create \
+            --app "$app_path" \
+            --dmg "$dmg_path" \
+            --source-repository "$GITHUB_REPOSITORY" \
+            --source-commit "$GITHUB_SHA" \
+            --expected-version "$SKYBRIDGE_RELEASE_VERSION" \
+            --expected-build "$SKYBRIDGE_RELEASE_BUILD_ID" \
+            --output "$identity_path"
+          python3 Scripts/macos_release_candidate_identity.py verify \
+            --identity "$identity_path" \
+            --app "$app_path" \
+            --dmg "$dmg_path"
+
+      - name: Assemble and Verify Signed Candidate Handoff
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' 'dist/SkyBridge Compass Pro.app/Contents/Info.plist')"
+          dmg_path="dist/SkyBridgeCompassPro-${app_version}.dmg"
+          [[ -f "$dmg_path" ]] || { echo "::error::Notarized DMG not found at $dmg_path"; exit 1; }
+
+          handoff_archive="$RUNNER_TEMP/macos-signed-release-candidate.tar.gz"
+          handoff_checksum="$handoff_archive.sha256"
+          handoff_verification="$RUNNER_TEMP/macos-signed-release-candidate-verification"
+          rm -f "$handoff_archive" "$handoff_checksum"
+          rm -rf "$handoff_verification"
+          COPYFILE_DISABLE=1 tar -czf "$handoff_archive" \
+            -C dist \
+            "SkyBridge Compass Pro.app" \
+            "$(basename "$dmg_path")" \
+            macos-release-candidate.json
+          [[ -s "$handoff_archive" ]] || { echo "::error::Signed candidate handoff is empty"; exit 1; }
+          (
+            cd "$(dirname "$handoff_archive")"
+            shasum -a 256 "$(basename "$handoff_archive")" > "$(basename "$handoff_checksum")"
+          )
+          python3 Scripts/extract_macos_release_handoff.py \
+            --archive "$handoff_archive" \
+            --destination "$handoff_verification"
+          [[ -f "$handoff_verification/SkyBridge Compass Pro.app/Contents/Info.plist" ]] || {
+            echo "::error::Verified handoff is missing the signed app."
+            exit 1
+          }
+          [[ -f "$handoff_verification/$(basename "$dmg_path")" ]] || {
+            echo "::error::Verified handoff is missing the notarized DMG."
+            exit 1
+          }
+          python3 Scripts/macos_release_candidate_identity.py verify \
+            --identity "$handoff_verification/macos-release-candidate.json" \
+            --app "$handoff_verification/SkyBridge Compass Pro.app" \
+            --dmg "$handoff_verification/$(basename "$dmg_path")"
+
+      - name: Upload Signed Release Candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-signed-release-candidate
+          path: |
+            ${{ runner.temp }}/macos-signed-release-candidate.tar.gz
+            ${{ runner.temp }}/macos-signed-release-candidate.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Remove Temporary Signing Credentials
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          cleanup_failed=0
+
+          if [[ "${RELEASE_KEYCHAIN_STATE_VERIFIED:-}" == "1" ]]; then
+            if ! python3 Scripts/release_keychain_state.py \
+              --list-snapshot "$ORIGINAL_KEYCHAIN_LIST_PATH" \
+              --default-snapshot "$ORIGINAL_DEFAULT_KEYCHAIN_PATH" \
+              --restore; then
+              echo "::error::Unable to restore the original user keychain state."
+              cleanup_failed=1
+            fi
+          fi
+
+          if [[ -n "${KEYCHAIN_PATH:-}" && -e "$KEYCHAIN_PATH" ]] && ! security delete-keychain "$KEYCHAIN_PATH"; then
+            echo "::error::Unable to delete the temporary release keychain."
+            cleanup_failed=1
+          fi
+
+          cleanup_paths=(
+            "$RUNNER_TEMP/developer-id.p12"
+            "$RUNNER_TEMP/notarytool-authkey.p8"
+            "${SKYBRIDGE_MACOS_PROVISIONPROFILE_PATH:-}"
+            "${SKYBRIDGE_WIDGET_PROVISIONPROFILE_PATH:-}"
+            "$HOME/Library/MobileDevice/Provisioning Profiles/skybridge-release.provisionprofile"
+            "$HOME/Library/MobileDevice/Provisioning Profiles/skybridge-widget-release.provisionprofile"
+            "${ORIGINAL_KEYCHAIN_LIST_PATH:-}"
+            "${ORIGINAL_DEFAULT_KEYCHAIN_PATH:-}"
+          )
+          for cleanup_path in "${cleanup_paths[@]}"; do
+            [[ -z "$cleanup_path" ]] && continue
+            if [[ -e "$cleanup_path" || -L "$cleanup_path" ]]; then
+              if ! /bin/rm -f "$cleanup_path"; then
+                echo "::error::Unable to remove temporary signing material: $cleanup_path"
+                cleanup_failed=1
+              fi
+            fi
+          done
+          exit "$cleanup_failed"

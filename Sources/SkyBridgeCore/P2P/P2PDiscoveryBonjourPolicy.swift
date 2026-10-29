@@ -1,0 +1,615 @@
+import Foundation
+import Network
+import SkyBridgeProtocolCore
+
+enum P2PDiscoveryBonjourPolicy {
+    enum LocalTargetEvidence: String, Sendable, Equatable {
+        case authoritativeLocalClassification
+        case stableDeviceIdentity
+        case protocolIdentityFingerprint
+        case authorityConflict
+        case loopbackAddress
+        case localInterfaceAddress
+        case loopbackPath
+    }
+
+    nonisolated static func localTargetEvidence(
+        for device: DiscoveredDevice,
+        localIdentity: CanonicalBonjourAdvertisementIdentity,
+        localInterfaceAddresses: Set<String>
+    ) -> LocalTargetEvidence? {
+        let target = sharedDialTarget(for: device, serviceTypes: [])
+        let local = ApplePeerConnectivityPolicy.DialTarget(
+            deviceIds: [localIdentity.deviceId],
+            protocolPublicKeyFingerprints: [localIdentity.protocolPublicKeyFingerprint],
+            routes: []
+        )
+
+        let matchingDeviceIds = target.deviceIds.intersection(local.deviceIds)
+        let foreignDeviceIds = target.deviceIds.subtracting(local.deviceIds)
+        let matchingFingerprints = target.protocolPublicKeyFingerprints
+            .intersection(local.protocolPublicKeyFingerprints)
+        let foreignFingerprints = target.protocolPublicKeyFingerprints
+            .subtracting(local.protocolPublicKeyFingerprints)
+
+        if !matchingDeviceIds.isEmpty {
+            if !foreignDeviceIds.isEmpty || !foreignFingerprints.isEmpty {
+                return .authorityConflict
+            }
+            return .stableDeviceIdentity
+        }
+        if !matchingFingerprints.isEmpty {
+            if !foreignDeviceIds.isEmpty || !foreignFingerprints.isEmpty {
+                return .authorityConflict
+            }
+            return .protocolIdentityFingerprint
+        }
+        if device.isLocalDevice {
+            return target.hasStrongIdentity
+                ? .authorityConflict
+                : .authoritativeLocalClassification
+        }
+
+        for address in [device.ipv4, device.ipv6].compactMap({ $0 }) {
+            if let evidence = localNetworkAddressEvidence(
+                address,
+                localInterfaceAddresses: localInterfaceAddresses
+            ) {
+                return target.hasStrongIdentity ? .authorityConflict : evidence
+            }
+        }
+        return nil
+    }
+
+    nonisolated static func localNetworkAddressEvidence(
+        _ rawAddress: String,
+        localInterfaceAddresses: Set<String>
+    ) -> LocalTargetEvidence? {
+        guard let address = normalizeIPAddressForMatching(rawAddress) else { return nil }
+        if address == "localhost" || address == "localhost." || isLoopbackIPAddress(address) {
+            return .loopbackAddress
+        }
+        let normalizedLocalAddresses = Set(
+            localInterfaceAddresses.compactMap(normalizeIPAddressForMatching)
+        )
+        return normalizedLocalAddresses.contains(address) ? .localInterfaceAddress : nil
+    }
+
+    nonisolated static func resolvedLocalRouteEvidence(
+        address: String?,
+        usesLoopbackPath: Bool,
+        targetHasStrongAuthority: Bool,
+        localInterfaceAddresses: Set<String>
+    ) -> LocalTargetEvidence? {
+        let routeEvidence: LocalTargetEvidence?
+        if usesLoopbackPath {
+            routeEvidence = .loopbackPath
+        } else if let address {
+            routeEvidence = localNetworkAddressEvidence(
+                address,
+                localInterfaceAddresses: localInterfaceAddresses
+            )
+        } else {
+            routeEvidence = nil
+        }
+        guard let routeEvidence else { return nil }
+        return targetHasStrongAuthority ? .authorityConflict : routeEvidence
+    }
+
+    nonisolated static func isLoopbackIPAddress(_ normalizedAddress: String) -> Bool {
+        if normalizedAddress == "::1" || normalizedAddress == "0:0:0:0:0:0:0:1" {
+            return true
+        }
+        let octets = normalizedAddress.split(separator: ".", omittingEmptySubsequences: false)
+        return octets.count == 4 && octets.first == "127"
+    }
+
+    nonisolated static func normalizedConnectableServiceTypes(from rawTypes: [String]) -> [String] {
+        // This list feeds a connector built with `NWParameters.tcp`. A UDP/QUIC advertisement
+        // remains discovery evidence, but it is never a TCP dial route.
+        var seen = Set<String>()
+        var ordered: [String] = []
+
+        for rawType in rawTypes {
+            let normalized = rawType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard ApplePeerConnectivityPolicy.ServiceKind(serviceType: normalized) == .control,
+                  normalized == BonjourInteropContract.controlServiceType,
+                  isValidBonjourServiceType(normalized) else {
+                continue
+            }
+            if seen.insert(normalized).inserted {
+                ordered.append(normalized)
+            }
+        }
+        return ordered
+    }
+
+    nonisolated static func tcpControlPort(from portMap: [String: Int]) -> Int? {
+        guard let port = portMap[BonjourInteropContract.controlServiceType],
+              (1...65_535).contains(port) else {
+            return nil
+        }
+        return port
+    }
+
+    nonisolated static func sharedDialTarget(
+        for device: DiscoveredDevice,
+        serviceTypes: [String]
+    ) -> ApplePeerConnectivityPolicy.DialTarget {
+        var deviceIds: [String] = []
+        var seenDeviceIds = Set<String>()
+        func appendDeviceId(_ raw: String?) {
+            guard let raw,
+                  let deviceId = PeerTrustLookup.persistentDeviceId(from: raw),
+                  seenDeviceIds.insert(deviceId).inserted else {
+                return
+            }
+            deviceIds.append(deviceId)
+        }
+        appendDeviceId(device.deviceId)
+        appendDeviceId(device.uniqueIdentifier)
+        device.routeIdentifiers.forEach(appendDeviceId)
+
+        var routes: [ApplePeerConnectivityPolicy.BonjourRouteIdentity] = []
+        var seenRoutes = Set<ApplePeerConnectivityPolicy.BonjourRouteIdentity>()
+        for name in resolvedBonjourServiceNameCandidates(for: device) {
+            for serviceType in serviceTypes {
+                guard let route = ApplePeerConnectivityPolicy.BonjourRouteIdentity(
+                    name: name,
+                    type: serviceType,
+                    domain: "local."
+                ), seenRoutes.insert(route).inserted else {
+                    continue
+                }
+                routes.append(route)
+            }
+        }
+
+        return ApplePeerConnectivityPolicy.DialTarget(
+            deviceIds: deviceIds,
+            protocolPublicKeyFingerprints: [device.pubKeyFP].compactMap { $0 },
+            routes: routes
+        )
+    }
+
+    nonisolated static func sharedRouteIdentity(
+        name: String,
+        type: String,
+        domain: String
+    ) -> ApplePeerConnectivityPolicy.BonjourRouteIdentity? {
+        ApplePeerConnectivityPolicy.BonjourRouteIdentity(
+            name: sanitizedBonjourServiceName(name),
+            type: type,
+            domain: domain
+        )
+    }
+
+    nonisolated static func advertisementPlatform(
+        for device: DiscoveredDevice
+    ) -> BonjourInteropProtocolContract.AdvertisementPlatform? {
+        let raw = device.platformName?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        switch raw {
+        case "macos", "mac":
+            return .macOS
+        case "ios", "iphoneos", "iphone":
+            return .iOS
+        case "ipados", "ipad":
+            return .iPadOS
+        case "android":
+            return .android
+        case "windows":
+            return .windows
+        case "linux":
+            return .linux
+        default:
+            let presentation = [
+                device.platformName,
+                device.modelName,
+                device.name
+            ]
+            .compactMap { $0 }
+            .joined(separator: " ")
+            .lowercased()
+            if presentation.contains("ipad") {
+                return .iPadOS
+            }
+            if presentation.contains("iphone") || presentation.contains("ios") {
+                return .iOS
+            }
+            if presentation.contains("macbook")
+                || presentation.contains("imac")
+                || presentation.contains("mac mini")
+                || presentation.contains("mac studio")
+                || presentation.contains("mac pro") {
+                return .macOS
+            }
+            return nil
+        }
+    }
+
+    nonisolated static func isValidBonjourServiceType(_ raw: String) -> Bool {
+        BonjourInteropContract.isValidDNSServiceType(
+            raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        )
+    }
+
+    nonisolated static func isBonjourIdentifier(_ identifier: String?) -> Bool {
+        guard let identifier else { return false }
+        let normalized = identifier.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized.hasPrefix("bonjour:") || normalized.hasPrefix("recent:bonjour:")
+    }
+
+    nonisolated static func preferredRoutableBonjourIdentifier(for device: DiscoveredDevice) -> String? {
+        for routeIdentifier in device.routeIdentifiers {
+            if let routable = routableBonjourIdentifier(routeIdentifier) {
+                return routable
+            }
+        }
+        return routableBonjourIdentifier(device.uniqueIdentifier)
+    }
+
+    nonisolated static func connectionPeerIdentifier(
+        for device: DiscoveredDevice,
+        usesBonjourServiceEndpoint: Bool
+    ) -> String? {
+        if usesBonjourServiceEndpoint,
+           let routeIdentifier = preferredRoutableBonjourIdentifier(for: device) {
+            return routeIdentifier
+        }
+        if let persistentDeviceId = trimmedNonEmpty(device.deviceId) {
+            return persistentDeviceId
+        }
+        return trimmedNonEmpty(device.uniqueIdentifier)
+    }
+
+    nonisolated static func isRoutableBonjourIdentifier(_ identifier: String?) -> Bool {
+        routableBonjourIdentifier(identifier) != nil
+    }
+
+    nonisolated static func isLikelyIPAddress(_ raw: String) -> Bool {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.contains(":") { return true }
+        let segments = trimmed.split(separator: ".")
+        return segments.count == 4 && segments.allSatisfy { part in
+            guard let value = Int(part), (0...255).contains(value) else { return false }
+            return String(value) == String(part) || part == "0"
+        }
+    }
+
+    nonisolated static func resolvedBonjourServiceName(for device: DiscoveredDevice) -> String {
+        resolvedBonjourServiceNameCandidates(for: device).first ?? ""
+    }
+
+    nonisolated static func resolvedBonjourServiceNameCandidates(for device: DiscoveredDevice) -> [String] {
+        var candidates: [String] = []
+        var seen = Set<String>()
+        let hasStrongIdentity =
+            device.deviceId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            || device.pubKeyFP?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            || isStrongUniqueIdentifier(device.uniqueIdentifier)
+
+        func append(_ raw: String?) {
+            let sanitized = sanitizedBonjourServiceName(raw ?? "")
+            guard !sanitized.isEmpty else { return }
+            guard !seen.contains(sanitized) else { return }
+            seen.insert(sanitized)
+            candidates.append(sanitized)
+        }
+
+        for routeIdentifier in device.routeIdentifiers {
+            append(extractBonjourServiceName(fromIdentifier: routeIdentifier))
+        }
+
+        let identifierName = extractBonjourServiceName(fromIdentifier: device.uniqueIdentifier)
+        let inferredAppleName = inferredDefaultAppleBonjourServiceName(fromDisplayName: device.name)
+
+        append(identifierName)
+        guard !hasStrongIdentity else {
+            return candidates
+        }
+        if identifierName == nil {
+            append(inferredAppleName)
+            append(device.name)
+        } else {
+            append(device.name)
+            append(inferredAppleName)
+        }
+        return candidates
+    }
+
+    private nonisolated static func routableBonjourIdentifier(_ identifier: String?) -> String? {
+        guard let raw = trimmedNonEmpty(identifier),
+              isBonjourIdentifier(raw),
+              let serviceName = extractBonjourServiceName(fromIdentifier: raw) else {
+            return nil
+        }
+        let trimmedServiceName = serviceName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercasedServiceName = trimmedServiceName.lowercased()
+        guard !trimmedServiceName.isEmpty,
+              !lowercasedServiceName.hasPrefix("id:"),
+              !lowercasedServiceName.hasPrefix("fp:"),
+              !lowercasedServiceName.hasPrefix("host:"),
+              !lowercasedServiceName.hasPrefix("peer:"),
+              UUID(uuidString: trimmedServiceName.uppercased()) == nil,
+              !isLikelyIPAddress(lowercasedServiceName),
+              !sanitizedBonjourServiceName(trimmedServiceName).isEmpty else {
+            return nil
+        }
+        return raw
+    }
+
+    nonisolated static func extractBonjourServiceName(fromIdentifier identifier: String?) -> String? {
+        guard let identifier else { return nil }
+        let normalized = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        func parseName(from payload: String) -> String? {
+            let name = payload.split(separator: "@", maxSplits: 1).first.map(String.init)
+            guard let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !trimmed.isEmpty else {
+                return nil
+            }
+            return legacyMangledBonjourServiceName(from: trimmed) ?? trimmed
+        }
+
+        func parsePlainName(from payload: String) -> String? {
+            payload.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        if normalized.hasPrefix("recent:bonjour:") {
+            let payload = String(normalized.dropFirst("recent:bonjour:".count))
+            return parseName(from: payload)
+        }
+        if normalized.hasPrefix("bonjour:") {
+            let payload = String(normalized.dropFirst("bonjour:".count))
+            return parseName(from: payload)
+        }
+        if normalized.hasPrefix("recent:name:") {
+            let payload = String(normalized.dropFirst("recent:name:".count))
+            return parsePlainName(from: payload)
+        }
+        if normalized.hasPrefix("name:") {
+            let payload = String(normalized.dropFirst("name:".count))
+            return parsePlainName(from: payload)
+        }
+        return nil
+    }
+
+    nonisolated static func sanitizedBonjourServiceName(_ raw: String) -> String {
+        var name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return "" }
+
+        if PeerTrustLookup.sanitizedBonjourServiceInstanceName(name) == nil {
+            return ""
+        }
+
+        while true {
+            if let suffix = trailingBracketSuffix(from: name, open: "(", close: ")") {
+                guard shouldStripTrailingBracketSuffix(payload: suffix.payload, open: "(") else {
+                    break
+                }
+                name = suffix.prefix
+                continue
+            }
+            if let suffix = trailingBracketSuffix(from: name, open: "[", close: "]") {
+                name = suffix.prefix
+                continue
+            }
+            if let suffix = trailingBracketSuffix(from: name, open: "【", close: "】") {
+                name = suffix.prefix
+                continue
+            }
+            break
+        }
+
+        for suffix in [" 📱", " 🍎"] where name.hasSuffix(suffix) {
+            name = String(name.dropLast(suffix.count))
+        }
+        return PeerTrustLookup.sanitizedBonjourServiceInstanceName(name) ?? ""
+    }
+
+    private nonisolated static func shouldStripTrailingBracketSuffix(payload: String, open: Character) -> Bool {
+        guard open == "(" else { return true }
+        return !isAppleHardwareModelSuffix(payload)
+    }
+
+    private nonisolated static func isAppleHardwareModelSuffix(_ raw: String) -> Bool {
+        let compact = raw
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "-", with: "")
+        guard compact.count >= 2 else { return false }
+
+        if compact.hasPrefix("m") {
+            var tail = String(compact.dropFirst())
+            for suffix in ["ultra", "max", "pro"] where tail.hasSuffix(suffix) {
+                tail.removeLast(suffix.count)
+                break
+            }
+            return !tail.isEmpty && tail.allSatisfy(\.isNumber)
+        }
+
+        if compact.hasPrefix("a") {
+            var tail = String(compact.dropFirst())
+            if tail.hasSuffix("x") || tail.hasSuffix("z") {
+                tail.removeLast()
+            }
+            return !tail.isEmpty && tail.allSatisfy(\.isNumber)
+        }
+
+        return false
+    }
+
+    private nonisolated static func legacyMangledBonjourServiceName(from raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let lowered = trimmed.lowercased()
+        let suffixes = ["__local.", "_local.", ".local."]
+        guard let suffix = suffixes.first(where: { lowered.hasSuffix($0) }) else {
+            return nil
+        }
+
+        var value = String(trimmed.dropLast(suffix.count))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+
+        var bracketedSuffix: String?
+        if let range = value.range(of: "__", options: .backwards) {
+            let suffixCandidate = String(value[range.upperBound...])
+                .trimmingCharacters(in: CharacterSet(charactersIn: "_ ").union(.whitespacesAndNewlines))
+            let baseCandidate = String(value[..<range.lowerBound])
+                .trimmingCharacters(in: CharacterSet(charactersIn: "_ ").union(.whitespacesAndNewlines))
+            if !suffixCandidate.isEmpty, !baseCandidate.isEmpty {
+                bracketedSuffix = suffixCandidate.replacingOccurrences(of: "_", with: " ")
+                value = baseCandidate
+            }
+        }
+
+        let baseName = value
+            .replacingOccurrences(of: "_", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !baseName.isEmpty else { return nil }
+        if let bracketedSuffix, !bracketedSuffix.isEmpty {
+            return "\(baseName) (\(bracketedSuffix))"
+        }
+        return baseName
+    }
+
+    nonisolated static func stripTrailingBracketSuffix(
+        from raw: String,
+        open: Character,
+        close: Character
+    ) -> String? {
+        trailingBracketSuffix(from: raw, open: open, close: close)?.prefix
+    }
+
+    private nonisolated static func trailingBracketSuffix(
+        from raw: String,
+        open: Character,
+        close: Character
+    ) -> (prefix: String, payload: String)? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.last == close else { return nil }
+        guard let openIndex = value.lastIndex(of: open), openIndex > value.startIndex else { return nil }
+
+        let prefix = value[..<openIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+        let payloadStart = value.index(after: openIndex)
+        let payloadEnd = value.index(before: value.endIndex)
+        let payload = value[payloadStart..<payloadEnd].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prefix.isEmpty else { return nil }
+        return (String(prefix), String(payload))
+    }
+
+    nonisolated static func inferredDefaultAppleBonjourServiceName(fromDisplayName displayName: String) -> String? {
+        let normalized = displayName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return nil }
+        if normalized.contains("iphone") { return "iPhone" }
+        if normalized.contains("ipad") { return "iPad" }
+        if normalized.contains("macbook")
+            || normalized.contains("imac")
+            || normalized.contains("mac mini")
+            || normalized.contains("mac studio")
+            || normalized.contains("mac pro")
+            || normalized == "mac"
+            || normalized.contains(" mac ") {
+            return "Mac"
+        }
+        return nil
+    }
+
+    nonisolated static func advertisedServicePort(from txt: [String: String], serviceType: String) -> Int? {
+        let keys: [String]
+        switch ApplePeerConnectivityPolicy.ServiceKind(serviceType: serviceType) {
+        case .control:
+            keys = ["port", "skybridgePort", "p2pPort", "controlPort"]
+        case .fileTransfer:
+            keys = ["transferPort", "fileTransferPort", "file_transfer_port", "port"]
+        case .remoteControl:
+            keys = ["remotePort", "remoteControlPort", "remote_port", "port"]
+        case .unsupported:
+            keys = ["port"]
+        }
+
+        let raw = keys.lazy.compactMap { txt[$0] }.first
+        guard let raw,
+              let port = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+              (1...65535).contains(port) else {
+            return nil
+        }
+        return port
+    }
+
+    nonisolated static func normalizeSOAFlag(_ value: String?) -> Bool {
+        guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !raw.isEmpty else {
+            return false
+        }
+        return raw == "1" || raw == "true" || raw == "yes"
+    }
+
+    nonisolated static func isStrongUniqueIdentifier(_ value: String?) -> Bool {
+        guard let value else { return false }
+        return value.hasPrefix("id:") || value.hasPrefix("fp:")
+    }
+
+    nonisolated static func preferredUniqueIdentifier(
+        deviceId: String?,
+        pubKeyFP: String?,
+        bonjourIdentifier: String?,
+        ipv4: String?,
+        ipv6: String?
+    ) -> String? {
+        if let deviceId, !deviceId.isEmpty { return "id:\(deviceId)" }
+        if let pubKeyFP, !pubKeyFP.isEmpty { return "fp:\(pubKeyFP)" }
+        if let bonjourIdentifier, !bonjourIdentifier.isEmpty { return bonjourIdentifier }
+        if let ipv4, !ipv4.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "ip:\(ipv4)" }
+        if let ipv6, !ipv6.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "ip:\(ipv6)" }
+        return nil
+    }
+
+    nonisolated static func normalizeIdentifierForMatching(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if value.hasPrefix("recent:") {
+            value.removeFirst("recent:".count)
+        }
+        return value.isEmpty ? nil : value
+    }
+
+    nonisolated static func normalizeIPAddressForMatching(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !value.isEmpty else { return nil }
+        if value.hasPrefix("[") && value.hasSuffix("]") {
+            value.removeFirst()
+            value.removeLast()
+        }
+        if value.contains(":"), let base = value.split(separator: "%", maxSplits: 1).first {
+            value = String(base)
+        }
+        if let ipv4 = IPv4Address(value) {
+            return String(describing: ipv4)
+        }
+        if let ipv6 = IPv6Address(value) {
+            let canonical = String(describing: ipv6).lowercased()
+            if canonical.hasPrefix("::ffff:"),
+               let mappedIPv4 = IPv4Address(String(canonical.dropFirst("::ffff:".count))) {
+                return String(describing: mappedIPv4)
+            }
+            return canonical
+        }
+        return value
+    }
+
+    nonisolated static func normalizedNameTokenForMatching(_ raw: String) -> String {
+        raw.lowercased().filter { $0.isLetter || $0.isNumber }
+    }
+
+    private nonisolated static func trimmedNonEmpty(_ raw: String?) -> String? {
+        guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+}

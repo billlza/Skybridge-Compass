@@ -7,13 +7,14 @@ set -euo pipefail
 PROJECT_DIR="/Users/bill/Desktop/SkyBridge Compass Pro release"
 DOCS_DIR="$PROJECT_DIR/Docs"
 OUT_DIR="$PROJECT_DIR/out"
-TEX_FILE="IEEE_Paper_SkyBridge_Compass_patched.tex"
-PDF_FILE="IEEE_Paper_SkyBridge_Compass_patched.pdf"
+TEX_FILE="TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.tex"
+PDF_FILE="TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.pdf"
 SUPP_TEX_FILE="TDSC-2026-01-0318_supplementary.tex"
 SUPP_PDF_FILE="TDSC-2026-01-0318_supplementary.pdf"
 
 SKIP_FIGURES=0
 SKIP_CHECKS=0
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 for arg in "$@"; do
   case "$arg" in
@@ -25,6 +26,16 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+if [[ -x "/opt/homebrew/bin/python3" ]]; then
+  if ! "$PYTHON_BIN" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 10) else 1)
+PY
+  then
+    PYTHON_BIN="/opt/homebrew/bin/python3"
+  fi
+fi
 
 if command -v rg >/dev/null 2>&1; then
   LOG_GREP=(rg -n)
@@ -71,6 +82,38 @@ check_type3_fonts() {
   fi
 }
 
+check_text_extraction() {
+  local pdf_file="$1"
+  local label="${2:-PDF}"
+
+  if ! command -v pdftotext >/dev/null 2>&1; then
+    echo "ERROR: pdftotext not found; install poppler to enable extraction checks." >&2
+    exit 1
+  fi
+
+  local extracted
+  extracted="$(mktemp)"
+  pdftotext "$pdf_file" "$extracted"
+  if ! python3 - "$extracted" <<'PY'
+import sys
+text = open(sys.argv[1], "r", encoding="utf-8", errors="replace").read()
+bad = [ch for ch in text if ord(ch) in (0xFFFD, 0xFFFE, 0xFFFF)]
+if bad:
+    sys.exit(1)
+PY
+  then
+    echo "ERROR: $label text extraction contains replacement/invalid glyph markers: $pdf_file" >&2
+    rm -f "$extracted"
+    exit 1
+  fi
+  rm -f "$extracted"
+}
+
+run_pdflatex_relaxed() {
+  local tex_file="$1"
+  pdflatex -interaction=nonstopmode "$tex_file" || true
+}
+
 cd "$DOCS_DIR"
 mkdir -p "$OUT_DIR"
 
@@ -79,25 +122,40 @@ echo "=== 开始编译 ==="
 # 先生成 IEEE figures（避免 Type 3 字体 / hatch 等问题传递到最终 PDF）
 if [[ "$SKIP_FIGURES" -eq 0 && -f "$PROJECT_DIR/Scripts/generate_ieee_figures.py" ]]; then
     echo "=== 生成 figures ==="
-    MPLBACKEND=Agg python3 "$PROJECT_DIR/Scripts/generate_ieee_figures.py"
+    MPLBACKEND=Agg "$PYTHON_BIN" "$PROJECT_DIR/Scripts/generate_ieee_figures.py"
 fi
 
-# 编译两次确保引用正确
+# 预编译主文，生成主文 aux（供 supplementary 交叉引用）
+echo "=== 预编译 main (bootstrap aux) ==="
+run_pdflatex_relaxed "$TEX_FILE"
+
+if [[ -f "$SUPP_TEX_FILE" ]]; then
+    # 先编 supplementary，生成其 aux（供 main 交叉引用）
+    echo "=== 预编译 supplementary (bootstrap aux) ==="
+    run_pdflatex_relaxed "$SUPP_TEX_FILE"
+    run_pdflatex_relaxed "$SUPP_TEX_FILE"
+fi
+
+# 再编译主文两次确保引用收敛
+echo "=== 编译 main ==="
+run_pdflatex_relaxed "$TEX_FILE"
 pdflatex -interaction=nonstopmode "$TEX_FILE"
-pdflatex -interaction=nonstopmode "$TEX_FILE"
+
+if [[ -f "$SUPP_TEX_FILE" ]]; then
+    # 主文稳定后回编 supplementary，确保其引用也收敛
+    echo "=== 回编 supplementary ==="
+    run_pdflatex_relaxed "$SUPP_TEX_FILE"
+    pdflatex -interaction=nonstopmode "$SUPP_TEX_FILE"
+fi
 
 if [[ "$SKIP_CHECKS" -eq 0 ]]; then
     check_latex_log "$DOCS_DIR/${TEX_FILE%.tex}.log" "Main paper"
     check_type3_fonts "$DOCS_DIR/$PDF_FILE" "Main paper"
-fi
-
-if [[ -f "$SUPP_TEX_FILE" ]]; then
-    echo "=== 编译 TDSC supplementary ==="
-    pdflatex -interaction=nonstopmode "$SUPP_TEX_FILE"
-    pdflatex -interaction=nonstopmode "$SUPP_TEX_FILE"
-    if [[ "$SKIP_CHECKS" -eq 0 ]]; then
+    check_text_extraction "$DOCS_DIR/$PDF_FILE" "Main paper"
+    if [[ -f "$SUPP_TEX_FILE" ]]; then
         check_latex_log "$DOCS_DIR/${SUPP_TEX_FILE%.tex}.log" "Supplementary"
         check_type3_fonts "$DOCS_DIR/$SUPP_PDF_FILE" "Supplementary"
+        check_text_extraction "$DOCS_DIR/$SUPP_PDF_FILE" "Supplementary"
     fi
 fi
 
@@ -115,7 +173,7 @@ if [ -f "$PDF_FILE" ]; then
     echo "归档文件: $OUT_DIR/$ARCHIVE_NAME"
     echo ""
     echo "当前归档历史:"
-    ls -lt "$OUT_DIR"/*.pdf 2>/dev/null | head -10
+    ls -lt "$OUT_DIR"/*.pdf 2>/dev/null | sed -n '1,10p'
 else
     echo "=== 编译失败 ==="
     exit 1

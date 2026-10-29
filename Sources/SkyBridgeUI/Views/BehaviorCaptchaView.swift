@@ -504,7 +504,7 @@ struct PuzzlePieceShape: Shape {
 
 // MARK: - 预览
 
-#if canImport(PreviewsMacros)
+#if DEBUG && canImport(PreviewsMacros)
 @available(macOS 14.0, *)
 #Preview {
     BehaviorCaptchaView { success, error in

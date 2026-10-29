@@ -5,23 +5,25 @@ import XCTest
 final class DowngradeEventTests: XCTestCase {
 
     func testStrictPQCEmitsNoFallbackEvents() async throws {
+        let emitter = SecurityEventEmitter.createForTesting()
         let noFallbackEvent = expectation(description: "No fallback event should be emitted")
         noFallbackEvent.isInverted = true
 
-        let subscriptionId = await SecurityEventEmitter.shared.subscribe { event in
+        let subscriptionId = await emitter.subscribe { event in
             if event.type == .cryptoDowngrade {
                 noFallbackEvent.fulfill()
             }
         }
-        defer { Task { await SecurityEventEmitter.shared.unsubscribe(subscriptionId) } }
+        defer { Task { await emitter.unsubscribe(subscriptionId) } }
 
         do {
             _ = try await TwoAttemptHandshakeManager.performHandshake(
                 deviceId: "event-test-device",
                 preferPQC: true,
-                policy: .strictPQC
+                policy: .strictPQC,
+                securityEventEmitter: emitter
             ) { _, _ in
-                throw HandshakeError.failed(.suiteNotSupported)
+                throw HandshakeError.failed(.suiteNegotiationFailed)
             }
             XCTFail("Expected strictPQC to throw")
         } catch {
@@ -32,24 +34,26 @@ final class DowngradeEventTests: XCTestCase {
     }
 
     func testFallbackEventContextIsComplete() async throws {
+        let emitter = SecurityEventEmitter.createForTesting()
         let fallbackEvent = expectation(description: "Fallback event should be emitted")
         let contextBox = EventContextBox()
 
-        let subscriptionId = await SecurityEventEmitter.shared.subscribe { event in
+        let subscriptionId = await emitter.subscribe { event in
             if event.type == .cryptoDowngrade {
                 await contextBox.set(event.context)
                 fallbackEvent.fulfill()
             }
         }
-        defer { Task { await SecurityEventEmitter.shared.unsubscribe(subscriptionId) } }
+        defer { Task { await emitter.unsubscribe(subscriptionId) } }
 
         _ = try await TwoAttemptHandshakeManager.performHandshake(
             deviceId: "event-test-device",
             preferPQC: true,
-            policy: .default
+            policy: .default,
+            securityEventEmitter: emitter
         ) { strategy, _ in
             if strategy == .pqcOnly {
-                throw HandshakeError.failed(.suiteNotSupported)
+                throw HandshakeError.failed(.suiteNegotiationFailed)
             }
             return Self.makeSessionKeys()
         }
@@ -57,9 +61,13 @@ final class DowngradeEventTests: XCTestCase {
         await fulfillment(of: [fallbackEvent], timeout: 0.5)
 
         let capturedContext = await contextBox.get()
-        XCTAssertEqual(capturedContext["deviceId"], "event-test-device")
-        XCTAssertEqual(capturedContext["reason"], String(describing: HandshakeFailureReason.suiteNotSupported))
+        XCTAssertEqual(capturedContext["deviceId"], SkyBridgeDiagnosticRedaction.redacted)
+        XCTAssertNotEqual(capturedContext["deviceId"], "event-test-device")
+        XCTAssertEqual(capturedContext["reason"], HandshakeFailureReason.suiteNegotiationFailed.diagnosticReasonCode)
         XCTAssertEqual(capturedContext["strategy"], HandshakeAttemptStrategy.classicOnly.rawValue)
+        XCTAssertEqual(capturedContext["fromStrategy"], HandshakeAttemptStrategy.pqcOnly.rawValue)
+        XCTAssertEqual(capturedContext["toStrategy"], HandshakeAttemptStrategy.classicOnly.rawValue)
+        XCTAssertEqual(capturedContext["policyAllowClassicFallback"], "1")
     }
 
     private static func makeSessionKeys() -> SessionKeys {

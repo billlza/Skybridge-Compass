@@ -17,19 +17,33 @@ public class StartupCoordinator: ObservableObject {
  /// 启动进度 (0.0 - 1.0)
     @Published public var progress: Double = 0.0
     
- /// 当前加载的组件名称
-    @Published public var currentLoadingComponent: String = ""
+ /// 当前正在执行的启动步骤
+    @Published public private(set) var currentStep: StartupStep?
     
- /// 是否启动完成
+ /// 已完成的启动步骤数
+    @Published public private(set) var completedStepCount: Int = 0
+    
+    /// 是否启动完成
     @Published public var isStartupComplete: Bool = false
+
+    /// 启动完成后的首帧稳定期是否结束
+    @Published public private(set) var isLaunchSettled: Bool = false
     
  /// 启动错误信息
     @Published public var startupError: String?
+
+    public var totalStepCount: Int {
+        StartupStep.allCases.count
+    }
     
  // MARK: - 私有属性
     
     private let logger = Logger(subsystem: "com.skybridge.compass", category: "StartupCoordinator")
     private var startupStartTime: Date?
+    private var launchInProgress = false
+    private var launchWaiters: [CheckedContinuation<Void, Never>] = []
+    private let stepAnnouncementDelay: Duration = .milliseconds(70)
+    private let stepCompletionDelay: Duration = .milliseconds(130)
     
  /// 单例实例
     public static let shared = StartupCoordinator()
@@ -40,31 +54,44 @@ public class StartupCoordinator: ObservableObject {
     
  // MARK: - 公共方法
     
- /// 开始分阶段启动流程
- /// 按照预定义的优先级和依赖关系加载组件
+    /// 开始分阶段启动流程
+    /// 按照预定义的优先级和依赖关系加载组件
     public func startCoordinatedLaunch() async {
+        if isStartupComplete || startupError != nil {
+            return
+        }
+
+        if launchInProgress {
+            await waitUntilLaunchSettled()
+            return
+        }
+
+        launchInProgress = true
+        defer { launchInProgress = false }
+
+        resetStartupState()
         startupStartTime = Date()
         logger.info("🎯 开始协调启动流程")
         
         do {
- // 第一阶段：核心系统组件 (0-30%)
+ // 第一阶段：核心系统组件
             try await executeStage(.coreSystem) {
-                await self.loadCoreSystemComponents()
+                try await self.loadCoreSystemComponents()
             }
             
- // 第二阶段：基础服务 (30-60%)
+ // 第二阶段：基础服务
             try await executeStage(.basicServices) {
-                await self.loadBasicServices()
+                try await self.loadBasicServices()
             }
             
- // 第三阶段：用户界面组件 (60-85%)
+ // 第三阶段：用户界面组件
             try await executeStage(.userInterface) {
-                await self.loadUserInterfaceComponents()
+                try await self.loadUserInterfaceComponents()
             }
             
- // 第四阶段：高级功能 (85-100%)
+ // 第四阶段：高级功能
             try await executeStage(.advancedFeatures) {
-                await self.loadAdvancedFeatures()
+                try await self.loadAdvancedFeatures()
             }
             
  // 启动完成
@@ -74,274 +101,299 @@ public class StartupCoordinator: ObservableObject {
             await handleStartupError(error)
         }
     }
+
+    @discardableResult
+    public func waitUntilLaunchSettled() async -> Bool {
+        if isLaunchSettled {
+            return isStartupComplete && startupError == nil
+        }
+
+        await withCheckedContinuation { continuation in
+            launchWaiters.append(continuation)
+        }
+        return isStartupComplete && startupError == nil
+    }
     
  // MARK: - 私有方法 - 阶段执行
     
  /// 执行指定启动阶段
     private func executeStage(_ stage: StartupStage, _ operation: () async throws -> Void) async throws {
         currentStage = stage
-        logger.info("📍 进入启动阶段: \(stage.description)")
+        logger.info("📍 进入启动阶段: \(stage.logLabel)")
         
         do {
             try await operation()
-            logger.info("✅ 完成启动阶段: \(stage.description)")
+            logger.info("✅ 完成启动阶段: \(stage.logLabel)")
         } catch {
-            logger.error("❌ 启动阶段失败: \(stage.description) - \(error.localizedDescription)")
+            logger.error("❌ 启动阶段失败: \(stage.logLabel) - \(error.localizedDescription)")
             throw error
         }
     }
     
- /// 更新启动进度
-    private func updateProgress(_ newProgress: Double, component: String) {
-        progress = newProgress
-        currentLoadingComponent = component
-        logger.debug("📊 启动进度: \(Int(newProgress * 100))% - 正在加载: \(component)")
+    /// 执行真实的启动步骤，并在步骤完成时更新进度
+    private func executeStep(_ step: StartupStep, _ operation: () async throws -> Void) async throws {
+        currentStage = step.stage
+        currentStep = step
+        logger.info("🔄 启动步骤开始: \(step.logLabel)")
+        try await Task.sleep(for: stepAnnouncementDelay)
+        await Task.yield()
+
+        let stepStartTime = Date()
+
+        do {
+            try await operation()
+            completedStepCount += 1
+            progress = Double(completedStepCount) / Double(totalStepCount)
+            try await Task.sleep(for: stepCompletionDelay)
+
+            let duration = Date().timeIntervalSince(stepStartTime)
+            logger.info(
+                "✅ 启动步骤完成: \(step.logLabel), progress=\(Int(self.progress * 100))%, duration=\(String(format: "%.2f", duration))s"
+            )
+            await Task.yield()
+        } catch {
+            logger.error("❌ 启动步骤失败: \(step.logLabel) - \(error.localizedDescription)")
+            throw error
+        }
+    }
+
+    private func resetStartupState() {
+        currentStage = .initializing
+        progress = 0.0
+        currentStep = nil
+        completedStepCount = 0
+        isStartupComplete = false
+        isLaunchSettled = false
+        startupError = nil
     }
     
- // MARK: - 第一阶段：核心系统组件 (0-30%)
+ // MARK: - 第一阶段：核心系统组件
     
  /// 加载核心系统组件
  /// 包括日志系统、配置管理、安全服务等基础设施
-    private func loadCoreSystemComponents() async {
+    private func loadCoreSystemComponents() async throws {
         logger.info("🔧 开始加载核心系统组件")
         
- // 1. 日志系统初始化 (0-5%)
-        updateProgress(0.05, component: "日志系统")
-        await initializeLoggingSystem()
+ // 1. 日志系统初始化
+        try await executeStep(.loggingSystem) {
+            await initializeLoggingSystem()
+        }
         
- // 2. 配置管理器 (5-10%)
-        updateProgress(0.10, component: "配置管理")
-        await initializeConfigurationManager()
+ // 2. 配置管理器
+        try await executeStep(.configurationManager) {
+            await initializeConfigurationManager()
+        }
         
- // 3. 安全服务 (10-20%)
-        updateProgress(0.20, component: "安全服务")
-        await initializeSecurityServices()
+ // 3. 安全服务
+        try await executeStep(.securityServices) {
+            await initializeSecurityServices()
+        }
         
- // 4. 性能监控基础 (20-30%)
-        updateProgress(0.30, component: "性能监控基础")
-        await initializePerformanceFoundation()
+ // 4. 性能监控基础
+        try await executeStep(.performanceFoundation) {
+            await initializePerformanceFoundation()
+        }
         
         logger.info("✅ 核心系统组件加载完成")
     }
     
  /// 初始化日志系统
     private func initializeLoggingSystem() async {
- // 配置日志级别和输出目标
-        try? await Task.sleep(nanoseconds: 100_000_000) // 模拟初始化时间
+ // 日志设施已在 App 进程内可用，这里只做一次显式预热
         logger.debug("📝 日志系统初始化完成")
     }
     
  /// 初始化配置管理器
     private func initializeConfigurationManager() async {
- // 加载应用配置和用户偏好设置
-        try? await Task.sleep(nanoseconds: 150_000_000)
+ // 触发设置单例加载，确保用户偏好已可用
+        _ = SettingsManager.shared
         logger.debug("⚙️ 配置管理器初始化完成")
- // 在启动早期执行一次 Keychain 去重，避免遗留冗余项影响后续读写性能
-        KeychainManager.shared.deduplicate(servicePrefix: "SkyBridge.")
     }
     
  /// 初始化安全服务
     private func initializeSecurityServices() async {
- // 初始化加密服务、认证管理等
-        try? await Task.sleep(nanoseconds: 200_000_000)
-        
- // 初始化本机强身份（用于设备发现的本机判定）
-        await SelfIdentityProvider.shared.loadOrCreate()
-        logger.debug("🆔 本机强身份初始化完成")
-        
-        logger.debug("🔒 安全服务初始化完成")
+        // Provider configuration owns an authentication mutation. Resolve it before
+        // restoring the login, rather than first selecting it when the root UI is built.
+        await SupabaseConfiguration.shared.waitForInitialConfigurationAttempt()
+        // loadAuthSession uses non-interactive Keychain access; identity material is
+        // still provisioned later from authenticated flows that actually need it.
+        AuthenticationService.shared.reloadPersistedSessionIfNeeded()
+
+        logger.debug("🔒 安全服务初始化完成（登录态非交互恢复，Keychain 身份材料延迟加载）")
     }
     
  /// 初始化性能监控基础
     private func initializePerformanceFoundation() async {
- // 启动基础性能监控，不包括具体监控器
-        try? await Task.sleep(nanoseconds: 100_000_000)
+ // 预热性能模式与硬件监控基础设施
+        _ = PerformanceModeManager.shared
+        _ = HardwareMonitorService.shared
         logger.debug("📈 性能监控基础初始化完成")
     }
     
- // MARK: - 第二阶段：基础服务 (30-60%)
+ // MARK: - 第二阶段：基础服务
     
  /// 加载基础服务
  /// 包括网络管理、文件系统、设备发现等核心功能
-    private func loadBasicServices() async {
+    private func loadBasicServices() async throws {
         logger.info("🌐 开始加载基础服务")
         
- // 1. 网络管理服务 (30-40%)
-        updateProgress(0.40, component: "网络管理")
-        await initializeNetworkServices()
+ // 1. 网络管理服务
+        try await executeStep(.networkServices) {
+            await initializeNetworkServices()
+        }
         
- // 2. 文件系统服务 (40-50%)
-        updateProgress(0.50, component: "文件系统")
-        await initializeFileSystemServices()
-        
- // 3. 设备发现服务 (50-60%)
-        updateProgress(0.60, component: "设备发现")
-        await initializeDeviceDiscovery()
+ // 2. 文件系统服务
+        try await executeStep(.fileSystemServices) {
+            await initializeFileSystemServices()
+        }
+
+        // 常驻 listener、Bonjour/P2P 广播和 USB 发现由首帧后的服务队列启动。
+        // 启动页阶段只做轻量配置预热，避免主线程被系统服务初始化挤占。
+        try await executeStep(.serviceLaunchPlan) {
+            await prepareDeferredServiceLaunch()
+        }
         
         logger.info("✅ 基础服务加载完成")
     }
     
  /// 初始化网络管理服务
     private func initializeNetworkServices() async {
- // 启动网络监控、WiFi管理、蓝牙服务
-        try? await Task.sleep(nanoseconds: 300_000_000)
+ // 预热网络偏好与 QoS 基础服务
+        let networkPreferenceService = NetworkPreferenceService.shared
+        networkPreferenceService.applyRuntimeSettings(
+            prefer5GHz: SettingsManager.shared.prefer5GHz,
+            autoConnectKnownNetworks: SettingsManager.shared.autoConnectKnownNetworks,
+            scanIntervalSeconds: SettingsManager.shared.wifiScanTimeout,
+            startMonitoringIfNeeded: false
+        )
+        _ = BackgroundScanningService.shared
+        _ = AutoConnectService.shared
+        _ = QoSManager.shared
         logger.debug("🌐 网络管理服务初始化完成")
     }
     
  /// 初始化文件系统服务
     private func initializeFileSystemServices() async {
- // 启动文件传输引擎、存储监控
-        try? await Task.sleep(nanoseconds: 200_000_000)
+ // 预热文件传输相关的桥接和任务管理器
+        _ = FileTransferSettingsBridge.shared
+        _ = FileTransferManager.shared
         logger.debug("📁 文件系统服务初始化完成")
     }
-    
- /// 初始化设备发现服务
-    private func initializeDeviceDiscovery() async {
-        logger.info("🔍 开始初始化设备发现服务")
-        
- // 启动设备发现管理器
-        let deviceDiscoveryManager = DeviceDiscoveryManager()
-        do {
-            try await deviceDiscoveryManager.start()
-            logger.info("✅ 设备发现管理器启动成功")
-        } catch {
-            logger.error("❌ 设备发现管理器启动失败: \(error)")
-        }
-        
- // 启动设备发现服务
-        let deviceDiscoveryService = DeviceDiscoveryService()
-        await deviceDiscoveryService.startDiscovery()
-        logger.info("✅ 设备发现服务启动成功")
-        
- // 启动P2P网络管理器（使用单例）
-        do {
-            try await P2PNetworkManager.shared.start()
-            await P2PNetworkManager.shared.startDiscovery()
-            logger.info("✅ P2P网络管理器启动成功")
-        } catch {
-            logger.error("❌ P2P网络管理器启动失败: \(error)")
-        }
-        
-        try? await Task.sleep(nanoseconds: 250_000_000)
-        logger.debug("🔍 设备发现服务初始化完成")
+
+    /// 准备首帧后的服务启动计划，不在启动页阶段创建监听器或扫描硬件。
+    private func prepareDeferredServiceLaunch() async {
+        await Task.yield()
+        logger.debug("🧭 常驻本地服务、P2P/Bonjour 和 USB 发现已排入首帧后启动队列")
     }
     
- // MARK: - 第三阶段：用户界面组件 (60-85%)
+ // MARK: - 第三阶段：用户界面组件
     
  /// 加载用户界面组件
  /// 包括主界面、系统监控界面、设置界面等
-    private func loadUserInterfaceComponents() async {
+    private func loadUserInterfaceComponents() async throws {
         logger.info("🎨 开始加载用户界面组件")
         
- // 1. 主题配置 (60-65%)
-        updateProgress(0.65, component: "主题配置")
-        await initializeThemeConfiguration()
+ // 1. 主题配置
+        try await executeStep(.themeConfiguration) {
+            await initializeThemeConfiguration()
+        }
         
- // 2. 主界面组件 (65-75%)
-        updateProgress(0.75, component: "主界面")
-        await initializeMainInterface()
+ // 2. 主界面组件
+        try await executeStep(.mainInterface) {
+            await initializeMainInterface()
+        }
         
- // 3. 系统监控界面 (75-85%)
-        updateProgress(0.85, component: "系统监控界面")
-        await initializeSystemMonitorInterface()
+ // 3. 系统监控界面
+        try await executeStep(.systemMonitorInterface) {
+            await prepareSystemMonitorInterface()
+        }
         
         logger.info("✅ 用户界面组件加载完成")
     }
     
  /// 初始化主题配置
     private func initializeThemeConfiguration() async {
- // 加载主题设置、颜色配置
-        try? await Task.sleep(nanoseconds: 100_000_000)
+ // 预热主题配置单例
+        _ = ThemeConfiguration.shared
         logger.debug("🎨 主题配置初始化完成")
     }
     
  /// 初始化主界面组件
     private func initializeMainInterface() async {
- // 加载仪表板、导航组件
-        try? await Task.sleep(nanoseconds: 200_000_000)
+ // 主界面主体由 SwiftUI 在进入 RootContainerView 时创建，这里仅保留显式步骤
+        await Task.yield()
         logger.debug("🏠 主界面组件初始化完成")
     }
     
  /// 初始化系统监控界面
-    private func initializeSystemMonitorInterface() async {
- // 延迟加载系统监控组件，避免启动时资源争抢
-        try? await Task.sleep(nanoseconds: 150_000_000)
-        logger.debug("📊 系统监控界面初始化完成")
+    private func prepareSystemMonitorInterface() async {
+        await Task.yield()
+        logger.debug("📊 系统监控界面已延后到首帧后按需启动")
     }
     
- // MARK: - 第四阶段：高级功能 (85-100%)
+ // MARK: - 第四阶段：高级功能
     
  /// 加载高级功能
  /// 包括天气服务、Apple Silicon优化、远程桌面等非关键功能
-    private func loadAdvancedFeatures() async {
+    private func loadAdvancedFeatures() async throws {
         logger.info("🚀 开始加载高级功能")
         
- // 1. 天气服务 (85-90%)
-        updateProgress(0.90, component: "天气服务")
-        await initializeWeatherServices()
-        
- // 2. Apple Silicon优化 (90-95%)
-        updateProgress(0.95, component: "Apple Silicon优化")
-        if #available(macOS 14.0, *) {
-            await initializeAppleSiliconOptimization()
-        } else {
-            logger.info("⚠️ Apple Silicon优化需要macOS 14.0或更高版本")
+ // 1. 天气服务
+        try await executeStep(.weatherServices) {
+            await initializeWeatherServices()
         }
         
- // 3. 远程桌面服务 (95-100%)
-        updateProgress(1.0, component: "远程桌面服务")
-        await initializeRemoteDesktopServices()
+ // 2. Apple Silicon优化
+        try await executeStep(.appleSiliconOptimization) {
+            await prepareAppleSiliconOptimization()
+        }
+        
+ // 3. 远程桌面服务
+        try await executeStep(.remoteDesktopServices) {
+            await prepareRemoteDesktopServices()
+        }
         
         logger.info("✅ 高级功能加载完成")
     }
     
  /// 初始化天气服务
     private func initializeWeatherServices() async {
- // 异步加载天气数据，不阻塞主流程
-        try? await Task.sleep(nanoseconds: 200_000_000)
-        logger.debug("🌤️ 天气服务初始化完成")
+ // 天气定位、网络请求与动态效果由首帧后的服务队列或用户进入天气相关界面时启动。
+        await Task.yield()
+        logger.debug("🌤️ 天气服务已登记为按需启动，启动页阶段不创建定位/天气运行时")
     }
     
  /// 初始化Apple Silicon优化
-    @available(macOS 14.0, *)
-    private func initializeAppleSiliconOptimization() async {
-        logger.debug("⚡ 开始初始化Apple Silicon优化")
-        
- // 初始化Apple Silicon优化器
-        _ = AppleSiliconOptimizer.shared
-        logger.debug("✅ Apple Silicon优化器已初始化")
-        
- // 初始化性能模式管理器
+    private func prepareAppleSiliconOptimization() async {
         _ = PerformanceModeManager.shared
-        logger.debug("✅ 性能模式管理器已初始化")
-        
- // 初始化Metal性能优化器（使用SkyBridgeCompassApp版本）
-        do {
-            _ = try MetalPerformanceOptimizer()
-            logger.debug("✅ Metal性能优化器已初始化")
-        } catch {
-            logger.error("❌ Metal性能优化器初始化失败: \(error)")
-        }
-        
- // 应用初始性能优化
-        logger.debug("✅ 初始性能优化已应用")
-        
-        logger.debug("⚡ Apple Silicon优化初始化完成")
+        await Task.yield()
+        logger.debug("⚡ Apple Silicon/Metal 重量级优化已延后到首帧后按需初始化")
     }
     
- /// 初始化远程桌面服务
-    private func initializeRemoteDesktopServices() async {
- // 启动远程桌面管理器
-        try? await Task.sleep(nanoseconds: 100_000_000)
-        logger.debug("🖥️ 远程桌面服务初始化完成")
+    /// 准备远程桌面服务。真正的会话/信令管理器由根界面和用户操作触发。
+    private func prepareRemoteDesktopServices() async {
+        await Task.yield()
+        logger.debug("🖥️ 远程桌面服务已延后到首帧后按需初始化")
     }
     
  // MARK: - 启动完成处理
     
  /// 完成启动流程
     private func completeStartup() async {
+        currentStage = .completed
+        currentStep = nil
+        completedStepCount = totalStepCount
+        progress = 1.0
         isStartupComplete = true
-        currentLoadingComponent = "启动完成"
+
+        do {
+            try await Task.sleep(for: .milliseconds(450))
+        } catch {
+            logger.warning("启动完成后的首帧稳定等待被取消: \(error.localizedDescription)")
+        }
+
+        isLaunchSettled = true
+        resumeLaunchWaiters()
         
         if let startTime = startupStartTime {
             let duration = Date().timeIntervalSince(startTime)
@@ -352,7 +404,17 @@ public class StartupCoordinator: ObservableObject {
  /// 处理启动错误
     private func handleStartupError(_ error: Error) async {
         startupError = error.localizedDescription
+        isLaunchSettled = true
+        resumeLaunchWaiters()
         logger.error("💥 启动过程中发生错误: \(error.localizedDescription)")
+    }
+
+    private func resumeLaunchWaiters() {
+        let waiters = launchWaiters
+        launchWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
     }
 }
 
@@ -367,21 +429,37 @@ public enum StartupStage: CaseIterable {
     case advancedFeatures  // 高级功能
     case completed         // 完成
     
- /// 阶段描述
-    var description: String {
+    var localizationKey: String {
         switch self {
         case .initializing:
-            return "正在初始化..."
+            return "startup.stage.initializing"
         case .coreSystem:
-            return "加载核心系统组件"
+            return "startup.stage.coreSystem"
         case .basicServices:
-            return "加载基础服务"
+            return "startup.stage.basicServices"
         case .userInterface:
-            return "加载用户界面组件"
+            return "startup.stage.userInterface"
         case .advancedFeatures:
-            return "加载高级功能"
+            return "startup.stage.advancedFeatures"
         case .completed:
-            return "启动完成"
+            return "startup.stage.completed"
+        }
+    }
+
+    var logLabel: String {
+        switch self {
+        case .initializing:
+            return "initializing"
+        case .coreSystem:
+            return "coreSystem"
+        case .basicServices:
+            return "basicServices"
+        case .userInterface:
+            return "userInterface"
+        case .advancedFeatures:
+            return "advancedFeatures"
+        case .completed:
+            return "completed"
         }
     }
     
@@ -400,6 +478,97 @@ public enum StartupStage: CaseIterable {
             return 0.85...1.0
         case .completed:
             return 1.0...1.0
+        }
+    }
+}
+
+public enum StartupStep: CaseIterable {
+    case loggingSystem
+    case configurationManager
+    case securityServices
+    case performanceFoundation
+    case networkServices
+    case fileSystemServices
+    case serviceLaunchPlan
+    case themeConfiguration
+    case mainInterface
+    case systemMonitorInterface
+    case weatherServices
+    case appleSiliconOptimization
+    case remoteDesktopServices
+
+    var stage: StartupStage {
+        switch self {
+        case .loggingSystem, .configurationManager, .securityServices, .performanceFoundation:
+            return .coreSystem
+        case .networkServices, .fileSystemServices, .serviceLaunchPlan:
+            return .basicServices
+        case .themeConfiguration, .mainInterface, .systemMonitorInterface:
+            return .userInterface
+        case .weatherServices, .appleSiliconOptimization, .remoteDesktopServices:
+            return .advancedFeatures
+        }
+    }
+
+    var localizationKey: String {
+        switch self {
+        case .loggingSystem:
+            return "startup.step.loggingSystem"
+        case .configurationManager:
+            return "startup.step.configurationManager"
+        case .securityServices:
+            return "startup.step.securityServices"
+        case .performanceFoundation:
+            return "startup.step.performanceFoundation"
+        case .networkServices:
+            return "startup.step.networkServices"
+        case .fileSystemServices:
+            return "startup.step.fileSystemServices"
+        case .serviceLaunchPlan:
+            return "startup.step.serviceLaunchPlan"
+        case .themeConfiguration:
+            return "startup.step.themeConfiguration"
+        case .mainInterface:
+            return "startup.step.mainInterface"
+        case .systemMonitorInterface:
+            return "startup.step.systemMonitorInterface"
+        case .weatherServices:
+            return "startup.step.weatherServices"
+        case .appleSiliconOptimization:
+            return "startup.step.appleSiliconOptimization"
+        case .remoteDesktopServices:
+            return "startup.step.remoteDesktopServices"
+        }
+    }
+
+    var logLabel: String {
+        switch self {
+        case .loggingSystem:
+            return "loggingSystem"
+        case .configurationManager:
+            return "configurationManager"
+        case .securityServices:
+            return "securityServices"
+        case .performanceFoundation:
+            return "performanceFoundation"
+        case .networkServices:
+            return "networkServices"
+        case .fileSystemServices:
+            return "fileSystemServices"
+        case .serviceLaunchPlan:
+            return "serviceLaunchPlan"
+        case .themeConfiguration:
+            return "themeConfiguration"
+        case .mainInterface:
+            return "mainInterface"
+        case .systemMonitorInterface:
+            return "systemMonitorInterface"
+        case .weatherServices:
+            return "weatherServices"
+        case .appleSiliconOptimization:
+            return "appleSiliconOptimization"
+        case .remoteDesktopServices:
+            return "remoteDesktopServices"
         }
     }
 }

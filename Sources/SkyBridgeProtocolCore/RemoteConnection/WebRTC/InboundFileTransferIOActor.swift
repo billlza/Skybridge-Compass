@@ -1,0 +1,2069 @@
+import CryptoKit
+import Foundation
+import Darwin
+import os.lock
+
+/// Canonicalizes only Darwin's fixed, system-owned root aliases before secure
+/// descriptor traversal. It deliberately does not resolve deeper symbolic links:
+/// those remain visible to `O_NOFOLLOW` and are rejected at the I/O boundary.
+@available(macOS 14.0, iOS 17.0, *)
+public enum DarwinSecurePathPolicy {
+    public enum PolicyError: Error, Sendable, Equatable {
+        case invalidAbsoluteFileURL
+    }
+
+    public static func canonicalizingSystemRootAlias(_ url: URL) throws -> URL {
+        let standardized = url.standardizedFileURL
+        guard standardized.isFileURL, standardized.path.hasPrefix("/") else {
+            throw PolicyError.invalidAbsoluteFileURL
+        }
+
+        let path = standardized.path
+        let systemRootAliases = ["/var", "/tmp", "/etc"]
+        guard let alias = systemRootAliases.first(where: {
+            path == $0 || path.hasPrefix($0 + "/")
+        }) else {
+            return standardized
+        }
+
+        let suffix = path.dropFirst(alias.count)
+        return URL(
+            fileURLWithPath: "/private\(alias)\(suffix)",
+            isDirectory: standardized.hasDirectoryPath
+        )
+    }
+
+    struct DirectoryTraversalPlan: Equatable {
+        let anchorURL: URL
+        let relativeComponents: [String]
+        let requiresOwnedAnchor: Bool
+    }
+
+    /// Mobile application sandboxes grant access to the app container without granting
+    /// directory traversal across every ancestor above that container. Anchor descriptor
+    /// traversal at the system-provided container root, then keep `O_NOFOLLOW` for every
+    /// application-controlled descendant. Targets outside the trusted root retain the
+    /// stricter filesystem-root traversal and therefore fail closed when the sandbox denies it.
+    static func directoryTraversalPlan(
+        targetURL: URL,
+        trustedContainerRootURL: URL?
+    ) throws -> DirectoryTraversalPlan {
+        let target = try canonicalizingSystemRootAlias(targetURL)
+        if let trustedContainerRootURL {
+            let trustedRoot = try canonicalizingSystemRootAlias(trustedContainerRootURL)
+            let trustedRootPath = trustedRoot.path == "/"
+                ? "/"
+                : trustedRoot.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                    .withLeadingSlash
+            let targetPath = target.path
+            if targetPath == trustedRootPath
+                || targetPath.hasPrefix(trustedRootPath + "/") {
+                let suffix = targetPath.dropFirst(trustedRootPath.count)
+                return DirectoryTraversalPlan(
+                    anchorURL: URL(
+                        fileURLWithPath: trustedRootPath,
+                        isDirectory: true
+                    ),
+                    relativeComponents: suffix.split(separator: "/").map(String.init),
+                    requiresOwnedAnchor: true
+                )
+            }
+        }
+
+        return DirectoryTraversalPlan(
+            anchorURL: URL(fileURLWithPath: "/", isDirectory: true),
+            relativeComponents: Array(target.pathComponents.dropFirst()),
+            requiresOwnedAnchor: false
+        )
+    }
+}
+
+private extension String {
+    var withLeadingSlash: String {
+        hasPrefix("/") ? self : "/\(self)"
+    }
+}
+
+@available(macOS 14.0, iOS 17.0, *)
+public struct InboundFileTransferIOHandle: Hashable, Sendable {
+    fileprivate let rawValue: UUID
+    // Copies share this allocated lock. Its scope is one real staging handle,
+    // independent of a task's cooperative cancellation flag or actor scheduling.
+    private let publicationRevoked = OSAllocatedUnfairLock(initialState: false)
+
+    fileprivate init(rawValue: UUID = UUID()) {
+        self.rawValue = rawValue
+    }
+
+    /// Synchronously prevents a future rename by this handle. This method does
+    /// not undo a rename that already won the lock; normal durability and cleanup
+    /// rules still apply. The caller can briefly wait for one rename syscall.
+    /// This is process-local lifecycle fencing, not durable protocol authority.
+    public func revokePublication() {
+        publicationRevoked.withLock { $0 = true }
+    }
+
+    fileprivate func withPublicationAuthorization<T: Sendable>(_ body: @Sendable () throws -> T) throws -> T {
+        try publicationRevoked.withLock { revoked in
+            guard !revoked else { throw CancellationError() }
+            try Task.checkCancellation()
+            return try body()
+        }
+    }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.rawValue == rhs.rawValue
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(rawValue)
+    }
+}
+
+/// A selected local directory held open for the entire authorization lifetime.
+/// Copies share this immutable capability; reconstructing its path does not
+/// reconstruct its scope. FileHandle closes the owned descriptor on last release.
+/// This establishes local target identity, not policy approval or OS attestation.
+@available(macOS 14.0, iOS 17.0, *)
+public final class InboundFileTransferDestinationCapability: Sendable, Equatable {
+    public let directoryURL: URL
+    public let scopeDigest: Data
+    fileprivate let issuerIdentifier: UUID
+    fileprivate let directoryHandle: FileHandle
+    fileprivate let deviceIdentifier: UInt64
+    fileprivate let inodeIdentifier: UInt64
+
+    fileprivate init(
+        directoryURL: URL, issuerIdentifier: UUID, descriptor: Int32,
+        deviceIdentifier: UInt64, inodeIdentifier: UInt64
+    ) {
+        self.directoryURL = directoryURL
+        self.issuerIdentifier = issuerIdentifier
+        self.deviceIdentifier = deviceIdentifier
+        self.inodeIdentifier = inodeIdentifier
+        directoryHandle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        var preimage = Data("skybridge/inbound-directory-capability/v1\0".utf8)
+        preimage.append(Data(UUID().uuidString.lowercased().utf8))
+        for value in [deviceIdentifier, inodeIdentifier] {
+            withUnsafeBytes(of: value.bigEndian) { preimage.append(contentsOf: $0) }
+        }
+        scopeDigest = Data(SHA256.hash(data: preimage))
+    }
+
+    public static func == (
+        lhs: InboundFileTransferDestinationCapability,
+        rhs: InboundFileTransferDestinationCapability
+    ) -> Bool {
+        lhs === rhs
+    }
+}
+
+/// Immutable protocol inputs supplied by the authorized receive coordinator.
+/// A target-scope digest identifies its policy selection; it does not by itself
+/// authenticate a filesystem path. The coordinator must establish that mapping.
+/// Equality is object identity: reconstructing identical public fields cannot
+/// impersonate the private request retained by that coordinator before binding.
+@available(macOS 14.0, iOS 17.0, *)
+public final class InboundFileTransferCommitRequest: Sendable, Equatable {
+    public let operationID: Data
+    public let sequence: UInt64
+    public let requestDigest: Data
+    public let transferID: Data
+    public let targetScope: Data
+    public let declaredBytes: UInt64
+    public let contentSHA256: Data
+    public let requestedFileName: String
+
+    public init(
+        operationID: Data, sequence: UInt64, requestDigest: Data,
+        transferID: Data, targetScope: Data, declaredBytes: UInt64,
+        contentSHA256: Data, requestedFileName: String
+    ) {
+        self.operationID = operationID
+        self.sequence = sequence
+        self.requestDigest = requestDigest
+        self.transferID = transferID
+        self.targetScope = targetScope
+        self.declaredBytes = declaredBytes
+        self.contentSHA256 = contentSHA256
+        self.requestedFileName = requestedFileName
+    }
+
+    public static func == (
+        lhs: InboundFileTransferCommitRequest, rhs: InboundFileTransferCommitRequest
+    ) -> Bool {
+        lhs === rhs
+    }
+}
+
+/// Issued by the I/O actor before rename and retained through durability retry.
+/// Neither a different handle nor a second protocol operation can relabel it.
+/// This is an in-process binding, not a persistent authorization fence.
+@available(macOS 14.0, iOS 17.0, *)
+public struct InboundFileTransferCommitBinding: Sendable, Equatable {
+    public let request: InboundFileTransferCommitRequest
+    public let handle: InboundFileTransferIOHandle
+    public let destinationDirectory: URL
+    public let requestedFileName: String
+    fileprivate let identifier: UUID
+    fileprivate let destinationDevice: UInt64
+    fileprivate let destinationInode: UInt64
+
+    fileprivate init(
+        request: InboundFileTransferCommitRequest,
+        handle: InboundFileTransferIOHandle,
+        destinationDirectory: URL, requestedFileName: String,
+        destinationDevice: UInt64, destinationInode: UInt64
+    ) {
+        self.request = request
+        self.handle = handle
+        self.destinationDirectory = destinationDirectory
+        self.requestedFileName = requestedFileName
+        self.destinationDevice = destinationDevice
+        self.destinationInode = destinationInode
+        identifier = UUID()
+    }
+}
+
+/// Sealed observation produced only after the installed file and both rename
+/// directories have passed the actor's descriptor-bound durability checks.
+///
+/// The memberwise initializer is intentionally unavailable outside this file:
+/// callers can inspect a real commit, but cannot manufacture one for a trusted
+/// committer or an experiment-evidence producer.
+@available(macOS 14.0, iOS 17.0, *)
+public struct InboundFileTransferDurableCommitObservation: Sendable, Equatable {
+    public enum DurabilityPrimitive: String, Sendable {
+        case fileAndParentDirectorySync = "file_and_parent_directory_sync"
+    }
+
+    public let destinationURL: URL
+    public let destinationRelativePath: String
+    public let byteCount: UInt64
+    public let sha256: Data
+    public let committedAt: Date
+    public let durabilityPrimitive: DurabilityPrimitive
+    /// Nil only for the classic, unbound file-transfer API. BoundSession rejects it.
+    public let operationBinding: InboundFileTransferCommitBinding?
+
+    fileprivate init(
+        destinationURL: URL,
+        destinationRelativePath: String,
+        byteCount: UInt64,
+        sha256: Data,
+        committedAt: Date,
+        operationBinding: InboundFileTransferCommitBinding?
+    ) {
+        self.destinationURL = destinationURL
+        self.destinationRelativePath = destinationRelativePath
+        self.byteCount = byteCount
+        self.sha256 = sha256
+        self.committedAt = committedAt
+        self.operationBinding = operationBinding
+        durabilityPrimitive = .fileAndParentDirectorySync
+    }
+}
+
+@available(macOS 14.0, iOS 17.0, *)
+public enum InboundFileTransferIOError: Error, LocalizedError, Sendable, Equatable {
+    case capacityExceeded
+    case destinationUnavailable
+    case crossDeviceCommitUnsupported
+    case invalidDestination(String)
+    case temporaryFileAlreadyExists
+    case unknownHandle
+    case writeAfterClose
+    case writeOutOfBounds
+    case dataDigestMismatch
+    case operationBindingMismatch
+    case destinationCapabilityMismatch
+    case createFailed(String)
+    case writeFailed(String)
+    case closeFailed(String)
+    case hashFailed(String)
+    case commitBeforeClose
+    case readBeforeVerification
+    case readAfterCommit
+    case releaseBeforeCommit
+    case moveFailed(String)
+    case cleanupFailed(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .capacityExceeded:
+            return "Inbound file I/O capacity exceeded"
+        case .destinationUnavailable:
+            return "Inbound file destination is unavailable or not writable"
+        case .crossDeviceCommitUnsupported:
+            return "Inbound staging and destination directories are on different file systems"
+        case .invalidDestination(let reason):
+            return "Invalid inbound file destination: \(reason)"
+        case .temporaryFileAlreadyExists:
+            return "Inbound temporary file already exists"
+        case .unknownHandle:
+            return "Unknown inbound file I/O handle"
+        case .writeAfterClose:
+            return "Inbound file write attempted after close"
+        case .writeOutOfBounds:
+            return "Inbound file write exceeds declared size"
+        case .dataDigestMismatch:
+            return "Inbound file data digest mismatch"
+        case .operationBindingMismatch:
+            return "Inbound file operation, handle, or destination binding does not match"
+        case .destinationCapabilityMismatch:
+            return "Inbound selected directory capability is foreign, missing, or changed"
+        case .createFailed(let details):
+            return "Inbound temporary file creation failed: \(details)"
+        case .writeFailed(let details):
+            return "Inbound file write failed: \(details)"
+        case .closeFailed(let details):
+            return "Inbound file close failed: \(details)"
+        case .hashFailed(let details):
+            return "Inbound file hash failed: \(details)"
+        case .commitBeforeClose:
+            return "Inbound file commit attempted before close and digest"
+        case .readBeforeVerification:
+            return "Inbound file read attempted before close and digest"
+        case .readAfterCommit:
+            return "Inbound staging read attempted after commit"
+        case .releaseBeforeCommit:
+            return "Inbound file I/O state release attempted before commit"
+        case .moveFailed(let details):
+            return "Inbound file commit failed: \(details)"
+        case .cleanupFailed(let details):
+            return "Inbound file cleanup failed: \(details)"
+        }
+    }
+}
+
+/// Owns every blocking inbound file operation away from UI actors.
+///
+/// The actor is deliberately bounded and serial: each transfer has an opaque
+/// handle, while one executor owns all FileHandle and FileManager access. This
+/// prevents UI-thread blocking and prevents concurrent seek/write races.
+@available(macOS 14.0, iOS 17.0, *)
+public actor InboundFileTransferIOActor {
+    public static let shared = InboundFileTransferIOActor()
+
+    enum CommitDurabilityFaultForTesting: Sendable, Equatable {
+        case installedFileReopen
+        case installedFileSync
+        case sourceDirectorySync
+        case destinationDirectorySync
+    }
+
+    private struct InstalledFile {
+        let url: URL
+        let sourceDirectoryURL: URL
+        let sourceDirectoryDeviceIdentifier: UInt64
+        let sourceDirectoryInodeIdentifier: UInt64
+        let destinationDirectoryURL: URL
+        let destinationDirectoryDeviceIdentifier: UInt64
+        let destinationDirectoryInodeIdentifier: UInt64
+        let expectedDigest: Data
+    }
+
+    private enum CommitState {
+        case staged
+        case installedPendingDurability(InstalledFile)
+        case durableCommitted(InboundFileTransferDurableCommitObservation)
+    }
+
+    private struct TransferState {
+        let temporaryURL: URL
+        let declaredFileSize: Int64
+        let deviceIdentifier: UInt64
+        let inodeIdentifier: UInt64
+        let temporaryDirectoryDeviceIdentifier: UInt64
+        let temporaryDirectoryInodeIdentifier: UInt64
+        var writer: FileHandle?
+        var digest: Data?
+        var closeFailure: String?
+        var commitState: CommitState
+        var commitBinding: InboundFileTransferCommitBinding? = nil
+        var destinationCapability: InboundFileTransferDestinationCapability? = nil
+    }
+
+    private final class WeakDestination {
+        weak var value: InboundFileTransferDestinationCapability?
+
+        init(_ value: InboundFileTransferDestinationCapability) {
+            self.value = value
+        }
+    }
+
+    private let maxOpenTransfers: Int
+    private var commitDurabilityFaultsForTesting: [CommitDurabilityFaultForTesting]
+    private var transfers: [InboundFileTransferIOHandle: TransferState] = [:]
+    private let destinationIssuerIdentifier = UUID()
+    private var destinations: [WeakDestination] = []
+
+    public init(maxOpenTransfers: Int = 32) {
+        precondition(maxOpenTransfers > 0, "Inbound file I/O capacity must be positive")
+        self.maxOpenTransfers = maxOpenTransfers
+        commitDurabilityFaultsForTesting = []
+    }
+
+    init(
+        maxOpenTransfers: Int,
+        commitDurabilityFaultsForTesting: [CommitDurabilityFaultForTesting]
+    ) {
+        precondition(maxOpenTransfers > 0, "Inbound file I/O capacity must be positive")
+        self.maxOpenTransfers = maxOpenTransfers
+        self.commitDurabilityFaultsForTesting = commitDurabilityFaultsForTesting
+    }
+
+    /// Resolve the selected target before approval. Retaining the descriptor
+    /// prevents inode reuse while a transfer or native grant still owns the target.
+    public func prepareDestinationDirectory(
+        at directoryURL: URL
+    ) throws -> InboundFileTransferDestinationCapability {
+        try Task.checkCancellation()
+        destinations.removeAll { $0.value == nil }
+        guard destinations.count < maxOpenTransfers else {
+            throw InboundFileTransferIOError.capacityExceeded
+        }
+        let canonical = try DarwinSecurePathPolicy.canonicalizingSystemRootAlias(directoryURL)
+        let descriptor = try Self.openDirectory(
+            at: canonical, createIfMissing: true, makeFinalComponentPrivate: false
+        )
+        var status = stat()
+        guard fstat(descriptor, &status) == 0, Self.isDirectory(status.st_mode) else {
+            guard Darwin.close(descriptor) == 0 else {
+                throw InboundFileTransferIOError.invalidDestination("selected directory validation close failed")
+            }
+            throw InboundFileTransferIOError.invalidDestination("selected directory identity unavailable")
+        }
+        let capability = InboundFileTransferDestinationCapability(
+            directoryURL: canonical, issuerIdentifier: destinationIssuerIdentifier,
+            descriptor: descriptor, deviceIdentifier: UInt64(status.st_dev),
+            inodeIdentifier: UInt64(status.st_ino)
+        )
+        destinations.append(WeakDestination(capability))
+        return capability
+    }
+
+    public func activeDestinationCapabilityCount() -> Int {
+        destinations.removeAll { $0.value == nil }
+        return destinations.count
+    }
+
+    private func requireDestination(
+        _ capability: InboundFileTransferDestinationCapability,
+        at descriptor: Int32? = nil
+    ) throws {
+        guard capability.issuerIdentifier == destinationIssuerIdentifier else {
+            throw InboundFileTransferIOError.destinationCapabilityMismatch
+        }
+        var held = stat()
+        guard fstat(capability.directoryHandle.fileDescriptor, &held) == 0,
+              Self.isDirectory(held.st_mode),
+              UInt64(held.st_dev) == capability.deviceIdentifier,
+              UInt64(held.st_ino) == capability.inodeIdentifier else {
+            throw InboundFileTransferIOError.destinationCapabilityMismatch
+        }
+        if let descriptor {
+            var current = stat()
+            guard fstat(descriptor, &current) == 0,
+                  Self.isDirectory(current.st_mode),
+                  current.st_dev == held.st_dev, current.st_ino == held.st_ino else {
+                throw InboundFileTransferIOError.destinationCapabilityMismatch
+            }
+        }
+    }
+
+    private func requireCurrentDestinationPath(
+        _ capability: InboundFileTransferDestinationCapability
+    ) throws {
+        try requireDestination(capability)
+        try Self.withDirectoryDescriptor(
+            at: capability.directoryURL, createIfMissing: false, makeFinalComponentPrivate: false
+        ) { descriptor in
+            try requireDestination(capability, at: descriptor)
+        }
+    }
+
+    /// Fails before any payload is received when an atomic rename cannot be
+    /// guaranteed because staging and destination reside on different devices.
+    public func validateSameVolumeCommit(
+        stagingURL: URL,
+        destinationDirectory: URL
+    ) throws {
+        try Task.checkCancellation()
+        try Self.withDirectoryDescriptor(
+            at: stagingURL.deletingLastPathComponent(),
+            createIfMissing: true,
+            makeFinalComponentPrivate: true
+        ) { stagingDirectoryFD in
+            var stagingStatus = stat()
+            guard fstat(stagingDirectoryFD, &stagingStatus) == 0,
+                  Self.isDirectory(stagingStatus.st_mode) else {
+                throw InboundFileTransferIOError.invalidDestination(
+                    "staging directory identity unavailable"
+                )
+            }
+            try Self.withDirectoryDescriptor(
+                at: destinationDirectory,
+                createIfMissing: true,
+                makeFinalComponentPrivate: false
+            ) { destinationDirectoryFD in
+                var destinationStatus = stat()
+                guard fstat(destinationDirectoryFD, &destinationStatus) == 0,
+                      Self.isDirectory(destinationStatus.st_mode) else {
+                    throw InboundFileTransferIOError.invalidDestination(
+                        "destination directory identity unavailable"
+                    )
+                }
+                guard stagingStatus.st_dev == destinationStatus.st_dev else {
+                    throw InboundFileTransferIOError.crossDeviceCommitUnsupported
+                }
+            }
+        }
+    }
+
+    public func createTemporaryFile(
+        at temporaryURL: URL,
+        declaredFileSize: Int64,
+        destination: InboundFileTransferDestinationCapability? = nil
+    ) throws -> InboundFileTransferIOHandle {
+        try Task.checkCancellation()
+        guard declaredFileSize >= 0 else {
+            throw InboundFileTransferIOError.writeOutOfBounds
+        }
+        guard transfers.count < maxOpenTransfers else {
+            throw InboundFileTransferIOError.capacityExceeded
+        }
+        if let destination {
+            try requireCurrentDestinationPath(destination)
+        }
+        let fileName = try Self.validatedDirectChildFileName(
+            temporaryURL,
+            errorReason: "temporary file must be a direct child"
+        )
+        let directoryURL = temporaryURL.deletingLastPathComponent()
+        let directoryFD = try Self.openDirectory(
+            at: directoryURL,
+            createIfMissing: true,
+            makeFinalComponentPrivate: true
+        )
+        var directoryStatus = stat()
+        guard fstat(directoryFD, &directoryStatus) == 0,
+              Self.isDirectory(directoryStatus.st_mode) else {
+            guard Darwin.close(directoryFD) == 0 else {
+                throw InboundFileTransferIOError.createFailed("staging directory validation close failed")
+            }
+            throw InboundFileTransferIOError.createFailed("staging directory identity unavailable")
+        }
+        do {
+            if let destination {
+                guard UInt64(directoryStatus.st_dev) == destination.deviceIdentifier else {
+                    throw InboundFileTransferIOError.crossDeviceCommitUnsupported
+                }
+                if UInt64(directoryStatus.st_ino) == destination.inodeIdentifier {
+                    try requireDestination(destination, at: directoryFD)
+                }
+            }
+        } catch {
+            guard Darwin.close(directoryFD) == 0 else {
+                throw InboundFileTransferIOError.createFailed(
+                    "selected directory mismatch: \(error.localizedDescription); staging descriptor close failed"
+                )
+            }
+            throw error
+        }
+        let flags = O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC
+        let fileFD = fileName.withCString { pointer in
+            openat(directoryFD, pointer, flags, mode_t(0o600))
+        }
+        guard fileFD >= 0 else {
+            let openError = errno
+            let closeResult = Darwin.close(directoryFD)
+            guard closeResult == 0 else {
+                throw InboundFileTransferIOError.createFailed("temporary directory close failed")
+            }
+            if openError == EEXIST || openError == ELOOP {
+                throw InboundFileTransferIOError.temporaryFileAlreadyExists
+            }
+            throw InboundFileTransferIOError.createFailed("exclusive temporary file open failed")
+        }
+
+        var status = stat()
+        guard fstat(fileFD, &status) == 0,
+              Self.isRegularFile(status.st_mode),
+              status.st_uid == geteuid(),
+              status.st_size == 0,
+              fchmod(fileFD, mode_t(0o600)) == 0 else {
+            let fileCloseResult = Darwin.close(fileFD)
+            let cleanupResult = fileName.withCString { unlinkat(directoryFD, $0, 0) }
+            let cleanupError = errno
+            let directoryCloseResult = Darwin.close(directoryFD)
+            guard fileCloseResult == 0,
+                  cleanupResult == 0 || cleanupError == ENOENT,
+                  directoryCloseResult == 0 else {
+                throw InboundFileTransferIOError.createFailed("temporary file validation cleanup failed")
+            }
+            throw InboundFileTransferIOError.createFailed("temporary file validation failed")
+        }
+        guard Darwin.close(directoryFD) == 0 else {
+            let fileCloseResult = Darwin.close(fileFD)
+            guard fileCloseResult == 0 else {
+                throw InboundFileTransferIOError.createFailed("temporary file cleanup failed")
+            }
+            throw InboundFileTransferIOError.createFailed("temporary directory close failed")
+        }
+
+        let writer = FileHandle(fileDescriptor: fileFD, closeOnDealloc: true)
+        let handle = InboundFileTransferIOHandle()
+        transfers[handle] = TransferState(
+            temporaryURL: temporaryURL,
+            declaredFileSize: declaredFileSize,
+            deviceIdentifier: UInt64(status.st_dev),
+            inodeIdentifier: UInt64(status.st_ino),
+            temporaryDirectoryDeviceIdentifier: UInt64(directoryStatus.st_dev),
+            temporaryDirectoryInodeIdentifier: UInt64(directoryStatus.st_ino),
+            writer: writer,
+            digest: nil,
+            closeFailure: nil,
+            commitState: .staged,
+            destinationCapability: destination
+        )
+        return handle
+    }
+
+    /// Reopens an explicitly isolated partial file for classic-transfer resume.
+    /// The file is truncated to the authenticated/negotiated resume offset so stale
+    /// trailing bytes can never survive into the resumed transfer.
+    public func resumeTemporaryFile(
+        at temporaryURL: URL,
+        isolatedDirectory: URL,
+        declaredFileSize: Int64,
+        resumeOffset: Int64
+    ) throws -> InboundFileTransferIOHandle {
+        try Task.checkCancellation()
+        guard declaredFileSize >= 0,
+              resumeOffset >= 0,
+              resumeOffset <= declaredFileSize else {
+            throw InboundFileTransferIOError.writeOutOfBounds
+        }
+        guard transfers.count < maxOpenTransfers else {
+            throw InboundFileTransferIOError.capacityExceeded
+        }
+        guard Self.isDirectChild(temporaryURL, of: isolatedDirectory) else {
+            throw InboundFileTransferIOError.invalidDestination("resume partial escaped isolation directory")
+        }
+
+        let fileName = try Self.validatedDirectChildFileName(
+            temporaryURL,
+            errorReason: "resume partial must be a direct child"
+        )
+        let directoryFD = try Self.openDirectory(
+            at: isolatedDirectory,
+            createIfMissing: false,
+            makeFinalComponentPrivate: true
+        )
+        var directoryStatus = stat()
+        guard fstat(directoryFD, &directoryStatus) == 0,
+              Self.isDirectory(directoryStatus.st_mode) else {
+            guard Darwin.close(directoryFD) == 0 else {
+                throw InboundFileTransferIOError.createFailed("resume directory validation close failed")
+            }
+            throw InboundFileTransferIOError.createFailed("resume directory identity unavailable")
+        }
+        let flags = O_RDWR | O_NOFOLLOW | O_CLOEXEC
+        let fileFD = fileName.withCString { openat(directoryFD, $0, flags) }
+        guard fileFD >= 0 else {
+            let closeResult = Darwin.close(directoryFD)
+            guard closeResult == 0 else {
+                throw InboundFileTransferIOError.createFailed("resume directory close failed")
+            }
+            throw InboundFileTransferIOError.createFailed("resume partial open failed")
+        }
+
+        var status = stat()
+        guard fstat(fileFD, &status) == 0,
+              Self.isRegularFile(status.st_mode),
+              status.st_uid == geteuid(),
+              status.st_size >= off_t(resumeOffset),
+              status.st_size <= off_t(declaredFileSize),
+              status.st_mode & mode_t(0o077) == 0 else {
+            let fileCloseResult = Darwin.close(fileFD)
+            let directoryCloseResult = Darwin.close(directoryFD)
+            guard fileCloseResult == 0, directoryCloseResult == 0 else {
+                throw InboundFileTransferIOError.createFailed("resume validation close failed")
+            }
+            throw InboundFileTransferIOError.createFailed("resume partial contract mismatch")
+        }
+        guard ftruncate(fileFD, off_t(resumeOffset)) == 0,
+              fsync(fileFD) == 0 else {
+            let fileCloseResult = Darwin.close(fileFD)
+            let directoryCloseResult = Darwin.close(directoryFD)
+            guard fileCloseResult == 0, directoryCloseResult == 0 else {
+                throw InboundFileTransferIOError.createFailed("resume truncate close failed")
+            }
+            throw InboundFileTransferIOError.createFailed("resume partial truncate failed")
+        }
+        guard Darwin.close(directoryFD) == 0 else {
+            let fileCloseResult = Darwin.close(fileFD)
+            guard fileCloseResult == 0 else {
+                throw InboundFileTransferIOError.createFailed("resume descriptor close failed")
+            }
+            throw InboundFileTransferIOError.createFailed("resume directory close failed")
+        }
+
+        let writer = FileHandle(fileDescriptor: fileFD, closeOnDealloc: true)
+
+        let handle = InboundFileTransferIOHandle()
+        transfers[handle] = TransferState(
+            temporaryURL: temporaryURL,
+            declaredFileSize: declaredFileSize,
+            deviceIdentifier: UInt64(status.st_dev),
+            inodeIdentifier: UInt64(status.st_ino),
+            temporaryDirectoryDeviceIdentifier: UInt64(directoryStatus.st_dev),
+            temporaryDirectoryInodeIdentifier: UInt64(directoryStatus.st_ino),
+            writer: writer,
+            digest: nil,
+            closeFailure: nil,
+            commitState: .staged
+        )
+        return handle
+    }
+
+    public func prepareFirstWritableDirectory(from candidates: [URL]) throws -> URL {
+        try Task.checkCancellation()
+        var seenPaths = Set<String>()
+        for candidate in candidates {
+            let standardized = candidate.standardizedFileURL
+            guard seenPaths.insert(standardized.path).inserted else { continue }
+            do {
+                try Self.withDirectoryDescriptor(
+                    at: standardized,
+                    createIfMissing: true,
+                    makeFinalComponentPrivate: false
+                ) { directoryFD in
+                    try Self.verifyWritableDirectory(directoryFD)
+                }
+                return standardized
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch InboundFileTransferIOError.destinationUnavailable {
+                continue
+            } catch {
+                throw error
+            }
+        }
+        throw InboundFileTransferIOError.invalidDestination("no writable receive directory")
+    }
+
+    public func write(
+        _ data: Data,
+        atOffset offset: UInt64,
+        using handle: InboundFileTransferIOHandle,
+        expectedSHA256: Data? = nil
+    ) throws -> Data {
+        try Task.checkCancellation()
+        let digest = Data(SHA256.hash(data: data))
+        if let expectedSHA256, digest != expectedSHA256 {
+            throw InboundFileTransferIOError.dataDigestMismatch
+        }
+        guard var state = transfers[handle] else {
+            throw InboundFileTransferIOError.unknownHandle
+        }
+        if let closeFailure = state.closeFailure {
+            throw InboundFileTransferIOError.closeFailed(closeFailure)
+        }
+        guard let writer = state.writer else {
+            throw InboundFileTransferIOError.writeAfterClose
+        }
+        guard offset <= UInt64(Int64.max),
+              Int64(offset) <= state.declaredFileSize,
+              Int64(data.count) <= state.declaredFileSize - Int64(offset) else {
+            throw InboundFileTransferIOError.writeOutOfBounds
+        }
+
+        do {
+            try writer.seek(toOffset: offset)
+            try writer.write(contentsOf: data)
+            state.digest = nil
+            transfers[handle] = state
+            return digest
+        } catch {
+            throw InboundFileTransferIOError.writeFailed(error.localizedDescription)
+        }
+    }
+
+    public func digest(
+        _ data: Data,
+        expectedSHA256: Data? = nil
+    ) throws -> Data {
+        try Task.checkCancellation()
+        let digest = Data(SHA256.hash(data: data))
+        if let expectedSHA256, digest != expectedSHA256 {
+            throw InboundFileTransferIOError.dataDigestMismatch
+        }
+        return digest
+    }
+
+    public func closeAndDigest(using handle: InboundFileTransferIOHandle) throws -> Data {
+        try Task.checkCancellation()
+        guard var state = transfers[handle] else {
+            throw InboundFileTransferIOError.unknownHandle
+        }
+        if let closeFailure = state.closeFailure {
+            throw InboundFileTransferIOError.closeFailed(closeFailure)
+        }
+        if let digest = state.digest {
+            return digest
+        }
+        guard let writer = state.writer else {
+            throw InboundFileTransferIOError.hashFailed("temporary file descriptor unavailable")
+        }
+
+        var status = stat()
+        guard fstat(writer.fileDescriptor, &status) == 0,
+              Self.isRegularFile(status.st_mode),
+              status.st_uid == geteuid(),
+              UInt64(status.st_dev) == state.deviceIdentifier,
+              UInt64(status.st_ino) == state.inodeIdentifier,
+              status.st_size == off_t(state.declaredFileSize) else {
+            throw InboundFileTransferIOError.hashFailed("temporary file identity or size changed")
+        }
+
+        var hasher = SHA256()
+        var bytesHashed: Int64 = 0
+        do {
+            guard fsync(writer.fileDescriptor) == 0 else {
+                throw InboundFileTransferIOError.hashFailed("temporary file sync failed")
+            }
+            try writer.seek(toOffset: 0)
+            while true {
+                try Task.checkCancellation()
+                guard let chunk = try writer.read(upToCount: 256 * 1_024), !chunk.isEmpty else {
+                    break
+                }
+                guard bytesHashed <= state.declaredFileSize - Int64(chunk.count) else {
+                    throw InboundFileTransferIOError.hashFailed("temporary file grew while hashing")
+                }
+                hasher.update(data: chunk)
+                bytesHashed += Int64(chunk.count)
+            }
+            guard bytesHashed == state.declaredFileSize else {
+                throw InboundFileTransferIOError.hashFailed("temporary file size changed while hashing")
+            }
+            try writer.close()
+            state.writer = nil
+            let digest = Data(hasher.finalize())
+            state.digest = digest
+            transfers[handle] = state
+            return digest
+        } catch {
+            let originalError = error
+            let closeResult: Swift.Result<Void, Error>
+            do {
+                try writer.close()
+                closeResult = .success(())
+            } catch {
+                closeResult = .failure(error)
+            }
+            state.writer = nil
+            if case .failure(let closeError) = closeResult {
+                let combinedFailure = [
+                    "hash: \(originalError.localizedDescription)",
+                    "close: \(closeError.localizedDescription)"
+                ].joined(separator: "; ")
+                state.closeFailure = combinedFailure
+                transfers[handle] = state
+                throw InboundFileTransferIOError.closeFailed(combinedFailure)
+            }
+            transfers[handle] = state
+            if originalError is CancellationError {
+                throw CancellationError()
+            }
+            if let typedError = originalError as? InboundFileTransferIOError {
+                throw typedError
+            }
+            throw InboundFileTransferIOError.hashFailed(originalError.localizedDescription)
+        }
+    }
+
+    /// Reopens the owned staging source, checks its recorded device/inode/size and full SHA,
+    /// then returns a held-descriptor reader. It cannot be constructed from a transfer-history
+    /// path. closeAndDigest already closed the receiving descriptor; this is a checked reopen,
+    /// not continuous file-object retention across that close. The caller retains this handle
+    /// until its own staging cleanup, and separately owns closing the returned reader.
+    /// This is a content/ownership handoff, not account or playback authorization: the caller
+    /// must keep checking its permission before reads and output. Cancellation and caller
+    /// lifetime validation are checked throughout hashing and again before handoff.
+    public func prepareVerifiedReadSession(using handle: InboundFileTransferIOHandle,
+        expectedSHA256: Data, validateLifetime: @escaping @Sendable () async throws -> Void
+    ) async throws -> PreparedOutboundFileReadSession {
+        try validatePreparedReadOwner(handle, expectedSHA256: expectedSHA256)
+        guard let state = transfers[handle] else { throw InboundFileTransferIOError.unknownHandle }
+        let reader = try await PreparedOutboundFileReadSession.prepareReceivedFile(
+            url: state.temporaryURL, fileSize: state.declaredFileSize,
+            device: state.deviceIdentifier, inode: state.inodeIdentifier, expectedSHA256: expectedSHA256,
+            validateLifetime: {
+                try await validateLifetime()
+                try await self.validatePreparedReadOwner(handle, expectedSHA256: expectedSHA256)
+            })
+        do {
+            try Task.checkCancellation()
+            try validatePreparedReadOwner(handle, expectedSHA256: expectedSHA256)
+            return reader
+        } catch {
+            let primary = error
+            do { try await reader.close() }
+            catch {
+                throw InboundFileTransferIOError.cleanupFailed(
+                    "read handoff: \(primary.localizedDescription); reader close: \(error.localizedDescription)")
+            }
+            throw primary
+        }
+    }
+
+    private func validatePreparedReadOwner(_ handle: InboundFileTransferIOHandle, expectedSHA256: Data) throws {
+        try Task.checkCancellation()
+        try handle.withPublicationAuthorization {}
+        guard let state = transfers[handle] else { throw InboundFileTransferIOError.unknownHandle }
+        if let failure = state.closeFailure { throw InboundFileTransferIOError.closeFailed(failure) }
+        guard state.writer == nil, let digest = state.digest else {
+            throw InboundFileTransferIOError.readBeforeVerification
+        }
+        guard expectedSHA256.count == 32, digest == expectedSHA256 else {
+            throw InboundFileTransferIOError.dataDigestMismatch
+        }
+        guard case .staged = state.commitState else { throw InboundFileTransferIOError.readAfterCommit }
+    }
+
+    public func commit(
+        using handle: InboundFileTransferIOHandle,
+        destinationDirectory: URL,
+        fileName: String
+    ) throws -> URL {
+        try commitWithDurabilityObservation(
+            using: handle,
+            destinationDirectory: destinationDirectory,
+            fileName: fileName
+        ).destinationURL
+    }
+
+    /// Seals the exact closed staging handle and destination directory identity
+    /// before publication. Repeated binding is permitted only for identical inputs.
+    public func bindCommit(
+        using handle: InboundFileTransferIOHandle,
+        request: InboundFileTransferCommitRequest,
+        destination: InboundFileTransferDestinationCapability,
+        fileName: String
+    ) throws -> InboundFileTransferCommitBinding {
+        try Task.checkCancellation()
+        guard var state = transfers[handle] else {
+            throw InboundFileTransferIOError.unknownHandle
+        }
+        try requireDestination(destination)
+        guard request.targetScope == destination.scopeDigest,
+              state.destinationCapability == nil || state.destinationCapability == destination else {
+            throw InboundFileTransferIOError.destinationCapabilityMismatch
+        }
+        guard request.requestedFileName.utf8.elementsEqual(fileName.utf8) else {
+            throw InboundFileTransferIOError.operationBindingMismatch
+        }
+        let validatedName = try Self.validatedDestinationFileName(fileName)
+        if let binding = state.commitBinding {
+            guard binding.request == request,
+                  binding.destinationDirectory == destination.directoryURL,
+                  binding.requestedFileName == validatedName else {
+                throw InboundFileTransferIOError.operationBindingMismatch
+            }
+            return binding
+        }
+        guard case .staged = state.commitState else {
+            throw InboundFileTransferIOError.operationBindingMismatch
+        }
+        if let closeFailure = state.closeFailure {
+            throw InboundFileTransferIOError.closeFailed(closeFailure)
+        }
+        guard state.writer == nil, let digest = state.digest else {
+            throw InboundFileTransferIOError.commitBeforeClose
+        }
+        guard request.sequence != 0,
+              request.operationID.count == 32,
+              request.operationID.contains(where: { $0 != 0 }),
+              request.requestDigest.count == 32,
+              request.transferID.count == 32,
+              request.targetScope.count == 32,
+              request.contentSHA256.count == SHA256.byteCount,
+              UInt64(exactly: state.declaredFileSize) == request.declaredBytes,
+              digest == request.contentSHA256 else {
+            throw InboundFileTransferIOError.operationBindingMismatch
+        }
+        let binding = try Self.withDirectoryDescriptor(
+            at: destination.directoryURL, createIfMissing: false, makeFinalComponentPrivate: false
+        ) { directoryFD in
+            try requireDestination(destination, at: directoryFD)
+            var status = stat()
+            guard fstat(directoryFD, &status) == 0,
+                  Self.isDirectory(status.st_mode) else {
+                throw InboundFileTransferIOError.invalidDestination(
+                    "destination identity unavailable at operation binding"
+                )
+            }
+            guard UInt64(status.st_dev) == state.deviceIdentifier else {
+                throw InboundFileTransferIOError.crossDeviceCommitUnsupported
+            }
+            return InboundFileTransferCommitBinding(
+                request: request, handle: handle, destinationDirectory: destination.directoryURL,
+                requestedFileName: validatedName,
+                destinationDevice: UInt64(status.st_dev),
+                destinationInode: UInt64(status.st_ino)
+            )
+        }
+        state.commitBinding = binding
+        state.destinationCapability = destination
+        transfers[handle] = state
+        return binding
+    }
+
+    public func commitBoundFile(
+        _ binding: InboundFileTransferCommitBinding
+    ) throws -> InboundFileTransferDurableCommitObservation {
+        guard let destination = transfers[binding.handle]?.destinationCapability else {
+            throw InboundFileTransferIOError.unknownHandle
+        }
+        return try commitFile(
+            using: binding.handle,
+            destinationDirectory: binding.destinationDirectory,
+            fileName: binding.requestedFileName,
+            binding: binding,
+            destination: destination
+        )
+    }
+
+    /// Classic receive completion for a directory capability selected before
+    /// approval. A protocol-bound handle still requires commitBoundFile.
+    public func commitToPreparedDestination(
+        using handle: InboundFileTransferIOHandle,
+        fileName: String
+    ) throws -> InboundFileTransferDurableCommitObservation {
+        guard let destination = transfers[handle]?.destinationCapability else {
+            throw InboundFileTransferIOError.destinationCapabilityMismatch
+        }
+        return try commitFile(
+            using: handle, destinationDirectory: destination.directoryURL,
+            fileName: fileName, binding: nil, destination: destination
+        )
+    }
+
+    /// Atomically installs and durably commits a classic, unbound file transfer.
+    /// Bound handles must use commitBoundFile, including post-rename retries.
+    /// Returns an observation
+    /// that cannot exist before the real descriptor-bound sync sequence succeeds.
+    public func commitWithDurabilityObservation(
+        using handle: InboundFileTransferIOHandle,
+        destinationDirectory: URL,
+        fileName: String
+    ) throws -> InboundFileTransferDurableCommitObservation {
+        try commitFile(
+            using: handle, destinationDirectory: destinationDirectory,
+            fileName: fileName, binding: nil, destination: nil
+        )
+    }
+
+    private func commitFile(
+        using handle: InboundFileTransferIOHandle,
+        destinationDirectory: URL,
+        fileName: String,
+        binding: InboundFileTransferCommitBinding?,
+        destination: InboundFileTransferDestinationCapability?
+    ) throws -> InboundFileTransferDurableCommitObservation {
+        try Task.checkCancellation()
+        guard let state = transfers[handle] else {
+            throw InboundFileTransferIOError.unknownHandle
+        }
+        guard state.commitBinding == binding else {
+            throw InboundFileTransferIOError.operationBindingMismatch
+        }
+        guard state.destinationCapability == destination else {
+            throw InboundFileTransferIOError.destinationCapabilityMismatch
+        }
+        if let destination {
+            try requireDestination(destination)
+        }
+        if let closeFailure = state.closeFailure {
+            throw InboundFileTransferIOError.closeFailed(closeFailure)
+        }
+        guard state.writer == nil, let expectedDigest = state.digest else {
+            throw InboundFileTransferIOError.commitBeforeClose
+        }
+
+        switch state.commitState {
+        case .durableCommitted(let observation):
+            return observation
+        case .installedPendingDurability(let installedFile):
+            try completeInstalledFileDurability(
+                installedFile,
+                state: state
+            )
+            let observation = try makeDurableCommitObservation(
+                installedFile: installedFile,
+                state: state
+            )
+            var durableState = state
+            durableState.commitState = .durableCommitted(observation)
+            transfers[handle] = durableState
+            return observation
+        case .staged:
+            break
+        }
+
+        do {
+            let validatedFileName = try Self.validatedDestinationFileName(fileName)
+            let temporaryName = try Self.validatedDirectChildFileName(
+                state.temporaryURL,
+                errorReason: "temporary file is not a direct child"
+            )
+            let installedFile = try Self.withDirectoryDescriptor(
+                at: state.temporaryURL.deletingLastPathComponent(),
+                createIfMissing: false,
+                makeFinalComponentPrivate: true
+            ) { temporaryDirectoryFD in
+                var sourceDirectoryStatus = stat()
+                guard fstat(temporaryDirectoryFD, &sourceDirectoryStatus) == 0,
+                      Self.isDirectory(sourceDirectoryStatus.st_mode),
+                      UInt64(sourceDirectoryStatus.st_dev) == state.temporaryDirectoryDeviceIdentifier,
+                      UInt64(sourceDirectoryStatus.st_ino) == state.temporaryDirectoryInodeIdentifier else {
+                    throw InboundFileTransferIOError.moveFailed(
+                        "temporary directory identity changed before commit"
+                    )
+                }
+                var status = stat()
+                let statusResult = temporaryName.withCString {
+                    fstatat(temporaryDirectoryFD, $0, &status, AT_SYMLINK_NOFOLLOW)
+                }
+                guard statusResult == 0,
+                      Self.isRegularFile(status.st_mode),
+                      status.st_uid == geteuid(),
+                      UInt64(status.st_dev) == state.deviceIdentifier,
+                      UInt64(status.st_ino) == state.inodeIdentifier,
+                      status.st_size == off_t(state.declaredFileSize) else {
+                    throw InboundFileTransferIOError.moveFailed(
+                        "temporary file identity changed before commit"
+                    )
+                }
+
+                return try Self.withDirectoryDescriptor(
+                    at: destinationDirectory,
+                    createIfMissing: destination == nil,
+                    makeFinalComponentPrivate: false
+                ) { destinationDirectoryFD in
+                    if let destination {
+                        try requireDestination(destination, at: destinationDirectoryFD)
+                    }
+                    var destinationStatus = stat()
+                    guard fstat(destinationDirectoryFD, &destinationStatus) == 0,
+                          Self.isDirectory(destinationStatus.st_mode) else {
+                        throw InboundFileTransferIOError.invalidDestination(
+                            "destination directory identity unavailable at commit"
+                        )
+                    }
+                    guard UInt64(destinationStatus.st_dev) == state.deviceIdentifier else {
+                        throw InboundFileTransferIOError.crossDeviceCommitUnsupported
+                    }
+                    if let binding {
+                        guard UInt64(destinationStatus.st_dev) == binding.destinationDevice,
+                              UInt64(destinationStatus.st_ino) == binding.destinationInode else {
+                            throw InboundFileTransferIOError.operationBindingMismatch
+                        }
+                    }
+                    for suffix in 0..<10_000 {
+                        let candidateName = Self.destinationFileName(
+                            validatedFileName,
+                            suffix: suffix
+                        )
+                        // Serialize only one exclusive publication syscall with
+                        // revocation. Hashing, synchronization and retry bookkeeping
+                        // stay outside this small, non-suspending critical section.
+                        let (renameResult, renameError) = try handle.withPublicationAuthorization {
+                            let result = temporaryName.withCString { sourcePointer in
+                                candidateName.withCString { destinationPointer in
+                                    renameatx_np(
+                                        temporaryDirectoryFD,
+                                        sourcePointer,
+                                        destinationDirectoryFD,
+                                        destinationPointer,
+                                        UInt32(RENAME_EXCL)
+                                    )
+                                }
+                            }
+                            return (result, errno)
+                        }
+                        if renameResult == 0 {
+                            let destinationURL = destinationDirectory.standardizedFileURL
+                                .appendingPathComponent(candidateName, isDirectory: false)
+                            let installedFile = InstalledFile(
+                                url: destinationURL,
+                                sourceDirectoryURL: state.temporaryURL
+                                    .deletingLastPathComponent()
+                                    .standardizedFileURL,
+                                sourceDirectoryDeviceIdentifier: UInt64(
+                                    sourceDirectoryStatus.st_dev
+                                ),
+                                sourceDirectoryInodeIdentifier: UInt64(
+                                    sourceDirectoryStatus.st_ino
+                                ),
+                                destinationDirectoryURL: destinationDirectory.standardizedFileURL,
+                                destinationDirectoryDeviceIdentifier: UInt64(
+                                    destinationStatus.st_dev
+                                ),
+                                destinationDirectoryInodeIdentifier: UInt64(
+                                    destinationStatus.st_ino
+                                ),
+                                expectedDigest: expectedDigest
+                            )
+                            var pendingState = state
+                            pendingState.commitState = .installedPendingDurability(
+                                installedFile
+                            )
+                            // Persist the exact post-rename identity in actor state before
+                            // any descriptor close, reopen, hash, or sync can fail. A retry
+                            // must resume this path and must never perform a second rename.
+                            transfers[handle] = pendingState
+                            return installedFile
+                        }
+                        guard renameError == EEXIST else {
+                            throw InboundFileTransferIOError.moveFailed(
+                                "exclusive temporary file rename failed"
+                            )
+                        }
+                    }
+                    throw InboundFileTransferIOError.moveFailed(
+                        "destination collision limit exceeded"
+                    )
+                }
+            }
+            try completeInstalledFileDurability(
+                installedFile,
+                state: state
+            )
+            let observation = try makeDurableCommitObservation(
+                installedFile: installedFile,
+                state: state
+            )
+            var durableState = state
+            durableState.commitState = .durableCommitted(observation)
+            transfers[handle] = durableState
+            return observation
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as InboundFileTransferIOError {
+            throw error
+        } catch {
+            throw InboundFileTransferIOError.moveFailed(error.localizedDescription)
+        }
+    }
+
+    private func makeDurableCommitObservation(
+        installedFile: InstalledFile,
+        state: TransferState
+    ) throws -> InboundFileTransferDurableCommitObservation {
+        guard let byteCount = UInt64(exactly: state.declaredFileSize),
+              state.digest == installedFile.expectedDigest,
+              installedFile.expectedDigest.count == SHA256.byteCount else {
+            throw InboundFileTransferIOError.moveFailed(
+                "durable commit observation projection is invalid"
+            )
+        }
+        let relativePath = try Self.validatedDirectChildFileName(
+            installedFile.url,
+            errorReason: "installed file is not a direct child"
+        )
+        return InboundFileTransferDurableCommitObservation(
+            destinationURL: installedFile.url,
+            destinationRelativePath: relativePath,
+            byteCount: byteCount,
+            sha256: installedFile.expectedDigest,
+            committedAt: Date(),
+            operationBinding: state.commitBinding
+        )
+    }
+
+    private func completeInstalledFileDurability(
+        _ installedFile: InstalledFile,
+        state: TransferState
+    ) throws {
+        let installedName = try Self.validatedDirectChildFileName(
+            installedFile.url,
+            errorReason: "installed file is not a direct child"
+        )
+        try Self.withDirectoryDescriptor(
+            at: installedFile.sourceDirectoryURL,
+            createIfMissing: false,
+            makeFinalComponentPrivate: true
+        ) { sourceDirectoryFD in
+            var sourceDirectoryStatus = stat()
+            guard fstat(sourceDirectoryFD, &sourceDirectoryStatus) == 0,
+                  Self.isDirectory(sourceDirectoryStatus.st_mode),
+                  UInt64(sourceDirectoryStatus.st_dev)
+                    == installedFile.sourceDirectoryDeviceIdentifier,
+                  UInt64(sourceDirectoryStatus.st_ino)
+                    == installedFile.sourceDirectoryInodeIdentifier else {
+                throw InboundFileTransferIOError.moveFailed(
+                    "source directory identity changed after rename"
+                )
+            }
+
+            try Self.withDirectoryDescriptor(
+                at: installedFile.destinationDirectoryURL,
+                createIfMissing: false,
+                makeFinalComponentPrivate: false
+            ) { destinationDirectoryFD in
+                var destinationDirectoryStatus = stat()
+                guard fstat(destinationDirectoryFD, &destinationDirectoryStatus) == 0,
+                      Self.isDirectory(destinationDirectoryStatus.st_mode),
+                      UInt64(destinationDirectoryStatus.st_dev)
+                        == installedFile.destinationDirectoryDeviceIdentifier,
+                      UInt64(destinationDirectoryStatus.st_ino)
+                        == installedFile.destinationDirectoryInodeIdentifier else {
+                    throw InboundFileTransferIOError.moveFailed(
+                        "destination directory identity changed after rename"
+                    )
+                }
+
+                try verifyHashAndSyncInstalledFile(
+                    named: installedName,
+                    in: destinationDirectoryFD,
+                    installedFile: installedFile,
+                    state: state
+                )
+                try failCommitDurabilityIfScheduledForTesting(.sourceDirectorySync)
+                guard fsync(sourceDirectoryFD) == 0 else {
+                    throw InboundFileTransferIOError.moveFailed(
+                        "source directory sync failed after rename"
+                    )
+                }
+                try failCommitDurabilityIfScheduledForTesting(.destinationDirectorySync)
+                guard fsync(destinationDirectoryFD) == 0 else {
+                    throw InboundFileTransferIOError.moveFailed(
+                        "destination directory sync failed after rename"
+                    )
+                }
+            }
+        }
+    }
+
+    private func verifyHashAndSyncInstalledFile(
+        named installedName: String,
+        in destinationDirectoryFD: Int32,
+        installedFile: InstalledFile,
+        state: TransferState
+    ) throws {
+        try failCommitDurabilityIfScheduledForTesting(.installedFileReopen)
+        let installedFileFD = installedName.withCString {
+            openat(
+                destinationDirectoryFD,
+                $0,
+                O_RDONLY | O_NOFOLLOW | O_CLOEXEC
+            )
+        }
+        guard installedFileFD >= 0 else {
+            throw InboundFileTransferIOError.moveFailed(
+                "installed file reopen failed after rename"
+            )
+        }
+
+        let operationResult: Swift.Result<Void, Error>
+        do {
+            var installedStatus = stat()
+            guard fstat(installedFileFD, &installedStatus) == 0,
+                  Self.isRegularFile(installedStatus.st_mode),
+                  installedStatus.st_uid == geteuid(),
+                  UInt64(installedStatus.st_dev) == state.deviceIdentifier,
+                  UInt64(installedStatus.st_ino) == state.inodeIdentifier,
+                  installedStatus.st_size == off_t(state.declaredFileSize) else {
+                throw InboundFileTransferIOError.moveFailed(
+                    "installed file identity changed after rename"
+                )
+            }
+
+            let reader = FileHandle(
+                fileDescriptor: installedFileFD,
+                closeOnDealloc: false
+            )
+            try reader.seek(toOffset: 0)
+            var hasher = SHA256()
+            var bytesHashed: Int64 = 0
+            while true {
+                try Task.checkCancellation()
+                guard let chunk = try reader.read(upToCount: 256 * 1_024),
+                      !chunk.isEmpty else {
+                    break
+                }
+                guard bytesHashed <= state.declaredFileSize - Int64(chunk.count) else {
+                    throw InboundFileTransferIOError.moveFailed(
+                        "installed file grew while hashing"
+                    )
+                }
+                hasher.update(data: chunk)
+                bytesHashed += Int64(chunk.count)
+            }
+            guard bytesHashed == state.declaredFileSize else {
+                throw InboundFileTransferIOError.moveFailed(
+                    "installed file size changed while hashing"
+                )
+            }
+            guard Data(hasher.finalize()) == installedFile.expectedDigest else {
+                throw InboundFileTransferIOError.moveFailed(
+                    "installed file digest changed after rename"
+                )
+            }
+            try failCommitDurabilityIfScheduledForTesting(.installedFileSync)
+            guard fsync(installedFileFD) == 0 else {
+                throw InboundFileTransferIOError.moveFailed(
+                    "installed file sync failed after rename"
+                )
+            }
+
+            var installedPathStatus = stat()
+            let installedPathStatusResult = installedName.withCString {
+                fstatat(
+                    destinationDirectoryFD,
+                    $0,
+                    &installedPathStatus,
+                    AT_SYMLINK_NOFOLLOW
+                )
+            }
+            guard installedPathStatusResult == 0,
+                  Self.isRegularFile(installedPathStatus.st_mode),
+                  UInt64(installedPathStatus.st_dev) == state.deviceIdentifier,
+                  UInt64(installedPathStatus.st_ino) == state.inodeIdentifier,
+                  installedPathStatus.st_size == off_t(state.declaredFileSize) else {
+                throw InboundFileTransferIOError.moveFailed(
+                    "installed path identity changed during durability verification"
+                )
+            }
+            operationResult = .success(())
+        } catch {
+            operationResult = .failure(error)
+        }
+
+        let closeResult = Darwin.close(installedFileFD)
+        let closeError = errno
+        guard closeResult == 0 else {
+            switch operationResult {
+            case .success:
+                throw InboundFileTransferIOError.moveFailed(
+                    "installed file descriptor close failed (errno \(closeError))"
+                )
+            case .failure(let operationError):
+                throw InboundFileTransferIOError.moveFailed(
+                    "\(operationError.localizedDescription); installed file descriptor close "
+                        + "failed (errno \(closeError))"
+                )
+            }
+        }
+        do {
+            try operationResult.get()
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as InboundFileTransferIOError {
+            throw error
+        } catch {
+            throw InboundFileTransferIOError.moveFailed(
+                "installed file verification failed: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func failCommitDurabilityIfScheduledForTesting(
+        _ fault: CommitDurabilityFaultForTesting
+    ) throws {
+        guard commitDurabilityFaultsForTesting.first == fault else {
+            return
+        }
+        commitDurabilityFaultsForTesting.removeFirst()
+        throw InboundFileTransferIOError.moveFailed(
+            "injected post-rename durability failure at \(fault)"
+        )
+    }
+
+    /// Releases actor bookkeeping after the caller has atomically published a
+    /// successful terminal receipt on its lifecycle actor.
+    public func releaseCommittedFile(using handle: InboundFileTransferIOHandle) throws {
+        guard let state = transfers[handle] else {
+            throw InboundFileTransferIOError.unknownHandle
+        }
+        guard case .durableCommitted = state.commitState else {
+            throw InboundFileTransferIOError.releaseBeforeCommit
+        }
+        transfers.removeValue(forKey: handle)
+    }
+
+    public func discard(_ handle: InboundFileTransferIOHandle) throws {
+        try discard(handle, preservingCommittedFile: false)
+    }
+
+    /// Cancels an in-flight receive without ever rolling back a durable commit.
+    /// This is the only cancellation primitive WebRTC lifecycles should use: a
+    /// channel-close task can race the actor's `commit`. A renamed file whose
+    /// durability checks have not completed is still rollback-eligible and must
+    /// never be published as successful.
+    public func discardUncommittedFile(_ handle: InboundFileTransferIOHandle) throws {
+        try discard(handle, preservingCommittedFile: true)
+    }
+
+    private func discard(
+        _ handle: InboundFileTransferIOHandle,
+        preservingCommittedFile: Bool
+    ) throws {
+        guard var state = transfers[handle] else { return }
+
+        if preservingCommittedFile,
+           case .durableCommitted = state.commitState {
+            transfers.removeValue(forKey: handle)
+            return
+        }
+
+        var failures: [String] = []
+        if let writer = state.writer {
+            do {
+                try writer.close()
+                state.writer = nil
+            } catch {
+                failures.append("close: \(error.localizedDescription)")
+            }
+        }
+        let fileURL: URL
+        let requiresPrivateDirectory: Bool
+        let cleanupDirectoryIdentity: (device: UInt64, inode: UInt64)?
+        switch state.commitState {
+        case .staged:
+            fileURL = state.temporaryURL
+            requiresPrivateDirectory = true
+            cleanupDirectoryIdentity = (
+                state.temporaryDirectoryDeviceIdentifier, state.temporaryDirectoryInodeIdentifier
+            )
+        case .installedPendingDurability(let installedFile):
+            fileURL = installedFile.url
+            requiresPrivateDirectory = false
+            cleanupDirectoryIdentity = (
+                installedFile.destinationDirectoryDeviceIdentifier,
+                installedFile.destinationDirectoryInodeIdentifier
+            )
+        case .durableCommitted(let observation):
+            fileURL = observation.destinationURL
+            requiresPrivateDirectory = false
+            cleanupDirectoryIdentity = state.destinationCapability.map {
+                ($0.deviceIdentifier, $0.inodeIdentifier)
+            }
+        }
+        do {
+            let retainedDirectory: Int32?
+            if let destination = state.destinationCapability,
+               let identity = cleanupDirectoryIdentity,
+               identity.device == destination.deviceIdentifier,
+               identity.inode == destination.inodeIdentifier {
+                try requireDestination(destination)
+                retainedDirectory = destination.directoryHandle.fileDescriptor
+            } else {
+                retainedDirectory = nil
+            }
+            try Self.removeIdentityBoundFileIfPresent(
+                at: fileURL,
+                deviceIdentifier: state.deviceIdentifier,
+                inodeIdentifier: state.inodeIdentifier,
+                requiresPrivateDirectory: requiresPrivateDirectory,
+                retainedDirectory: retainedDirectory
+            )
+        } catch {
+            failures.append("remove: \(error.localizedDescription)")
+        }
+        if case .installedPendingDurability(let installedFile) = state.commitState {
+            do {
+                if let destination = state.destinationCapability,
+                   installedFile.sourceDirectoryDeviceIdentifier == destination.deviceIdentifier,
+                   installedFile.sourceDirectoryInodeIdentifier == destination.inodeIdentifier {
+                    try requireDestination(destination)
+                    guard destination.deviceIdentifier == installedFile.sourceDirectoryDeviceIdentifier,
+                          destination.inodeIdentifier == installedFile.sourceDirectoryInodeIdentifier,
+                          fsync(destination.directoryHandle.fileDescriptor) == 0 else {
+                        throw InboundFileTransferIOError.cleanupFailed("retained source directory sync failed")
+                    }
+                } else {
+                    try Self.syncIdentityBoundDirectory(
+                        at: installedFile.sourceDirectoryURL,
+                        deviceIdentifier: installedFile.sourceDirectoryDeviceIdentifier,
+                        inodeIdentifier: installedFile.sourceDirectoryInodeIdentifier,
+                        requiresPrivateDirectory: true
+                    )
+                }
+            } catch {
+                failures.append("source directory sync: \(error.localizedDescription)")
+            }
+        }
+        if !failures.isEmpty {
+            // Preserve ownership until every cleanup step succeeds. A close or
+            // unlink failure is retryable; dropping the handle here would leak an
+            // unreachable partial and permanently block the same transfer ID.
+            transfers[handle] = state
+            throw InboundFileTransferIOError.cleanupFailed(failures.joined(separator: "; "))
+        }
+        transfers.removeValue(forKey: handle)
+    }
+
+    /// Closes and releases actor bookkeeping while intentionally preserving the
+    /// isolated partial file for an authenticated classic-transfer resume.
+    public func suspendForResume(_ handle: InboundFileTransferIOHandle) throws {
+        guard let state = transfers[handle] else {
+            throw InboundFileTransferIOError.unknownHandle
+        }
+        guard case .staged = state.commitState else {
+            throw InboundFileTransferIOError.releaseBeforeCommit
+        }
+        guard state.destinationCapability == nil else {
+            throw InboundFileTransferIOError.destinationCapabilityMismatch
+        }
+        if let writer = state.writer {
+            do {
+                var descriptorStatus = stat()
+                guard fstat(writer.fileDescriptor, &descriptorStatus) == 0,
+                      Self.isRegularFile(descriptorStatus.st_mode),
+                      descriptorStatus.st_uid == geteuid(),
+                      descriptorStatus.st_mode & mode_t(0o077) == 0,
+                      UInt64(descriptorStatus.st_dev) == state.deviceIdentifier,
+                      UInt64(descriptorStatus.st_ino) == state.inodeIdentifier,
+                      descriptorStatus.st_size >= 0,
+                      descriptorStatus.st_size <= off_t(state.declaredFileSize) else {
+                    throw InboundFileTransferIOError.closeFailed(
+                        "resume partial descriptor identity changed"
+                    )
+                }
+                let fileName = try Self.validatedDirectChildFileName(
+                    state.temporaryURL,
+                    errorReason: "resume partial is not a direct child"
+                )
+                try Self.withDirectoryDescriptor(
+                    at: state.temporaryURL.deletingLastPathComponent(),
+                    createIfMissing: false,
+                    makeFinalComponentPrivate: true
+                ) { directoryFD in
+                    var pathStatus = stat()
+                    let statusResult = fileName.withCString {
+                        fstatat(directoryFD, $0, &pathStatus, AT_SYMLINK_NOFOLLOW)
+                    }
+                    guard statusResult == 0,
+                          Self.isRegularFile(pathStatus.st_mode),
+                          pathStatus.st_uid == geteuid(),
+                          UInt64(pathStatus.st_dev) == state.deviceIdentifier,
+                          UInt64(pathStatus.st_ino) == state.inodeIdentifier else {
+                        throw InboundFileTransferIOError.closeFailed(
+                            "resume partial path identity changed"
+                        )
+                    }
+                }
+                guard fsync(writer.fileDescriptor) == 0 else {
+                    throw InboundFileTransferIOError.closeFailed("resume partial sync failed")
+                }
+                try writer.close()
+            } catch let error as InboundFileTransferIOError {
+                throw error
+            } catch {
+                throw InboundFileTransferIOError.closeFailed(error.localizedDescription)
+            }
+        }
+        transfers.removeValue(forKey: handle)
+    }
+
+    public func discardSuspendedPartial(
+        at temporaryURL: URL,
+        isolatedDirectory: URL
+    ) throws {
+        // Terminal cleanup is intentionally non-cancellable. Transport task
+        // cancellation must not strand an owned partial file on disk.
+        guard Self.isDirectChild(temporaryURL, of: isolatedDirectory) else {
+            throw InboundFileTransferIOError.invalidDestination("partial cleanup escaped isolation directory")
+        }
+        do {
+            let fileName = try Self.validatedDirectChildFileName(
+                temporaryURL,
+                errorReason: "partial cleanup target is not a direct child"
+            )
+            try Self.withDirectoryDescriptor(
+                at: isolatedDirectory,
+                createIfMissing: false,
+                makeFinalComponentPrivate: true
+            ) { directoryFD in
+                var status = stat()
+                let statusResult = fileName.withCString {
+                    fstatat(directoryFD, $0, &status, AT_SYMLINK_NOFOLLOW)
+                }
+                if statusResult != 0, errno == ENOENT {
+                    return
+                }
+                guard statusResult == 0,
+                      Self.isRegularFile(status.st_mode),
+                      status.st_uid == geteuid() else {
+                    throw InboundFileTransferIOError.invalidDestination(
+                        "partial cleanup target is not an owned regular file"
+                    )
+                }
+                guard fileName.withCString({ unlinkat(directoryFD, $0, 0) }) == 0,
+                      fsync(directoryFD) == 0 else {
+                    throw InboundFileTransferIOError.cleanupFailed(
+                        "partial cleanup unlink failed"
+                    )
+                }
+            }
+        } catch let error as InboundFileTransferIOError {
+            throw error
+        } catch {
+            throw InboundFileTransferIOError.cleanupFailed(error.localizedDescription)
+        }
+    }
+
+    public func activeTransferCount() -> Int {
+        transfers.count
+    }
+
+    private static func validatedDestinationFileName(_ fileName: String) throws -> String {
+        do {
+            try ClassicTransferMetadataContract.validateFileName(fileName)
+        } catch {
+            throw InboundFileTransferIOError.invalidDestination("unsafe file name")
+        }
+        return fileName
+    }
+
+    private static func destinationFileName(_ fileName: String, suffix: Int) -> String {
+        guard suffix > 0 else { return fileName }
+        let suffixText = " (\(suffix))"
+        let fileExtension = (fileName as NSString).pathExtension
+        let originalStem = (fileName as NSString).deletingPathExtension
+        var extensionText = fileExtension.isEmpty ? "" : ".\(fileExtension)"
+        let availableBytes = 255 - suffixText.utf8.count
+        if extensionText.utf8.count >= availableBytes {
+            extensionText = ""
+        }
+        var stem = utf8SafePrefix(
+            originalStem,
+            maximumByteCount: availableBytes - extensionText.utf8.count
+        )
+        if stem.isEmpty {
+            extensionText = ""
+            stem = utf8SafePrefix(fileName, maximumByteCount: availableBytes)
+        }
+        return stem + suffixText + extensionText
+    }
+
+    private static func utf8SafePrefix(
+        _ value: String,
+        maximumByteCount: Int
+    ) -> String {
+        guard maximumByteCount > 0 else { return "" }
+        var result = ""
+        var usedBytes = 0
+        for character in value {
+            let characterBytes = String(character).utf8.count
+            guard usedBytes + characterBytes <= maximumByteCount else { break }
+            result.append(character)
+            usedBytes += characterBytes
+        }
+        return result
+    }
+
+    private static func validatedDirectChildFileName(
+        _ fileURL: URL,
+        errorReason: String
+    ) throws -> String {
+        let standardized = fileURL.standardizedFileURL
+        let fileName = standardized.lastPathComponent
+        guard standardized.isFileURL,
+              !fileName.isEmpty,
+              fileName != ".",
+              fileName != "..",
+              fileName == (fileName as NSString).lastPathComponent else {
+            throw InboundFileTransferIOError.invalidDestination(errorReason)
+        }
+        return fileName
+    }
+
+    private static func withDirectoryDescriptor<Result>(
+        at directoryURL: URL,
+        createIfMissing: Bool,
+        makeFinalComponentPrivate: Bool,
+        _ operation: (Int32) throws -> Result
+    ) throws -> Result {
+        let directoryFD = try openDirectory(
+            at: directoryURL,
+            createIfMissing: createIfMissing,
+            makeFinalComponentPrivate: makeFinalComponentPrivate
+        )
+        let result: Swift.Result<Result, Error>
+        do {
+            result = .success(try operation(directoryFD))
+        } catch {
+            result = .failure(error)
+        }
+        guard Darwin.close(directoryFD) == 0 else {
+            throw InboundFileTransferIOError.invalidDestination("directory descriptor close failed")
+        }
+        return try result.get()
+    }
+
+    private static func openDirectory(
+        at directoryURL: URL,
+        createIfMissing: Bool,
+        makeFinalComponentPrivate: Bool
+    ) throws -> Int32 {
+        let standardized: URL
+        do {
+            standardized = try DarwinSecurePathPolicy.canonicalizingSystemRootAlias(directoryURL)
+        } catch {
+            throw InboundFileTransferIOError.invalidDestination("directory must be an absolute file URL")
+        }
+        let flags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        let trustedContainerRoot: URL?
+        #if os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
+        trustedContainerRoot = URL(
+            fileURLWithPath: NSHomeDirectory(),
+            isDirectory: true
+        )
+        #else
+        trustedContainerRoot = nil
+        #endif
+        let traversalPlan: DarwinSecurePathPolicy.DirectoryTraversalPlan
+        do {
+            traversalPlan = try DarwinSecurePathPolicy.directoryTraversalPlan(
+                targetURL: standardized,
+                trustedContainerRootURL: trustedContainerRoot
+            )
+        } catch {
+            throw InboundFileTransferIOError.invalidDestination(
+                "directory traversal anchor is invalid"
+            )
+        }
+        var currentFD = Darwin.open(traversalPlan.anchorURL.path, flags)
+        guard currentFD >= 0 else {
+            throw InboundFileTransferIOError.invalidDestination(
+                traversalPlan.requiresOwnedAnchor
+                    ? "trusted container root open failed"
+                    : "root directory open failed"
+            )
+        }
+
+        if traversalPlan.requiresOwnedAnchor {
+            var anchorStatus = stat()
+            guard fstat(currentFD, &anchorStatus) == 0,
+                  isDirectory(anchorStatus.st_mode),
+                  anchorStatus.st_uid == geteuid() else {
+                let closeResult = Darwin.close(currentFD)
+                guard closeResult == 0 else {
+                    throw InboundFileTransferIOError.invalidDestination(
+                        "trusted container root validation close failed"
+                    )
+                }
+                throw InboundFileTransferIOError.invalidDestination(
+                    "trusted container root validation failed"
+                )
+            }
+        }
+
+        let components = traversalPlan.relativeComponents
+        for (index, component) in components.enumerated() {
+            guard !component.isEmpty, component != ".", component != "..", component != "/" else {
+                let closeResult = Darwin.close(currentFD)
+                guard closeResult == 0 else {
+                    throw InboundFileTransferIOError.invalidDestination("invalid path close failed")
+                }
+                throw InboundFileTransferIOError.invalidDestination("unsafe directory component")
+            }
+            var childFD = component.withCString { openat(currentFD, $0, flags) }
+            if childFD < 0, errno == ENOENT, createIfMissing {
+                let createResult = component.withCString {
+                    mkdirat(currentFD, $0, mode_t(0o700))
+                }
+                let createError = errno
+                guard createResult == 0 || createError == EEXIST else {
+                    let closeResult = Darwin.close(currentFD)
+                    guard closeResult == 0 else {
+                        throw InboundFileTransferIOError.invalidDestination(
+                            "directory creation close failed"
+                        )
+                    }
+                    if isUnavailableErrno(createError) {
+                        throw InboundFileTransferIOError.destinationUnavailable
+                    }
+                    throw InboundFileTransferIOError.invalidDestination("directory creation failed")
+                }
+                childFD = component.withCString { openat(currentFD, $0, flags) }
+            }
+            let childOpenError = errno
+            guard childFD >= 0 else {
+                let closeResult = Darwin.close(currentFD)
+                guard closeResult == 0 else {
+                    throw InboundFileTransferIOError.invalidDestination("directory open close failed")
+                }
+                if isUnavailableErrno(childOpenError) {
+                    throw InboundFileTransferIOError.destinationUnavailable
+                }
+                throw InboundFileTransferIOError.invalidDestination(
+                    "directory component \(index) open failed (errno \(childOpenError))"
+                )
+            }
+            var status = stat()
+            let isFinalComponent = index == components.count - 1
+            guard fstat(childFD, &status) == 0,
+                  isDirectory(status.st_mode),
+                  !isFinalComponent || !makeFinalComponentPrivate || (
+                      status.st_uid == geteuid() && fchmod(childFD, mode_t(0o700)) == 0
+                  ) else {
+                let childCloseResult = Darwin.close(childFD)
+                let currentCloseResult = Darwin.close(currentFD)
+                guard childCloseResult == 0, currentCloseResult == 0 else {
+                    throw InboundFileTransferIOError.invalidDestination(
+                        "directory validation cleanup failed"
+                    )
+                }
+                throw InboundFileTransferIOError.invalidDestination("directory validation failed")
+            }
+            guard Darwin.close(currentFD) == 0 else {
+                let childCloseResult = Darwin.close(childFD)
+                guard childCloseResult == 0 else {
+                    throw InboundFileTransferIOError.invalidDestination(
+                        "directory descriptor cleanup failed"
+                    )
+                }
+                throw InboundFileTransferIOError.invalidDestination("directory descriptor close failed")
+            }
+            currentFD = childFD
+        }
+        return currentFD
+    }
+
+    private static func verifyWritableDirectory(_ directoryFD: Int32) throws {
+        let probeName = ".skybridge-write-probe-\(UUID().uuidString)"
+        let probeFD = probeName.withCString {
+            openat(
+                directoryFD,
+                $0,
+                O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                mode_t(0o600)
+            )
+        }
+        let probeError = errno
+        guard probeFD >= 0 else {
+            if isUnavailableErrno(probeError) {
+                throw InboundFileTransferIOError.destinationUnavailable
+            }
+            throw InboundFileTransferIOError.invalidDestination("directory is not writable")
+        }
+        let closeResult = Darwin.close(probeFD)
+        let unlinkResult = probeName.withCString { unlinkat(directoryFD, $0, 0) }
+        guard closeResult == 0, unlinkResult == 0 else {
+            throw InboundFileTransferIOError.invalidDestination("writability probe cleanup failed")
+        }
+    }
+
+    private static func removeIdentityBoundFileIfPresent(
+        at fileURL: URL,
+        deviceIdentifier: UInt64,
+        inodeIdentifier: UInt64,
+        requiresPrivateDirectory: Bool,
+        retainedDirectory: Int32? = nil
+    ) throws {
+        let fileName = try validatedDirectChildFileName(
+            fileURL,
+            errorReason: "cleanup target is not a direct child"
+        )
+        let remove: (Int32) throws -> Void = { directoryFD in
+            var status = stat()
+            let statusResult = fileName.withCString {
+                fstatat(directoryFD, $0, &status, AT_SYMLINK_NOFOLLOW)
+            }
+            if statusResult != 0, errno == ENOENT {
+                guard fsync(directoryFD) == 0 else {
+                    throw InboundFileTransferIOError.cleanupFailed(
+                        "cleanup directory resync failed"
+                    )
+                }
+                return
+            }
+            guard statusResult == 0,
+                  isRegularFile(status.st_mode),
+                  UInt64(status.st_dev) == deviceIdentifier,
+                  UInt64(status.st_ino) == inodeIdentifier else {
+                throw InboundFileTransferIOError.cleanupFailed(
+                    "cleanup target identity changed"
+                )
+            }
+            guard fileName.withCString({ unlinkat(directoryFD, $0, 0) }) == 0,
+                  fsync(directoryFD) == 0 else {
+                throw InboundFileTransferIOError.cleanupFailed("cleanup unlink failed")
+            }
+        }
+        if let retainedDirectory {
+            var status = stat()
+            guard fstat(retainedDirectory, &status) == 0,
+                  isDirectory(status.st_mode),
+                  !requiresPrivateDirectory || (
+                    status.st_uid == geteuid() && fchmod(retainedDirectory, mode_t(0o700)) == 0
+                  ) else {
+                throw InboundFileTransferIOError.cleanupFailed("retained cleanup directory validation failed")
+            }
+            try remove(retainedDirectory)
+        } else {
+            try withDirectoryDescriptor(
+                at: fileURL.deletingLastPathComponent(),
+                createIfMissing: false,
+                makeFinalComponentPrivate: requiresPrivateDirectory
+            ) { try remove($0) }
+        }
+    }
+
+    private static func syncIdentityBoundDirectory(
+        at directoryURL: URL,
+        deviceIdentifier: UInt64,
+        inodeIdentifier: UInt64,
+        requiresPrivateDirectory: Bool
+    ) throws {
+        try withDirectoryDescriptor(
+            at: directoryURL,
+            createIfMissing: false,
+            makeFinalComponentPrivate: requiresPrivateDirectory
+        ) { directoryFD in
+            var status = stat()
+            guard fstat(directoryFD, &status) == 0,
+                  isDirectory(status.st_mode),
+                  UInt64(status.st_dev) == deviceIdentifier,
+                  UInt64(status.st_ino) == inodeIdentifier else {
+                throw InboundFileTransferIOError.cleanupFailed(
+                    "cleanup directory identity changed"
+                )
+            }
+            guard fsync(directoryFD) == 0 else {
+                throw InboundFileTransferIOError.cleanupFailed(
+                    "cleanup directory sync failed"
+                )
+            }
+        }
+    }
+
+    private static func isDirectory(_ mode: mode_t) -> Bool {
+        mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
+    }
+
+    private static func isRegularFile(_ mode: mode_t) -> Bool {
+        mode & mode_t(S_IFMT) == mode_t(S_IFREG)
+    }
+
+    private static func isUnavailableErrno(_ code: Int32) -> Bool {
+        switch code {
+        case ENOENT, EACCES, EPERM, EROFS, ENOSPC, EDQUOT:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func isDirectChild(_ candidate: URL, of directory: URL) -> Bool {
+        candidate.standardizedFileURL.deletingLastPathComponent().path
+            == directory.standardizedFileURL.path
+    }
+}

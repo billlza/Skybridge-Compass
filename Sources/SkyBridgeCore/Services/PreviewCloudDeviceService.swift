@@ -13,7 +13,7 @@ public final class PreviewCloudDeviceService: CloudDeviceService {
     public var accountStatusPublisher: AnyPublisher<CloudKitAccountStatus, Never> { $accountStatus.eraseToAnyPublisher() }
     public var isSyncingPublisher: AnyPublisher<Bool, Never> { $isSyncing.eraseToAnyPublisher() }
     
-    public var currentDeviceId: String = "preview-device-id"
+    public var currentDeviceId: String? = "preview-device-id"
     
     public init(devices: [CloudDevice] = []) {
         if devices.isEmpty {

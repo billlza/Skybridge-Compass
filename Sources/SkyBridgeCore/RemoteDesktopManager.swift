@@ -1,15 +1,18 @@
+// macOS-exclusive: built on macOS-only frameworks (see SkyBridgeCore iOS portability
+// notes). Excluded from other platforms; no behaviour changes on macOS.
+#if os(macOS)
 import Foundation
 import Combine
 import AppKit
+@preconcurrency import Metal
 import Network
 import OSLog
 import OrderedCollections
 import CryptoKit
+import SkyBridgeCameraKit
 
 #if canImport(FreeRDPBridge)
 import FreeRDPBridge
-#else
-#error("FreeRDPBridge framework 未找到：请在工程中添加真实的 FreeRDPBridge 依赖，或移除 RDP 支持。")
 #endif
 
 // MARK: - 错误定义
@@ -82,7 +85,7 @@ public enum RemoteDesktopError: Error, LocalizedError, Sendable {
         
         安装完成后重启 SkyBridge Compass Pro 即可使用 RDP 功能。
         
-        替代方案：您也可以使用 VNC 或 UltraStream 协议连接到远程设备。
+        替代方案：您也可以使用 VNC 连接到远程设备。
         """
     }
 }
@@ -103,12 +106,15 @@ public final class RemoteDesktopManager: ObservableObject, Sendable {
         .init(onlineDevices: 0, activeSessions: 0, transferCount: 0, alertCount: 0, cpuTimeline: [:])
     )
 
- // 会话表（用并发队列保证线程安全）
+ // 管理器本身受 MainActor 隔离，会话表不得再套一层异步队列制造生命周期竞态。
     private var activeSessions: [UUID: RemoteDesktopSession] = [:]
-    private let sessionQueue = DispatchQueue(label: "com.skybridge.compass.rdp.sessions", attributes: .concurrent)
+    private var cameraSessions: [UUID: CameraRemoteDesktopSession] = [:]
+    private var terminalCameraSummaries: [UUID: RemoteSessionSummary] = [:]
+    private var cameraCleanupTasks: [UUID: Task<Void, Never>] = [:]
 
- // 统一纹理输出（给 SwiftUI / AppKit 绑定用）
+ // 保留的兼容 feed；新 UI 必须通过 textureFeed(for:) 选择会话，避免多会话串帧。
     public let textureFeed = RemoteTextureFeed()
+    private lazy var textureFeedDeliveryGate = LatestTextureDeliveryGate(feed: textureFeed)
 
  // 监控 CPU 简单指标（非必须，可删）
     private var monitoringTimer: Timer?
@@ -134,25 +140,25 @@ public final class RemoteDesktopManager: ObservableObject, Sendable {
     }
 
     public func stop() {
-        guard started else { return }
         started = false
 
         monitoringTimer?.invalidate()
         monitoringTimer = nil
+        textureFeedDeliveryGate.clear()
 
-        sessionQueue.async(flags: .barrier) { [weak self] in
-            guard let self else { return }
- // 在主线程上安全访问 activeSessions
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                let sessions = Array(self.activeSessions.values)
-                for s in sessions { s.stop() }
-                self.activeSessions.removeAll()
-                self.sessionsSubject.send([])
-                self.metricsSubject.send(.init(onlineDevices: 0, activeSessions: 0,
-                                               transferCount: 0, alertCount: 0, cpuTimeline: [:]))
-            }
+        let sessions = Array(activeSessions.values)
+        let cameras = Array(cameraSessions.values)
+        activeSessions.removeAll()
+        cameraSessions.removeAll()
+        terminalCameraSummaries.removeAll()
+        for session in sessions { session.stop() }
+        for camera in cameras {
+            camera.prepareForStop(status: .disconnected)
+            scheduleCameraCleanup(camera)
         }
+        sessionsSubject.send([])
+        metricsSubject.send(.init(onlineDevices: 0, activeSessions: 0,
+                                  transferCount: 0, alertCount: 0, cpuTimeline: [:]))
 
         log.info("🛑 RemoteDesktopManager (RDP) stopped")
     }
@@ -160,6 +166,10 @@ public final class RemoteDesktopManager: ObservableObject, Sendable {
  // MARK: - 建立连接（自动 + 手动两种）
 
     public func connect(to device: DiscoveredDevice, tenant: TenantDescriptor) async throws {
+        #if !canImport(FreeRDPBridge)
+        throw RemoteDesktopError.freeRDPUnavailable(installGuide: RemoteDesktopError.freeRDPInstallGuide)
+        #endif
+
         let credentials = try await TenantAccessController.shared.credentials(for: tenant.id)
         guard let host = device.ipv4 ?? device.ipv6 else {
             throw RemoteDesktopError.missingAddress(device)
@@ -175,7 +185,7 @@ public final class RemoteDesktopManager: ObservableObject, Sendable {
             host: host,
             port: port,
             renderer: RemoteFrameRenderer(),
-            feed: textureFeed,
+            feed: RemoteTextureFeed(),
             summaryChanged: { [weak self] in self?.updateSessionsSnapshot() },
             stateChanged:  { [weak self] in self?.refreshMetrics() }
         )
@@ -190,6 +200,10 @@ public final class RemoteDesktopManager: ObservableObject, Sendable {
                         password: String,
                         domain: String? = nil,
                         displayName: String? = nil) async throws {
+        #if !canImport(FreeRDPBridge)
+        throw RemoteDesktopError.freeRDPUnavailable(installGuide: RemoteDesktopError.freeRDPInstallGuide)
+        #endif
+
         guard port > 0 && port <= Int(UInt16.max) else {
             throw RemoteDesktopError.connectionFailed("非法端口 \(port)")
         }
@@ -219,7 +233,7 @@ public final class RemoteDesktopManager: ObservableObject, Sendable {
             host: host,
             port: port,
             renderer: RemoteFrameRenderer(),
-            feed: textureFeed,
+            feed: RemoteTextureFeed(),
             summaryChanged: { [weak self] in self?.updateSessionsSnapshot() },
             stateChanged:  { [weak self] in self?.refreshMetrics() }
         )
@@ -227,84 +241,201 @@ public final class RemoteDesktopManager: ObservableObject, Sendable {
         try await addAndStartSession(session)
     }
 
-    private func addAndStartSession(_ session: RemoteDesktopSession) async throws {
-        Task { @MainActor in
-            self.activeSessions[session.id] = session
-            self.updateSessionsSnapshot()
+    /// 连接用户明确提供的本地摄像头 RTSP/RTSPS 流。
+    ///
+    /// 首个发布合同严格限定为：私有 IP 字面量、H.264、RTP-over-RTSP interleaved TCP、
+    /// 单路只读视频。端点校验、鉴权和协议解析由 SkyBridgeCameraKit 在网络边界执行。
+    @discardableResult
+    public func connectCamera(
+        endpoint endpointValue: String,
+        username: String? = nil,
+        password: String? = nil,
+        displayName: String? = nil,
+        acknowledgesPlaintextRTSP: Bool = false
+    ) async throws -> UUID {
+        // A previous terminal session may still be completing its bounded TEARDOWN. Wait for
+        // ownership to converge before creating another decoder/socket pair.
+        let pendingCleanupTasks = Array(cameraCleanupTasks.values)
+        for cleanupTask in pendingCleanupTasks {
+            await cleanupTask.value
+        }
+        guard cameraSessions.isEmpty else {
+            throw SkyBridgeCameraError.invalidState(
+                "only one camera stream may be active in this release"
+            )
+        }
+        let endpointText = endpointValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let endpoint = try RTSPEndpoint(endpointText)
+        guard endpoint.isSecure || acknowledgesPlaintextRTSP else {
+            throw SkyBridgeCameraError.invalidState(
+                "unencrypted RTSP requires explicit user acknowledgement"
+            )
         }
 
+        let normalizedUsername = username?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let suppliedPassword = password ?? ""
+        let credentials: RTSPCredentials?
+        switch (normalizedUsername.isEmpty, suppliedPassword.isEmpty) {
+        case (true, true):
+            credentials = nil
+        case (false, false):
+            credentials = try RTSPCredentials(
+                username: normalizedUsername,
+                password: suppliedPassword
+            )
+        default:
+            throw SkyBridgeCameraError.invalidState(
+                "camera username and password must be supplied together"
+            )
+        }
+
+        let safeDisplayName = try Self.validatedCameraDisplayName(displayName)
+        let configuration = try RTSPClientConfiguration(
+            endpoint: endpoint,
+            credentials: credentials,
+            frameBufferCapacity: 1
+        )
+        // A terminal card is presentation-only and contains no credentials. A validated new
+        // camera attempt replaces it so the session list remains bounded.
+        terminalCameraSummaries.removeAll(keepingCapacity: true)
+        let session = CameraRemoteDesktopSession(
+            displayName: safeDisplayName,
+            protocolDescription: endpoint.isSecure
+                ? "RTSPS/TCP · System Trust · Read Only"
+                : "RTSP/TCP · Unencrypted · Read Only",
+            client: RTSPInterleavedClient(configuration: configuration),
+            renderer: RemoteFrameRenderer(),
+            feed: RemoteTextureFeed(),
+            summaryChanged: { [weak self] in self?.updateSessionsSnapshot() },
+            stateChanged: { [weak self] in self?.refreshMetrics() },
+            terminalFailure: { [weak self] sessionID in
+                self?.handleCameraTerminalFailure(sessionID: sessionID)
+            }
+        )
+
+        cameraSessions[session.id] = session
+        updateSessionsSnapshot()
+        refreshMetrics()
         do {
             try await session.start()
-            refreshMetrics()
+            return session.id
         } catch {
-            Task { @MainActor in
-                self.activeSessions.removeValue(forKey: session.id)
-                self.updateSessionsSnapshot()
-                self.refreshMetrics()
+            cameraSessions.removeValue(forKey: session.id)
+            session.prepareForStop(status: .failed)
+            do {
+                try await session.stop()
+            } catch {
+                // stop() closes the transport before surfacing a TEARDOWN failure. Preserve the
+                // original connection error while recording only the sanitized error category.
+                log.error("Camera cleanup after failed connection reported a protocol error")
             }
+            updateSessionsSnapshot()
+            refreshMetrics()
             throw error
         }
     }
 
-    public func terminate(sessionID: UUID) {
-        Task { @MainActor in
-            if let s = activeSessions.removeValue(forKey: sessionID) {
-                s.stop()
-            }
+    private func addAndStartSession(_ session: RemoteDesktopSession) async throws {
+        activeSessions[session.id] = session
+        updateSessionsSnapshot()
+
+        do {
+ // 连接前把用户持久化的远程桌面设置（分辨率/色深/编码器/帧率/网络等）下发给会话，
+ // 否则设置 UI 只写入 UserDefaults 而从不生效（此前 applySettings 没有任何调用方 = 假阳性）。
+ // FreeRDP 类参数需在 connect 之前设置，故放在 start() 之前。
+            try session.applySettings(RemoteDesktopSettingsManager.shared.settings)
+            try await session.start()
+            refreshMetrics()
+        } catch {
+            activeSessions.removeValue(forKey: session.id)
+            session.stop()
             updateSessionsSnapshot()
             refreshMetrics()
+            throw error
         }
     }
 
-    public func focus(on sessionID: UUID) {
-        Task { @MainActor in
-            activeSessions[sessionID]?.focus()
+    /// 把当前持久化的远程桌面设置重新下发给所有活跃 RDP 会话。
+    /// FreeRDP 连接期参数不支持活跃会话中改写；拒绝时向调用方抛出 reconnect-required 错误，
+    /// 由 UI 明确告知用户，不把仅写入 UserDefaults 伪装成运行时已生效。
+    public func reapplyCurrentSettingsToActiveSessions() throws {
+        let settings = RemoteDesktopSettingsManager.shared.settings
+        for session in activeSessions.values {
+            try session.applySettings(settings)
         }
+    }
+
+    public func terminate(sessionID: UUID) {
+        if let session = activeSessions.removeValue(forKey: sessionID) {
+            session.stop()
+        }
+        if let camera = cameraSessions.removeValue(forKey: sessionID) {
+            camera.prepareForStop(status: .disconnected)
+            scheduleCameraCleanup(camera)
+        }
+        terminalCameraSummaries.removeValue(forKey: sessionID)
+        updateSessionsSnapshot()
+        refreshMetrics()
+    }
+
+    public func focus(on sessionID: UUID) {
+        activeSessions[sessionID]?.focus()
+    }
+
+    /// 返回指定会话的独立纹理源。每个会话只能发布到自己的 feed。
+    public func textureFeed(for sessionID: UUID) -> RemoteTextureFeed? {
+        activeSessions[sessionID]?.textureFeed ?? cameraSessions[sessionID]?.textureFeed
+    }
+
+    public func supportsInput(sessionID: UUID) -> Bool {
+        activeSessions[sessionID] != nil
     }
     
  /// 重新加载会话列表（公开接口）
     public func reloadSessions() {
-        Task { @MainActor in
-            updateSessionsSnapshot()
-            refreshMetrics()
-        }
+        updateSessionsSnapshot()
+        refreshMetrics()
     }
     
  /// 引导启动管理器
     public func bootstrap() {
         guard !started else { return }
         started = true
-        
+
  // 启动监控定时器
-        Task { @MainActor in
-            monitoringTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        monitoringTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor [weak self] in
                 guard let self else { return }
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    let cpu = self.fetchCpuLoad()
-                    self.refreshMetrics(cpuLoad: cpu)
-                }
+                let cpu = self.fetchCpuLoad()
+                self.refreshMetrics(cpuLoad: cpu)
             }
         }
-        
+
         log.info("RemoteDesktopManager bootstrap完成")
     }
     
  /// 关闭管理器
     public func shutdown() {
-        Task { @MainActor in
-            monitoringTimer?.invalidate()
-            monitoringTimer = nil
-            
- // 断开所有会话
-            let sessions = sessionQueue.sync { Array(activeSessions.values) }
-            for session in sessions {
-                session.stop()
-            }
-            activeSessions.removeAll()
-            updateSessionsSnapshot()
+        monitoringTimer?.invalidate()
+        monitoringTimer = nil
+        textureFeedDeliveryGate.clear()
+
+        let sessions = Array(activeSessions.values)
+        let cameras = Array(cameraSessions.values)
+        activeSessions.removeAll()
+        cameraSessions.removeAll()
+        terminalCameraSummaries.removeAll()
+        for session in sessions {
+            session.stop()
         }
-        
+        for camera in cameras {
+            camera.prepareForStop(status: .disconnected)
+            scheduleCameraCleanup(camera)
+        }
+        updateSessionsSnapshot()
+        refreshMetrics()
+
         started = false
         log.info("RemoteDesktopManager shutdown完成")
     }
@@ -365,33 +496,20 @@ public final class RemoteDesktopManager: ObservableObject, Sendable {
 
     public func sendMouseEvent(sessionId: UUID, x: Float, y: Float,
                                eventType: NSEvent.EventType, buttonNumber: Int) {
-        sessionQueue.async { [weak self] in
-            guard let self else { return }
-            Task { @MainActor in
-                self.activeSessions[sessionId]?.sendMouseEvent(x: x, y: y,
-                                                               eventType: eventType,
-                                                               buttonNumber: buttonNumber)
-            }
-        }
+        activeSessions[sessionId]?.sendMouseEvent(
+            x: x,
+            y: y,
+            eventType: eventType,
+            buttonNumber: buttonNumber
+        )
     }
 
     public func sendKeyboardEvent(sessionId: UUID, keyCode: UInt16, isPressed: Bool) {
-        sessionQueue.async { [weak self] in
-            guard let self else { return }
-            Task { @MainActor in
-                self.activeSessions[sessionId]?.sendKeyboardEvent(keyCode: keyCode,
-                                                                  isPressed: isPressed)
-            }
-        }
+        activeSessions[sessionId]?.sendKeyboardEvent(keyCode: keyCode, isPressed: isPressed)
     }
 
     public func sendScrollEvent(sessionId: UUID, deltaX: Float, deltaY: Float) {
-        sessionQueue.async { [weak self] in
-            guard let self else { return }
-            Task { @MainActor in
-                self.activeSessions[sessionId]?.sendScrollEvent(deltaX: deltaX, deltaY: deltaY)
-            }
-        }
+        activeSessions[sessionId]?.sendScrollEvent(deltaX: deltaX, deltaY: deltaY)
     }
 
  // MARK: - 会话 & 指标
@@ -403,9 +521,9 @@ public final class RemoteDesktopManager: ObservableObject, Sendable {
     }
 
     private func updateSessionsSnapshot() {
-        let snapshots: [RemoteSessionSummary] = sessionQueue.sync {
-            Array(activeSessions.values.map { $0.summary })
-        }
+        let snapshots = activeSessions.values.map(\.summary)
+            + cameraSessions.values.map(\.summary)
+            + terminalCameraSummaries.values
         sessionsSubject.send(snapshots)
     }
 
@@ -417,17 +535,65 @@ public final class RemoteDesktopManager: ObservableObject, Sendable {
                 cpuTimeline.removeFirst()
             }
         }
-        let sessions = sessionQueue.sync { Array(activeSessions.values) }
+        let sessions = Array(activeSessions.values)
+        let cameras = Array(cameraSessions.values)
         let activeCount = sessions.filter { $0.clientState == .connected }.count
-        let alertCount  = sessions.filter { $0.clientState == .failed }.count
+            + cameras.filter { $0.summary.status == .connected }.count
+        let alertCount = sessions.filter { $0.clientState == .failed }.count
+            + cameras.filter { $0.summary.status == .failed }.count
+            + terminalCameraSummaries.count
         let snapshot = RemoteMetricsSnapshot(
-            onlineDevices: sessions.count,
+            onlineDevices: sessions.count + cameras.count,
             activeSessions: activeCount,
             transferCount: 0,
             alertCount: alertCount,
             cpuTimeline: cpuTimeline
         )
         metricsSubject.send(snapshot)
+    }
+
+    private static func validatedCameraDisplayName(_ value: String?) throws -> String {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else {
+            return LocalizationManager.shared.localizedString("remote.camera.defaultName")
+        }
+        guard trimmed.utf8.count <= 128,
+              !trimmed.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+        else {
+            throw SkyBridgeCameraError.invalidState("the camera display name is invalid")
+        }
+        return trimmed
+    }
+
+    private func handleCameraTerminalFailure(sessionID: UUID) {
+        guard let camera = cameraSessions.removeValue(forKey: sessionID) else { return }
+        camera.prepareForStop(status: .failed)
+        let failedSummary = camera.summary
+        terminalCameraSummaries[sessionID] = RemoteSessionSummary(
+            id: failedSummary.id,
+            targetName: failedSummary.targetName,
+            protocolDescription: failedSummary.protocolDescription,
+            kind: .readOnlyCamera,
+            bandwidthMbps: failedSummary.bandwidthMbps,
+            frameLatencyMilliseconds: failedSummary.frameLatencyMilliseconds,
+            status: .failed
+        )
+        scheduleCameraCleanup(camera)
+        updateSessionsSnapshot()
+        refreshMetrics()
+    }
+
+    private func scheduleCameraCleanup(_ camera: CameraRemoteDesktopSession) {
+        let sessionID = camera.id
+        guard cameraCleanupTasks[sessionID] == nil else { return }
+        cameraCleanupTasks[sessionID] = Task { [weak self] in
+            do {
+                try await camera.stop()
+            } catch {
+                self?.log.error("Camera TEARDOWN failed after the local transport was closed")
+            }
+            self?.cameraCleanupTasks.removeValue(forKey: sessionID)
+        }
     }
 
     private func startResourceMonitoring() {
@@ -457,6 +623,155 @@ public final class RemoteDesktopManager: ObservableObject, Sendable {
     }
 }
 
+private final class RemoteDesktopFrameProcessor: @unchecked Sendable {
+    private struct PendingFrame: @unchecked Sendable {
+        let data: Data
+        let width: Int
+        let height: Int
+        let stride: Int
+        let type: RemoteFrameType
+        let completion: @Sendable (RenderMetrics) -> Void
+    }
+
+    private let lock = NSLock()
+    private let queue = DispatchQueue(label: "com.skybridge.compass.rdp.frame-processor", qos: .userInitiated)
+    private let renderer: RemoteFrameRenderer
+    private var isActive = true
+    private var pendingFrames: [PendingFrame] = []
+    private let maximumPendingFrameCount = 4
+    private var isDrainScheduled = false
+
+    init(renderer: RemoteFrameRenderer) {
+        self.renderer = renderer
+    }
+
+    func installFrameHandler(_ handler: @escaping (MTLTexture, AnyObject?) -> Void) {
+        renderer.frameHandler = handler
+    }
+
+    func installFailureHandler(_ handler: @escaping @Sendable (RemoteFrameRenderError) -> Void) {
+        renderer.failureHandler = handler
+    }
+
+    func submit(
+        data: Data,
+        width: Int,
+        height: Int,
+        stride: Int,
+        type: RemoteFrameType,
+        completion: @escaping @Sendable (RenderMetrics) -> Void
+    ) {
+        let frame = PendingFrame(
+            data: data,
+            width: width,
+            height: height,
+            stride: stride,
+            type: type,
+            completion: completion
+        )
+
+        lock.lock()
+        guard isActive else {
+            lock.unlock()
+            return
+        }
+        // BGRA 帧彼此独立，可安全替换最新待处理帧；压缩帧必须保持顺序，使用小型
+        // 有界 FIFO，达到上限即显式失败，不能任意丢预测帧后继续假装可解码。
+        let didOverflow: Bool
+        if frame.type == .bgra,
+           let lastIndex = pendingFrames.indices.last,
+           pendingFrames[lastIndex].type == .bgra {
+            pendingFrames[lastIndex] = frame
+            didOverflow = false
+        } else if pendingFrames.count < maximumPendingFrameCount {
+            pendingFrames.append(frame)
+            didOverflow = false
+        } else {
+            didOverflow = true
+        }
+        let shouldSchedule = !isDrainScheduled
+        if shouldSchedule, !didOverflow {
+            isDrainScheduled = true
+        }
+        lock.unlock()
+
+        if didOverflow {
+            renderer.failureHandler?(.decoderBackpressure)
+            return
+        }
+        guard shouldSchedule else { return }
+        queue.async { [weak self] in
+            self?.drainLatestFrames()
+        }
+    }
+
+    func stop() {
+        lock.lock()
+        let shouldStop = isActive
+        isActive = false
+        pendingFrames.removeAll(keepingCapacity: false)
+        lock.unlock()
+        guard shouldStop else { return }
+
+        queue.async { [renderer] in
+            renderer.frameHandler = nil
+            renderer.teardown()
+        }
+    }
+
+    private func drainLatestFrames() {
+        while let frame = takePendingFrame() {
+            let metrics = renderer.processFrame(
+                data: frame.data,
+                width: frame.width,
+                height: frame.height,
+                stride: frame.stride,
+                type: frame.type
+            )
+            guard activeSnapshot() else { return }
+            frame.completion(metrics)
+        }
+    }
+
+    private func takePendingFrame() -> PendingFrame? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard isActive else {
+            isDrainScheduled = false
+            pendingFrames.removeAll(keepingCapacity: false)
+            return nil
+        }
+        guard !pendingFrames.isEmpty else {
+            isDrainScheduled = false
+            return nil
+        }
+        return pendingFrames.removeFirst()
+    }
+
+    private func activeSnapshot() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return isActive
+    }
+}
+
+private final class RemoteFramePublicationToken: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isActive = true
+
+    func invalidate() {
+        lock.lock()
+        isActive = false
+        lock.unlock()
+    }
+
+    func permitsPublication() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return isActive
+    }
+}
+
 // MARK: - 单个 RDP 会话
 
 @MainActor
@@ -470,8 +785,10 @@ final class RemoteDesktopSession {
     private let host: String
     private let port: Int
 
-    private let renderer: RemoteFrameRenderer
-    private weak var feed: RemoteTextureFeed?
+    private let frameProcessor: RemoteDesktopFrameProcessor
+    let textureFeed: RemoteTextureFeed
+    private let textureFeedDeliveryGate: LatestTextureDeliveryGate
+    private let framePublicationToken = RemoteFramePublicationToken()
 
     private let log = Logger(subsystem: "com.skybridge.compass", category: "RemoteSessionRDP")
 
@@ -481,6 +798,8 @@ final class RemoteDesktopSession {
 
     private var connectionContinuation: CheckedContinuation<Void, Error>?
     private let continuationLock = NSLock()
+    private var lastPointerLocation: CGPoint?
+    private var hasEstablishedConnection = false
 
     private(set) var clientState: CBFreeRDPClientState = .idle
     private(set) var summary: RemoteSessionSummary
@@ -500,8 +819,9 @@ final class RemoteDesktopSession {
         self.credentials = credentials
         self.host = host
         self.port = port
-        self.renderer = renderer
-        self.feed = feed
+        self.frameProcessor = RemoteDesktopFrameProcessor(renderer: renderer)
+        self.textureFeed = feed
+        self.textureFeedDeliveryGate = LatestTextureDeliveryGate(feed: feed)
         self.summaryChanged = summaryChanged
         self.stateChanged = stateChanged
 
@@ -552,11 +872,22 @@ final class RemoteDesktopSession {
     }
 
     func stop() {
-        renderer.teardown()
-        client.disconnect()
+        if hasEstablishedConnection {
+            RemoteDesktopSessionNotificationService.shared.sendTerminalNotificationIfNeeded(
+                sessionID: id.uuidString,
+                deviceName: device.name,
+                transport: "rdp",
+                kind: .normal,
+                reason: "rdp_terminate"
+            )
+        }
         client.frameCallback = nil
         client.stateCallback = nil
-        feed = nil
+        client.disconnect()
+        resolveConnectionContinuation(.failure(CancellationError()))
+        framePublicationToken.invalidate()
+        frameProcessor.stop()
+        textureFeedDeliveryGate.clear()
         clientState = .disconnected
         stateChanged()
     }
@@ -576,6 +907,11 @@ final class RemoteDesktopSession {
             return
         }
 
+        let interactionSettings = RemoteDesktopSettingsManager.shared.settings.interactionSettings
+        guard interactionSettings.enableContextMenu || !Self.isRightMouseEvent(eventType) else {
+            return
+        }
+
         var mask: UInt16 = 0
 
         switch eventType {
@@ -589,8 +925,13 @@ final class RemoteDesktopSession {
             mask = 0
         }
 
-        let nx = UInt16(max(0, min(65535, x)))
-        let ny = UInt16(max(0, min(65535, y)))
+        let adjustedPoint = adjustedPointerLocation(
+            CGPoint(x: CGFloat(x), y: CGFloat(y)),
+            eventType: eventType,
+            settings: interactionSettings
+        )
+        let nx = UInt16(max(0, min(65535, adjustedPoint.x)))
+        let ny = UInt16(max(0, min(65535, adjustedPoint.y)))
         client.submitPointerEvent(with: nx, y: ny, buttonMask: mask)
     }
 
@@ -607,34 +948,84 @@ final class RemoteDesktopSession {
             log.warning("尝试发送滚轮事件到未连接会话")
             return
         }
-        let mask: UInt16 = deltaY > 0 ? 0x0078 : 0x0088
+        let interactionSettings = RemoteDesktopSettingsManager.shared.settings.interactionSettings
+        guard interactionSettings.enableTrackpadGestures else {
+            return
+        }
+        let scaledDeltaY = Double(deltaY) * max(0.1, min(interactionSettings.scrollSensitivity, 5.0))
+        let mask: UInt16 = scaledDeltaY > 0 ? 0x0078 : 0x0088
+        let repeatCount = max(1, min(8, Int((abs(scaledDeltaY) / 8).rounded(.up))))
  // 使用当前光标附近的坐标（RDP 这边一般不敏感）
-        client.submitPointerEvent(with: 400, y: 300, buttonMask: mask)
+        for _ in 0..<repeatCount {
+            client.submitPointerEvent(with: 400, y: 300, buttonMask: mask)
+        }
+    }
+
+    private static func isRightMouseEvent(_ eventType: NSEvent.EventType) -> Bool {
+        eventType == .rightMouseDown || eventType == .rightMouseUp || eventType == .rightMouseDragged
+    }
+
+    private static func isPointerMovementEvent(_ eventType: NSEvent.EventType) -> Bool {
+        eventType == .mouseMoved || eventType == .leftMouseDragged || eventType == .rightMouseDragged
+    }
+
+    private func adjustedPointerLocation(
+        _ location: CGPoint,
+        eventType: NSEvent.EventType,
+        settings: InteractionSettings
+    ) -> CGPoint {
+        defer { lastPointerLocation = location }
+        guard Self.isPointerMovementEvent(eventType),
+              let previous = lastPointerLocation else {
+            return location
+        }
+
+        let sensitivity = max(0.1, min(settings.mouseSensitivity, 5.0))
+        let deltaX = location.x - previous.x
+        let deltaY = location.y - previous.y
+        let distance = hypot(deltaX, deltaY)
+        let acceleration = settings.enableMouseAcceleration
+            ? max(1.0, min(2.0, distance / 48.0))
+            : 1.0
+        return CGPoint(
+            x: previous.x + (deltaX * sensitivity * acceleration),
+            y: previous.y + (deltaY * sensitivity * acceleration)
+        )
     }
 
  // MARK: - 回调配置
 
     private func configureCallbacks() {
- // 帧回调：FreeRDPBridge 把解码后的 BGRA/H.264 帧交给我们
-        renderer.frameHandler = { [weak self] texture in
-            guard let self else { return }
-            Task { @MainActor in
-                self.feed?.update(texture: texture)
+ // 帧回调：FreeRDPBridge 的发布路径仅上拋软件 GDI 产生的 BGRA 帧。
+        let deliveryGate = textureFeedDeliveryGate
+        let publicationToken = framePublicationToken
+        frameProcessor.installFrameHandler { texture, backing in
+            guard publicationToken.permitsPublication() else { return }
+            deliveryGate.submit(texture: texture, backing: backing)
+        }
+        frameProcessor.installFailureHandler { [weak self] error in
+            Task { @MainActor [weak self] in
+                self?.failSession(reason: error.localizedDescription)
             }
         }
 
-        client.frameCallback = { [weak self] data, width, height, stride, frameType in
-            guard let self else { return }
-            Task { @MainActor in
-                let mapped = RemoteFrameType(rawValue: UInt(frameType.rawValue)) ?? .bgra
-                let metrics = self.renderer.processFrame(
-                    data: data as Data,
-                    width: Int(width),
-                    height: Int(height),
-                    stride: Int(stride),
-                    type: mapped
-                )
-
+        client.frameCallback = { [weak self, weak frameProcessor] data, width, height, stride, frameType in
+            guard let self, let frameProcessor else { return }
+            guard let mapped = RemoteFrameType(rawValue: UInt(frameType.rawValue)) else {
+                Task { @MainActor [weak self] in
+                    self?.failSession(reason: "RDP delivered an unsupported frame type.")
+                }
+                return
+            }
+            frameProcessor.submit(
+                data: data as Data,
+                width: Int(width),
+                height: Int(height),
+                stride: Int(stride),
+                type: mapped
+            ) { [weak self] metrics in
+                Task { @MainActor [weak self] in
+                    guard let self, self.clientState != .disconnected else { return }
                 self.summary = RemoteSessionSummary(
                     id: self.summary.id,
                     targetName: self.summary.targetName,
@@ -644,6 +1035,7 @@ final class RemoteDesktopSession {
                     status: self.mapState(self.clientState)
                 )
                 self.summaryChanged()
+                }
             }
         }
 
@@ -665,12 +1057,35 @@ final class RemoteDesktopSession {
 
                 switch self.clientState {
                 case .connected:
+                    self.hasEstablishedConnection = true
+                    RemoteDesktopSessionNotificationService.shared.beginSession(
+                        sessionID: self.id.uuidString,
+                        transport: "rdp"
+                    )
                     self.resolveConnectionContinuation(.success(()))
                 case .failed:
+                    if self.hasEstablishedConnection {
+                        RemoteDesktopSessionNotificationService.shared.sendTerminalNotificationIfNeeded(
+                            sessionID: self.id.uuidString,
+                            deviceName: self.device.name,
+                            transport: "rdp",
+                            kind: .interrupted,
+                            reason: desc
+                        )
+                    }
                     self.resolveConnectionContinuation(.failure(
                         RemoteDesktopError.connectionFailed(desc)
                     ))
                 case .disconnected:
+                    if self.hasEstablishedConnection {
+                        RemoteDesktopSessionNotificationService.shared.sendTerminalNotificationIfNeeded(
+                            sessionID: self.id.uuidString,
+                            deviceName: self.device.name,
+                            transport: "rdp",
+                            kind: .interrupted,
+                            reason: "rdp_disconnected"
+                        )
+                    }
                     self.resolveConnectionContinuation(.failure(
                         RemoteDesktopError.connectionFailed("RDP 会话已断开")
                     ))
@@ -693,6 +1108,37 @@ final class RemoteDesktopSession {
         }
     }
 
+    private func failSession(reason: String) {
+        guard clientState != .failed, clientState != .disconnected else { return }
+        if hasEstablishedConnection {
+            RemoteDesktopSessionNotificationService.shared.sendTerminalNotificationIfNeeded(
+                sessionID: id.uuidString,
+                deviceName: device.name,
+                transport: "rdp",
+                kind: .interrupted,
+                reason: reason
+            )
+        }
+        client.frameCallback = nil
+        client.stateCallback = nil
+        client.disconnect()
+        resolveConnectionContinuation(.failure(RemoteDesktopError.connectionFailed(reason)))
+        framePublicationToken.invalidate()
+        frameProcessor.stop()
+        textureFeedDeliveryGate.clear()
+        clientState = .failed
+        summary = RemoteSessionSummary(
+            id: summary.id,
+            targetName: summary.targetName,
+            protocolDescription: "RDP",
+            bandwidthMbps: summary.bandwidthMbps,
+            frameLatencyMilliseconds: summary.frameLatencyMilliseconds,
+            status: .failed
+        )
+        summaryChanged()
+        stateChanged()
+    }
+
     private func resolveConnectionContinuation(_ result: Result<Void, Error>) {
         continuationLock.lock()
         guard let cont = connectionContinuation else {
@@ -710,17 +1156,13 @@ final class RemoteDesktopSession {
 
  // MARK: - 应用设置（映射到 FreeRDP）
 
-    func applySettings(_ settings: RemoteDesktopSettings) {
+    func applySettings(_ settings: RemoteDesktopSettings) throws {
         var dict: [String: Any] = [:]
 
- // 显示相关：分辨率/色深/编码器等，交给 FreeRDPBridge 映射到 /gfx-h264, /bpp 等
+ // 只下发 FreeRDPBridge 已接线、可验证且必须在 connect 前写入的字段。
+ // 其余 UI 设置由各自已接线的 runtime consumer 处理，不得在 RDP 桥中假装生效。
         var display: [String: Any] = [
-            "colorDepth": settings.displaySettings.colorDepth.rawValue,
-            "fullScreen": settings.displaySettings.fullScreenMode,
-            "multiMonitor": settings.displaySettings.multiMonitorSupport,
-            "preferredCodec": settings.displaySettings.preferredCodec.rawValue,
-            "targetFrameRate": settings.displaySettings.targetFrameRate,
-            "keyFrameInterval": settings.displaySettings.keyFrameInterval
+            "colorDepth": settings.displaySettings.colorDepth.rawValue
         ]
         if let dim = settings.displaySettings.resolution.dimensions {
             display["width"] = dim.width
@@ -728,15 +1170,76 @@ final class RemoteDesktopSession {
         }
         dict["displaySettings"] = display
 
- // 网络相关：LAN/WAN、自适应质量等
+ // FreeRDP client 库只负责协议连接类型。超时、重连和自适应策略在 Swift 会话层执行。
         let network: [String: Any] = [
-            "connectionType": settings.networkSettings.connectionType.rawValue,
-            "enableEncryption": settings.networkSettings.enableEncryption,
-            "enableUDPTransport": settings.networkSettings.enableUDPTransport,
-            "enableAdaptiveQuality": settings.networkSettings.enableAdaptiveQuality
+            "connectionType": settings.networkSettings.connectionType.rawValue
         ]
         dict["networkSettings"] = network
 
-        client.applyAllSettings(dict)
+        try client.applyAllSettings(dict)
     }
 }
+
+#if !canImport(FreeRDPBridge)
+// MARK: - FreeRDPBridge 缺失时的降级桩（保证可编译）
+//
+// 目标：
+// - 让 SkyBridgeCore 在不包含 FreeRDPBridge / FreeRDP 二进制依赖的环境里仍可编译
+// - 运行时若调用 RDP 功能，给出明确的不可用错误，而不是编译期 #error 直接阻断
+
+enum CBFreeRDPClientState: Int {
+    case idle
+    case connecting
+    case connected
+    case disconnecting
+    case failed
+    case disconnected
+}
+
+enum CBFreeRDPFrameType: UInt {
+    case bgra = 0
+    case h264 = 1
+    case hevc = 2
+}
+
+final class CBFreeRDPClient {
+    var frameCallback: ((Data, UInt32, UInt32, UInt32, CBFreeRDPFrameType) -> Void)?
+    var stateCallback: ((String) -> Void)?
+
+    private(set) var state: CBFreeRDPClientState = .idle
+
+    init(host: String, port: UInt16, username: String, password: String, domain: String?) {
+        _ = host
+        _ = port
+        _ = username
+        _ = password
+        _ = domain
+    }
+
+    func connect() throws {
+        state = .failed
+        throw RemoteDesktopError.freeRDPUnavailable(installGuide: RemoteDesktopError.freeRDPInstallGuide)
+    }
+
+    func disconnect() {
+        state = .disconnected
+    }
+
+    func submitPointerEvent(with x: UInt16, y: UInt16, buttonMask: UInt16) {
+        _ = x
+        _ = y
+        _ = buttonMask
+    }
+
+    func submitKeyboardEvent(withCode code: UInt16, down: Bool) {
+        _ = code
+        _ = down
+    }
+
+    func applyAllSettings(_ dict: [String: Any]) throws {
+        _ = dict
+        throw RemoteDesktopError.freeRDPUnavailable(installGuide: RemoteDesktopError.freeRDPInstallGuide)
+    }
+}
+#endif
+#endif

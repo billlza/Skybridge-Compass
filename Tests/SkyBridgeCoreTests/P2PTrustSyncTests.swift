@@ -10,11 +10,168 @@
 // Property 12: Keychain Sync Attribute (Validates: Requirements 3.8)
 //
 
+import CryptoKit
+import Network
 import XCTest
 @testable import SkyBridgeCore
 
 @available(macOS 14.0, iOS 17.0, *)
 final class P2PTrustSyncTests: XCTestCase {
+
+    func testAuthenticatedAuthorityResolutionPreservesRejectionReasons() throws {
+        let deviceId = "id:authority-resolution"
+        let publicKey = Data(repeating: 0x45, count: 32)
+        let fingerprint = ProtocolIdentityBinding.computeFingerprint(
+            algorithm: .ed25519,
+            publicKeyBytes: publicKey
+        )
+        func rejection(
+            records: [TrustRecord] = [],
+            identity: String = "id:authority-resolution",
+            stableIdentity: String? = "id:authority-resolution",
+            fingerprint suppliedFingerprint: String? = nil,
+            key: Data? = nil
+        ) throws -> AuthenticatedRemoteAuthorityRejection {
+            let result = TrustSyncService.authenticatedRemoteAuthorityResolution(
+                existingRecords: records,
+                deviceId: identity,
+                preferredCurrentDeviceId: stableIdentity,
+                protocolSigningAlgorithm: .ed25519,
+                protocolPublicKeyFingerprint: suppliedFingerprint ?? fingerprint,
+                authenticatedProtocolPublicKey: key ?? publicKey
+            )
+            let reason: AuthenticatedRemoteAuthorityRejection?
+            switch result {
+            case .failure(let rejected): reason = rejected
+            case .success: reason = nil
+            }
+            return try XCTUnwrap(reason, "Rejected authority unexpectedly produced a record")
+        }
+        XCTAssertEqual(try rejection(identity: " "), .invalidDeviceId)
+        XCTAssertEqual(try rejection(fingerprint: "invalid"), .invalidFingerprint)
+        XCTAssertEqual(try rejection(key: Data(repeating: 0x45, count: 31)), .invalidPublicKey)
+        XCTAssertEqual(try rejection(fingerprint: String(repeating: "0", count: 64)), .invalidPublicKey)
+        XCTAssertEqual(try rejection(stableIdentity: nil), .missingStableIdentity)
+
+        let ambiguousRecords = ["bonjour:first", "bonjour:second"].map { alias in
+            TrustRecord(
+                deviceId: alias, pubKeyFP: "", publicKey: Data(), signature: Data(),
+                currentDeviceId: deviceId, lifecycleState: .active
+            )
+        }
+        XCTAssertEqual(try rejection(records: ambiguousRecords), .ambiguousDirectIdentity)
+
+        let canonical = try TrustSyncService.authenticatedRemoteAuthorityResolution(
+            existingRecords: [], deviceId: deviceId, preferredCurrentDeviceId: deviceId,
+            protocolSigningAlgorithm: .ed25519,
+            protocolPublicKeyFingerprint: fingerprint,
+            authenticatedProtocolPublicKey: publicKey
+        ).get()
+        let rawIdentityAlias = TrustRecord(
+            deviceId: "bonjour:raw-identity", pubKeyFP: "", publicKey: Data(), signature: Data(),
+            currentDeviceId: "authority-resolution", lifecycleState: .active
+        )
+        XCTAssertEqual(
+            try rejection(records: [canonical, rawIdentityAlias]),
+            .conflictingIdentityClaims
+        )
+        let differentKey = Data(repeating: 0x46, count: 32)
+        XCTAssertEqual(
+            try rejection(
+                records: [canonical],
+                fingerprint: ProtocolIdentityBinding.computeFingerprint(
+                    algorithm: .ed25519, publicKeyBytes: differentKey
+                ),
+                key: differentKey
+            ),
+            .authorityBindingConflict
+        )
+    }
+
+    @MainActor
+    func testTrustInvalidationDisconnectsOnlyTheExactCurrentP2PAuthority() async throws {
+        let suffix = UUID().uuidString.lowercased()
+        let oldRecordId = "id:old-invalidation-\(suffix)"
+        let replacementRecordId = "id:replacement-invalidation-\(suffix)"
+        let routeKey = "id:shared-route-\(suffix)"
+        let oldPublicKey = Data(repeating: 0x31, count: 32)
+        let replacementPublicKey = Data(repeating: 0x42, count: 32)
+        let oldFingerprint = ProtocolIdentityBinding.computeFingerprint(
+            algorithm: .ed25519,
+            publicKeyBytes: oldPublicKey
+        )
+        let replacementFingerprint = ProtocolIdentityBinding.computeFingerprint(
+            algorithm: .ed25519,
+            publicKeyBytes: replacementPublicKey
+        )
+        let trust = TrustSyncService.shared
+        try await trust.requireInitialLoadForTesting()
+        trust.setInMemoryPersistenceForTesting(true)
+        try await trust.removeRecordsForTesting(deviceIds: [oldRecordId, replacementRecordId])
+        addTeardownBlock { @MainActor [trust] in
+            try await trust.removeRecordsForTesting(deviceIds: [oldRecordId, replacementRecordId])
+            trust.setInMemoryPersistenceForTesting(false)
+        }
+
+        for (recordId, publicKey, fingerprint) in [
+            (oldRecordId, oldPublicKey, oldFingerprint),
+            (replacementRecordId, replacementPublicKey, replacementFingerprint),
+        ] {
+            _ = try await trust.addTrustRecord(
+                TrustRecord(
+                    deviceId: recordId,
+                    pubKeyFP: "",
+                    publicKey: Data(),
+                    protocolPublicKey: publicKey,
+                    protocolSigningAlgorithm: .ed25519,
+                    protocolPublicKeyFingerprint: fingerprint,
+                    signature: Data(),
+                    currentDeviceId: routeKey,
+                    knownDeviceIds: [routeKey],
+                    lifecycleState: .active
+                )
+            )
+        }
+
+        let networkConnection = NWConnection(host: "127.0.0.1", port: 9, using: .tcp)
+        defer { networkConnection.cancel() }
+        let replacementConnection = P2PConnection(
+            device: P2PDevice(
+                id: routeKey,
+                name: "Replacement peer",
+                type: .macOS,
+                address: "127.0.0.1",
+                port: 9,
+                osVersion: "test",
+                capabilities: [],
+                publicKey: Data(),
+                lastSeen: Date()
+            ),
+            connection: networkConnection
+        )
+        replacementConnection.testingSetStatus(.authenticated)
+        replacementConnection.testingSetAuthenticatedRemoteAuthority(
+            AuthenticatedRemoteAuthority(
+                protocolSigningAlgorithm: .ed25519,
+                protocolPublicKeyFingerprint: replacementFingerprint,
+                protocolPublicKey: replacementPublicKey
+            )
+        )
+        let manager = P2PDiscoveryService()
+        manager.testingReplaceAuthenticatedConnections([routeKey: replacementConnection])
+
+        try await trust.revokeTrustRecord(deviceId: oldRecordId)
+        XCTAssertTrue(
+            manager.activeAuthenticatedConnectionsForClassicTransfer().contains {
+                $0 === replacementConnection
+            },
+            "Revoking a stale authority must not disconnect a same-route replacement"
+        )
+
+        try await trust.revokeTrustRecord(deviceId: replacementRecordId)
+        XCTAssertTrue(manager.activeAuthenticatedConnectionsForClassicTransfer().isEmpty)
+        XCTAssertEqual(replacementConnection.status, .disconnected)
+    }
     
  // MARK: - Property 10: Trust Record Round-Trip Serialization
     
@@ -61,6 +218,20 @@ final class P2PTrustSyncTests: XCTestCase {
                            "recordType must survive round-trip")
             XCTAssertEqual(decoded.deviceName, record.deviceName,
                            "deviceName must survive round-trip")
+            XCTAssertEqual(decoded.protocolSigningAlgorithm, record.protocolSigningAlgorithm,
+                           "protocolSigningAlgorithm must survive round-trip")
+            XCTAssertEqual(decoded.protocolPublicKeyFingerprint, record.protocolPublicKeyFingerprint,
+                           "protocolPublicKeyFingerprint must survive round-trip")
+            XCTAssertEqual(decoded.protocolPublicKey, record.protocolPublicKey,
+                           "protocolPublicKey must survive round-trip")
+            XCTAssertEqual(decoded.protocolIdentityBindingsV2, record.protocolIdentityBindingsV2,
+                           "protocolIdentityBindingsV2 must survive round-trip")
+            XCTAssertEqual(decoded.currentDeviceIdMetadata, record.currentDeviceIdMetadata,
+                           "currentDeviceId must survive round-trip")
+            XCTAssertEqual(decoded.knownDeviceIdsMetadata, record.knownDeviceIdsMetadata,
+                           "knownDeviceIds must survive round-trip")
+            XCTAssertEqual(decoded.lifecycleStateMetadata, record.lifecycleStateMetadata,
+                           "lifecycleState must survive round-trip")
             
  // Date comparison with millisecond precision
             XCTAssertEqual(decoded.createdAt.timeIntervalSince1970,
@@ -128,8 +299,8 @@ final class P2PTrustSyncTests: XCTestCase {
  /// the revoke record should win; otherwise use LWW based on updatedAt.
  /// **Validates: Requirements 3.5**
     @MainActor
-    func testTombstoneConflictResolutionProperty() async {
-        let service = TrustSyncService.shared
+    func testTombstoneConflictResolutionProperty() async throws {
+        let service = TrustSyncService(initialRecordsForTesting: [])
         
  // Test case 1: Local is tombstone, remote is add
         let localTombstone = createTestTrustRecord(
@@ -143,7 +314,7 @@ final class P2PTrustSyncTests: XCTestCase {
             updatedAt: Date().addingTimeInterval(100) // Remote is newer
         )
         
-        let resolved1 = service.resolveConflict(local: localTombstone, remote: remoteAdd)
+        let resolved1 = try service.resolveConflict(local: localTombstone, remote: remoteAdd)
         
  // Property: Tombstone must win regardless of timestamp
         XCTAssertEqual(resolved1.recordType, .revoke,
@@ -163,7 +334,7 @@ final class P2PTrustSyncTests: XCTestCase {
             revokedAt: Date()
         )
         
-        let resolved2 = service.resolveConflict(local: localAdd, remote: remoteTombstone)
+        let resolved2 = try service.resolveConflict(local: localAdd, remote: remoteTombstone)
         
  // Property: Tombstone must win regardless of timestamp
         XCTAssertEqual(resolved2.recordType, .revoke,
@@ -181,7 +352,7 @@ final class P2PTrustSyncTests: XCTestCase {
             updatedAt: Date()
         )
         
-        let resolved3 = service.resolveConflict(local: olderAdd, remote: newerAdd)
+        let resolved3 = try service.resolveConflict(local: olderAdd, remote: newerAdd)
         
  // Property: Newer record wins when both are add
         XCTAssertEqual(resolved3.updatedAt.timeIntervalSince1970,
@@ -203,7 +374,7 @@ final class P2PTrustSyncTests: XCTestCase {
             updatedAt: Date()
         )
         
-        let resolved4 = service.resolveConflict(local: olderTombstone, remote: newerTombstone)
+        let resolved4 = try service.resolveConflict(local: olderTombstone, remote: newerTombstone)
         
  // Property: Newer tombstone wins when both are tombstone
         XCTAssertEqual(resolved4.updatedAt.timeIntervalSince1970,
@@ -214,8 +385,8 @@ final class P2PTrustSyncTests: XCTestCase {
     
  /// Test conflict resolution is symmetric for same-type records
     @MainActor
-    func testConflictResolutionSymmetry() async {
-        let service = TrustSyncService.shared
+    func testConflictResolutionSymmetry() async throws {
+        let service = TrustSyncService(initialRecordsForTesting: [])
         
         let record1 = createTestTrustRecord(
             deviceId: "symmetric-test",
@@ -228,14 +399,677 @@ final class P2PTrustSyncTests: XCTestCase {
             updatedAt: Date().addingTimeInterval(10)
         )
         
-        let resolved1 = service.resolveConflict(local: record1, remote: record2)
-        let resolved2 = service.resolveConflict(local: record2, remote: record1)
+        let resolved1 = try service.resolveConflict(local: record1, remote: record2)
+        let resolved2 = try service.resolveConflict(local: record2, remote: record1)
         
  // Property: Resolution should be consistent regardless of order
         XCTAssertEqual(resolved1.updatedAt.timeIntervalSince1970,
                        resolved2.updatedAt.timeIntervalSince1970,
                        accuracy: 0.001,
                        "Conflict resolution must be consistent")
+    }
+
+    func testRecordAuthenticatedRemoteAuthorityUpdatesAliasMatchedRecord() throws {
+        let suffix = UUID().uuidString.lowercased()
+        let aliasId = "bonjour:skybridge-\(suffix)@local."
+        let stableId = "id:\(suffix)"
+        let fingerprint = String(repeating: "d", count: 64)
+
+        let aliasRecord = TrustRecord(
+            deviceId: aliasId,
+            pubKeyFP: "",
+            publicKey: Data(),
+            protocolPublicKey: nil,
+            protocolSigningAlgorithm: nil,
+            protocolPublicKeyFingerprint: nil,
+            kemPublicKeys: [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+                    publicKey: Data(repeating: 0xAA, count: 1_184)
+                )
+            ],
+            attestationLevel: .none,
+            signature: Data(),
+            deviceName: "SkyBridge Test \(suffix)",
+            currentDeviceId: stableId,
+            knownDeviceIds: [aliasId, stableId],
+            lifecycleState: .active
+        )
+
+        let updated = TrustSyncService.resolvedAuthenticatedRemoteAuthorityRecord(
+            existingRecords: [aliasRecord],
+            deviceId: aliasId,
+            displayName: "SkyBridge Test \(suffix)",
+            preferredCurrentDeviceId: stableId,
+            knownDeviceIds: [aliasId, stableId],
+            protocolSigningAlgorithm: .mlDSA65,
+            protocolPublicKeyFingerprint: fingerprint
+        )
+
+        XCTAssertNotNil(updated)
+        XCTAssertEqual(updated?.deviceId, stableId)
+        XCTAssertEqual(updated?.protocolSigningAlgorithm, .mlDSA65)
+        XCTAssertEqual(updated?.protocolPublicKeyFingerprint, fingerprint)
+        XCTAssertEqual(updated?.currentDeviceIdMetadata, stableId)
+        XCTAssertTrue(
+            Set(updated?.knownDeviceIdsMetadata ?? []).isSuperset(of: Set([aliasId, stableId])),
+            "Known device ids should retain alias + stable identity while allowing normalized derivatives"
+        )
+        XCTAssertEqual(
+            updated?.kemPublicKeys,
+            [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+                    publicKey: Data(repeating: 0xAA, count: 1_184)
+                )
+            ]
+        )
+    }
+
+    func testAuthenticatedRemoteAuthorityPersistsOnlyFingerprintBoundProtocolPublicKey() throws {
+        let deviceId = "id:\(UUID().uuidString.lowercased())"
+        let publicKey = Data(repeating: 0x5C, count: 1_952)
+        let fingerprint = ProtocolIdentityBinding.computeFingerprint(
+            algorithm: .mlDSA65,
+            publicKeyBytes: publicKey
+        )
+
+        let valid = TrustSyncService.resolvedAuthenticatedRemoteAuthorityRecord(
+            existingRecords: [],
+            deviceId: deviceId,
+            preferredCurrentDeviceId: deviceId,
+            protocolSigningAlgorithm: .mlDSA65,
+            protocolPublicKeyFingerprint: fingerprint,
+            authenticatedProtocolPublicKey: publicKey
+        )
+        XCTAssertEqual(valid?.protocolPublicKey, publicKey)
+
+        XCTAssertNil(
+            TrustSyncService.resolvedAuthenticatedRemoteAuthorityRecord(
+                existingRecords: [],
+                deviceId: deviceId,
+                preferredCurrentDeviceId: deviceId,
+                protocolSigningAlgorithm: .mlDSA65,
+                protocolPublicKeyFingerprint: String(repeating: "0", count: 64),
+                authenticatedProtocolPublicKey: publicKey
+            )
+        )
+        XCTAssertNil(
+            TrustSyncService.resolvedAuthenticatedRemoteAuthorityRecord(
+                existingRecords: [],
+                deviceId: deviceId,
+                preferredCurrentDeviceId: deviceId,
+                protocolSigningAlgorithm: .mlDSA65,
+                protocolPublicKeyFingerprint: fingerprint,
+                authenticatedProtocolPublicKey: Data(publicKey.dropLast())
+            )
+        )
+    }
+
+    func testMLDSA65AndMLDSA87RawAuthoritiesCoexistWithoutWriting87ToLegacyFields() throws {
+        let deviceId = "id:\(UUID().uuidString.lowercased())"
+        let mlDSA65Key = Data(repeating: 0x65, count: 1_952)
+        let mlDSA87Key = Data(repeating: 0x87, count: 2_592)
+        let mlDSA65Fingerprint = ProtocolIdentityBinding.computeFingerprint(
+            algorithm: .mlDSA65,
+            publicKeyBytes: mlDSA65Key
+        )
+        let mlDSA87Fingerprint = ProtocolIdentityBinding.computeFingerprint(
+            algorithm: .mlDSA87,
+            publicKeyBytes: mlDSA87Key
+        )
+
+        let mlDSA65Record = try XCTUnwrap(
+            TrustSyncService.resolvedAuthenticatedRemoteAuthorityRecord(
+                existingRecords: [],
+                deviceId: deviceId,
+                preferredCurrentDeviceId: deviceId,
+                protocolSigningAlgorithm: .mlDSA65,
+                protocolPublicKeyFingerprint: mlDSA65Fingerprint,
+                authenticatedProtocolPublicKey: mlDSA65Key
+            )
+        )
+        let dualAlgorithmRecord = try XCTUnwrap(
+            TrustSyncService.resolvedAuthenticatedRemoteAuthorityRecord(
+                existingRecords: [mlDSA65Record],
+                deviceId: deviceId,
+                preferredCurrentDeviceId: deviceId,
+                protocolSigningAlgorithm: .mlDSA87,
+                protocolPublicKeyFingerprint: mlDSA87Fingerprint,
+                authenticatedProtocolPublicKey: mlDSA87Key
+            )
+        )
+
+        XCTAssertEqual(dualAlgorithmRecord.protocolSigningAlgorithm, .mlDSA65)
+        XCTAssertEqual(dualAlgorithmRecord.protocolPublicKey, mlDSA65Key)
+        XCTAssertEqual(dualAlgorithmRecord.protocolPublicKeyFingerprint, mlDSA65Fingerprint)
+        XCTAssertFalse(
+            dualAlgorithmRecord.protocolIdentityPins?.contains(where: { $0.algorithm == .mlDSA87 }) ?? false,
+            "ML-DSA-87 must not enter the legacy enum-backed pin field"
+        )
+        XCTAssertEqual(
+            Set(dualAlgorithmRecord.protocolIdentityBindingsV2?.map(\.algorithm) ?? []),
+            Set([ProtocolSigningAlgorithm.mlDSA65.rawValue, ProtocolSigningAlgorithm.mlDSA87.rawValue])
+        )
+        XCTAssertEqual(dualAlgorithmRecord.getVerificationPublicKey(for: .mlDSA65), mlDSA65Key)
+        XCTAssertEqual(dualAlgorithmRecord.getVerificationPublicKey(for: .mlDSA87), mlDSA87Key)
+        XCTAssertNil(dualAlgorithmRecord.getVerificationPublicKey(for: .ed25519))
+    }
+
+    @MainActor
+    func testAuthenticatedProtocolIdentityLookupRequiresActiveRawBinding() async throws {
+        let service = TrustSyncService(initialRecordsForTesting: [])
+        let deviceId = "id:\(UUID().uuidString.lowercased())"
+        let publicKey = Data(repeating: 0x87, count: 2_592)
+        let fingerprint = ProtocolIdentityBinding.computeFingerprint(
+            algorithm: .mlDSA87,
+            publicKeyBytes: publicKey
+        )
+        let record = try XCTUnwrap(
+            TrustSyncService.resolvedAuthenticatedRemoteAuthorityRecord(
+                existingRecords: [],
+                deviceId: deviceId,
+                preferredCurrentDeviceId: deviceId,
+                protocolSigningAlgorithm: .mlDSA87,
+                protocolPublicKeyFingerprint: fingerprint,
+                authenticatedProtocolPublicKey: publicKey
+            )
+        )
+
+        XCTAssertEqual(
+            service.outboundPQCSignatureAlgorithm(
+                deviceId: deviceId,
+                requestedAlgorithm: .mlDSA87
+            ),
+            .mlDSA65,
+            "An unpinned peer must remain on the established ML-DSA-65 path"
+        )
+        _ = try await service.addTrustRecord(record)
+
+        XCTAssertTrue(service.hasAuthenticatedProtocolIdentity(deviceId: deviceId, algorithm: .mlDSA87))
+        XCTAssertEqual(
+            service.authenticatedProtocolIdentityBinding(deviceId: deviceId, algorithm: .mlDSA87)?.publicKey,
+            publicKey
+        )
+        XCTAssertFalse(service.hasAuthenticatedProtocolIdentity(deviceId: deviceId, algorithm: .mlDSA65))
+        XCTAssertEqual(
+            service.outboundPQCSignatureAlgorithm(
+                deviceId: deviceId,
+                requestedAlgorithm: .mlDSA87
+            ),
+            .mlDSA87
+        )
+        XCTAssertEqual(
+            service.outboundPQCSignatureAlgorithm(
+                deviceId: deviceId,
+                requestedAlgorithm: .mlDSA65
+            ),
+            .mlDSA65,
+            "Peer support must not override the local algorithm request"
+        )
+
+        _ = try await service.addTrustRecord(
+            TrustRecord(
+                deviceId: deviceId,
+                pubKeyFP: record.pubKeyFP,
+                publicKey: record.publicKey,
+                capabilities: ["kem-refresh"],
+                signature: Data(),
+                currentDeviceId: deviceId,
+                knownDeviceIds: [deviceId],
+                lifecycleState: .active
+            )
+        )
+        XCTAssertTrue(
+            service.hasAuthenticatedProtocolIdentity(deviceId: deviceId, algorithm: .mlDSA87),
+            "Generic metadata updates must not erase an existing raw-key authority sidecar"
+        )
+    }
+
+    func testAuthenticatedAuthorityRejectsWrongAlgorithmAndEveryWrongRawKeyLength() throws {
+        let deviceId = "id:\(UUID().uuidString.lowercased())"
+        let cases: [(ProtocolSigningAlgorithm, Int)] = [
+            (.ed25519, 31),
+            (.mlDSA65, 1_951),
+            (.mlDSA87, 2_591)
+        ]
+
+        for (algorithm, length) in cases {
+            let key = Data(repeating: 0xA5, count: length)
+            let fingerprint = ProtocolIdentityBinding.computeFingerprint(
+                algorithm: algorithm,
+                publicKeyBytes: key
+            )
+            XCTAssertNil(
+                TrustSyncService.resolvedAuthenticatedRemoteAuthorityRecord(
+                    existingRecords: [],
+                    deviceId: deviceId,
+                    preferredCurrentDeviceId: deviceId,
+                    protocolSigningAlgorithm: algorithm,
+                    protocolPublicKeyFingerprint: fingerprint,
+                    authenticatedProtocolPublicKey: key
+                ),
+                "\(algorithm.rawValue) must reject a \(length)-byte public key"
+            )
+        }
+
+        let mlDSA65Key = Data(repeating: 0x55, count: 1_952)
+        let mlDSA65Fingerprint = ProtocolIdentityBinding.computeFingerprint(
+            algorithm: .mlDSA65,
+            publicKeyBytes: mlDSA65Key
+        )
+        XCTAssertNil(
+            TrustSyncService.resolvedAuthenticatedRemoteAuthorityRecord(
+                existingRecords: [],
+                deviceId: deviceId,
+                preferredCurrentDeviceId: deviceId,
+                protocolSigningAlgorithm: .mlDSA87,
+                protocolPublicKeyFingerprint: mlDSA65Fingerprint,
+                authenticatedProtocolPublicKey: mlDSA65Key
+            ),
+            "Raw public-key bytes and fingerprint cannot be reinterpreted as another algorithm"
+        )
+        let mlDSA87Key = Data(repeating: 0x87, count: 2_592)
+        XCTAssertNil(
+            TrustSyncService.resolvedAuthenticatedRemoteAuthorityRecord(
+                existingRecords: [],
+                deviceId: deviceId,
+                preferredCurrentDeviceId: deviceId,
+                protocolSigningAlgorithm: .mlDSA87,
+                protocolPublicKeyFingerprint: String(repeating: "0", count: 64),
+                authenticatedProtocolPublicKey: mlDSA87Key
+            ),
+            "ML-DSA-87 raw authority must match its algorithm-bound fingerprint"
+        )
+        XCTAssertNil(
+            TrustSyncService.resolvedAuthenticatedRemoteAuthorityRecord(
+                existingRecords: [],
+                deviceId: deviceId,
+                preferredCurrentDeviceId: deviceId,
+                protocolSigningAlgorithm: .mlDSA87,
+                protocolPublicKeyFingerprint: String(repeating: "a", count: 64),
+                authenticatedProtocolPublicKey: nil
+            ),
+            "ML-DSA-87 must never create a fingerprint-only authority"
+        )
+    }
+
+    @MainActor
+    func testSameAlgorithmAuthorityConflictIsRejectedInsteadOfLastWriterWins() throws {
+        let deviceId = "id:\(UUID().uuidString.lowercased())"
+        let firstKey = Data(repeating: 0x11, count: 2_592)
+        let secondKey = Data(repeating: 0x22, count: 2_592)
+        let firstFingerprint = ProtocolIdentityBinding.computeFingerprint(
+            algorithm: .mlDSA87,
+            publicKeyBytes: firstKey
+        )
+        let secondFingerprint = ProtocolIdentityBinding.computeFingerprint(
+            algorithm: .mlDSA87,
+            publicKeyBytes: secondKey
+        )
+        let firstRecord = try XCTUnwrap(
+            TrustSyncService.resolvedAuthenticatedRemoteAuthorityRecord(
+                existingRecords: [],
+                deviceId: deviceId,
+                preferredCurrentDeviceId: deviceId,
+                protocolSigningAlgorithm: .mlDSA87,
+                protocolPublicKeyFingerprint: firstFingerprint,
+                authenticatedProtocolPublicKey: firstKey
+            )
+        )
+
+        XCTAssertNil(
+            TrustSyncService.resolvedAuthenticatedRemoteAuthorityRecord(
+                existingRecords: [firstRecord],
+                deviceId: deviceId,
+                preferredCurrentDeviceId: deviceId,
+                protocolSigningAlgorithm: .mlDSA87,
+                protocolPublicKeyFingerprint: secondFingerprint,
+                authenticatedProtocolPublicKey: secondKey
+            )
+        )
+
+        let conflictingRecord = TrustRecord(
+            deviceId: deviceId,
+            pubKeyFP: firstRecord.pubKeyFP,
+            publicKey: firstRecord.publicKey,
+            protocolIdentityBindingsV2: [
+                ProtocolIdentityBindingV2(
+                    algorithm: .mlDSA87,
+                    publicKey: secondKey,
+                    fingerprint: secondFingerprint,
+                    source: .authenticatedHandshake,
+                    approvedAt: firstRecord.updatedAt.addingTimeInterval(60),
+                    generation: 1
+                )
+            ],
+            updatedAt: firstRecord.updatedAt.addingTimeInterval(60),
+            signature: Data(repeating: 0xAB, count: 64),
+            currentDeviceId: deviceId,
+            knownDeviceIds: [deviceId],
+            lifecycleState: .active
+        )
+        XCTAssertThrowsError(
+            try TrustSyncService(initialRecordsForTesting: [])
+                .resolveConflict(local: firstRecord, remote: conflictingRecord)
+        ) { error in
+            guard case TrustSyncError.conflictResolutionFailed = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+    }
+
+    func testLegacyFixtureDecodeAndNewRecordRemainUnknownFieldCompatible() throws {
+        let legacyFixture = Data(
+            """
+            {
+              "deviceId":"legacy-fixture-device",
+              "pubKeyFP":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "publicKey":"AQID",
+              "attestationLevel":0,
+              "capabilities":[],
+              "createdAt":1000,
+              "updatedAt":1000,
+              "version":1,
+              "signature":"",
+              "recordType":"add"
+            }
+            """.utf8
+        )
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+        let decodedLegacy = try decoder.decode(TrustRecord.self, from: legacyFixture)
+        XCTAssertEqual(decodedLegacy.deviceId, "legacy-fixture-device")
+        XCTAssertNil(decodedLegacy.protocolIdentityBindingsV2)
+
+        let deviceId = "id:\(UUID().uuidString.lowercased())"
+        let mlDSA65Key = Data(repeating: 0x65, count: 1_952)
+        let mlDSA87Key = Data(repeating: 0x87, count: 2_592)
+        let mlDSA65Fingerprint = ProtocolIdentityBinding.computeFingerprint(
+            algorithm: .mlDSA65,
+            publicKeyBytes: mlDSA65Key
+        )
+        let mlDSA87Fingerprint = ProtocolIdentityBinding.computeFingerprint(
+            algorithm: .mlDSA87,
+            publicKeyBytes: mlDSA87Key
+        )
+        let legacy65 = try XCTUnwrap(
+            TrustSyncService.resolvedAuthenticatedRemoteAuthorityRecord(
+                existingRecords: [],
+                deviceId: deviceId,
+                preferredCurrentDeviceId: deviceId,
+                protocolSigningAlgorithm: .mlDSA65,
+                protocolPublicKeyFingerprint: mlDSA65Fingerprint,
+                authenticatedProtocolPublicKey: mlDSA65Key
+            )
+        )
+        let newRecord = try XCTUnwrap(
+            TrustSyncService.resolvedAuthenticatedRemoteAuthorityRecord(
+                existingRecords: [legacy65],
+                deviceId: deviceId,
+                preferredCurrentDeviceId: deviceId,
+                protocolSigningAlgorithm: .mlDSA87,
+                protocolPublicKeyFingerprint: mlDSA87Fingerprint,
+                authenticatedProtocolPublicKey: mlDSA87Key
+            )
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .millisecondsSince1970
+        let encodedNewRecord = try encoder.encode(newRecord)
+        let legacyDecodedNewRecord = try decoder.decode(LegacyTrustRecordFixture.self, from: encodedNewRecord)
+
+        XCTAssertEqual(legacyDecodedNewRecord.protocolSigningAlgorithm, .mlDSA65)
+        XCTAssertEqual(legacyDecodedNewRecord.protocolPublicKey, mlDSA65Key)
+        XCTAssertFalse(
+            legacyDecodedNewRecord.protocolIdentityPins?.contains(where: { $0.algorithm.rawValue == "ML-DSA-87" }) ?? false
+        )
+    }
+
+    @MainActor
+    func testLegacyRecordSignatureRemainsValidButCannotAuthorizeUnsignedV2Sidecar() async throws {
+        let service = TrustSyncService(initialRecordsForTesting: [])
+        let createdAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let updatedAt = createdAt.addingTimeInterval(60)
+        let legacyKey = Data(repeating: 0x65, count: 1_952)
+        let legacyFingerprint = ProtocolIdentityBinding.computeFingerprint(
+            algorithm: .mlDSA65,
+            publicKeyBytes: legacyKey
+        )
+        let unsignedLegacy = TrustRecord(
+            deviceId: "id:\(UUID().uuidString.lowercased())",
+            pubKeyFP: String(repeating: "a", count: 64),
+            publicKey: Data(repeating: 0x01, count: 32),
+            protocolPublicKey: legacyKey,
+            protocolSigningAlgorithm: .mlDSA65,
+            protocolPublicKeyFingerprint: legacyFingerprint,
+            protocolIdentityPins: [
+                ProtocolIdentityPin(
+                    algorithm: .mlDSA65,
+                    fingerprint: legacyFingerprint,
+                    approvedAt: updatedAt,
+                    source: .authenticatedHandshake
+                )
+            ],
+            createdAt: createdAt,
+            updatedAt: updatedAt,
+            signature: Data()
+        )
+        let preV2Payload = try service.recordSignaturePayloadForTesting(
+            unsignedLegacy,
+            includeProtocolIdentityPins: true,
+            includeProtocolIdentityBindingsV2: false
+        )
+        let legacySignature = try await DeviceIdentityKeyManager.shared.sign(data: preV2Payload)
+        let signedLegacy = TrustRecord(
+            deviceId: unsignedLegacy.deviceId,
+            pubKeyFP: unsignedLegacy.pubKeyFP,
+            publicKey: unsignedLegacy.publicKey,
+            protocolPublicKey: unsignedLegacy.protocolPublicKey,
+            protocolSigningAlgorithm: unsignedLegacy.protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: unsignedLegacy.protocolPublicKeyFingerprint,
+            protocolIdentityPins: unsignedLegacy.protocolIdentityPins,
+            createdAt: createdAt,
+            updatedAt: updatedAt,
+            signature: legacySignature
+        )
+        let legacySignatureAccepted = try await service.verifyRecordSignature(signedLegacy)
+        XCTAssertTrue(legacySignatureAccepted)
+
+        let injectedKey = Data(repeating: 0x87, count: 2_592)
+        let injectedFingerprint = ProtocolIdentityBinding.computeFingerprint(
+            algorithm: .mlDSA87,
+            publicKeyBytes: injectedKey
+        )
+        let unsignedSidecarInjection = TrustRecord(
+            deviceId: signedLegacy.deviceId,
+            pubKeyFP: signedLegacy.pubKeyFP,
+            publicKey: signedLegacy.publicKey,
+            protocolPublicKey: signedLegacy.protocolPublicKey,
+            protocolSigningAlgorithm: signedLegacy.protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: signedLegacy.protocolPublicKeyFingerprint,
+            protocolIdentityPins: signedLegacy.protocolIdentityPins,
+            protocolIdentityBindingsV2: [
+                ProtocolIdentityBindingV2(
+                    algorithm: .mlDSA87,
+                    publicKey: injectedKey,
+                    fingerprint: injectedFingerprint,
+                    source: .authenticatedHandshake,
+                    approvedAt: updatedAt,
+                    generation: 1
+                )
+            ],
+            createdAt: createdAt,
+            updatedAt: updatedAt,
+            signature: legacySignature
+        )
+        let injectedSidecarAccepted = try await service.verifyRecordSignature(unsignedSidecarInjection)
+        XCTAssertFalse(
+            injectedSidecarAccepted,
+            "A legacy signature must not authenticate an attached v2 authority sidecar"
+        )
+    }
+
+    func testRecordAuthenticatedRemoteAuthorityCreatesStableCurrentPathRecord() throws {
+        let suffix = UUID().uuidString.lowercased()
+        let aliasId = "peer:fe80::\(suffix.prefix(4))%en0"
+        let bonjourId = "bonjour:skybridge-\(suffix)@local."
+        let stableId = "id:\(suffix)"
+        let fingerprint = String(repeating: "e", count: 64)
+
+        let created = TrustSyncService.resolvedAuthenticatedRemoteAuthorityRecord(
+            existingRecords: [],
+            deviceId: aliasId,
+            displayName: "Inbound iPhone \(suffix)",
+            preferredCurrentDeviceId: stableId,
+            knownDeviceIds: [aliasId, bonjourId, stableId],
+            protocolSigningAlgorithm: .mlDSA65,
+            protocolPublicKeyFingerprint: fingerprint
+        )
+
+        XCTAssertNotNil(created)
+        XCTAssertEqual(created?.deviceId, stableId)
+        XCTAssertEqual(created?.currentDeviceIdMetadata, stableId)
+        XCTAssertEqual(created?.protocolSigningAlgorithm, .mlDSA65)
+        XCTAssertEqual(created?.protocolPublicKeyFingerprint, fingerprint)
+        XCTAssertTrue(
+            Set(created?.knownDeviceIdsMetadata ?? []).isSuperset(
+                of: Set([aliasId, bonjourId, stableId])
+            ),
+            "Known device ids should include supplied identifiers while allowing normalized derivatives"
+        )
+        XCTAssertEqual(created?.lifecycleStateMetadata, .active)
+    }
+
+    func testRecordAuthenticatedRemoteAuthorityDoesNotPersistIdentifierAsDisplayName() throws {
+        let stableId = "id:\(UUID().uuidString.lowercased())"
+        let fingerprint = String(repeating: "a", count: 64)
+
+        let created = TrustSyncService.resolvedAuthenticatedRemoteAuthorityRecord(
+            existingRecords: [],
+            deviceId: "peer:fe80::1%en0",
+            displayName: stableId,
+            preferredCurrentDeviceId: stableId,
+            knownDeviceIds: [stableId, "peer:fe80::1%en0"],
+            protocolSigningAlgorithm: .mlDSA65,
+            protocolPublicKeyFingerprint: fingerprint
+        )
+
+        XCTAssertNotNil(created)
+        XCTAssertEqual(created?.deviceId, stableId)
+        XCTAssertNil(created?.deviceName)
+    }
+
+    func testProtectedTrustMirrorPersistenceFailuresAreNotSilentlyIgnored() throws {
+        let source = try readSource("Sources/SkyBridgeCore/P2P/TrustSyncService.swift")
+
+        XCTAssertTrue(source.contains("private func storeFallbackRecords(_ records: [TrustRecord]) throws"))
+        XCTAssertTrue(source.contains("private func upsertFallbackRecord(_ record: TrustRecord) throws"))
+        XCTAssertTrue(source.contains("private func removeFallbackRecord(deviceId: String) throws"))
+        XCTAssertTrue(source.contains("private func deleteFromKeychain(deviceId: String) throws"))
+        XCTAssertTrue(source.contains("fallbackCleanupErrorAfterAuthoritativeCommit"))
+        XCTAssertTrue(source.contains("fallbackCleanupFailedAfterAuthoritativeCommit"))
+        XCTAssertTrue(source.contains("if let postCommitError"))
+        XCTAssertTrue(source.contains("let status = SecItemDelete(query as CFDictionary)"))
+        XCTAssertTrue(source.contains("throw TrustSyncError.keychainError(status)"))
+        XCTAssertFalse(source.contains("SecItemDelete(query as CFDictionary)\n        try removeFallbackRecord"))
+        XCTAssertFalse(source.contains("try? storeFallbackRecords"))
+        XCTAssertFalse(source.contains("try? Self.protectedFallbackRecordStore.remove()"))
+        XCTAssertFalse(source.contains("stale fallback cleanup failed and will be retried"))
+        XCTAssertTrue(source.contains("func removeRecordsForTesting(deviceIds: [String]) async throws"))
+        XCTAssertTrue(source.contains("try deleteFromKeychain(deviceId: deviceId)"))
+        XCTAssertFalse(source.contains("preconditionFailure(\"failed to remove trust record for testing"))
+    }
+
+    func testLocalTrustRecordLoadVerifiesSignaturesBeforeMerging() throws {
+        let source = try readSource("Sources/SkyBridgeCore/P2P/TrustSyncService.swift")
+
+        // 逐条验签的 hardening 不允许回退：每条记录都必须过 verifyRecordSignature，
+        // legacy 记录只在安全字段状态下才可接受。
+        XCTAssertTrue(source.contains("private func verifiedTrustRecordsForLocalLoad("))
+        XCTAssertTrue(source.contains("isValid = try await verifyRecordSignature(record)"))
+        XCTAssertTrue(source.contains("reason=invalid_signature device=redacted"))
+        XCTAssertTrue(source.contains("reason=verification_error"))
+        XCTAssertTrue(source.contains("private func hasSafeLegacyUnsignedFields(_ record: TrustRecord) -> Bool"))
+        XCTAssertTrue(source.contains("hasSafeLegacyUnsignedFields(record)"))
+
+        // 加载契约：单条不可验证的记录只跳过（skip-and-continue），绝不抛错中断，
+        // 否则第一条坏记录就会把整个 trust store 永久打死，撤销检查随之 fail open。
+        let verifierStart = try XCTUnwrap(
+            source.range(of: "private func verifiedTrustRecordsForLocalLoad(")
+        )
+        let verifierEnd = try XCTUnwrap(
+            source.range(
+                of: "private func retainDenyOnlyTombstoneIfNeeded(",
+                range: verifierStart.upperBound..<source.endIndex
+            )
+        )
+        let verifierBody = String(source[verifierStart.lowerBound..<verifierEnd.lowerBound])
+        XCTAssertTrue(verifierBody.contains(") async -> LocalLoadVerification"))
+        XCTAssertFalse(verifierBody.contains("async throws"))
+        XCTAssertFalse(verifierBody.contains("throw "))
+        XCTAssertTrue(verifierBody.contains("continue"))
+
+        // 无法本机验证的 tombstone（iCloud 异设备撤销）保留为仅拒绝记录，
+        // 并与已验证记录走同一条 revoke 优先的合并路径。
+        XCTAssertTrue(source.contains("retainDenyOnlyTombstoneIfNeeded(record, in: &verification, source: source)"))
+        XCTAssertTrue(source.contains("guard record.isTombstone else { return }"))
+        XCTAssertTrue(source.contains("for tombstone in verification.denyOnlyTombstones { merge(tombstone) }"))
+        XCTAssertTrue(source.contains("for record in verification.verifiedRecords { merge(record) }"))
+
+        // 可用性门：keychain 可读时必须提交 mergedCache；只有整库硬失败才置
+        // isLocalStoreAvailable = false，同步准入读取随之 fail closed。
+        XCTAssertTrue(source.contains("localCache = mergedCache"))
+        XCTAssertTrue(source.contains("private(set) var isLocalStoreAvailable = true"))
+        XCTAssertTrue(source.contains("isLocalStoreAvailable = false"))
+        XCTAssertTrue(source.contains("guard isLocalStoreAvailable else { return .quarantinedIdentity }"))
+        XCTAssertFalse(source.contains("loadFailure = .conflictResolutionFailed"))
+
+        // 单条 keychain item 的解码/账户错配错误按条跳过，整库查询失败仍是硬错误。
+        XCTAssertTrue(source.contains("return items.enumerated().compactMap { index, item in"))
+        XCTAssertTrue(source.contains("Skipped keychain trust item during local load"))
+        XCTAssertTrue(source.contains("reason=account_identity_mismatch"))
+        XCTAssertTrue(source.contains("Self.keychainAccount(account, matchesRecordDeviceId: record.deviceId)"))
+        XCTAssertFalse(source.contains("throw TrustSyncError.decodingError(\"Keychain item"))
+        XCTAssertFalse(source.contains("throw TrustSyncError.decodingError(\n                    \"Keychain trust record"))
+
+        XCTAssertTrue(source.contains("try Self.protectedFallbackRecordStore.loadOrThrow() ?? []"))
+        // Native enumeration completeness is exercised against real, isolated
+        // Keychain items in TrustRecordKeychainReadTests. The former source-text
+        // check for concatenating two fallback arrays missed an invalid query
+        // that returned zero records despite both fixtures being present.
+        XCTAssertFalse(source.contains("func copyDataItems"))
+        XCTAssertFalse(source.contains("for record in allRecords {"))
+        XCTAssertFalse(source.contains("if let record = try? decoder.decode(TrustRecord.self, from: data)"))
+    }
+
+    @MainActor
+    func testEvaluateCurrentPathBindingMatchesKnownAliasesBeforeDeclaringConflict() async throws {
+        let service = TrustSyncService(initialRecordsForTesting: [])
+        let suffix = UUID().uuidString.lowercased()
+        let aliasId = "bonjour:skybridge-\(suffix)@local."
+        let stableId = "id:\(suffix)"
+
+        _ = try await service.addTrustRecord(
+            TrustRecord(
+                deviceId: aliasId,
+                pubKeyFP: String(repeating: "4", count: 64),
+                publicKey: Data([0x01]),
+                protocolPublicKey: Data([0x02]),
+                protocolSigningAlgorithm: .ed25519,
+                protocolPublicKeyFingerprint: String(repeating: "a", count: 64),
+                signature: Data(),
+                deviceName: "Alias Matched Device",
+                currentDeviceId: stableId,
+                knownDeviceIds: [aliasId, stableId]
+            )
+        )
+
+        let conflict = service.evaluateCurrentPathBinding(
+            deviceId: stableId,
+            protocolPublicKeyFingerprint: String(repeating: "b", count: 64)
+        )
+
+        XCTAssertEqual(conflict, .identityConflict)
     }
     
  // MARK: - Property 12: Keychain Sync Attribute
@@ -290,18 +1124,134 @@ final class P2PTrustSyncTests: XCTestCase {
         XCTAssertFalse(record.isExpired,
                        "Fresh record should not be expired")
     }
+
+    func testCurrentPathTrustMetadataComputedProperties() {
+        let record = TrustRecord(
+            deviceId: "legacy-device-id",
+            pubKeyFP: String(repeating: "b", count: 64),
+            publicKey: Data(repeating: 0x02, count: 32),
+            protocolPublicKey: Data(repeating: 0x11, count: 32),
+            protocolSigningAlgorithm: .ed25519,
+            protocolPublicKeyFingerprint: String(repeating: "c", count: 64),
+            attestationLevel: .none,
+            signature: Data(repeating: 0xAA, count: 64),
+            currentDeviceId: "authoritative-device-id",
+            knownDeviceIds: ["authoritative-device-id", "legacy-device-id", "authoritative-device-id"],
+            lifecycleState: .reverificationRequired
+        )
+
+        XCTAssertEqual(record.currentDeviceId, "authoritative-device-id",
+                       "currentDeviceId should prefer current-path metadata")
+        XCTAssertEqual(record.knownDeviceIds, ["authoritative-device-id", "legacy-device-id"],
+                       "knownDeviceIds should be de-duplicated and sorted")
+        XCTAssertEqual(record.lifecycleState, .reverificationRequired,
+                       "lifecycleState should expose stored metadata")
+        XCTAssertEqual(record.currentPathAuthorityFingerprint, String(repeating: "c", count: 64),
+                       "currentPathAuthorityFingerprint should normalize lowercase metadata")
+    }
+
+    @MainActor
+    func testOnlyActiveLifecycleRecordsCanAuthorizeTrust() async throws {
+        let service = TrustSyncService(initialRecordsForTesting: [])
+        let suffix = UUID().uuidString.lowercased()
+        let activeId = "id:active-\(suffix)"
+        let quarantineId = "id:quarantine-\(suffix)"
+        let reverificationId = "id:reverify-\(suffix)"
+        let records = [
+            TrustRecord(
+                deviceId: activeId,
+                pubKeyFP: String(repeating: "1", count: 64),
+                publicKey: Data([0x01]),
+                signature: Data(),
+                lifecycleState: .active
+            ),
+            TrustRecord(
+                deviceId: quarantineId,
+                pubKeyFP: String(repeating: "2", count: 64),
+                publicKey: Data([0x02]),
+                signature: Data(),
+                lifecycleState: .quarantined
+            ),
+            TrustRecord(
+                deviceId: reverificationId,
+                pubKeyFP: String(repeating: "3", count: 64),
+                publicKey: Data([0x03]),
+                signature: Data(),
+                lifecycleState: .reverificationRequired
+            )
+        ]
+        for record in records {
+            _ = try await service.addTrustRecord(record)
+        }
+
+        XCTAssertTrue(service.isTrusted(deviceId: activeId))
+        XCTAssertTrue(service.isTrusted(pubKeyFP: String(repeating: "1", count: 64)))
+        XCTAssertFalse(service.isTrusted(deviceId: quarantineId))
+        XCTAssertFalse(service.isTrusted(pubKeyFP: String(repeating: "2", count: 64)))
+        XCTAssertFalse(service.isTrusted(deviceId: reverificationId))
+        XCTAssertFalse(service.isTrusted(pubKeyFP: String(repeating: "3", count: 64)))
+
+        XCTAssertTrue(records[0].isAuthenticationEligible)
+        XCTAssertFalse(records[1].isAuthenticationEligible)
+        XCTAssertFalse(records[2].isAuthenticationEligible)
+    }
+
+    func testProtocolIdentityPinsSeedLegacyAndRejectSameAlgorithmReplacement() throws {
+        let deviceId = "id:\(UUID().uuidString.lowercased())"
+        let legacyEd25519 = String(repeating: "a", count: 64)
+        let firstMLDSA = String(repeating: "b", count: 64)
+        let secondMLDSA = String(repeating: "c", count: 64)
+        let legacyRecord = TrustRecord(
+            deviceId: deviceId,
+            pubKeyFP: String(repeating: "d", count: 64),
+            publicKey: Data([0x01]),
+            protocolSigningAlgorithm: .ed25519,
+            protocolPublicKeyFingerprint: legacyEd25519,
+            signature: Data(),
+            currentDeviceId: deviceId,
+            knownDeviceIds: [deviceId]
+        )
+
+        XCTAssertEqual(legacyRecord.currentPathAuthorityFingerprints, [legacyEd25519])
+
+        let firstUpdated = TrustSyncService.resolvedAuthenticatedRemoteAuthorityRecord(
+            existingRecords: [legacyRecord],
+            deviceId: deviceId,
+            preferredCurrentDeviceId: deviceId,
+            knownDeviceIds: [deviceId],
+            protocolSigningAlgorithm: .mlDSA65,
+            protocolPublicKeyFingerprint: firstMLDSA,
+            pinSource: .pib1OperatorApproval
+        )
+        XCTAssertEqual(firstUpdated?.currentPathAuthorityFingerprints, [legacyEd25519, firstMLDSA])
+
+        XCTAssertNil(
+            TrustSyncService.resolvedAuthenticatedRemoteAuthorityRecord(
+                existingRecords: [try XCTUnwrap(firstUpdated)],
+                deviceId: deviceId,
+                preferredCurrentDeviceId: deviceId,
+                knownDeviceIds: [deviceId],
+                protocolSigningAlgorithm: .mlDSA65,
+                protocolPublicKeyFingerprint: secondMLDSA,
+                pinSource: .pib1OperatorApproval
+            ),
+            "Same-algorithm authority changes require explicit authenticated rotation"
+        )
+    }
     
  /// Test tombstone expiration
     func testTombstoneExpiration() {
- // Create tombstone with old revokedAt
+        let expiredAt = Date().addingTimeInterval(-31 * 24 * 60 * 60)
+ // Create tombstone with old signed update time
         let expiredTombstone = TrustRecord(
             deviceId: "expired-tombstone",
             pubKeyFP: String(repeating: "a", count: 64),
             publicKey: Data(repeating: 0x01, count: 32),
             attestationLevel: .none,
+            updatedAt: expiredAt,
             signature: Data(repeating: 0xAA, count: 64),
             recordType: .revoke,
-            revokedAt: Date().addingTimeInterval(-31 * 24 * 60 * 60) // 31 days ago
+            revokedAt: expiredAt
         )
         
  // Property: Old tombstone should be expired
@@ -380,6 +1330,37 @@ final class P2PTrustSyncTests: XCTestCase {
         XCTAssertEqual(revoked.publicKey, original.publicKey,
                        "publicKey must be preserved")
     }
+
+    func testRevokedMethodPreservesCurrentPathMetadata() {
+        let original = TrustRecord(
+            deviceId: "revoke-current-path",
+            pubKeyFP: String(repeating: "d", count: 64),
+            publicKey: Data(repeating: 0x04, count: 32),
+            protocolPublicKey: Data(repeating: 0x55, count: 32),
+            protocolSigningAlgorithm: .ed25519,
+            protocolPublicKeyFingerprint: String(repeating: "e", count: 64),
+            attestationLevel: .none,
+            signature: Data(repeating: 0x11, count: 64),
+            currentDeviceId: "stable-current-device-id",
+            knownDeviceIds: ["stable-current-device-id", "legacy-device-id"],
+            lifecycleState: .quarantined
+        )
+
+        let revoked = original.revoked(signature: Data(repeating: 0x22, count: 64))
+
+        XCTAssertEqual(revoked.protocolSigningAlgorithm, .ed25519,
+                       "Revoked record should preserve protocol signing algorithm")
+        XCTAssertEqual(revoked.protocolPublicKeyFingerprint, String(repeating: "e", count: 64),
+                       "Revoked record should preserve authoritative fingerprint")
+        XCTAssertEqual(revoked.protocolPublicKey, Data(repeating: 0x55, count: 32),
+                       "Revoked record should preserve authoritative public key")
+        XCTAssertEqual(revoked.currentDeviceIdMetadata, "stable-current-device-id",
+                       "Revoked record should preserve current device metadata")
+        XCTAssertEqual(Set(revoked.knownDeviceIdsMetadata ?? []), Set(["stable-current-device-id", "legacy-device-id"]),
+                       "Revoked record should preserve known device ids")
+        XCTAssertEqual(revoked.lifecycleStateMetadata, .revoked,
+                       "Revoked record should force lifecycle state to revoked")
+    }
     
  // MARK: - Helper Methods
     
@@ -414,6 +1395,43 @@ final class P2PTrustSyncTests: XCTestCase {
             deviceId: "test-device-5",
             deviceName: "iPhone 15 Pro"
         ))
+
+        records.append(TrustRecord(
+            deviceId: "test-device-6",
+            pubKeyFP: String(repeating: "f", count: 64),
+            publicKey: Data(repeating: 0x09, count: 32),
+            protocolPublicKey: Data(repeating: 0x42, count: 32),
+            protocolSigningAlgorithm: .ed25519,
+            protocolPublicKeyFingerprint: String(repeating: "1", count: 64),
+            attestationLevel: .none,
+            signature: Data(repeating: 0xAA, count: 64),
+            currentDeviceId: "test-device-6-current",
+            knownDeviceIds: ["test-device-6-current", "test-device-6-legacy"],
+            lifecycleState: .active
+        ))
+
+        let mlDSA87Key = Data(repeating: 0x87, count: 2_592)
+        records.append(TrustRecord(
+            deviceId: "test-device-7",
+            pubKeyFP: String(repeating: "7", count: 64),
+            publicKey: Data(),
+            protocolIdentityBindingsV2: [
+                ProtocolIdentityBindingV2(
+                    algorithm: .mlDSA87,
+                    publicKey: mlDSA87Key,
+                    fingerprint: ProtocolIdentityBinding.computeFingerprint(
+                        algorithm: .mlDSA87,
+                        publicKeyBytes: mlDSA87Key
+                    ),
+                    source: .authenticatedHandshake,
+                    approvedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                    generation: 1
+                )
+            ],
+            attestationLevel: .none,
+            signature: Data(repeating: 0xAA, count: 64),
+            lifecycleState: .active
+        ))
         
         return records
     }
@@ -444,4 +1462,24 @@ final class P2PTrustSyncTests: XCTestCase {
             deviceName: deviceName
         )
     }
+
+    private func readSource(_ relativePath: String) throws -> String {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        return try String(contentsOf: root.appendingPathComponent(relativePath), encoding: .utf8)
+    }
+}
+
+private struct LegacyTrustRecordFixture: Decodable {
+    enum LegacyProtocolSigningAlgorithm: String, Decodable {
+        case ed25519 = "Ed25519"
+        case mlDSA65 = "ML-DSA-65"
+    }
+
+    struct LegacyProtocolIdentityPin: Decodable {
+        let algorithm: LegacyProtocolSigningAlgorithm
+    }
+
+    let protocolPublicKey: Data?
+    let protocolSigningAlgorithm: LegacyProtocolSigningAlgorithm?
+    let protocolIdentityPins: [LegacyProtocolIdentityPin]?
 }

@@ -1,3 +1,8 @@
+// macOS-exclusive: built on macOS-only APIs (AppKit / IOKit / ScreenCaptureKit / CoreWLAN /
+// MetalFX / ServiceManagement / ApplicationServices / CoreGraphics display services).
+// Excluded from other platforms so SkyBridgeCore can be the single shared core for iOS as
+// well. No behaviour changes on macOS.
+#if os(macOS)
 import SwiftUI
 import Network
 import CryptoKit
@@ -497,6 +502,8 @@ public struct ConnectionDetailsView: View {
             return "pc"
         case .linux:
             return "server.rack"
+        case .unknown:
+            return "questionmark.circle"
         }
     }
     
@@ -776,4 +783,5 @@ struct ConnectionDetailsView_Previews: PreviewProvider {
         ConnectionDetailsView(device: P2PDevice.mockDevice)
     }
 }
+#endif
 #endif

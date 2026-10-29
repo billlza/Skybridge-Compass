@@ -1,3 +1,8 @@
+// macOS-exclusive: this file is built on frameworks that exist only on macOS
+// (AppKit / IOKit / ScreenCaptureKit / CoreWLAN / MetalFX / ServiceManagement /
+// ApplicationServices). It is excluded from other platforms so SkyBridgeCore can be
+// the single shared core for iOS as well. No behaviour changes on macOS.
+#if os(macOS)
 import Foundation
 import CoreWLAN
 import CoreBluetooth
@@ -35,31 +40,6 @@ public enum PermissionType: String, CaseIterable, Sendable {
     }
 }
 
-/// 权限状态枚举
-public enum PermissionStatus: String, Sendable {
-    case notDetermined = "未确定"
-    case denied = "已拒绝"
-    case authorized = "已授权"
-    case restricted = "受限制"
-    case unavailable = "不可用"
-    
-    public var isAuthorized: Bool {
-        return self == .authorized
-    }
-    
-    public var color: String {
-        switch self {
-        case .authorized:
-            return "green"
-        case .denied, .restricted:
-            return "red"
-        case .notDetermined:
-            return "orange"
-        case .unavailable:
-            return "gray"
-        }
-    }
-}
 
 /// 权限信息结构
 public struct PermissionInfo: Identifiable, Sendable {
@@ -99,6 +79,7 @@ public final class DevicePermissionManager: NSObject, ObservableObject, Sendable
     private let logger = Logger(subsystem: "com.skybridge.compass", category: "DevicePermissionManager")
     private var bluetoothManager: CBCentralManager?
     private let locationManager = CLLocationManager()
+    private var locationPermissionContinuations: [CheckedContinuation<Bool, Never>] = []
     
  // 并发安全队列
     private let permissionQueue = DispatchQueue(label: "com.skybridge.compass.permissions", qos: .userInitiated)
@@ -106,12 +87,11 @@ public final class DevicePermissionManager: NSObject, ObservableObject, Sendable
  // MARK: - 初始化
     public override init() {
         super.init()
-        
+        locationManager.delegate = self
+
  // ⚡ 完全异步初始化 - 不阻塞任何主线程操作
         Task { @MainActor [weak self] in
             guard let self else { return }
-            self.setupBluetoothManager()
-            try? await Task.sleep(nanoseconds: 500_000_000) // 延迟0.5秒
             self.checkAllPermissions()
         }
     }
@@ -230,7 +210,15 @@ public final class DevicePermissionManager: NSObject, ObservableObject, Sendable
     
  /// 检查WiFi权限
     private func checkWiFiPermission() async -> PermissionStatus {
- // 在macOS中，WiFi访问需要用户授权和位置权限
+ // 在 macOS 中，WiFi 扫描受位置权限约束；先看位置状态，再看接口能力。
+        let locationStatus = checkLocationPermission()
+        switch locationStatus {
+        case .authorized:
+            break
+        case .denied, .restricted, .notDetermined, .unavailable:
+            return locationStatus
+        }
+
         let client = CWWiFiClient.shared()
         let interface = client.interface()
         
@@ -243,24 +231,21 @@ public final class DevicePermissionManager: NSObject, ObservableObject, Sendable
     
  /// 检查蓝牙权限
     private func checkBluetoothPermission() -> PermissionStatus {
-        guard let manager = bluetoothManager else {
-            return .unavailable
-        }
-        
-        switch manager.state {
-        case .poweredOn:
-            return .authorized
-        case .poweredOff:
-            return .denied
-        case .unauthorized:
-            return .denied
-        case .unsupported:
-            return .unavailable
-        case .resetting:
+        guard !isRunningUnderUnitTests else {
             return .notDetermined
-        case .unknown:
+        }
+
+        switch CBManager.authorization {
+        case .allowedAlways:
+            return .authorized
+        case .denied:
+            return .denied
+        case .restricted:
+            return .restricted
+        case .notDetermined:
             return .notDetermined
         @unknown default:
+            logger.warning("检测到未知蓝牙授权状态，按 notDetermined 处理")
             return .notDetermined
         }
     }
@@ -271,7 +256,7 @@ public final class DevicePermissionManager: NSObject, ObservableObject, Sendable
         let authStatus = locationManager.authorizationStatus
         
         switch authStatus {
-        case .authorizedAlways:
+        case .authorizedAlways, .authorizedWhenInUse:
             return .authorized
         case .denied:
             return .denied
@@ -306,33 +291,60 @@ public final class DevicePermissionManager: NSObject, ObservableObject, Sendable
     
  /// 请求WiFi权限
     private func requestWiFiPermission() async -> Bool {
- // WiFi权限通常不需要特殊请求
         let status = await checkWiFiPermission()
-        return status.isAuthorized
+        switch status {
+        case .authorized:
+            return true
+        case .denied, .restricted, .unavailable:
+            return false
+        case .notDetermined:
+            let granted = await requestLocationPermission()
+            guard granted else { return false }
+            return (await checkWiFiPermission()).isAuthorized
+        }
     }
     
  /// 请求蓝牙权限
     private func requestBluetoothPermission() async -> Bool {
-        return await withCheckedContinuation { continuation in
- // 蓝牙权限会在CBCentralManager初始化时自动请求
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                let status = self.checkBluetoothPermission()
-                continuation.resume(returning: status.isAuthorized)
-            }
+        guard !isRunningUnderUnitTests else {
+            logger.info("单元测试环境：跳过蓝牙权限请求")
+            return false
         }
+
+        guard hasBluetoothUsageDescription else {
+            logger.error("无法请求蓝牙权限：Info.plist 缺少 NSBluetoothAlwaysUsageDescription")
+            return false
+        }
+
+ // 蓝牙权限会在 CBCentralManager 初始化时自动请求
+        setupBluetoothManagerIfNeeded()
+
+ // 给系统权限弹窗状态一点传播时间
+        for _ in 0..<10 {
+            let status = checkBluetoothPermission()
+            if status != .notDetermined {
+                return status.isAuthorized
+            }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+
+        return checkBluetoothPermission().isAuthorized
     }
     
  /// 请求位置权限
     private func requestLocationPermission() async -> Bool {
- // macOS中位置权限请求
-        let manager = CLLocationManager()
-        manager.requestWhenInUseAuthorization()
-        
- // 等待权限结果
-        return await withCheckedContinuation { continuation in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                let status = self.checkLocationPermission()
-                continuation.resume(returning: status.isAuthorized)
+        let currentStatus = checkLocationPermission()
+        switch currentStatus {
+        case .authorized:
+            return true
+        case .denied, .restricted, .unavailable:
+            return false
+        case .notDetermined:
+            return await withCheckedContinuation { continuation in
+                self.locationPermissionContinuations.append(continuation)
+                if self.locationPermissionContinuations.count == 1 {
+                    self.locationManager.requestWhenInUseAuthorization()
+                }
             }
         }
     }
@@ -368,8 +380,41 @@ public final class DevicePermissionManager: NSObject, ObservableObject, Sendable
  // MARK: - 辅助方法
     
  /// 设置蓝牙管理器
-    private func setupBluetoothManager() {
+    private func setupBluetoothManagerIfNeeded() {
+        guard bluetoothManager == nil else { return }
+        guard !isRunningUnderUnitTests else {
+            logger.info("单元测试环境：跳过蓝牙管理器初始化")
+            return
+        }
+        guard hasBluetoothUsageDescription else {
+            logger.error("跳过蓝牙管理器初始化：Info.plist 缺少蓝牙用途描述，避免触发 TCC 崩溃")
+            return
+        }
         bluetoothManager = CBCentralManager(delegate: self, queue: nil)
+    }
+
+    private var hasBluetoothUsageDescription: Bool {
+        let candidateKeys = [
+            "NSBluetoothAlwaysUsageDescription",
+            "NSBluetoothPeripheralUsageDescription"
+        ]
+
+        return candidateKeys.contains { key in
+            guard let value = Bundle.main.object(forInfoDictionaryKey: key) as? String else {
+                return false
+            }
+            return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
+    private var isRunningUnderUnitTests: Bool {
+        #if DEBUG || SKYBRIDGE_TESTING
+        return ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+            || NSClassFromString("XCTestCase") != nil
+            || NSClassFromString("XCTest") != nil
+        #else
+        return false
+        #endif
     }
     
  /// 获取权限摘要
@@ -396,9 +441,34 @@ extension DevicePermissionManager: CBCentralManagerDelegate {
     }
 }
 
+// MARK: - CLLocationManagerDelegate
+extension DevicePermissionManager: CLLocationManagerDelegate {
+    nonisolated public func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        _ = manager
+        Task { @MainActor [weak self] in
+            self?.handleLocationAuthorizationChange()
+        }
+    }
+
+    nonisolated public func locationManager(_ manager: CLLocationManager, didChangeAuthorization status: CLAuthorizationStatus) {
+        _ = manager
+        _ = status
+        Task { @MainActor [weak self] in
+            self?.handleLocationAuthorizationChange()
+        }
+    }
+}
+
 // MARK: - 权限帮助器
 extension DevicePermissionManager {
-    
+    private func handleLocationAuthorizationChange() {
+        let isAuthorized = checkLocationPermission().isAuthorized
+        let continuations = locationPermissionContinuations
+        locationPermissionContinuations.removeAll()
+        continuations.forEach { $0.resume(returning: isAuthorized) }
+        checkAllPermissions()
+    }
+
  /// 权限状态描述
     public func statusDescription(for type: PermissionType) -> String {
         guard let permission = permissions.first(where: { $0.type == type }) else {
@@ -439,3 +509,4 @@ extension DevicePermissionManager {
         }
     }
 }
+#endif

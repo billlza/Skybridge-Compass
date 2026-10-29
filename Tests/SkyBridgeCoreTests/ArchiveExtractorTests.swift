@@ -121,6 +121,77 @@ struct ArchiveTestGenerator {
         try data.write(to: fileURL)
         return fileURL
     }
+
+    static func createTraversalZip(
+        in directory: URL,
+        name: String = "traversal.zip"
+    ) throws -> URL {
+        let script = """
+import pathlib
+import sys
+import zipfile
+
+archive = pathlib.Path(sys.argv[1])
+with zipfile.ZipFile(archive, "w") as zf:
+    zf.writestr("../outside/pwned.txt", "owned")
+"""
+
+        let zipURL = directory.appendingPathComponent(name)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = ["-", zipURL.path]
+        let stdin = Pipe()
+        process.standardInput = stdin
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        try process.run()
+        stdin.fileHandleForWriting.write(Data(script.utf8))
+        try? stdin.fileHandleForWriting.close()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            throw NSError(domain: "ArchiveTestGenerator", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to create traversal ZIP"])
+        }
+
+        return zipURL
+    }
+
+    static func createSymlinkZip(
+        in directory: URL,
+        name: String = "symlink.zip"
+    ) throws -> URL {
+        let stagingDir = directory.appendingPathComponent("staging_symlink_\(UUID().uuidString)")
+        let outsideDir = directory.appendingPathComponent("outside_symlink_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outsideDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: stagingDir)
+            try? FileManager.default.removeItem(at: outsideDir)
+        }
+
+        let outsideFile = outsideDir.appendingPathComponent("secret.txt")
+        try Data("secret".utf8).write(to: outsideFile)
+        let symlinkURL = stagingDir.appendingPathComponent("link.txt")
+        try FileManager.default.createSymbolicLink(at: symlinkURL, withDestinationURL: URL(fileURLWithPath: "../\(outsideDir.lastPathComponent)/secret.txt"))
+
+        let zipURL = directory.appendingPathComponent(name)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
+        process.arguments = ["-y", "-q", zipURL.path, "link.txt"]
+        process.currentDirectoryURL = stagingDir
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        try process.run()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            throw NSError(domain: "ArchiveTestGenerator", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed to create symlink ZIP"])
+        }
+
+        return zipURL
+    }
 }
 
 // MARK: - ArchiveFormat Detection Tests
@@ -573,6 +644,39 @@ final class ArchiveExtractorLimitsTests: XCTestCase {
             )
         }
  // If it completed, that's also acceptable (system was fast enough)
+    }
+
+    func testRejectsUnsafeTraversalEntryPaths() async throws {
+        let zipURL = try ArchiveTestGenerator.createTraversalZip(in: tempDirectory)
+        let extractor = ArchiveExtractor(policy: .default)
+        let destDir = tempDirectory.appendingPathComponent("traversal_extracted")
+
+        let result = await extractor.extract(from: zipURL, to: destDir)
+
+        XCTAssertTrue(result.aborted, "Traversal entries should be rejected")
+        XCTAssertEqual(result.abortReason, .unsafePath, "Traversal entries should fail with unsafePath")
+        XCTAssertTrue(result.extractedURLs.isEmpty, "Unsafe archives should not yield extracted files")
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: destDir.appendingPathComponent("outside/pwned.txt").path),
+            "Unsafe traversal entry must not be written into the destination"
+        )
+    }
+
+    func testSymlinkEntriesAreMaterializedAsRegularFiles() async throws {
+        let zipURL = try ArchiveTestGenerator.createSymlinkZip(in: tempDirectory)
+        let extractor = ArchiveExtractor(policy: .default)
+        let destDir = tempDirectory.appendingPathComponent("symlink_extracted")
+
+        let result = await extractor.extract(from: zipURL, to: destDir)
+
+        XCTAssertFalse(result.aborted, "Symlink entries should be extracted safely")
+        XCTAssertEqual(result.extractedURLs.count, 1, "Expected a single extracted entry")
+
+        let extractedURL = try XCTUnwrap(result.extractedURLs.first)
+        let values = try extractedURL.resourceValues(forKeys: [.isSymbolicLinkKey])
+        XCTAssertEqual(values.isSymbolicLink, false, "Symlink entries should not be recreated as symlinks")
+        let content = try String(contentsOf: extractedURL, encoding: .utf8)
+        XCTAssertFalse(content.isEmpty, "Symlink payload should be materialized as inert file content")
     }
 }
 

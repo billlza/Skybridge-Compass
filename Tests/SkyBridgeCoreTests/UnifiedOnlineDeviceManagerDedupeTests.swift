@@ -1,0 +1,3461 @@
+import XCTest
+@testable import SkyBridgeCore
+
+@available(macOS 14.0, iOS 17.0, *)
+final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
+    private let liveProtocolFingerprint = "336b022ee58b653f08569a1be0e32a740da127882b79897589e75a95f0e2b94c"
+
+    @MainActor
+    func testNetworkLocalAuthoritySurvivesUnifiedMergeAndRecompute() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let deviceId = "550e8400-e29b-41d4-a716-446655440099"
+        let fingerprint = String(repeating: "9", count: 64)
+        let localDiscovery = DiscoveredDevice(
+            id: UUID(),
+            name: "Local Authority Fixture",
+            ipv4: "192.0.2.10",
+            ipv6: nil,
+            platformName: nil,
+            services: [BonjourInteropContract.controlServiceType],
+            portMap: [BonjourInteropContract.controlServiceType: 9_527],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:\(deviceId)",
+            routeIdentifiers: ["bonjour:Local Authority Fixture@local."],
+            source: .skybridgeBonjour,
+            isLocalDevice: true,
+            deviceId: deviceId,
+            pubKeyFP: fingerprint
+        )
+        XCTAssertEqual(localDiscovery.deviceType, .unknown)
+
+        manager.replaceDevicesForTesting([])
+        defer {
+            manager.applyNetworkDeviceUpdateForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+
+        manager.applyNetworkDeviceUpdateForTesting([localDiscovery])
+        let merged = try XCTUnwrap(manager.device(withIdentifier: "id:\(deviceId)"))
+        XCTAssertTrue(merged.isLocalDevice)
+
+        manager.recomputeLocalFlagsForTesting()
+        XCTAssertTrue(
+            try XCTUnwrap(manager.device(withIdentifier: "id:\(deviceId)")).isLocalDevice
+        )
+    }
+
+    @MainActor
+    func testMACOnlyNetworkLocalAuthoritySurvivesMergeAndRecompute() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let macAddress = "02:00:00:00:00:99"
+        let localDiscovery = DiscoveredDevice(
+            id: UUID(),
+            name: "Layer Zero Fixture",
+            ipv4: "192.0.2.11",
+            ipv6: nil,
+            services: [BonjourInteropContract.controlServiceType],
+            portMap: [BonjourInteropContract.controlServiceType: 9_527],
+            connectionTypes: [.wifi],
+            source: .skybridgeBonjour,
+            isLocalDevice: true,
+            macSet: [macAddress]
+        )
+        XCTAssertEqual(localDiscovery.deviceType, .unknown)
+
+        manager.replaceDevicesForTesting([])
+        defer {
+            manager.applyNetworkDeviceUpdateForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+
+        manager.applyNetworkDeviceUpdateForTesting([localDiscovery])
+        XCTAssertTrue(
+            try XCTUnwrap(manager.device(withIdentifier: "mac:\(macAddress)")).isLocalDevice
+        )
+
+        manager.recomputeLocalFlagsForTesting()
+        XCTAssertTrue(
+            try XCTUnwrap(manager.device(withIdentifier: "mac:\(macAddress)")).isLocalDevice
+        )
+    }
+
+    func testRecentStableIdentityCollapsesWhenStrongRecordExists() {
+        let recent = makeDevice(
+            name: "MacBook Pro",
+            uniqueIdentifier: "recent:id:peer-1",
+            status: .connected,
+            lastConnectedAt: Date()
+        )
+        let strong = makeDevice(
+            name: "MacBook Pro",
+            uniqueIdentifier: "id:peer-1",
+            status: .connected,
+            lastConnectedAt: Date(),
+            isConnectable: true
+        )
+
+        XCTAssertTrue(
+            UnifiedOnlineDeviceManager.shouldCollapseRecentDevice(recent, against: [strong])
+        )
+    }
+
+    func testRecentStableUUIDCollapsesEvenWhenDisplayNameDiffers() {
+        let peerId = "550E8400-E29B-41D4-A716-446655440001"
+        let recent = makeDevice(
+            name: "peer:fe80::c55:97f0:7246:915",
+            uniqueIdentifier: "recent:id:\(peerId)",
+            status: .connected,
+            lastConnectedAt: Date()
+        )
+        let strong = makeDevice(
+            name: "Ziang的iPhone 16 Pro",
+            uniqueIdentifier: "id:\(peerId)",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true
+        )
+
+        XCTAssertTrue(
+            UnifiedOnlineDeviceManager.shouldCollapseRecentDevice(recent, against: [strong])
+        )
+    }
+
+    @MainActor
+    func testRouteCoalescingKeepsLiveProtocolIdentityOverNewerStaleStableId() {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let bonjourRoute = "bonjour:iPad_Pro_11-inch__M4__local."
+        let stale = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "id:07CB9A6E-7492-4680-9DD7-F37DC8568891",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            routeIdentifiers: [bonjourRoute],
+            platformName: "ipados",
+            modelName: "iPad_Pro_11-inch__M4_",
+            lastSeen: Date().addingTimeInterval(60)
+        )
+        let live = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "id:9DDF920E-D7C4-51F2-9C94-67FF629BDF04",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            routeIdentifiers: [bonjourRoute],
+            platformName: "ipados",
+            modelName: "iPad_Pro_11-inch__M4_",
+            protocolFingerprint: liveProtocolFingerprint
+        )
+        manager.replaceNetworkDiscoveredDevicesForTesting([discoveryObservation(for: live)])
+        defer {
+            manager.replaceNetworkDiscoveredDevicesForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+
+        manager.replaceDevicesForTesting([stale, live])
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        XCTAssertEqual(
+            manager.onlineDevices.first?.uniqueIdentifier,
+            "id:9DDF920E-D7C4-51F2-9C94-67FF629BDF04"
+        )
+        XCTAssertEqual(
+            manager.onlineDevices.first?.protocolFingerprint,
+            liveProtocolFingerprint
+        )
+    }
+
+    func testRecentPeerAddressCollapsesWhenReachableBonjourRecordExists() {
+        let recent = makeDevice(
+            name: "peer:192.168.31.20",
+            uniqueIdentifier: "recent:peer:192.168.31.20",
+            status: .connected,
+            lastConnectedAt: Date()
+        )
+        let bonjour = makeDevice(
+            name: "Mac mini",
+            uniqueIdentifier: "bonjour:Mac mini@local.",
+            ipv4: "192.168.31.20",
+            status: .online,
+            lastConnectedAt: Date(),
+            isConnectable: true
+        )
+
+        XCTAssertTrue(
+            UnifiedOnlineDeviceManager.shouldCollapseRecentDevice(recent, against: [bonjour])
+        )
+    }
+
+    @MainActor
+    func testCrossNetworkSessionRouteDoesNotCreatePersistentRecentDevice() {
+        UserDefaults.standard.removeObject(forKey: "skybridge.persistedDevices")
+        let manager = UnifiedOnlineDeviceManager.shared
+        manager.replaceDevicesForTesting([])
+        defer {
+            manager.replaceDevicesForTesting([])
+            UserDefaults.standard.removeObject(forKey: "skybridge.persistedDevices")
+        }
+
+        manager.markDeviceAsConnected(
+            peerId: "cross-network:session-123456789",
+            displayName: "Remote Device",
+            cryptoKind: "Current Path",
+            suite: "X-Wing",
+            guardStatus: "跨网已连接"
+        )
+
+        XCTAssertTrue(manager.onlineDevices.isEmpty)
+        XCTAssertNil(UserDefaults.standard.data(forKey: "skybridge.persistedDevices"))
+    }
+
+    @MainActor
+    func testLoadPersistedDevicesScrubsCrossNetworkRecentRowsAndRewritesStorage() throws {
+        UserDefaults.standard.removeObject(forKey: "skybridge.persistedDevices")
+        let manager = UnifiedOnlineDeviceManager.shared
+        let staleCrossNetworkRecent = makeDevice(
+            name: "Remote Device",
+            uniqueIdentifier: "recent:peer:cross-network:session-123",
+            status: .connected,
+            lastConnectedAt: Date()
+        )
+        let stable = makeDevice(
+            name: "Stable iPad",
+            uniqueIdentifier: "id:550e8400-e29b-41d4-a716-446655440001",
+            status: .connected,
+            lastConnectedAt: Date(),
+            routeIdentifiers: [
+                "bonjour:Stable iPad@local.",
+                "peer:cross-network:session-123"
+            ]
+        )
+        defer {
+            manager.replaceDevicesForTesting([])
+            UserDefaults.standard.removeObject(forKey: "skybridge.persistedDevices")
+        }
+
+        try writePersistedDevicesForTesting([staleCrossNetworkRecent, stable], schemaVersion: 2)
+        manager.reloadPersistedDevicesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.map(\.uniqueIdentifier), [stable.uniqueIdentifier])
+        let persisted = try persistedDevicesForTesting()
+        XCTAssertEqual(persisted.map(\.uniqueIdentifier), [stable.uniqueIdentifier])
+        XCTAssertEqual(persisted.first?.routeIdentifiers, ["bonjour:Stable iPad@local."])
+    }
+
+    @MainActor
+    func testPersistenceKeepsNamedConnectedAndDropsUnknownOrNeverConnected() throws {
+        UserDefaults.standard.removeObject(forKey: "skybridge.persistedDevices")
+        let manager = UnifiedOnlineDeviceManager.shared
+        let namedConnected = makeDevice(
+            name: "Ziang的Mac",
+            uniqueIdentifier: "id:aaaaaaaa-0000-4000-8000-000000000001",
+            status: .offline,
+            lastConnectedAt: Date()
+        )
+        // 无名「未知」设备（即便有连接时间）不应被记住——这是历史堆积的离线幽灵。
+        let unknownConnected = makeDevice(
+            name: "Unknown Device",
+            uniqueIdentifier: "id:bbbbbbbb-0000-4000-8000-000000000002",
+            status: .offline,
+            lastConnectedAt: Date()
+        )
+        // 从未连接的被动发现不应被记住。
+        let neverConnected = makeDevice(
+            name: "Passing iPhone",
+            uniqueIdentifier: "id:cccccccc-0000-4000-8000-000000000003",
+            status: .offline,
+            lastConnectedAt: nil
+        )
+        defer {
+            manager.replaceDevicesForTesting([])
+            UserDefaults.standard.removeObject(forKey: "skybridge.persistedDevices")
+        }
+
+        try writePersistedDevicesForTesting(
+            [namedConnected, unknownConnected, neverConnected],
+            schemaVersion: 2
+        )
+        manager.reloadPersistedDevicesForTesting()
+
+        XCTAssertEqual(
+            manager.onlineDevices.map(\.uniqueIdentifier),
+            [namedConnected.uniqueIdentifier]
+        )
+        let persisted = try persistedDevicesForTesting()
+        XCTAssertEqual(persisted.map(\.uniqueIdentifier), [namedConnected.uniqueIdentifier])
+    }
+
+    @MainActor
+    func testClearOfflineDevicesRemovesUnauthorizedOfflineAndKeepsOnline() {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let offlineNamed = makeDevice(
+            name: "Old Offline Mac",
+            uniqueIdentifier: "id:dddddddd-0000-4000-8000-000000000004",
+            status: .offline,
+            lastConnectedAt: Date()
+        )
+        let onlineDevice = makeDevice(
+            name: "Live iPad",
+            uniqueIdentifier: "id:eeeeeeee-0000-4000-8000-000000000005",
+            status: .online,
+            lastConnectedAt: nil
+        )
+        defer {
+            manager.replaceDevicesForTesting([])
+            UserDefaults.standard.removeObject(forKey: "skybridge.persistedDevices")
+        }
+
+        manager.replaceDevicesForTesting([offlineNamed, onlineDevice])
+        let removed = manager.clearOfflineDevices()
+
+        XCTAssertEqual(removed, 1)
+        XCTAssertEqual(
+            manager.onlineDevices.map(\.uniqueIdentifier),
+            [onlineDevice.uniqueIdentifier]
+        )
+    }
+
+    @MainActor
+    func testLegacyPersistedDeviceScrubMigratesToV2WithoutCrossNetworkRows() throws {
+        UserDefaults.standard.removeObject(forKey: "skybridge.persistedDevices")
+        let manager = UnifiedOnlineDeviceManager.shared
+        let staleRecent = makeDevice(
+            name: "Remote Device",
+            uniqueIdentifier: "recent:cross-network:session-456",
+            status: .connected,
+            lastConnectedAt: Date()
+        )
+        let stable = makeDevice(
+            name: "Stable Mac",
+            uniqueIdentifier: "id:650e8400-e29b-41d4-a716-446655440001",
+            status: .connected,
+            lastConnectedAt: Date()
+        )
+        defer {
+            manager.replaceDevicesForTesting([])
+            UserDefaults.standard.removeObject(forKey: "skybridge.persistedDevices")
+        }
+
+        let legacyData = try JSONEncoder().encode([staleRecent, stable])
+        UserDefaults.standard.set(legacyData, forKey: "skybridge.persistedDevices")
+        manager.reloadPersistedDevicesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.map(\.uniqueIdentifier), [stable.uniqueIdentifier])
+        let persisted = try persistedDevicesForTesting()
+        XCTAssertEqual(persisted.map(\.uniqueIdentifier), [stable.uniqueIdentifier])
+        XCTAssertNotNil(UserDefaults.standard.data(forKey: "skybridge.persistedDevices"))
+    }
+
+    @MainActor
+    func testStableOnlineDeviceUsesPreservedBonjourRouteAliasForConnectability() {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let stableBonjour = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "id:07CB9A6E-1111-4222-8333-123456789ABC",
+            ipv4: nil,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            routeIdentifiers: ["bonjour:Ziang的iPad@local."],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
+        )
+
+        XCTAssertTrue(manager.hasResolvedConnectableControlRoute(for: stableBonjour))
+    }
+
+    @MainActor
+    func testStableOnlineDeviceWithoutHostOrBonjourRouteIsNotConnectableFromPortOnly() {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let stableWithoutRoute = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "id:07CB9A6E-1111-4222-8333-123456789ABC",
+            ipv4: nil,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            routeIdentifiers: [],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro"
+        )
+
+        XCTAssertFalse(manager.hasResolvedConnectableControlRoute(for: stableWithoutRoute))
+    }
+
+    @MainActor
+    func testStableOnlineDeviceRejectsMalformedBonjourRouteAlias() {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let malformedRoute = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "id:07CB9A6E-1111-4222-8333-123456789ABC",
+            ipv4: nil,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            routeIdentifiers: ["bonjour:id:07CB9A6E-1111-4222-8333-123456789ABC@local."],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro"
+        )
+
+        XCTAssertFalse(manager.hasResolvedConnectableControlRoute(for: malformedRoute))
+    }
+
+    @MainActor
+    func testTrustedStableIdentityAliasesCoalesceAndPreferConnectableRoute() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let oldStableId = "07CB9A6E-1111-4222-8333-123456789ABC"
+        let currentStableId = "9F9D4114-0EA8-4856-A5B1-6912B2EE2542"
+        let staleCloudAlias = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "id:\(oldStableId)",
+            ipv4: nil,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: false,
+            connectionTypes: [],
+            services: [],
+            portMap: [:],
+            routeIdentifiers: [],
+            sources: [.skybridgeCloud],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro"
+        )
+        let liveStableRoute = makeDevice(
+            name: "iPad",
+            uniqueIdentifier: "id:\(currentStableId)",
+            ipv4: "192.168.0.104",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 51776],
+            routeIdentifiers: ["bonjour:iPad@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
+        )
+        let trustRecord = TrustRecord(
+            deviceId: "id:\(currentStableId)",
+            pubKeyFP: String(repeating: "e", count: 64),
+            publicKey: Data([0x04]),
+            kemPublicKeys: nil,
+            capabilities: ["trusted", "declaredDeviceId=\(currentStableId)"],
+            signature: Data(),
+            deviceName: "iPad",
+            currentDeviceId: "id:\(currentStableId)",
+            knownDeviceIds: ["id:\(oldStableId)", "id:\(currentStableId)"]
+        )
+        let previousTrustRecords = TrustSyncService.shared.activeTrustRecords
+        TrustSyncService.shared.activeTrustRecords = [trustRecord]
+        manager.replaceDevicesForTesting([staleCloudAlias, liveStableRoute])
+        defer {
+            TrustSyncService.shared.activeTrustRecords = previousTrustRecords
+            manager.replaceDevicesForTesting([])
+        }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertEqual(resolved.uniqueIdentifier, "id:\(currentStableId)")
+        XCTAssertEqual(resolved.ipv4, "192.168.0.104")
+        XCTAssertTrue(resolved.sources.contains(.skybridgeCloud))
+        XCTAssertTrue(resolved.sources.contains(.skybridgeBonjour))
+        XCTAssertTrue(manager.hasResolvedConnectableControlRoute(for: resolved))
+    }
+
+    @MainActor
+    func testCloudHeartbeatOnlyRowDoesNotRemainConnectableFromPersistedState() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let cloudOnly = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "serial:icloud-ipad",
+            ipv4: nil,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [],
+            services: [],
+            portMap: [:],
+            routeIdentifiers: [],
+            sources: [.skybridgeCloud],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro"
+        )
+        manager.replaceDevicesForTesting([cloudOnly])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertFalse(
+            resolved.isConnectable,
+            "Apple mobile endpoints without a resolved positive control port must stay non-connectable."
+        )
+        XCTAssertFalse(manager.hasResolvedConnectableControlRoute(for: resolved))
+    }
+
+    @MainActor
+    func testLinkLocalIPv4DoesNotCreateDirectControlRoute() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let linkLocalOnly = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "id:51D74800-4C6F-41AA-9F73-711751AF0B56",
+            ipv4: "169.254.185.245",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.usb, .wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            routeIdentifiers: [],
+            sources: [.skybridgeCloud],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro"
+        )
+        let discovered = DiscoveredDevice(
+            id: UUID(),
+            name: "Ziang的iPad",
+            ipv4: "169.254.185.245",
+            ipv6: nil,
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            connectionTypes: [.usb],
+            uniqueIdentifier: "host:169.254.185.245"
+        )
+        manager.replaceDevicesForTesting([linkLocalOnly])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertFalse(UnifiedOnlineDeviceManager.hasResolvedSkyBridgeControlRoute(discovered))
+        XCTAssertFalse(manager.hasResolvedConnectableControlRoute(for: resolved))
+    }
+
+    @MainActor
+    func testLinkLocalBonjourOnlineDeviceDoesNotRemainConnectableByServiceNameOnly() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let staleBonjour = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "id:51D74800-4C6F-41AA-9F73-711751AF0B56",
+            ipv4: "169.254.185.245",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.usb, .wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            routeIdentifiers: ["bonjour:Ziang的iPad@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
+        )
+        manager.replaceDevicesForTesting([staleBonjour])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertFalse(resolved.isConnectable)
+        XCTAssertFalse(manager.hasResolvedConnectableControlRoute(for: resolved))
+    }
+
+    @MainActor
+    func testLiveDiscoveredCandidateMakesStaleAppleMobilePresentationConnectable() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let bonjourRoute = "bonjour:iPad_Pro_11-inch__M4__local."
+        let stalePresentation = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "id:07CB9A6E-7492-4680-9DD7-F37DC8568891",
+            ipv4: "192.168.0.104",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: false,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            routeIdentifiers: [bonjourRoute],
+            sources: [.skybridgeBonjour],
+            platformName: "ipados",
+            osVersion: "27.0",
+            modelName: "iPad_Pro_11-inch__M4_"
+        )
+        let liveCandidate = DiscoveredDevice(
+            id: UUID(),
+            name: "iPad_Pro_11-inch__M4_",
+            ipv4: nil,
+            ipv6: nil,
+            platformName: "ipados",
+            osVersion: "27.0",
+            modelName: "iPad_Pro_11-inch__M4_",
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:9DDF920E-D7C4-51F2-9C94-67FF629BDF04",
+            routeIdentifiers: [bonjourRoute],
+            deviceId: "9DDF920E-D7C4-51F2-9C94-67FF629BDF04",
+            pubKeyFP: liveProtocolFingerprint
+        )
+        manager.replaceDevicesForTesting([stalePresentation])
+        manager.replaceNetworkDiscoveredDevicesForTesting([liveCandidate])
+        manager.recomputeDeviceStatusesForTesting()
+        defer {
+            manager.replaceNetworkDiscoveredDevicesForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertFalse(resolved.isConnectable)
+        XCTAssertEqual(manager.resolvedConnectableDiscoveredCandidates(for: resolved, limit: 1).count, 1)
+        XCTAssertTrue(manager.hasResolvedConnectableControlRoute(for: resolved))
+    }
+
+    @MainActor
+    func testLiveDiscoveredAppleMobileCandidateWithoutPortBlocksStalePresentationHost() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let bonjourRoute = "bonjour:iPad_Pro_11-inch__M4__local."
+        let stableDeviceId = "9DDF920E-D7C4-51F2-9C94-67FF629BDF04"
+        let stalePresentation = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "id:\(stableDeviceId)",
+            ipv4: "192.168.0.104",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            routeIdentifiers: [bonjourRoute],
+            sources: [.skybridgeBonjour],
+            platformName: "ipados",
+            osVersion: "27.0",
+            modelName: "iPad_Pro_11-inch__M4_",
+            protocolFingerprint: liveProtocolFingerprint
+        )
+        let liveCandidate = DiscoveredDevice(
+            id: UUID(),
+            name: "iPad_Pro_11-inch__M4_",
+            ipv4: "192.168.0.107",
+            ipv6: nil,
+            platformName: "ipados",
+            osVersion: "27.0",
+            modelName: "iPad_Pro_11-inch__M4_",
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 0],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:\(stableDeviceId)",
+            routeIdentifiers: [bonjourRoute],
+            deviceId: stableDeviceId,
+            pubKeyFP: liveProtocolFingerprint
+        )
+        manager.replaceDevicesForTesting([stalePresentation])
+        manager.replaceNetworkDiscoveredDevicesForTesting([liveCandidate])
+        manager.recomputeDeviceStatusesForTesting()
+        defer {
+            manager.replaceNetworkDiscoveredDevicesForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        let connectable = manager.resolvedConnectableDiscoveredCandidates(for: resolved, limit: 1)
+
+        XCTAssertTrue(manager.hasUnresolvedLiveSkyBridgeControlRoute(for: resolved))
+        XCTAssertEqual(connectable.count, 0)
+        XCTAssertFalse(manager.hasResolvedConnectableControlRoute(for: resolved))
+    }
+
+    @MainActor
+    func testLiveDiscoveredAppleMobileCandidateWithoutControlPortDoesNotEnableStalePresentation() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let bonjourRoute = "bonjour:iPad_Pro_11-inch__M4__local."
+        let stalePresentation = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "id:07CB9A6E-7492-4680-9DD7-F37DC8568891",
+            ipv4: "192.168.0.104",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 0],
+            routeIdentifiers: [bonjourRoute],
+            sources: [.skybridgeBonjour],
+            platformName: "ipados",
+            osVersion: "27.0",
+            modelName: "iPad_Pro_11-inch__M4_",
+            protocolFingerprint: liveProtocolFingerprint
+        )
+        let liveCandidate = DiscoveredDevice(
+            id: UUID(),
+            name: "iPad_Pro_11-inch__M4_",
+            ipv4: nil,
+            ipv6: nil,
+            platformName: "ipados",
+            osVersion: "27.0",
+            modelName: "iPad_Pro_11-inch__M4_",
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 0],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:9DDF920E-D7C4-51F2-9C94-67FF629BDF04",
+            routeIdentifiers: [bonjourRoute],
+            deviceId: "9DDF920E-D7C4-51F2-9C94-67FF629BDF04",
+            pubKeyFP: liveProtocolFingerprint
+        )
+        manager.replaceDevicesForTesting([stalePresentation])
+        manager.replaceNetworkDiscoveredDevicesForTesting([liveCandidate])
+        manager.recomputeDeviceStatusesForTesting()
+        defer {
+            manager.replaceNetworkDiscoveredDevicesForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertFalse(
+            resolved.isConnectable,
+            "resolved isConnectable=\(resolved.isConnectable) portMap=\(resolved.portMap) platform=\(resolved.platformName ?? "-") model=\(resolved.modelName ?? "-") fingerprint=\(resolved.protocolFingerprint ?? "-") hasRoute=\(manager.hasResolvedConnectableControlRoute(for: resolved))"
+        )
+        XCTAssertEqual(manager.resolvedConnectableDiscoveredCandidates(for: resolved, limit: 1).count, 0)
+        XCTAssertFalse(manager.hasResolvedConnectableControlRoute(for: resolved))
+    }
+
+    @MainActor
+    func testRoutableAppleMobileBonjourWithoutProtocolFingerprintIsNotConnectable() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let staleBonjour = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "id:07CB9A6E-7492-4680-9DD7-F37DC8568891",
+            ipv4: "192.168.0.104",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            routeIdentifiers: ["bonjour:iPad_Pro_11-inch__M4__local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro"
+        )
+        manager.replaceDevicesForTesting([staleBonjour])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertFalse(resolved.isConnectable)
+        XCTAssertFalse(manager.hasResolvedConnectableControlRoute(for: resolved))
+    }
+
+    @MainActor
+    func testMergedAppleMobileRouteReplacesStaleLinkLocalIPv4WithLANIPv4() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let staleCloud = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "serial:icloud-device-chain-ipad",
+            ipv4: "169.254.185.245",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: false,
+            connectionTypes: [],
+            services: [],
+            portMap: [:],
+            routeIdentifiers: [],
+            sources: [.skybridgeCloud],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro"
+        )
+        let liveBonjour = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "bonjour:Ziang的iPad@local.",
+            ipv4: "192.168.0.104",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            routeIdentifiers: ["bonjour:Ziang的iPad@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
+        )
+        manager.replaceDevicesForTesting([staleCloud, liveBonjour])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertEqual(resolved.ipv4, "192.168.0.104")
+        XCTAssertEqual(
+            resolved.protocolFingerprint,
+            "336b022ee58b653f08569a1be0e32a740da127882b79897589e75a95f0e2b94c"
+        )
+        XCTAssertTrue(manager.hasResolvedConnectableControlRoute(for: resolved))
+    }
+
+    @MainActor
+    func testRoutableAppleMobileBonjourRowShadowsStaleLinkLocalIdentityRow() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let staleBonjour = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "id:51D74800-4C6F-41AA-9F73-711751AF0B56",
+            ipv4: "169.254.185.245",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.usb, .wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            routeIdentifiers: ["bonjour:Ziang的iPad@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
+        )
+        let routableBonjour = makeDevice(
+            name: "iPad",
+            uniqueIdentifier: "id:EFDF569E-194A-44AF-B288-ADD5B4EAFF77",
+            ipv4: "192.168.0.104",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            routeIdentifiers: ["bonjour:iPad@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            protocolFingerprint: "336b022ee58b653f08569a1be0e32a740da127882b79897589e75a95f0e2b94c"
+        )
+        manager.replaceDevicesForTesting([staleBonjour, routableBonjour])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertEqual(resolved.uniqueIdentifier, "id:EFDF569E-194A-44AF-B288-ADD5B4EAFF77")
+        XCTAssertEqual(resolved.ipv4, "192.168.0.104")
+        XCTAssertTrue(manager.hasResolvedConnectableControlRoute(for: resolved))
+    }
+
+    @MainActor
+    func testUSBOnlyAppleMobilePresenceDoesNotCreateControlRoute() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let usbOnly = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "serial:00008103-0011223344556677",
+            ipv4: nil,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.usb],
+            services: [],
+            portMap: [:],
+            routeIdentifiers: [],
+            sources: [.skybridgeUSB],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro"
+        )
+        manager.replaceDevicesForTesting([usbOnly])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertFalse(resolved.isConnectable)
+        XCTAssertFalse(manager.hasResolvedConnectableControlRoute(for: resolved))
+    }
+
+    @MainActor
+    func testCloudAndBonjourMergeKeepsStableIdentityAndRealBonjourRoute() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let cloudOnly = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "serial:icloud-ipad",
+            ipv4: nil,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: false,
+            connectionTypes: [],
+            services: [],
+            portMap: [:],
+            routeIdentifiers: [],
+            sources: [.skybridgeCloud],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro"
+        )
+        let stableBonjour = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "id:07CB9A6E-1111-4222-8333-123456789ABC",
+            ipv4: nil,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            routeIdentifiers: ["bonjour:Ziang的iPad@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
+        )
+        manager.replaceDevicesForTesting([cloudOnly, stableBonjour])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        XCTAssertEqual(resolved.uniqueIdentifier, "id:07CB9A6E-1111-4222-8333-123456789ABC")
+        XCTAssertEqual(resolved.routeIdentifiers, ["bonjour:Ziang的iPad@local."])
+        XCTAssertTrue(manager.hasResolvedConnectableControlRoute(for: resolved))
+    }
+
+    @MainActor
+    func testCloudUSBAndBonjourIPadRowsCoalesceDespitePseudoSerialAndPlatformAlias() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let cloudOnly = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "serial:icloud-device-chain-ipad",
+            ipv4: nil,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: false,
+            connectionTypes: [],
+            services: [],
+            portMap: [:],
+            routeIdentifiers: [],
+            sources: [.skybridgeCloud],
+            platformName: nil,
+            osVersion: "26.5",
+            modelName: "iPad",
+            serialNumber: "icloud-device-chain-ipad"
+        )
+        let usbHistory = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "serial:00008103-0011223344556677",
+            ipv4: nil,
+            status: .offline,
+            lastConnectedAt: Date(timeIntervalSince1970: 100),
+            isConnectable: true,
+            connectionTypes: [.usb],
+            services: [],
+            portMap: [:],
+            routeIdentifiers: [],
+            sources: [.skybridgeUSB],
+            platformName: "iOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            lastSeen: Date(timeIntervalSinceNow: -30),
+            serialNumber: "00008103-0011223344556677"
+        )
+        let bonjour = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "bonjour:Ziang的iPad@local.",
+            ipv4: "192.168.0.103",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            routeIdentifiers: ["bonjour:Ziang的iPad@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
+        )
+        manager.replaceDevicesForTesting([cloudOnly, usbHistory, bonjour])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertEqual(resolved.uniqueIdentifier, "bonjour:Ziang的iPad@local.")
+        XCTAssertEqual(resolved.ipv4, "192.168.0.103")
+        XCTAssertEqual(resolved.platformName, "iPadOS")
+        XCTAssertEqual(resolved.modelName, "iPad Pro")
+        XCTAssertTrue(resolved.connectionTypes.contains(.usb))
+        XCTAssertTrue(resolved.connectionTypes.contains(.wifi))
+        XCTAssertTrue(resolved.sources.contains(.skybridgeCloud))
+        XCTAssertTrue(resolved.sources.contains(.skybridgeUSB))
+        XCTAssertTrue(resolved.sources.contains(.skybridgeBonjour))
+        XCTAssertTrue(manager.hasResolvedConnectableControlRoute(for: resolved))
+        XCTAssertEqual(resolved.serialNumber, "00008103-0011223344556677")
+    }
+
+    @MainActor
+    func testCloudUSBBonjourAndHostIPadRowsCoalesceAndPreserveDialableRoute() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let cloudOnly = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "serial:icloud-device-chain-ipad",
+            ipv4: nil,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: false,
+            connectionTypes: [],
+            services: [],
+            portMap: [:],
+            routeIdentifiers: [],
+            sources: [.skybridgeCloud],
+            platformName: nil,
+            osVersion: "26.5",
+            modelName: "iPad",
+            serialNumber: "icloud-device-chain-ipad"
+        )
+        let usbHistory = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "serial:00008103-0011223344556677",
+            ipv4: nil,
+            status: .offline,
+            lastConnectedAt: Date(timeIntervalSince1970: 100),
+            isConnectable: true,
+            connectionTypes: [.usb],
+            services: [],
+            portMap: [:],
+            routeIdentifiers: [],
+            sources: [.skybridgeUSB],
+            platformName: "iOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            lastSeen: Date(timeIntervalSinceNow: -30),
+            serialNumber: "00008103-0011223344556677"
+        )
+        let bonjour = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "bonjour:Ziang的iPad@local.",
+            ipv4: "192.168.0.103",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            routeIdentifiers: ["bonjour:Ziang的iPad@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro"
+        )
+        let host = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "host:192.168.0.103",
+            ipv4: "192.168.0.103",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            routeIdentifiers: [],
+            sources: [.skybridgeP2P],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
+        )
+        manager.replaceDevicesForTesting([cloudOnly, usbHistory, bonjour, host])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertEqual(resolved.ipv4, "192.168.0.103")
+        XCTAssertEqual(resolved.serialNumber, "00008103-0011223344556677")
+        XCTAssertTrue(resolved.routeIdentifiers.contains("bonjour:Ziang的iPad@local."))
+        XCTAssertTrue(resolved.sources.contains(.skybridgeCloud))
+        XCTAssertTrue(resolved.sources.contains(.skybridgeUSB))
+        XCTAssertTrue(resolved.sources.contains(.skybridgeBonjour))
+        XCTAssertTrue(resolved.sources.contains(.skybridgeP2P))
+        XCTAssertTrue(manager.hasResolvedConnectableControlRoute(for: resolved))
+    }
+
+    @MainActor
+    func testUSBGenericIPadNameCoalescesWithPersonalizedBonjourAndP2PRoutes() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let usb = makeDevice(
+            name: "iPad",
+            uniqueIdentifier: "serial:00008103-0011223344556677",
+            ipv4: nil,
+            status: .offline,
+            lastConnectedAt: Date(timeIntervalSince1970: 100),
+            isConnectable: false,
+            connectionTypes: [.usb],
+            services: [],
+            portMap: [:],
+            routeIdentifiers: [],
+            sources: [.skybridgeUSB],
+            platformName: "iOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            serialNumber: "00008103-0011223344556677"
+        )
+        let bonjour = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "bonjour:Ziang的iPad@local.",
+            ipv4: "192.168.0.103",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            routeIdentifiers: ["bonjour:Ziang的iPad@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro"
+        )
+        let p2pHost = makeDevice(
+            name: "192.168.0.103",
+            uniqueIdentifier: "host:192.168.0.103",
+            ipv4: "192.168.0.103",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            routeIdentifiers: [],
+            sources: [.skybridgeP2P],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
+        )
+        manager.replaceDevicesForTesting([usb, bonjour, p2pHost])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertEqual(resolved.name, "Ziang的iPad")
+        XCTAssertEqual(resolved.ipv4, "192.168.0.103")
+        XCTAssertTrue(resolved.connectionTypes.contains(.usb))
+        XCTAssertTrue(resolved.connectionTypes.contains(.wifi))
+        XCTAssertTrue(resolved.sources.contains(.skybridgeUSB))
+        XCTAssertTrue(resolved.sources.contains(.skybridgeBonjour))
+        XCTAssertTrue(resolved.sources.contains(.skybridgeP2P))
+        XCTAssertTrue(manager.hasResolvedConnectableControlRoute(for: resolved))
+    }
+
+    func testGenericIPadNameDoesNotCoalesceTwoNetworkOnlyRows() {
+        let genericNetwork = makeDevice(
+            name: "iPad",
+            uniqueIdentifier: "bonjour:iPad@local.",
+            ipv4: "192.168.0.103",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            routeIdentifiers: ["bonjour:iPad@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro"
+        )
+        let personalizedNetwork = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "bonjour:Ziang的iPad@local.",
+            ipv4: "192.168.0.120",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11551],
+            routeIdentifiers: ["bonjour:Ziang的iPad@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro"
+        )
+
+        XCTAssertFalse(
+            UnifiedOnlineDeviceManager.shouldCoalesceEquivalentPhysicalDevices(
+                genericNetwork,
+                personalizedNetwork
+            )
+        )
+    }
+
+    @MainActor
+    func testStableGenericIPadRowKeepsPersonalizedBonjourNameAfterCoalescing() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let stable = makeDevice(
+            name: "iPad",
+            uniqueIdentifier: "id:550E8400-E29B-41D4-A716-446655440004",
+            ipv4: "192.168.0.103",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            routeIdentifiers: ["bonjour:Ziang的iPad@local."],
+            sources: [.skybridgeCloud],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
+        )
+        let bonjour = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "bonjour:Ziang的iPad@local.",
+            ipv4: "192.168.0.103",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            routeIdentifiers: ["bonjour:Ziang的iPad@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
+        )
+        manager.replaceDevicesForTesting([stable, bonjour])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertEqual(resolved.uniqueIdentifier, "id:550E8400-E29B-41D4-A716-446655440004")
+        XCTAssertEqual(resolved.name, "Ziang的iPad")
+        XCTAssertTrue(resolved.sources.contains(.skybridgeCloud))
+        XCTAssertTrue(resolved.sources.contains(.skybridgeBonjour))
+        XCTAssertTrue(manager.hasResolvedConnectableControlRoute(for: resolved))
+    }
+
+    @MainActor
+    func testMergedIPadRowsPreferHumanDisplayNameOverGenericAndRouteIdentifiers() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let stableDeviceId = "550E8400-E29B-41D4-A716-446655440088"
+        let cloud = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "id:\(stableDeviceId)",
+            ipv4: nil,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: false,
+            connectionTypes: [],
+            services: [],
+            portMap: [:],
+            routeIdentifiers: [],
+            sources: [.skybridgeCloud],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro 11-inch (M4)"
+        )
+        let genericBonjour = makeDevice(
+            name: "iPad",
+            uniqueIdentifier: "bonjour:iPad@local.",
+            ipv4: "192.168.0.103",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            routeIdentifiers: ["bonjour:iPad@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro 11-inch (M4)",
+            protocolFingerprint: liveProtocolFingerprint
+        )
+        let hostAlias = makeDevice(
+            name: "host:192.168.0.103",
+            uniqueIdentifier: "host:192.168.0.103",
+            ipv4: "192.168.0.103",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            sources: [.skybridgeP2P],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro 11-inch (M4)",
+            protocolFingerprint: liveProtocolFingerprint
+        )
+        manager.replaceDevicesForTesting([genericBonjour, hostAlias, cloud])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertEqual(resolved.name, "Ziang的iPad")
+        XCTAssertEqual(resolved.ipv4, "192.168.0.103")
+        XCTAssertTrue(manager.hasResolvedConnectableControlRoute(for: resolved))
+    }
+
+    @MainActor
+    func testGenericIPadRowsPreferModelNameWhenNoHumanNameExists() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let stableDeviceId = "550E8400-E29B-41D4-A716-446655440089"
+        let stable = makeDevice(
+            name: "id:\(stableDeviceId)",
+            uniqueIdentifier: "id:\(stableDeviceId)",
+            ipv4: nil,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: false,
+            connectionTypes: [],
+            services: [],
+            portMap: [:],
+            routeIdentifiers: [],
+            sources: [.skybridgeCloud],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro 11-inch (M4)"
+        )
+        let genericBonjour = makeDevice(
+            name: "iPad",
+            uniqueIdentifier: "bonjour:iPad@local.",
+            ipv4: "192.168.0.103",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            routeIdentifiers: ["bonjour:iPad@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro 11-inch (M4)"
+        )
+        manager.replaceDevicesForTesting([stable, genericBonjour])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        XCTAssertEqual(manager.onlineDevices.first?.name, "iPad Pro 11-inch (M4)")
+    }
+
+    @MainActor
+    func testGenericIPadRowsDoNotUsePlatformAsDisplayNameWhenModelIsMissing() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let stableDeviceId = "550E8400-E29B-41D4-A716-446655440090"
+        let bonjourRoute = "bonjour:iPad@local."
+        let stable = makeDevice(
+            name: "id:550E8400-E29B-41D4-A716-446655440090",
+            uniqueIdentifier: "id:\(stableDeviceId)",
+            ipv4: nil,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: false,
+            connectionTypes: [],
+            services: [],
+            portMap: [:],
+            routeIdentifiers: [bonjourRoute],
+            sources: [.skybridgeCloud],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: nil
+        )
+        let genericBonjour = makeDevice(
+            name: "iPad",
+            uniqueIdentifier: bonjourRoute,
+            ipv4: "192.168.0.103",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            routeIdentifiers: [bonjourRoute],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: nil
+        )
+        manager.replaceDevicesForTesting([stable, genericBonjour])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        XCTAssertEqual(manager.onlineDevices.first?.name, "iPad")
+    }
+
+    @MainActor
+    func testLegacyCloudSerialStableIDCoalescesWithBonjourStableIDWhenNamesDiffer() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let stableDeviceId = "ipad-stable-device-id"
+        let legacyCloudOnly = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "serial:\(stableDeviceId)",
+            ipv4: nil,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: false,
+            connectionTypes: [],
+            services: [],
+            portMap: [:],
+            routeIdentifiers: [],
+            sources: [.skybridgeCloud],
+            platformName: nil,
+            osVersion: "26.5",
+            modelName: "iPad",
+            serialNumber: stableDeviceId
+        )
+        let liveBonjour = makeDevice(
+            name: "iPad",
+            uniqueIdentifier: "id:\(stableDeviceId)",
+            ipv4: "192.168.0.103",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            routeIdentifiers: ["bonjour:iPad@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
+        )
+        let hostAlias = makeDevice(
+            name: "192.168.0.103",
+            uniqueIdentifier: "host:192.168.0.103",
+            ipv4: "192.168.0.103",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            routeIdentifiers: [],
+            sources: [.skybridgeP2P],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            protocolFingerprint: liveProtocolFingerprint
+        )
+        manager.replaceDevicesForTesting([legacyCloudOnly, liveBonjour, hostAlias])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertEqual(resolved.uniqueIdentifier, "id:\(stableDeviceId)")
+        XCTAssertEqual(resolved.serialNumber, nil)
+        XCTAssertEqual(resolved.ipv4, "192.168.0.103")
+        XCTAssertTrue(resolved.routeIdentifiers.contains("bonjour:iPad@local."))
+        XCTAssertTrue(resolved.sources.contains(.skybridgeCloud))
+        XCTAssertTrue(resolved.sources.contains(.skybridgeBonjour))
+        XCTAssertTrue(resolved.sources.contains(.skybridgeP2P))
+        XCTAssertTrue(manager.hasResolvedConnectableControlRoute(for: resolved))
+    }
+
+    @MainActor
+    func testCloudHeartbeatDoesNotKeepStaleBonjourRouteConnectable() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let stale = Date(timeIntervalSinceNow: -180)
+        let recent = Date()
+        let staleBonjour = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "bonjour:Ziang的iPad@local.",
+            ipv4: "192.168.0.103",
+            status: .offline,
+            lastConnectedAt: Date(timeIntervalSince1970: 100),
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            routeIdentifiers: ["bonjour:Ziang的iPad@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            lastSeen: stale
+        )
+        let cloudHeartbeat = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "serial:icloud-ipad",
+            ipv4: nil,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: false,
+            connectionTypes: [],
+            services: [],
+            portMap: [:],
+            routeIdentifiers: [],
+            sources: [.skybridgeCloud],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            lastSeen: recent
+        )
+        manager.replaceDevicesForTesting([staleBonjour, cloudHeartbeat])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertEqual(resolved.name, "Ziang的iPad")
+        XCTAssertEqual(resolved.connectionStatus, .online)
+        XCTAssertFalse(resolved.isConnectable)
+        XCTAssertFalse(manager.hasResolvedConnectableControlRoute(for: resolved))
+    }
+
+    func testRecentEntrySurvivesWithoutEquivalentRealRecord() {
+        let recent = makeDevice(
+            name: "MacBook Pro",
+            uniqueIdentifier: "recent:id:peer-2",
+            status: .connected,
+            lastConnectedAt: Date()
+        )
+        let unrelated = makeDevice(
+            name: "Other Mac",
+            uniqueIdentifier: "id:peer-3",
+            ipv4: "192.168.31.21",
+            status: .online,
+            lastConnectedAt: Date(),
+            isConnectable: true
+        )
+
+        XCTAssertFalse(
+            UnifiedOnlineDeviceManager.shouldCollapseRecentDevice(recent, against: [unrelated])
+        )
+    }
+
+    func testUSBAndBonjourRowsForSameRecentIPhoneCoalesce() {
+        let usb = makeDevice(
+            name: "Ziang的iPhone 16 Pro",
+            uniqueIdentifier: "serial:00008140-000E788401C0801C",
+            status: .offline,
+            lastConnectedAt: Date(timeIntervalSince1970: 100),
+            isConnectable: true,
+            connectionTypes: [.usb],
+            services: [],
+            portMap: [:],
+            platformName: "iOS",
+            osVersion: "26.5",
+            modelName: "iPhone 16 Pro"
+        )
+        let bonjour = makeDevice(
+            name: "Ziang的iPhone 16 Pro",
+            uniqueIdentifier: "bonjour:Ziang的iPhone 16 Pro@local.",
+            ipv4: "192.168.0.106",
+            status: .online,
+            lastConnectedAt: Date(timeIntervalSince1970: 200),
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 50873],
+            platformName: "iOS",
+            osVersion: "26.5",
+            modelName: "iPhone 16 Pro"
+        )
+
+        XCTAssertTrue(
+            UnifiedOnlineDeviceManager.shouldCoalesceEquivalentPhysicalDevices(usb, bonjour)
+        )
+    }
+
+    func testPseudoCloudSerialDoesNotBlockUSBAndBonjourIPadCoalescing() {
+        let cloudShadow = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "serial:icloud-device-chain-ipad",
+            status: .online,
+            lastConnectedAt: Date(timeIntervalSince1970: 100),
+            isConnectable: false,
+            connectionTypes: [.usb],
+            services: [],
+            portMap: [:],
+            sources: [.skybridgeCloud, .skybridgeUSB],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            serialNumber: "icloud-device-chain-ipad"
+        )
+        let liveBonjour = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "bonjour:Ziang的iPad@local.",
+            ipv4: "192.168.0.102",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 51537],
+            routeIdentifiers: ["bonjour:Ziang的iPad@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro"
+        )
+
+        XCTAssertTrue(
+            UnifiedOnlineDeviceManager.shouldCoalesceEquivalentPhysicalDevices(cloudShadow, liveBonjour)
+        )
+    }
+
+    func testRecentPeerAliasCoalescesWithLiveHostRoute() {
+        let recentPeerAlias = makeDevice(
+            name: "peer:192.168.0.102",
+            uniqueIdentifier: "recent:peer:192.168.0.102",
+            status: .offline,
+            lastConnectedAt: Date(timeIntervalSince1970: 100),
+            isConnectable: false,
+            connectionTypes: [.wifi],
+            services: [],
+            portMap: [:]
+        )
+        let liveHostRoute = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "host:192.168.0.102",
+            ipv4: "192.168.0.102",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 51537],
+            sources: [.skybridgeP2P],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro"
+        )
+
+        XCTAssertTrue(
+            UnifiedOnlineDeviceManager.shouldCoalesceEquivalentPhysicalDevices(recentPeerAlias, liveHostRoute)
+        )
+    }
+
+    func testMacSkyBridgeServiceRowsWithSameNameCoalesceAcrossComplementaryRoutes() {
+        let bonjourControl = makeDevice(
+            name: "Lza的MacBook Pro",
+            uniqueIdentifier: "bonjour:Lza的MacBook Pro@local.",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 51542],
+            routeIdentifiers: ["bonjour:Lza的MacBook Pro@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "macOS",
+            osVersion: "15.5",
+            modelName: "MacBook Pro"
+        )
+        let remoteControl = makeDevice(
+            name: "Lza的MacBook Pro",
+            uniqueIdentifier: "ip:192.168.0.101",
+            ipv4: "192.168.0.101",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: [BonjourInteropContract.remoteControlServiceType],
+            portMap: [BonjourInteropContract.remoteControlServiceType: 5901],
+            routeIdentifiers: ["host:192.168.0.101"],
+            sources: [.skybridgeP2P],
+            platformName: "macOS",
+            osVersion: "15.5",
+            modelName: "MacBookPro18,2"
+        )
+
+        XCTAssertTrue(
+            UnifiedOnlineDeviceManager.shouldCoalesceEquivalentPhysicalDevices(
+                bonjourControl,
+                remoteControl
+            )
+        )
+    }
+
+    func testMacPersonalizedNameCoalescesWithHardwareModelServiceAlias() {
+        let bonjourControl = makeDevice(
+            name: "Lza的MacBook Pro",
+            uniqueIdentifier: "bonjour:Lza的MacBook Pro@local.",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 51752],
+            routeIdentifiers: ["bonjour:Lza的MacBook Pro@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "macOS",
+            osVersion: "26.5",
+            modelName: "MacBook Pro"
+        )
+        let remoteControlAlias = makeDevice(
+            name: "MacBookPro18,2",
+            uniqueIdentifier: "bonjour:MacBookPro18,2@local.",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: [BonjourInteropContract.remoteControlServiceType],
+            portMap: [BonjourInteropContract.remoteControlServiceType: 51776],
+            routeIdentifiers: ["bonjour:MacBookPro18,2@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "macOS",
+            osVersion: "26.5",
+            modelName: "MacBookPro18,2"
+        )
+
+        XCTAssertTrue(
+            UnifiedOnlineDeviceManager.shouldCoalesceEquivalentPhysicalDevices(
+                bonjourControl,
+                remoteControlAlias
+            )
+        )
+    }
+
+    @MainActor
+    func testUpdateDevicesListCoalescesMacHardwareModelAliasRows() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let bonjourControl = makeDevice(
+            name: "Lza的MacBook Pro",
+            uniqueIdentifier: "bonjour:Lza的MacBook Pro@local.",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 51752],
+            routeIdentifiers: ["bonjour:Lza的MacBook Pro@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "macOS",
+            osVersion: "26.5",
+            modelName: "MacBook Pro"
+        )
+        let remoteControlAlias = makeDevice(
+            name: "MacBookPro18,2",
+            uniqueIdentifier: "bonjour:MacBookPro18,2@local.",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: [BonjourInteropContract.remoteControlServiceType],
+            portMap: [BonjourInteropContract.remoteControlServiceType: 51776],
+            routeIdentifiers: ["bonjour:MacBookPro18,2@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "macOS",
+            osVersion: "26.5",
+            modelName: "MacBookPro18,2"
+        )
+        manager.replaceDevicesForTesting([bonjourControl, remoteControlAlias])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertEqual(resolved.name, "Lza的MacBook Pro")
+        XCTAssertTrue(resolved.services.contains("_skybridge._tcp"))
+        XCTAssertTrue(resolved.services.contains(BonjourInteropContract.remoteControlServiceType))
+        XCTAssertEqual(resolved.portMap["_skybridge._tcp"], 51752)
+        XCTAssertEqual(resolved.portMap[BonjourInteropContract.remoteControlServiceType], 51776)
+    }
+
+    func testDifferentMacNamesDoNotCoalesceAcrossSkyBridgeRoutes() {
+        let first = makeDevice(
+            name: "Lza的MacBook Pro",
+            uniqueIdentifier: "bonjour:Lza的MacBook Pro@local.",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 51542],
+            routeIdentifiers: ["bonjour:Lza的MacBook Pro@local."],
+            platformName: "macOS",
+            modelName: "MacBook Pro"
+        )
+        let second = makeDevice(
+            name: "Studio Mac",
+            uniqueIdentifier: "ip:192.168.0.110",
+            ipv4: "192.168.0.110",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            services: [BonjourInteropContract.remoteControlServiceType],
+            portMap: [BonjourInteropContract.remoteControlServiceType: 5901],
+            routeIdentifiers: ["host:192.168.0.110"],
+            platformName: "macOS",
+            modelName: "Mac Studio"
+        )
+
+        XCTAssertFalse(
+            UnifiedOnlineDeviceManager.shouldCoalesceEquivalentPhysicalDevices(first, second)
+        )
+    }
+
+    @MainActor
+    func testUpdateDevicesListCoalescesPersistedUSBAndBonjourRowsForSameRecentIPhone() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let usb = makeDevice(
+            name: "Ziang的iPhone 16 Pro",
+            uniqueIdentifier: "serial:00008140-000E788401C0801C",
+            status: .offline,
+            lastConnectedAt: Date(timeIntervalSince1970: 100),
+            isConnectable: true,
+            connectionTypes: [.usb],
+            services: [],
+            portMap: [:],
+            platformName: "iOS",
+            osVersion: "26.5",
+            modelName: "iPhone 16 Pro"
+        )
+        let bonjour = makeDevice(
+            name: "Ziang的iPhone 16 Pro",
+            uniqueIdentifier: "bonjour:Ziang的iPhone 16 Pro@local.",
+            ipv4: "192.168.0.106",
+            status: .online,
+            lastConnectedAt: Date(timeIntervalSince1970: 200),
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 50873],
+            platformName: "iOS",
+            osVersion: "26.5",
+            modelName: "iPhone 16 Pro"
+        )
+        manager.replaceDevicesForTesting([usb, bonjour])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        let merged = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertEqual(merged.name, "Ziang的iPhone 16 Pro")
+        XCTAssertEqual(merged.connectionStatus, .online)
+        XCTAssertEqual(merged.uniqueIdentifier, "bonjour:Ziang的iPhone 16 Pro@local.")
+        XCTAssertEqual(merged.ipv4, "192.168.0.106")
+        XCTAssertTrue(merged.connectionTypes.contains(.usb))
+        XCTAssertTrue(merged.connectionTypes.contains(.wifi))
+        XCTAssertEqual(merged.portMap["_skybridge._tcp"], 50873)
+    }
+
+    func testSameNamedIPhonesDoNotCoalesceWhenSerialsConflict() {
+        let first = makeDevice(
+            name: "Ziang的iPhone 16 Pro",
+            uniqueIdentifier: "serial:00008140-000E788401C0801C",
+            status: .online,
+            lastConnectedAt: Date(),
+            isConnectable: true,
+            platformName: "iOS",
+            osVersion: "26.5",
+            modelName: "iPhone 16 Pro"
+        )
+        let second = makeDevice(
+            name: "Ziang的iPhone 16 Pro",
+            uniqueIdentifier: "serial:00008140-000E788401C0801D",
+            status: .online,
+            lastConnectedAt: Date(),
+            isConnectable: true,
+            platformName: "iOS",
+            osVersion: "26.5",
+            modelName: "iPhone 16 Pro"
+        )
+
+        XCTAssertFalse(
+            UnifiedOnlineDeviceManager.shouldCoalesceEquivalentPhysicalDevices(first, second)
+        )
+    }
+
+    @MainActor
+    func testResolvedTrustRecordMatchesOfflineAliasToCanonicalTrustedIdentity() {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let trustRecord = TrustRecord(
+            deviceId: "id:peer-iphone",
+            pubKeyFP: String(repeating: "a", count: 64),
+            publicKey: Data([0x01]),
+            kemPublicKeys: nil,
+            capabilities: [
+                "trusted",
+                "peerEndpoint=bonjour:ziang的iphone 16 pro@local."
+            ],
+            signature: Data(),
+            deviceName: "Ziang的iPhone 16 Pro",
+            currentDeviceId: "id:peer-iphone",
+            knownDeviceIds: ["peer:169.254.186.235"]
+        )
+        let shadowAlias = makeDevice(
+            name: "169.254.186.235",
+            uniqueIdentifier: "recent:peer:169.254.186.235",
+            ipv4: "169.254.186.235",
+            status: .offline,
+            lastConnectedAt: Date()
+        )
+
+        let matched = manager.resolvedTrustRecord(for: shadowAlias, among: [trustRecord])
+
+        XCTAssertEqual(matched?.deviceId, trustRecord.deviceId)
+    }
+
+    @MainActor
+    func testTrustedRecordStatusPrefersLiveBonjourOverOfflineHistory() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let old = Date(timeIntervalSinceNow: -3_600)
+        let offlineHistory = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "serial:00008103-0011223344556677",
+            status: .offline,
+            lastConnectedAt: old,
+            isConnectable: false,
+            connectionTypes: [.usb],
+            services: [],
+            portMap: [:],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            lastSeen: old
+        )
+        let liveBonjour = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "bonjour:Ziang的iPad@local.",
+            ipv4: "192.168.0.103",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            lastSeen: Date()
+        )
+        let trustRecord = TrustRecord(
+            deviceId: "id:trusted-ipad",
+            pubKeyFP: String(repeating: "b", count: 64),
+            publicKey: Data([0x01]),
+            kemPublicKeys: nil,
+            capabilities: [
+                "trusted",
+                "peerEndpoint=bonjour:ziang的ipad@local."
+            ],
+            signature: Data(),
+            deviceName: "Ziang的iPad",
+            currentDeviceId: "id:trusted-ipad",
+            knownDeviceIds: ["bonjour:ziang的ipad@local."]
+        )
+        manager.replaceDevicesForTesting([offlineHistory, liveBonjour])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        let resolved = try XCTUnwrap(manager.resolvedOnlineDevice(for: trustRecord))
+        XCTAssertEqual(resolved.uniqueIdentifier, "bonjour:Ziang的iPad@local.")
+        XCTAssertEqual(resolved.connectionStatus, .online)
+    }
+
+    @MainActor
+    func testTrustRecordDoesNotResolveUnrelatedConnectedDeviceWithoutIdentityMatch() {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let unrelated = makeDevice(
+            name: "Other iPad",
+            uniqueIdentifier: "bonjour:Other iPad@local.",
+            ipv4: "192.168.0.120",
+            status: .connected,
+            lastConnectedAt: Date(),
+            isConnectable: true,
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro"
+        )
+        let trustRecord = TrustRecord(
+            deviceId: "id:trusted-ipad",
+            pubKeyFP: String(repeating: "c", count: 64),
+            publicKey: Data([0x02]),
+            kemPublicKeys: nil,
+            capabilities: ["trusted"],
+            signature: Data(),
+            deviceName: "Ziang的iPad",
+            currentDeviceId: "id:trusted-ipad",
+            knownDeviceIds: []
+        )
+        manager.replaceDevicesForTesting([unrelated])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        XCTAssertNil(manager.resolvedOnlineDevice(for: trustRecord))
+    }
+
+    @MainActor
+    func testAppleMobileTrustRecordDoesNotResolveNameOnlyLiveDeviceWithoutStrongAnchor() {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let sameNamedLiveDevice = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "bonjour:Ziang的iPad@local.",
+            ipv4: nil,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro"
+        )
+        let trustRecord = TrustRecord(
+            deviceId: "id:trusted-ipad",
+            pubKeyFP: String(repeating: "d", count: 64),
+            publicKey: Data([0x03]),
+            kemPublicKeys: nil,
+            capabilities: ["trusted"],
+            signature: Data(),
+            deviceName: "Ziang的iPad",
+            currentDeviceId: "id:trusted-ipad",
+            knownDeviceIds: []
+        )
+        manager.replaceDevicesForTesting([sameNamedLiveDevice])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        XCTAssertNil(manager.resolvedOnlineDevice(for: trustRecord))
+    }
+
+    @MainActor
+    func testDiscoveredDeviceResolvesStatusThroughUnifiedOnlineState() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let connected = makeDevice(
+            name: "Ziang的iPhone",
+            uniqueIdentifier: "bonjour:Ziang的iPhone@local.",
+            ipv4: nil,
+            status: .connected,
+            lastConnectedAt: Date(),
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            platformName: "iOS",
+            osVersion: "26.5",
+            modelName: "iPhone 16 Pro"
+        )
+        let discovered = DiscoveredDevice(
+            id: UUID(),
+            name: "Ziang的iPhone",
+            ipv4: nil,
+            ipv6: nil,
+            platformName: "iOS",
+            osVersion: "26.5",
+            modelName: "iPhone 16 Pro",
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "bonjour:Ziang的iPhone@local."
+        )
+        manager.replaceDevicesForTesting([connected])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        let resolved = try XCTUnwrap(manager.resolvedOnlineDevice(for: discovered))
+        XCTAssertEqual(resolved.connectionStatus, .connected)
+    }
+
+    @MainActor
+    func testDiscoveredAppleMobileDoesNotResolveNameOnlyOnlineStateWithoutAnchor() {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let nameOnlyHistory = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "name:ziang-ipad-history",
+            ipv4: nil,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro"
+        )
+        let discovered = DiscoveredDevice(
+            id: UUID(),
+            name: "Ziang的iPad",
+            ipv4: nil,
+            ipv6: nil,
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "bonjour:Ziang的iPad@local."
+        )
+        manager.replaceDevicesForTesting([nameOnlyHistory])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        XCTAssertNil(manager.resolvedOnlineDevice(for: discovered))
+    }
+
+    @MainActor
+    func testResolvedICloudDevicePrefersLiveBonjourRowOverOfflineHistory() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let old = Date(timeIntervalSinceNow: -3_600)
+        let staleHistory = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "serial:00008103-0011223344556677",
+            ipv4: nil,
+            status: .offline,
+            lastConnectedAt: old,
+            isConnectable: false,
+            connectionTypes: [.usb],
+            services: [],
+            portMap: [:],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            lastSeen: old
+        )
+        let liveBonjour = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "bonjour:Ziang的iPad@local.",
+            ipv4: "192.168.0.103",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            lastSeen: Date()
+        )
+        let cloudDevice = iCloudDevice(
+            id: "icloud-ipad",
+            name: "Ziang的iPad",
+            model: "iPad Pro",
+            osVersion: "26.5",
+            appVersion: "1.0.0",
+            lastSeen: old,
+            capabilities: [.remoteDesktop],
+            isOnline: false,
+            networkType: .wifi,
+            ipAddress: "192.168.0.103"
+        )
+
+        manager.replaceDevicesForTesting([staleHistory, liveBonjour])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        let matched = try XCTUnwrap(manager.resolvedOnlineDevice(for: cloudDevice))
+        XCTAssertEqual(matched.uniqueIdentifier, "bonjour:Ziang的iPad@local.")
+        XCTAssertEqual(matched.connectionStatus, .online)
+    }
+
+    @MainActor
+    func testResolvedICloudDeviceUsesStableIdentityHintWhenPathIdsDiffer() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let stableDeviceId = "550e8400-e29b-41d4-a716-446655440001"
+        let liveDevice = makeDevice(
+            name: "Bill iPad",
+            uniqueIdentifier: "id:\(stableDeviceId)",
+            ipv4: nil,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro 11-inch (M4)"
+        )
+        let cloudDevice = iCloudDevice(
+            id: "kvs-path-usb",
+            name: "Bill iPad",
+            model: "iPad Pro 11-inch (M4)",
+            osVersion: "26.5",
+            appVersion: "1.0.0",
+            lastSeen: Date(),
+            capabilities: [.remoteDesktop],
+            isOnline: true,
+            networkType: .wifi,
+            ipAddress: nil,
+            stableIdentityDeviceId: stableDeviceId
+        )
+
+        manager.replaceDevicesForTesting([liveDevice])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        let matched = try XCTUnwrap(manager.resolvedOnlineDevice(for: cloudDevice))
+        XCTAssertEqual(matched.uniqueIdentifier, "id:\(stableDeviceId)")
+    }
+
+    @MainActor
+    func testConflictingStableAppleMobileRowsDoNotCoalesceFromSameGenericNameAndReusedEndpoint() {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let staleGeneratedStableId = "id:07CB9A6E-7492-4680-9DD7-F37DC8568891"
+        let protocolStableId = "id:9DDF82C4-56A7-4B0D-8E91-998877665544"
+        let now = Date()
+        let staleGeneratedBonjour = makeDevice(
+            name: "iPad",
+            uniqueIdentifier: staleGeneratedStableId,
+            ipv4: "192.168.0.104",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp", BonjourInteropContract.remoteControlServiceType],
+            portMap: ["_skybridge._tcp": 51776, BonjourInteropContract.remoteControlServiceType: 51777],
+            routeIdentifiers: ["bonjour:iPad_local@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro 11-inch (M4)",
+            lastSeen: now.addingTimeInterval(-10)
+        )
+        let protocolStableBonjour = makeDevice(
+            name: "iPad",
+            uniqueIdentifier: protocolStableId,
+            ipv4: "192.168.0.104",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 51776],
+            routeIdentifiers: ["bonjour:iPad@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro 11-inch (M4)",
+            lastSeen: now
+        )
+        manager.replaceDevicesForTesting([staleGeneratedBonjour, protocolStableBonjour])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(
+            Set(manager.onlineDevices.map(\.uniqueIdentifier)),
+            [staleGeneratedStableId, protocolStableId]
+        )
+        XCTAssertEqual(manager.onlineDevices.count, 2)
+        XCTAssertFalse(
+            UnifiedOnlineDeviceManager.shouldCoalesceEquivalentPhysicalDevices(
+                staleGeneratedBonjour,
+                protocolStableBonjour
+            )
+        )
+    }
+
+    func testConflictingStableAppleMobileRowsDoNotCoalesceAcrossDifferentEndpoints() {
+        let first = makeDevice(
+            name: "iPad",
+            uniqueIdentifier: "id:07CB9A6E-7492-4680-9DD7-F37DC8568891",
+            ipv4: "192.168.0.104",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 51776],
+            routeIdentifiers: ["bonjour:iPad@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro 11-inch (M4)"
+        )
+        let second = makeDevice(
+            name: "iPad",
+            uniqueIdentifier: "id:9DDF82C4-56A7-4B0D-8E91-998877665544",
+            ipv4: "192.168.0.120",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 51776],
+            routeIdentifiers: ["bonjour:iPad-Office@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro 11-inch (M4)"
+        )
+
+        XCTAssertFalse(
+            UnifiedOnlineDeviceManager.shouldCoalesceEquivalentPhysicalDevices(first, second)
+        )
+    }
+
+    @MainActor
+    func testRouteShapedTrustMetadataCannotSelectAnonymousHardwareRecord() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let trust = TrustSyncService.shared
+        let knownID = "id:11111111-1111-4111-8111-111111111105"
+        let serial = "00008103-0011223344AABBCF"
+        let now = Date()
+        let known = makeDevice(
+            name: "Current iPad", uniqueIdentifier: knownID, ipv4: "192.0.2.31",
+            status: .offline, lastConnectedAt: now.addingTimeInterval(-120),
+            isConnectable: true, connectionTypes: [.usb, .wifi],
+            platformName: "iPadOS", modelName: "iPad Pro", serialNumber: serial,
+            protocolFingerprint: liveProtocolFingerprint
+        )
+        let anonymous = makeDevice(
+            name: "USB iPad", uniqueIdentifier: "serial:\(serial)", ipv4: "192.0.2.99",
+            status: .online, lastConnectedAt: nil, connectionTypes: [.usb],
+            sources: [.skybridgeUSB], platformName: "iPadOS", modelName: "iPad Pro",
+            serialNumber: serial
+        )
+        let previousRecords = trust.activeTrustRecords
+        defer {
+            trust.activeTrustRecords = previousRecords
+            manager.replaceDevicesForTesting([])
+        }
+
+        for metadata in ["192.0.2.88", "host:192.0.2.88", "id:192.0.2.88", "bonjour:iPad@local."] {
+            trust.activeTrustRecords = [TrustRecord(
+                deviceId: knownID, pubKeyFP: String(repeating: "e", count: 64),
+                publicKey: Data([0x04]), signature: Data(), deviceName: known.name,
+                currentDeviceId: metadata, knownDeviceIds: [knownID]
+            )]
+            for records in [[anonymous, known], [known, anonymous]] {
+                manager.replaceDevicesForTesting(records)
+                manager.recomputeDeviceStatusesForTesting()
+                let result = try XCTUnwrap(manager.onlineDevices.first)
+                XCTAssertEqual(manager.onlineDevices.count, 1)
+                XCTAssertEqual(result.uniqueIdentifier, knownID, metadata)
+                XCTAssertEqual(result.id, known.id, "Invalid metadata must not select an identity-less record: \(metadata)")
+                XCTAssertEqual(result.ipv4, known.ipv4, "Invalid metadata must not redirect the connection: \(metadata)")
+                XCTAssertEqual(result.protocolFingerprint, known.protocolFingerprint)
+            }
+        }
+    }
+
+    @MainActor
+    func testCachedUSBDiscoveryMetadataCannotReplaceNewerConnectedIdentity() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let oldID = "id:11111111-1111-4111-8111-111111111101"
+        let currentID = "id:11111111-1111-4111-8111-111111111102"
+        let now = Date()
+        let sources: [DeviceSource] = [.skybridgeBonjour, .skybridgeUSB, .skybridgeCloud]
+        var old = makeDevice(
+            name: "Historical iPad", uniqueIdentifier: oldID, ipv4: "192.0.2.20",
+            status: .offline, lastConnectedAt: now.addingTimeInterval(-3_600),
+            isConnectable: true, connectionTypes: [.usb, .wifi], sources: sources,
+            platformName: "iPadOS", modelName: "iPad Pro", lastSeen: now,
+            serialNumber: "00008103-0011223344AABBCD"
+        )
+        var current = makeDevice(
+            name: "Current iPad", uniqueIdentifier: currentID, ipv4: "192.0.2.21",
+            status: .offline, lastConnectedAt: now.addingTimeInterval(-120),
+            isConnectable: true, connectionTypes: [.usb, .wifi], sources: sources,
+            platformName: "iPadOS", modelName: "iPad Pro",
+            lastSeen: now.addingTimeInterval(-120), serialNumber: "00008103-0011223344AABBCD"
+        )
+        old.isAuthorized = true
+        current.isAuthorized = true
+        defer { manager.replaceDevicesForTesting([]) }
+
+        // A fresh hardware/cloud observation does not attest the app identity.
+        // Check both insertion orders and a second projection after alias rewrite.
+        for records in [[old, current], [current, old]] {
+            manager.replaceDevicesForTesting(records)
+            for _ in 0..<2 {
+                manager.recomputeDeviceStatusesForTesting()
+                let result = try XCTUnwrap(manager.onlineDevices.first)
+                XCTAssertEqual(manager.onlineDevices.count, 1)
+                XCTAssertEqual(result.uniqueIdentifier, currentID)
+                XCTAssertEqual(result.lastConnectedAt, current.lastConnectedAt)
+                XCTAssertEqual(result.connectionStatus, .offline)
+                XCTAssertNil(result.protocolFingerprint)
+                XCTAssertEqual(manager.device(withIdentifier: oldID)?.uniqueIdentifier, oldID,
+                    "A later update for the old ID must still address its own record")
+                XCTAssertEqual(manager.device(withIdentifier: currentID)?.uniqueIdentifier, currentID)
+            }
+            manager.applyICloudDevicesUpdateForTesting([iCloudDevice(
+                id: "historical-cloud-record", name: "Historical iPad", model: "iPad Pro",
+                osVersion: "26.5", appVersion: "1.0.0", lastSeen: now,
+                capabilities: [.remoteDesktop], isOnline: true, networkType: .wifi,
+                ipAddress: "192.0.2.99", stableIdentityDeviceId: String(oldID.dropFirst(3))
+            )])
+            let afterCloud = try XCTUnwrap(manager.onlineDevices.first)
+            XCTAssertEqual(manager.onlineDevices.count, 1)
+            XCTAssertEqual(afterCloud.uniqueIdentifier, currentID)
+            XCTAssertEqual(afterCloud.ipv4, current.ipv4)
+            XCTAssertEqual(afterCloud.lastConnectedAt, current.lastConnectedAt)
+            XCTAssertEqual(afterCloud.connectionStatus, .offline)
+        }
+    }
+
+    @MainActor
+    func testAuthenticatedUSBIdentityWinsOverAnotherCurrentDiscoveryIdentity() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let presence = ConnectionPresenceService.shared
+        let now = Date()
+        let connected = makeDevice(
+            name: "USB iPad", uniqueIdentifier: "id:11111111-1111-4111-8111-111111111103",
+            status: .offline, lastConnectedAt: now.addingTimeInterval(-120),
+            connectionTypes: [.usb], sources: [.skybridgeUSB],
+            platformName: "iPadOS", modelName: "iPad Pro",
+            lastSeen: now.addingTimeInterval(-120), serialNumber: "00008103-0011223344AABBCE"
+        )
+        let advertised = makeDevice(
+            name: "Nearby iPad", uniqueIdentifier: "id:11111111-1111-4111-8111-111111111104",
+            ipv4: "192.0.2.22", status: .online, lastConnectedAt: now,
+            isConnectable: true, platformName: "iPadOS", modelName: "iPad Pro",
+            serialNumber: "00008103-0011223344AABBCE", protocolFingerprint: liveProtocolFingerprint
+        )
+        let lease = try XCTUnwrap(presence.markConnectedOwned(
+            peerId: connected.uniqueIdentifier, displayName: connected.name,
+            cryptoKind: "Q-Periapt", suite: "Q-Periapt-ABI2-PolicyBound", controlTransport: .usb
+        ))
+        defer {
+            XCTAssertTrue(presence.disconnectIfOwned(lease))
+            manager.replaceNetworkDiscoveredDevicesForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+        manager.replaceNetworkDiscoveredDevicesForTesting([discoveryObservation(for: advertised)])
+        manager.replaceDevicesForTesting([advertised, connected])
+        manager.recomputeDeviceStatusesForTesting()
+
+        let result = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        XCTAssertEqual(result.uniqueIdentifier, connected.uniqueIdentifier)
+        XCTAssertEqual(result.connectionStatus, .connected)
+        XCTAssertNil(result.protocolFingerprint, "A different protocol identity cannot supply this connection's pin")
+        XCTAssertNil(result.ipv4, "A different protocol identity cannot supply this USB connection's network address")
+    }
+
+    @MainActor
+    func testTrustedCanonicalProtocolIdentityWinsWhenOldAndNewIPadRowsCoalesce() async throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let trust = TrustSyncService.shared
+        let oldDeviceId = "07cb9a6e-7492-4680-9dd7-f37dc8568891"
+        let newDeviceId = "fe040ab2-0a7b-4b83-9f53-c80b4e2c8295"
+        let oldStableId = "id:\(oldDeviceId)"
+        let newStableId = "id:\(newDeviceId)"
+        let bonjourAlias = "bonjour:ziang-ipad@local."
+        let now = Date()
+
+        trust.setInMemoryPersistenceForTesting(true)
+        try await trust.removeRecordsForTesting(
+            deviceIds: [oldStableId, newStableId, bonjourAlias]
+        )
+        addTeardownBlock { @MainActor [manager, trust] in
+            manager.replaceDevicesForTesting([])
+            try await trust.removeRecordsForTesting(
+                deviceIds: [oldStableId, newStableId, bonjourAlias]
+            )
+            trust.setInMemoryPersistenceForTesting(false)
+        }
+
+        _ = try await trust.addTrustRecord(
+            TrustRecord(
+                deviceId: newStableId,
+                pubKeyFP: String(repeating: "a", count: 64),
+                publicKey: Data([0x01]),
+                protocolSigningAlgorithm: .mlDSA65,
+                protocolPublicKeyFingerprint: String(repeating: "b", count: 64),
+                signature: Data(),
+                deviceName: "Ziang的iPad",
+                currentDeviceId: newStableId,
+                knownDeviceIds: [oldStableId, newStableId, bonjourAlias],
+                lifecycleState: .active
+            )
+        )
+
+        let oldRow = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: oldStableId,
+            ipv4: "192.168.0.102",
+            status: .online,
+            lastConnectedAt: Date(timeIntervalSince1970: 100),
+            isConnectable: true,
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            routeIdentifiers: [bonjourAlias],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro 11-inch (M4)",
+            lastSeen: now.addingTimeInterval(-1)
+        )
+        let currentRow = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: newStableId,
+            ipv4: "192.168.0.102",
+            status: .online,
+            lastConnectedAt: Date(timeIntervalSince1970: 200),
+            isConnectable: true,
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            routeIdentifiers: [bonjourAlias],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro 11-inch (M4)",
+            lastSeen: now
+        )
+
+        manager.replaceDevicesForTesting([oldRow, currentRow])
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        XCTAssertEqual(manager.onlineDevices.first?.uniqueIdentifier, newStableId)
+        XCTAssertEqual(manager.onlineDevices.first?.connectionStatus, .online)
+    }
+
+    @MainActor
+    func testLiveStableProtocolIdentityWinsOverStaleTrustedAliasDuringCoalesce() async throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let trust = TrustSyncService.shared
+        let staleDeviceId = "07cb9a6e-7492-4680-9dd7-f37dc8568891"
+        let liveDeviceId = "f951b140-a4d8-4664-ab9d-d90118738c54"
+        let staleStableId = "id:\(staleDeviceId)"
+        let liveStableId = "id:\(liveDeviceId)"
+        let bonjourAlias = "bonjour:iPad@local."
+        let now = Date()
+
+        trust.setInMemoryPersistenceForTesting(true)
+        try await trust.removeRecordsForTesting(
+            deviceIds: [staleStableId, liveStableId, bonjourAlias]
+        )
+        addTeardownBlock { @MainActor [manager, trust] in
+            manager.replaceDevicesForTesting([])
+            try await trust.removeRecordsForTesting(
+                deviceIds: [staleStableId, liveStableId, bonjourAlias]
+            )
+            trust.setInMemoryPersistenceForTesting(false)
+        }
+
+        _ = try await trust.addTrustRecord(
+            TrustRecord(
+                deviceId: staleStableId,
+                pubKeyFP: String(repeating: "c", count: 64),
+                publicKey: Data([0x02]),
+                protocolSigningAlgorithm: .mlDSA65,
+                protocolPublicKeyFingerprint: String(repeating: "d", count: 64),
+                signature: Data(),
+                deviceName: "iPad",
+                currentDeviceId: staleStableId,
+                knownDeviceIds: [staleStableId, liveStableId, bonjourAlias],
+                lifecycleState: .active
+            )
+        )
+
+        let staleRow = makeDevice(
+            name: "iPad",
+            uniqueIdentifier: staleStableId,
+            ipv4: "169.254.12.10",
+            status: .online,
+            lastConnectedAt: Date(timeIntervalSince1970: 100),
+            isConnectable: true,
+            routeIdentifiers: [bonjourAlias],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro 11-inch (M4)",
+            lastSeen: now.addingTimeInterval(-30)
+        )
+        let liveRow = makeDevice(
+            name: "iPad",
+            uniqueIdentifier: liveStableId,
+            ipv4: "192.168.0.102",
+            status: .online,
+            lastConnectedAt: Date(timeIntervalSince1970: 200),
+            isConnectable: true,
+            routeIdentifiers: [bonjourAlias],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro 11-inch (M4)",
+            lastSeen: now
+        )
+
+        manager.replaceNetworkDiscoveredDevicesForTesting([discoveryObservation(for: liveRow)])
+        defer { manager.replaceNetworkDiscoveredDevicesForTesting([]) }
+        manager.replaceDevicesForTesting([staleRow, liveRow])
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        XCTAssertEqual(manager.onlineDevices.first?.uniqueIdentifier, liveStableId)
+        XCTAssertEqual(manager.onlineDevices.first?.ipv4, "192.168.0.102")
+    }
+
+    @MainActor
+    func testResolvedICloudDeviceDoesNotCrossMatchDifferentAppleMobileFamilies() {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let misleadingName = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "bonjour:Ziang的iPhone@local.",
+            ipv4: "192.168.0.104",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            platformName: "iOS",
+            osVersion: "26.5",
+            modelName: "iPhone 16 Pro"
+        )
+        let cloudDevice = iCloudDevice(
+            id: "icloud-ipad",
+            name: "Ziang的iPad",
+            model: "iPad Pro",
+            osVersion: "26.5",
+            appVersion: "1.0.0",
+            lastSeen: Date(timeIntervalSinceNow: -3_600),
+            capabilities: [.remoteDesktop],
+            isOnline: false,
+            networkType: .wifi,
+            ipAddress: nil
+        )
+
+        manager.replaceDevicesForTesting([misleadingName])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        XCTAssertNil(manager.resolvedOnlineDevice(for: cloudDevice))
+    }
+
+    @MainActor
+    func testResolvedICloudDeviceRequiresStableOrAddressAnchorForSameNamedLiveDevice() {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let sameNamedLiveDevice = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "bonjour:Ziang的iPad@local.",
+            ipv4: nil,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro"
+        )
+        let cloudDevice = iCloudDevice(
+            id: "icloud-ipad",
+            name: "Ziang的iPad",
+            model: "iPad Pro",
+            osVersion: "26.5",
+            appVersion: "1.0.0",
+            lastSeen: Date(timeIntervalSinceNow: -3_600),
+            capabilities: [.remoteDesktop],
+            isOnline: false,
+            networkType: .wifi,
+            ipAddress: nil
+        )
+
+        manager.replaceDevicesForTesting([sameNamedLiveDevice])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        XCTAssertNil(manager.resolvedOnlineDevice(for: cloudDevice))
+    }
+
+    @MainActor
+    func testMarkDeviceAsConnectedUpdatesStableIdentityEvenWhenDisplayNameIsEphemeral() {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let peerId = "id:550E8400-E29B-41D4-A716-446655440001"
+        let existing = makeDevice(
+            name: "Trusted iPhone",
+            uniqueIdentifier: peerId,
+            status: .offline,
+            lastConnectedAt: Date(),
+            isConnectable: true
+        )
+        manager.replaceDevicesForTesting([existing])
+        ConnectionPresenceService.shared.markConnected(
+            peerId: peerId,
+            displayName: "Trusted iPhone",
+            address: nil,
+            cryptoKind: "Apple PQC",
+            suite: "ML-KEM-768"
+        )
+        defer {
+            ConnectionPresenceService.shared.markDisconnected(peerId: peerId)
+            manager.replaceDevicesForTesting([])
+        }
+
+        manager.markDeviceAsConnected(
+            peerId: peerId,
+            displayName: "peer:fe80::1",
+            cryptoKind: "Apple PQC",
+            suite: "ML-KEM-768"
+        )
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        XCTAssertEqual(manager.onlineDevices.first?.uniqueIdentifier, peerId)
+        XCTAssertEqual(manager.onlineDevices.first?.connectionStatus, .connected)
+        XCTAssertEqual(manager.onlineDevices.first?.lastCryptoSuite, "ML-KEM-768")
+    }
+
+    @MainActor
+    func testMarkDeviceAsConnectedUsesBonjourRouteAliasBeforeCreatingRecentRow() {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let stableId = "id:550E8400-E29B-41D4-A716-446655440002"
+        let bonjourPeer = "bonjour:Ziang的iPad@local."
+        let existing = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: stableId,
+            status: .offline,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            routeIdentifiers: [bonjourPeer],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro"
+        )
+        manager.replaceDevicesForTesting([existing])
+        ConnectionPresenceService.shared.markConnected(
+            peerId: bonjourPeer,
+            displayName: "peer:fe80::1",
+            address: nil,
+            cryptoKind: "Apple PQC",
+            suite: "ML-KEM-768"
+        )
+        defer {
+            ConnectionPresenceService.shared.markDisconnected(peerId: bonjourPeer)
+            manager.replaceDevicesForTesting([])
+        }
+
+        manager.markDeviceAsConnected(
+            peerId: bonjourPeer,
+            displayName: "peer:fe80::1",
+            cryptoKind: "Apple PQC",
+            suite: "ML-KEM-768"
+        )
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        XCTAssertEqual(manager.onlineDevices.first?.uniqueIdentifier, stableId)
+        XCTAssertEqual(manager.onlineDevices.first?.connectionStatus, .connected)
+        XCTAssertEqual(manager.onlineDevices.first?.lastCryptoSuite, "ML-KEM-768")
+        XCTAssertTrue(manager.onlineDevices.first?.routeIdentifiers.contains(bonjourPeer) == true)
+    }
+
+    @MainActor
+    func testMarkDeviceAsConnectedDoesNotBindAppleMobileByDisplayNameOnly() {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let staleId = "id:07CB9A6E-7492-4680-9DD7-F37DC8568891"
+        let livePeerId = "id:F951B140-A4D8-4664-AB9D-D90118738C54"
+        let staleRow = makeDevice(
+            name: "iPad",
+            uniqueIdentifier: staleId,
+            status: .online,
+            lastConnectedAt: Date(timeIntervalSince1970: 100),
+            isConnectable: true,
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro 11-inch (M4)"
+        )
+        manager.replaceDevicesForTesting([staleRow])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.markDeviceAsConnected(
+            peerId: livePeerId,
+            displayName: "iPad",
+            cryptoKind: "Apple PQC",
+            suite: "ML-KEM-768"
+        )
+
+        let staleAfter = manager.onlineDevices.first { $0.uniqueIdentifier == staleId }
+        XCTAssertNotEqual(staleAfter?.connectionStatus, .connected)
+        XCTAssertTrue(
+            manager.onlineDevices.contains {
+                $0.uniqueIdentifier.lowercased() == livePeerId.lowercased()
+            },
+            manager.onlineDevices
+                .map { "\($0.uniqueIdentifier)|\($0.connectionStatus.rawValue)" }
+                .joined(separator: ";")
+        )
+    }
+
+    @MainActor
+    func testPresenceRecomputeKeepsStableIdentityConnectedWhenPeerIdUsesIdPrefix() {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let peerId = "id:550E8400-E29B-41D4-A716-446655440000"
+        let existing = makeDevice(
+            name: "Trusted iPhone",
+            uniqueIdentifier: peerId,
+            status: .offline,
+            lastConnectedAt: Date(),
+            isConnectable: true
+        )
+        manager.replaceDevicesForTesting([existing])
+        ConnectionPresenceService.shared.markConnected(
+            peerId: peerId,
+            displayName: "Trusted iPhone",
+            address: nil,
+            cryptoKind: "Apple PQC",
+            suite: "ML-KEM-768"
+        )
+        defer {
+            ConnectionPresenceService.shared.markDisconnected(peerId: peerId)
+            manager.replaceDevicesForTesting([])
+        }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.first?.connectionStatus, .connected)
+        XCTAssertEqual(manager.onlineDevices.first?.guardStatus, "守护中")
+    }
+
+    @MainActor
+    func testPresenceRecomputeKeepsStableIdentityConnectedWhenPeerIdUsesBonjourRoute() {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let stableId = "id:550E8400-E29B-41D4-A716-446655440003"
+        let bonjourPeer = "bonjour:Ziang的iPad@local."
+        let existing = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: stableId,
+            status: .offline,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            routeIdentifiers: [bonjourPeer],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro"
+        )
+        manager.replaceDevicesForTesting([existing])
+        ConnectionPresenceService.shared.markConnected(
+            peerId: bonjourPeer,
+            displayName: "peer:fe80::1",
+            address: nil,
+            cryptoKind: "Apple PQC",
+            suite: "ML-KEM-768"
+        )
+        defer {
+            ConnectionPresenceService.shared.markDisconnected(peerId: bonjourPeer)
+            manager.replaceDevicesForTesting([])
+        }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        XCTAssertEqual(manager.onlineDevices.first?.uniqueIdentifier, stableId)
+        XCTAssertEqual(manager.onlineDevices.first?.connectionStatus, .connected)
+        XCTAssertEqual(manager.onlineDevices.first?.guardStatus, "守护中")
+    }
+
+    // MARK: - 身份矛盾时禁止合并（Mac 侧“对端全部离线”的回归护栏）
+
+    /// 两台协议身份明确不同的对端，仅仅因为共用一个 IPv4，就被 `findSimilarDevice`
+    /// 折叠成同一行——被吞掉的那一行从可见列表消失，界面只剩过期的持久化行，于是
+    /// iOS / Windows / Android 全部显示「离线」。
+    ///
+    /// 共用 IPv4 在现实里非常常见：NAT 之后、DHCP 地址回收、link-local 冲突。
+    /// 它是佐证，不是身份，绝不能推翻一对明确且不同的协议身份。
+    @MainActor
+    func testDistinctProtocolIdentitiesSharingIPv4DoNotFuse() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let sharedIPv4 = "192.168.0.104"
+        let macDeviceId = "11111111-2222-4333-8444-555555555555"
+        let padDeviceId = "66666666-7777-4888-8999-aaaaaaaaaaaa"
+        let macFingerprint = String(repeating: "a", count: 64)
+        let padFingerprint = String(repeating: "b", count: 64)
+
+        let macPeer = DiscoveredDevice(
+            id: UUID(),
+            name: "Lza的MacBook Pro",
+            ipv4: sharedIPv4,
+            ipv6: nil,
+            platformName: "macos",
+            osVersion: "27.0",
+            modelName: "MacBook Pro",
+            services: [BonjourInteropContract.controlServiceType],
+            portMap: [BonjourInteropContract.controlServiceType: 9_527],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:\(macDeviceId)",
+            routeIdentifiers: ["bonjour:Lza的MacBook Pro@local."],
+            source: .skybridgeBonjour,
+            deviceId: macDeviceId,
+            pubKeyFP: macFingerprint
+        )
+        let padPeer = DiscoveredDevice(
+            id: UUID(),
+            name: "Ziang的iPad",
+            ipv4: sharedIPv4,
+            ipv6: nil,
+            platformName: "ipados",
+            osVersion: "27.0",
+            modelName: "iPad Pro 11-inch (M4)",
+            services: [BonjourInteropContract.controlServiceType],
+            portMap: [BonjourInteropContract.controlServiceType: 51_776],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:\(padDeviceId)",
+            routeIdentifiers: ["bonjour:Ziang的iPad@local."],
+            source: .skybridgeBonjour,
+            deviceId: padDeviceId,
+            pubKeyFP: padFingerprint
+        )
+
+        manager.replaceDevicesForTesting([])
+        defer {
+            manager.applyNetworkDeviceUpdateForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+
+        manager.applyNetworkDeviceUpdateForTesting([macPeer, padPeer])
+
+        let resolvedMac = try XCTUnwrap(
+            manager.device(withIdentifier: "id:\(macDeviceId)"),
+            "Mac 对端不应被 IPv4 巧合吞掉"
+        )
+        let resolvedPad = try XCTUnwrap(
+            manager.device(withIdentifier: "id:\(padDeviceId)"),
+            "iPad 对端不应被 IPv4 巧合吞掉"
+        )
+
+        XCTAssertNotEqual(
+            resolvedMac.uniqueIdentifier,
+            resolvedPad.uniqueIdentifier,
+            "协议身份不同的两台设备必须保持两行"
+        )
+        // 各自的元数据不得串台——串台正是旧实现留在持久化存储里的特征。
+        XCTAssertEqual(resolvedMac.platformName, "macos")
+        XCTAssertEqual(resolvedPad.platformName, "ipados")
+        XCTAssertEqual(resolvedPad.modelName, "iPad Pro 11-inch (M4)")
+    }
+
+    /// 同上，但走 MAC 地址这条更「可靠」的佐证：随机化 MAC 复用、虚拟网卡都会撞车，
+    /// 同样不足以推翻一对不同的协议身份。
+    @MainActor
+    func testDistinctProtocolIdentitiesSharingMACDoNotFuse() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let sharedMAC = "02:00:00:00:00:77"
+        let firstDeviceId = "aaaaaaaa-1111-4222-8333-444444444444"
+        let secondDeviceId = "bbbbbbbb-5555-4666-8777-888888888888"
+
+        let first = DiscoveredDevice(
+            id: UUID(),
+            name: "Peer One",
+            ipv4: "192.168.0.10",
+            ipv6: nil,
+            platformName: "macos",
+            services: [BonjourInteropContract.controlServiceType],
+            portMap: [BonjourInteropContract.controlServiceType: 9_527],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:\(firstDeviceId)",
+            source: .skybridgeBonjour,
+            deviceId: firstDeviceId,
+            pubKeyFP: String(repeating: "c", count: 64),
+            macSet: [sharedMAC]
+        )
+        let second = DiscoveredDevice(
+            id: UUID(),
+            name: "Peer Two",
+            ipv4: "192.168.0.11",
+            ipv6: nil,
+            platformName: "windows",
+            services: [BonjourInteropContract.controlServiceType],
+            portMap: [BonjourInteropContract.controlServiceType: 9_528],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:\(secondDeviceId)",
+            source: .skybridgeBonjour,
+            deviceId: secondDeviceId,
+            pubKeyFP: String(repeating: "d", count: 64),
+            macSet: [sharedMAC]
+        )
+
+        manager.replaceDevicesForTesting([])
+        defer {
+            manager.applyNetworkDeviceUpdateForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+
+        manager.applyNetworkDeviceUpdateForTesting([first, second])
+
+        // 注意：合并发生时 deviceMap 会把两个 key 都指向同一行，
+        // 所以「两个 key 都能查到」并不能证明没合并——必须比对解析出来的身份本身。
+        let resolvedFirst = try XCTUnwrap(manager.device(withIdentifier: "id:\(firstDeviceId)"))
+        let resolvedSecond = try XCTUnwrap(manager.device(withIdentifier: "id:\(secondDeviceId)"))
+
+        XCTAssertNotEqual(
+            resolvedFirst.uniqueIdentifier,
+            resolvedSecond.uniqueIdentifier,
+            "共用 MAC 不足以推翻两个不同的协议身份"
+        )
+        XCTAssertEqual(resolvedFirst.platformName, "macos")
+        XCTAssertEqual(resolvedSecond.platformName, "windows")
+    }
+
+    /// 信任别名合并曾是绕过身份闸门的后门：信任记录的 knownDeviceIds 里会被
+    /// `P2PDiscoveryKEMAliasRepairPolicy` 塞进裸 IP / `host:<ip>` 这类地址形状的 token，
+    /// 于是两台身份不同、只是恰好同 IP 的设备，只要有一条信任记录同时沾到它们就会被合并。
+    @MainActor
+    func testTrustedAliasDoesNotFuseContradictingIdentitiesSharingOnlyAnAddress() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let sharedIPv4 = "192.168.0.104"
+        let firstStableId = "11111111-2222-4333-8444-555555555555"
+        let secondStableId = "66666666-7777-4888-8999-aaaaaaaaaaaa"
+
+        let first = makeDevice(
+            name: "Lza的MacBook Pro",
+            uniqueIdentifier: "id:\(firstStableId)",
+            ipv4: sharedIPv4,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            routeIdentifiers: ["bonjour:Lza的MacBook Pro@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "macos",
+            modelName: "MacBook Pro",
+            protocolFingerprint: String(repeating: "a", count: 64)
+        )
+        let second = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "id:\(secondStableId)",
+            ipv4: sharedIPv4,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 51776],
+            routeIdentifiers: ["bonjour:Ziang的iPad@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "ipados",
+            modelName: "iPad Pro 11-inch (M4)",
+            protocolFingerprint: String(repeating: "b", count: 64)
+        )
+
+        // 这条信任记录唯一同时沾到两台设备的 token 就是那个共享 IP —— 地址，不是身份。
+        let addressOnlyTrustRecord = TrustRecord(
+            deviceId: "id:\(firstStableId)",
+            pubKeyFP: String(repeating: "a", count: 64),
+            publicKey: Data([0x04]),
+            kemPublicKeys: nil,
+            capabilities: ["trusted"],
+            signature: Data(),
+            deviceName: "Lza的MacBook Pro",
+            currentDeviceId: "id:\(firstStableId)",
+            knownDeviceIds: ["id:\(firstStableId)", sharedIPv4, "host:\(sharedIPv4)"]
+        )
+
+        let previousTrustRecords = TrustSyncService.shared.activeTrustRecords
+        TrustSyncService.shared.activeTrustRecords = [addressOnlyTrustRecord]
+        manager.replaceDevicesForTesting([first, second])
+        defer {
+            TrustSyncService.shared.activeTrustRecords = previousTrustRecords
+            manager.replaceDevicesForTesting([])
+        }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(
+            manager.onlineDevices.count,
+            2,
+            "共享地址的信任 token 不得推翻两个不同的协议身份；实际行："
+                + "\(manager.onlineDevices.map(\.uniqueIdentifier))"
+        )
+    }
+
+    /// 身份「未知」不等于身份「不同」：一侧没有协议身份时，仍然允许靠地址补全，
+    /// 否则 Bonjour 的裸命中就再也接不上已知设备了。
+    @MainActor
+    func testUnknownIdentityStillFusesOnSharedAddress() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let sharedIPv4 = "192.168.0.55"
+        let deviceId = "cccccccc-9999-4000-8111-222222222222"
+
+        let identified = DiscoveredDevice(
+            id: UUID(),
+            name: "Ziang的iPhone",
+            ipv4: sharedIPv4,
+            ipv6: nil,
+            platformName: "ios",
+            services: [BonjourInteropContract.controlServiceType],
+            portMap: [BonjourInteropContract.controlServiceType: 9_527],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:\(deviceId)",
+            source: .skybridgeBonjour,
+            deviceId: deviceId,
+            pubKeyFP: String(repeating: "e", count: 64)
+        )
+        // 没有 deviceId / pubKeyFP 的裸地址命中——身份未知，应当被吸附到已识别的那行。
+        let anonymous = DiscoveredDevice(
+            id: UUID(),
+            name: "192.168.0.55",
+            ipv4: sharedIPv4,
+            ipv6: nil,
+            services: [],
+            portMap: [:],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "host:\(sharedIPv4)",
+            source: .skybridgeP2P
+        )
+
+        manager.replaceDevicesForTesting([])
+        defer {
+            manager.applyNetworkDeviceUpdateForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+
+        manager.applyNetworkDeviceUpdateForTesting([identified, anonymous])
+
+        XCTAssertNotNil(
+            manager.device(withIdentifier: "id:\(deviceId)"),
+            "已识别的行必须保留"
+        )
+        // ⚠️ 不要断言 device(withIdentifier: "host:<ip>") == nil：`host:` 从来就不会成为
+        // deviceMap 的 key（generateUniqueIdentifier 会把它归一化成 `id:<ip>`），
+        // 那种断言在「合并了」和「没合并」两种世界里都恒为 nil，毫无鉴别力。
+        // 要断言合并后的形状本身。
+        XCTAssertEqual(
+            manager.onlineDevices.count,
+            1,
+            "身份未知的裸地址命中应当被吸附进已识别的行，而不是自成一行；"
+                + "实际行：\(manager.onlineDevices.map(\.uniqueIdentifier))"
+        )
+        // 活下来的必须是「已识别」的那一行，而不是由路径端点洗出来的幽灵身份。
+        // 注意：合并后 deviceMap 会把裸地址 key 也别名到同一行，所以不能靠
+        // 「该 key 查不到」来判定——要看活下来这行的身份是谁。
+        XCTAssertEqual(
+            manager.onlineDevices.first?.uniqueIdentifier,
+            "id:\(deviceId)",
+            "路径端点不得被当成稳定身份而顶掉真正的协议身份"
+        )
+        XCTAssertEqual(manager.onlineDevices.first?.platformName, "ios")
+    }
+
+    private func discoveryObservation(for row: OnlineDevice) -> DiscoveredDevice {
+        DiscoveredDevice(
+            id: UUID(), name: row.name, ipv4: row.ipv4, ipv6: row.ipv6,
+            platformName: row.platformName, services: row.services, portMap: row.portMap,
+            connectionTypes: [.wifi], uniqueIdentifier: row.uniqueIdentifier,
+            routeIdentifiers: row.routeIdentifiers, deviceId: row.uniqueIdentifier,
+            pubKeyFP: row.protocolFingerprint
+        )
+    }
+
+    private func makeDevice(
+        name: String,
+        uniqueIdentifier: String,
+        ipv4: String? = nil,
+        status: OnlineDeviceStatus,
+        lastConnectedAt: Date?,
+        isConnectable: Bool = false,
+        connectionTypes: Set<DeviceConnectionType> = [.wifi],
+        services: [String] = ["_skybridge._tcp"],
+        portMap: [String: Int] = ["_skybridge._tcp": 9527],
+        routeIdentifiers: [String] = [],
+        sources: [DeviceSource] = [.skybridgeBonjour],
+        platformName: String? = nil,
+        osVersion: String? = nil,
+        modelName: String? = nil,
+        lastSeen: Date = Date(),
+        serialNumber: String? = nil,
+        protocolFingerprint: String? = nil
+    ) -> OnlineDevice {
+        OnlineDevice(
+            id: UUID(),
+            name: name,
+            deviceType: .computer,
+            ipv4: ipv4,
+            ipv6: nil,
+            platformName: platformName,
+            osVersion: osVersion,
+            modelName: modelName,
+            chip: nil,
+            macAddress: nil,
+            serialNumber: serialNumber,
+            connectionTypes: connectionTypes,
+            services: services,
+            portMap: portMap,
+            routeIdentifiers: routeIdentifiers,
+            protocolFingerprint: protocolFingerprint,
+            uniqueIdentifier: uniqueIdentifier,
+            sources: sources,
+            discoveredAt: Date(),
+            lastSeen: lastSeen,
+            connectionStatus: status,
+            lastConnectedAt: lastConnectedAt,
+            lastCryptoKind: "Apple PQC",
+            lastCryptoSuite: "ML-KEM-768",
+            guardStatus: "守护中",
+            isLocalDevice: false,
+            isAuthorized: false,
+            signalStrength: nil,
+            isConnectable: isConnectable
+        )
+    }
+
+    private struct PersistedDevicesPayloadForTesting: Codable {
+        let schemaVersion: Int
+        let devices: [OnlineDevice]
+    }
+
+    private func writePersistedDevicesForTesting(
+        _ devices: [OnlineDevice],
+        schemaVersion: Int
+    ) throws {
+        let payload = PersistedDevicesPayloadForTesting(
+            schemaVersion: schemaVersion,
+            devices: devices
+        )
+        let data = try JSONEncoder().encode(payload)
+        UserDefaults.standard.set(data, forKey: "skybridge.persistedDevices")
+    }
+
+    /// BUG B 回归：Mac 浏览到自己的 `_skybridge._tcp` 广播时，即使发现层因身份预热竞态
+    /// 漏判（`isLocalDevice=false`），显示层也必须凭本机强身份把它认成本机，
+    /// 而不是让它带着「连接」按钮以可连接对端的身份泄漏进在线设备区。
+    @MainActor
+    func testSelfAdvertisementFlaggedLocalByStrongIdentityDespiteDiscoveryLayerMiss() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let selfDeviceId = "11111111-2222-4333-8444-555555555555"
+        let selfFP = String(repeating: "a", count: 64)
+
+        manager.replaceDevicesForTesting([])
+        manager.setLocalStrongIdentityForTesting(
+            deviceId: selfDeviceId,
+            protocolFingerprint: selfFP,
+            ipAddresses: ["192.168.0.104"],
+            macAddresses: ["aa:bb:cc:dd:ee:ff"]
+        )
+        defer {
+            manager.applyNetworkDeviceUpdateForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+
+        // 自广播被发现层漏判：携带本机自己的 deviceId，但 isLocalDevice=false。
+        let selfLeak = DiscoveredDevice(
+            id: UUID(),
+            name: "Lza的MacBook Pro",
+            ipv4: "192.168.0.104",
+            ipv6: nil,
+            platformName: "macos",
+            services: [BonjourInteropContract.controlServiceType],
+            portMap: [BonjourInteropContract.controlServiceType: 61_163],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:\(selfDeviceId)",
+            routeIdentifiers: ["bonjour:Lza的MacBook Pro@local."],
+            source: .skybridgeBonjour,
+            isLocalDevice: false,
+            deviceId: selfDeviceId,
+            pubKeyFP: selfFP
+        )
+        manager.applyNetworkDeviceUpdateForTesting([selfLeak])
+
+        let row = try XCTUnwrap(manager.device(withIdentifier: "id:\(selfDeviceId)"))
+        XCTAssertTrue(row.isLocalDevice, "本机自广播必须被判为本机，不能作为可连接对端泄漏")
+        XCTAssertFalse(
+            manager.onlineDevices.contains {
+                !$0.isLocalDevice && $0.uniqueIdentifier == "id:\(selfDeviceId)"
+            },
+            "本机自广播不得出现在在线对端列表中；实际：\(manager.onlineDevices.map(\.uniqueIdentifier))"
+        )
+    }
+
+    /// BUG B 回归（地址兜底路径）：自广播的 deviceId 缺失/未及时解析时，
+    /// 只要解析回的地址落在本机接口地址集合内，也必须判为本机。
+    @MainActor
+    func testSelfAdvertisementFlaggedLocalByOwnInterfaceAddress() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        manager.replaceDevicesForTesting([])
+        manager.setLocalStrongIdentityForTesting(
+            deviceId: "00000000-0000-4000-8000-000000000000",
+            protocolFingerprint: String(repeating: "b", count: 64),
+            ipAddresses: ["192.168.0.104"],
+            macAddresses: []
+        )
+        defer {
+            manager.applyNetworkDeviceUpdateForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+
+        // 无 deviceId/指纹的自广播，但解析回本机 LAN IP。
+        let selfByIP = DiscoveredDevice(
+            id: UUID(),
+            name: "Lza的MacBook Pro",
+            ipv4: "192.168.0.104",
+            ipv6: nil,
+            platformName: "macos",
+            services: [BonjourInteropContract.controlServiceType],
+            portMap: [BonjourInteropContract.controlServiceType: 61_163],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "bonjour:Lza的MacBook Pro@local.",
+            routeIdentifiers: ["bonjour:Lza的MacBook Pro@local."],
+            source: .skybridgeBonjour,
+            isLocalDevice: false,
+            deviceId: nil,
+            pubKeyFP: nil
+        )
+        manager.applyNetworkDeviceUpdateForTesting([selfByIP])
+
+        XCTAssertFalse(
+            manager.onlineDevices.contains { !$0.isLocalDevice && $0.ipv4 == "192.168.0.104" },
+            "解析回本机接口地址的自广播不得作为在线对端出现"
+        )
+    }
+
+    /// BUG B 反向保护：真正的远端对端（不同 deviceId、不同 IP、非本机 MAC）
+    /// 绝不能被自识别误吞成本机。
+    @MainActor
+    func testGenuineRemotePeerIsNotMisclassifiedAsLocal() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        manager.replaceDevicesForTesting([])
+        manager.setLocalStrongIdentityForTesting(
+            deviceId: "11111111-2222-4333-8444-555555555555",
+            protocolFingerprint: String(repeating: "a", count: 64),
+            ipAddresses: ["192.168.0.104"],
+            macAddresses: ["aa:bb:cc:dd:ee:ff"]
+        )
+        defer {
+            manager.applyNetworkDeviceUpdateForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+
+        let remoteId = "99999999-8888-4777-8666-555544443333"
+        let remote = DiscoveredDevice(
+            id: UUID(),
+            name: "Ziang的iPhone 16 Pro",
+            ipv4: "192.168.0.101",
+            ipv6: nil,
+            platformName: "ios",
+            services: [BonjourInteropContract.controlServiceType],
+            portMap: [BonjourInteropContract.controlServiceType: 51_776],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:\(remoteId)",
+            routeIdentifiers: ["bonjour:Ziang的iPhone 16 Pro@local."],
+            source: .skybridgeBonjour,
+            isLocalDevice: false,
+            deviceId: remoteId,
+            pubKeyFP: String(repeating: "c", count: 64)
+        )
+        manager.applyNetworkDeviceUpdateForTesting([remote])
+
+        let row = try XCTUnwrap(manager.device(withIdentifier: "id:\(remoteId)"))
+        XCTAssertFalse(row.isLocalDevice, "真实远端对端不得被误判为本机")
+    }
+
+    /// BUG(自识别泄漏)回归:Mac 浏览到自己、被发现层因竞态误判为非本机(留下一条以
+    /// 本机 IP 为地址的「对端」行),recompute 必须凭本机强身份/接口地址把它洗成本机——
+    /// 而不是被 authoritative map 里那个陈旧的 `false` 短路挡住,继续以带连接按钮的对端泄漏。
+    @MainActor
+    func testRecomputeReclaimsSelfLeakedPeerByInterfaceAddress() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let selfLeakUID = "id:e0715a9a-d0d3-47e6-b353-de0a30293e1f"
+
+        let leakedSelf = OnlineDevice(
+            id: UUID(),
+            name: "Lza的MacBook Pro",
+            deviceType: .computer,
+            ipv4: "192.168.0.104", ipv6: nil,
+            platformName: "macos",
+            osVersion: nil, modelName: nil, chip: nil,
+            macAddress: nil, serialNumber: nil,
+            connectionTypes: [.wifi],
+            services: [], portMap: [:],
+            uniqueIdentifier: selfLeakUID,
+            sources: [.skybridgeBonjour],
+            discoveredAt: Date(), lastSeen: Date(),
+            connectionStatus: .online,
+            isLocalDevice: false,   // 发现层竞态误判
+            isAuthorized: true
+        )
+
+        manager.replaceDevicesForTesting([leakedSelf])
+        manager.setLocalStrongIdentityForTesting(
+            deviceId: "some-other-cached-id",
+            protocolFingerprint: nil,
+            ipAddresses: ["192.168.0.104"],   // 本机接口地址
+            macAddresses: []
+        )
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeLocalFlagsForTesting()
+
+        let row = try XCTUnwrap(manager.device(withIdentifier: selfLeakUID))
+        XCTAssertTrue(row.isLocalDevice, "解析回本机接口地址的自广播必须被重算为本机")
+        XCTAssertFalse(
+            manager.onlineDevices.contains { !$0.isLocalDevice && $0.uniqueIdentifier == selfLeakUID },
+            "本机自广播不得作为可连接对端出现"
+        )
+    }
+
+    /// BUG(自识别过度匹配)回归:重算时,多条带回环/占位地址(127.0.0.1)的陈旧行
+    /// 不得因撞上本机回环地址而**全部**被判成本机(现场实测"重算出 5 个本机")。
+    /// 回环不作为本机信号;真远端对端不持有本机真实 LAN IP,因此不会误判。
+    @MainActor
+    func testRecomputeDoesNotFlagLoopbackRowsAsMultipleLocals() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+
+        var rows: [OnlineDevice] = []
+        for i in 0..<5 {
+            rows.append(OnlineDevice(
+                id: UUID(),
+                name: "Peer \(i)",
+                deviceType: .computer,
+                ipv4: "127.0.0.1", ipv6: nil,   // 占位/回环
+                platformName: nil, osVersion: nil, modelName: nil, chip: nil,
+                macAddress: nil, serialNumber: nil,
+                connectionTypes: [.wifi],
+                services: [], portMap: [:],
+                uniqueIdentifier: "id:\(UUID().uuidString.lowercased())",
+                sources: [.skybridgeBonjour],
+                discoveredAt: Date(), lastSeen: Date(),
+                connectionStatus: .online,
+                isLocalDevice: false,
+                isAuthorized: true
+            ))
+        }
+        manager.replaceDevicesForTesting(rows)
+        manager.setLocalStrongIdentityForTesting(
+            deviceId: "self-device-id",
+            protocolFingerprint: nil,
+            ipAddresses: ["10.11.19.50", "127.0.0.1", "::1"],   // 本机 IP 含回环
+            macAddresses: []
+        )
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeLocalFlagsForTesting()
+
+        let locals = manager.onlineDevices.filter(\.isLocalDevice)
+        XCTAssertTrue(
+            locals.isEmpty,
+            "带回环占位地址的远端行不得被判成本机;实际本机数=\(locals.count):\(locals.map(\.name))"
+        )
+    }
+
+    private func persistedDevicesForTesting() throws -> [OnlineDevice] {
+        let data = try XCTUnwrap(UserDefaults.standard.data(forKey: "skybridge.persistedDevices"))
+        let payload = try JSONDecoder().decode(PersistedDevicesPayloadForTesting.self, from: data)
+        XCTAssertEqual(payload.schemaVersion, 2)
+        return payload.devices
+    }
+}

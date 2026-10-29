@@ -1,3 +1,8 @@
+// macOS-exclusive: built on macOS-only APIs (AppKit / IOKit / ScreenCaptureKit / CoreWLAN /
+// MetalFX / ServiceManagement / ApplicationServices / CoreGraphics display services).
+// Excluded from other platforms so SkyBridgeCore can be the single shared core for iOS as
+// well. No behaviour changes on macOS.
+#if os(macOS)
 import SwiftUI
 
 /// 网络监控卡片 - 显示网络使用情况和统计信息
@@ -18,6 +23,8 @@ public struct NetworkMonitorCard: View {
     
     @State private var animateUpload = false
     @State private var animateDownload = false
+    @State private var isUploadPulseInFlight = false
+    @State private var isDownloadPulseInFlight = false
     
  // MARK: - 初始化
     
@@ -272,9 +279,13 @@ public struct NetworkMonitorCard: View {
             animateUpload = true
             animateDownload = true
         }
+        isUploadPulseInFlight = false
+        isDownloadPulseInFlight = false
     }
     
     private func triggerUploadAnimation() {
+        guard !isUploadPulseInFlight else { return }
+        isUploadPulseInFlight = true
         withAnimation(.easeInOut(duration: 0.3)) {
             animateUpload = false
         }
@@ -284,10 +295,13 @@ public struct NetworkMonitorCard: View {
             withAnimation(.easeInOut(duration: 0.3)) {
                 animateUpload = true
             }
+            isUploadPulseInFlight = false
         }
     }
     
     private func triggerDownloadAnimation() {
+        guard !isDownloadPulseInFlight else { return }
+        isDownloadPulseInFlight = true
         withAnimation(.easeInOut(duration: 0.3)) {
             animateDownload = false
         }
@@ -297,6 +311,7 @@ public struct NetworkMonitorCard: View {
             withAnimation(.easeInOut(duration: 0.3)) {
                 animateDownload = true
             }
+            isDownloadPulseInFlight = false
         }
     }
 }
@@ -351,3 +366,4 @@ struct NetworkMonitorCard_Previews: PreviewProvider {
         .previewDisplayName("错误状态")
     }
 }
+#endif

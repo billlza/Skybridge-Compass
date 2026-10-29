@@ -1,0 +1,110 @@
+{
+  "artifact_roots": {
+    "license": {
+      "file_count": 1,
+      "path": "Sources/Vendor/NativeLicenses/libflac",
+      "tree_sha256": "03576783b320e32c75644cbf53c5798169c2ec021c9d71915a0b83489c2c2a52"
+    },
+    "xcframework": {
+      "file_count": 31,
+      "path": "Sources/Vendor/libflac.xcframework",
+      "tree_sha256": "f5c31ceb6d0f99590088ba229d5e2f84c289563bbb1b9864318a82d418690023"
+    }
+  },
+  "binaries": [
+    {
+      "architectures": [
+        "arm64"
+      ],
+      "deployment_targets": [
+        "17.0"
+      ],
+      "path": "Sources/Vendor/libflac.xcframework/ios-arm64/libFLAC.a",
+      "platforms": [
+        "ios"
+      ],
+      "sha256": "efde77e3ffd649ca2eb22db7de96fb5a94a6a7e7c5f38b314d409d6bc757fb2c",
+      "size": 369272
+    },
+    {
+      "architectures": [
+        "x86_64",
+        "arm64"
+      ],
+      "deployment_targets": [
+        "17.0"
+      ],
+      "path": "Sources/Vendor/libflac.xcframework/ios-arm64_x86_64-simulator/libFLAC.a",
+      "platforms": [
+        "ios-simulator"
+      ],
+      "sha256": "513ca7c5c1a2dea364a544307d906d9255715e5a3f80ae32497b32d9dc2fe501",
+      "size": 800568
+    },
+    {
+      "architectures": [
+        "arm64"
+      ],
+      "deployment_targets": [
+        "14.0"
+      ],
+      "path": "Sources/Vendor/libflac.xcframework/macos-arm64/libFLAC.a",
+      "platforms": [
+        "macos"
+      ],
+      "sha256": "6a7b336485a36efcce5a700d11d5ad08eeda5b498295f05c80c3be42455dc51d",
+      "size": 379136
+    }
+  ],
+  "build": {
+    "inputs": {
+      "architectures": "macos-arm64,ios-arm64,ios-simulator-arm64,ios-simulator-x86_64",
+      "build_type": "Release",
+      "cxx": "false",
+      "docs": "false",
+      "examples": "false",
+      "fortify_source": "2",
+      "ios_deployment_target": "17.0",
+      "ios_sdk": "27.1",
+      "ios_simulator_sdk": "27.1",
+      "license_sha256": "7866ee98760fc1f0156b4fe6bf530257e02be487ab3fd94e2b63799dd32d6b2c",
+      "linkage": "static",
+      "macos_deployment_target": "14.0",
+      "official_release_archive_sha256": "f2c1c76592a82ffff8413ba3c4a1299b6c7ab06c734dee03fd88630485c2b920",
+      "ogg": "false",
+      "programs": "false",
+      "stack_protector": "strong",
+      "test_patch": "Scripts/Patches/libflac-1.5.0-crc-fixture-alignment.patch@a9cc31d1c061281eed68c1696c9c8b7d77c8772e6bdf3f68b626ce56ac1f25a8",
+      "testing": "true",
+      "werror": "true"
+    },
+    "recipe": "Scripts/build_libflac_xcframework.py",
+    "recipe_sha256": "17b999ff6167bb6d69af6b9e3e96cdde7529840260ec688ceddbd506dca2bc6b",
+    "toolchain": {
+      "clang": "Apple clang version 21.0.0 (clang-2100.3.34.2)",
+      "cmake": "cmake version 4.3.3",
+      "macos_sdk": "27.0",
+      "ninja": "1.13.2",
+      "xcode": "Xcode 27.1; Build version 27A9275"
+    }
+  },
+  "family": "libflac",
+  "native_dependency_lock": {
+    "family": "libflac",
+    "family_sha256": "cea3efb2a4d3f8aaaf0bd6e5bf5dc260e10dc364befe4b011a7e60fcd57088a8",
+    "path": "Config/native-dependencies.lock.json",
+    "schema_version": 2
+  },
+  "schema_version": 2,
+  "sources": [
+    {
+      "commit": "1507800de4b70e21be71f38caa0d9079d0bc6e45",
+      "git_tree": "1619ad4585b61ce5ef86fe1cf97a66bf569a949d",
+      "name": "libflac",
+      "ref": "1.5.0",
+      "repository": "https://github.com/xiph/flac.git",
+      "source_archive_sha256": "bea9c521afb6685d1b0708a55371d74e9b70e837419cee73a95706f137de6228",
+      "version": "1.5.0"
+    }
+  ]
+}

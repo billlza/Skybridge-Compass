@@ -3,6 +3,20 @@ import CryptoKit
 import Security
 import OSLog
 
+public enum EnhancedQuantumKeyManagerError: Error, LocalizedError, Sendable {
+    case keychainOperationFailed(OSStatus)
+    case invalidKeychainPayload
+
+    public var errorDescription: String? {
+        switch self {
+        case .keychainOperationFailed(let status):
+            return "Quantum key Keychain operation failed: \(status)"
+        case .invalidKeychainPayload:
+            return "Quantum key Keychain payload is invalid"
+        }
+    }
+}
+
 /// 增强版量子密钥管理器 - 使用Apple CryptoKit和安全存储
 ///
 /// 改进点:
@@ -54,9 +68,9 @@ public class EnhancedQuantumKeyManager: @unchecked Sendable {
     
  // MARK: - 内存密钥管理
     
- /// 存储密钥到内存（临时）
+    /// 存储密钥到内存（临时）
     public func storeKeyInMemory(_ key: SymmetricKey, for peerId: String) async {
-        logger.info("💾 存储密钥到内存: \(peerId)")
+        logger.info("💾 存储密钥到内存")
         keyLock.withLock { keys in
             keys[peerId] = key
         }
@@ -66,7 +80,7 @@ public class EnhancedQuantumKeyManager: @unchecked Sendable {
     public func getKeyFromMemory(for peerId: String) async throws -> SymmetricKey {
         return try keyLock.withLock { keys in
             guard let key = keys[peerId] else {
-                logger.error("❌ 内存中未找到密钥: \(peerId)")
+                logger.error("❌ 内存中未找到密钥")
                 throw QuantumNetworkError.keyNotFound
             }
             return key
@@ -75,26 +89,37 @@ public class EnhancedQuantumKeyManager: @unchecked Sendable {
     
  // MARK: - Keychain存储
     
- /// 存储密钥到Keychain（持久化）
+    /// 存储密钥到Keychain（持久化）
     public func storeKeyInKeychain(_ keyData: Data, identifier: String) throws {
-        logger.info("💾 存储密钥到Keychain: \(identifier)")
+        logger.info("💾 存储密钥到Keychain")
         
-        let query: [String: Any] = [
+        let lookupQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: identifier,
+            kSecAttrAccount as String: identifier
+        ]
+
+        let updateAttributes: [String: Any] = [
             kSecValueData as String: keyData,
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         ]
-        
- // 先删除旧密钥（如果存在）
-        SecItemDelete(query as CFDictionary)
-        
- // 添加新密钥
-        let status = SecItemAdd(query as CFDictionary, nil)
+        let updateStatus = SecItemUpdate(
+            lookupQuery as CFDictionary,
+            updateAttributes as CFDictionary
+        )
+
+        let status: OSStatus
+        if updateStatus == errSecItemNotFound {
+            var addQuery = lookupQuery
+            addQuery.merge(updateAttributes) { _, newValue in newValue }
+            status = SecItemAdd(addQuery as CFDictionary, nil)
+        } else {
+            status = updateStatus
+        }
+
         guard status == errSecSuccess else {
             logger.error("❌ Keychain存储失败: \(status)")
-            throw QuantumNetworkError.keychainError(status)
+            throw EnhancedQuantumKeyManagerError.keychainOperationFailed(status)
         }
         
         logger.info("✅ 密钥已安全存储到Keychain")
@@ -102,7 +127,16 @@ public class EnhancedQuantumKeyManager: @unchecked Sendable {
     
  /// 从Keychain检索密钥
     public func retrieveKeyFromKeychain(identifier: String) throws -> Data {
-        logger.info("🔍 从Keychain检索密钥: \(identifier)")
+        guard let keyData = try retrieveKeyFromKeychainIfPresent(identifier: identifier) else {
+            throw QuantumNetworkError.keyNotFound
+        }
+        return keyData
+    }
+
+    /// Reads an optional key while distinguishing a genuinely missing item from
+    /// Keychain access failures and corrupt result payloads.
+    public func retrieveKeyFromKeychainIfPresent(identifier: String) throws -> Data? {
+        logger.info("🔍 从Keychain检索密钥")
         
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -113,20 +147,25 @@ public class EnhancedQuantumKeyManager: @unchecked Sendable {
         
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        
-        guard status == errSecSuccess,
-              let keyData = result as? Data else {
+        if status == errSecItemNotFound {
+            return nil
+        }
+        guard status == errSecSuccess else {
             logger.error("❌ Keychain检索失败: \(status)")
-            throw QuantumNetworkError.keyNotFound
+            throw EnhancedQuantumKeyManagerError.keychainOperationFailed(status)
+        }
+        guard let keyData = result as? Data else {
+            logger.error("❌ Keychain检索结果格式无效")
+            throw EnhancedQuantumKeyManagerError.invalidKeychainPayload
         }
         
         logger.info("✅ 密钥已从Keychain检索")
         return keyData
     }
     
- /// 从Keychain删除密钥
+    /// 从Keychain删除密钥
     public func deleteKeyFromKeychain(identifier: String) throws {
-        logger.info("🗑️ 从Keychain删除密钥: \(identifier)")
+        logger.info("🗑️ 从Keychain删除密钥")
         
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -137,7 +176,7 @@ public class EnhancedQuantumKeyManager: @unchecked Sendable {
         let status = SecItemDelete(query as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             logger.error("❌ Keychain删除失败: \(status)")
-            throw QuantumNetworkError.keychainError(status)
+            throw EnhancedQuantumKeyManagerError.keychainOperationFailed(status)
         }
         
         logger.info("✅ 密钥已从Keychain删除")
@@ -145,22 +184,22 @@ public class EnhancedQuantumKeyManager: @unchecked Sendable {
     
  // MARK: - 密钥轮换
     
- /// 轮换密钥（生成新密钥并替换旧密钥）
+    /// 轮换密钥（生成新密钥并替换旧密钥）
     public func rotateKey(for peerId: String) async throws {
-        logger.info("🔄 轮换密钥: \(peerId)")
+        logger.info("🔄 轮换密钥")
         
  // 生成新密钥
         let newKey = try await generateQuantumKey()
         
- // 存储新密钥
-        await storeKeyInMemory(newKey, for: peerId)
-        
- // 如果Keychain中有旧密钥，也更新
+ // 先持久化；失败时保留原有内存密钥并把错误交给调用方。
         let keychainId = "\(peerId)_latest"
         let keyData = newKey.withUnsafeBytes { Data($0) }
-        try? storeKeyInKeychain(keyData, identifier: keychainId)
+        try storeKeyInKeychain(keyData, identifier: keychainId)
+
+ // Keychain成功后再切换内存密钥，避免报告成功但持久层仍是旧密钥。
+        await storeKeyInMemory(newKey, for: peerId)
         
-        logger.info("✅ 密钥轮换完成: \(peerId)")
+        logger.info("✅ 密钥轮换完成")
     }
     
  // MARK: - 密钥清理
@@ -180,13 +219,3 @@ public class EnhancedQuantumKeyManager: @unchecked Sendable {
         }
     }
 }
-
-// MARK: - 扩展错误类型
-
-extension QuantumNetworkError {
-    static func keychainError(_ status: OSStatus) -> QuantumNetworkError {
- // 可以通过自定义错误处理Keychain错误
-        return .keyNotFound
-    }
-}
-

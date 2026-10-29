@@ -1,93 +1,328 @@
 import Foundation
 import Combine
+import SkyBridgeProtocolCore
 
-/// 桥接“设置-文件传输”到实际后端（非侵入式）：
-/// - 仅在显式调用 apply() 时下推到引擎，避免日常 UI 修改影响实际功能
-/// - 去抖/合并多项更改
+struct FileTransferReceiveDirectoryFailure: Sendable, Equatable {
+    let domain: String
+    let code: Int
+
+    init(_ error: Error) {
+        let nsError = error as NSError
+        self.domain = nsError.domain
+        self.code = nsError.code
+    }
+}
+
+enum FileTransferReceiveDirectoryResolution: Sendable, Equatable {
+    case success(
+        url: URL,
+        usedFallback: Bool,
+        preferredFailure: FileTransferReceiveDirectoryFailure?
+    )
+    case failure(
+        preferredFailure: FileTransferReceiveDirectoryFailure?,
+        terminalFailure: FileTransferReceiveDirectoryFailure
+    )
+    case cancelled
+}
+
+enum FileTransferDirectoryResolutionCoalescingPolicy {
+    nonisolated static func shouldReuseActiveRequest(
+        requestKey: String,
+        lastRequestedKey: String?,
+        hasActiveTask: Bool,
+        force: Bool
+    ) -> Bool {
+        !force && hasActiveTask && requestKey == lastRequestedKey
+    }
+}
+
+/// 桥接“设置-文件传输”到权威的 `FileTransferManager` 运行时。
 @MainActor
 public final class FileTransferSettingsBridge: ObservableObject {
+    private struct RuntimeSettingsSnapshot: Equatable {
+        let concurrentTransfers: Int
+        let chunkSize: Int
+        let speedLimitMBps: Double
+        let automaticResumeEnabled: Bool
+        let keepTransferHistory: Bool
+        let keepSystemAwake: Bool
+        let virusScanEnabled: Bool
+        let scanLevel: String
+    }
+
     public static let shared = FileTransferSettingsBridge()
-    
-    private let videoSettings = VideoTransferSettingsManager.shared
+
     private let settings = SettingsManager.shared
-    private let fileTransferManager = FileTransferManager()
-    private var cancellables = Set<AnyCancellable>()
-    
-    private var pendingApplyWorkItem: DispatchWorkItem?
-    private let debounceInterval: TimeInterval = 0.0 // 仅手动触发，默认不自动
-    
+    private let fileTransferManager = FileTransferManager.shared
+    private var directoryResolutionTask: Task<Void, Never>?
+    private var directoryRevision: UInt64 = 0
+    private var lastRequestedDirectoryKey: String?
+    private var lastAppliedRuntimeSnapshot: RuntimeSettingsSnapshot?
+
     private init() {}
-    
- /// 手动应用当前设置到后端（安全合并）
+
+    /// 手动应用当前设置到后端。纯内存设置立即应用；目录 I/O 在专用 actor 上合并执行。
     public func apply() {
-        pendingApplyWorkItem?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            Task { @MainActor in
-                guard let self else { return }
-                self.applyFileTransferSettings()
-                self.applyVideoSettings()
+        applyRuntimeSettings()
+        _ = scheduleDirectoryResolution(
+            preferredPath: settings.defaultTransferPath,
+            force: false
+        )
+    }
+
+    /// 异步调用返回时，设置（包括真实目录验证）已经完整下推。
+    public func applyAsync() async {
+        applyRuntimeSettings()
+        let task = scheduleDirectoryResolution(
+            preferredPath: settings.defaultTransferPath,
+            force: false
+        )
+        await task?.value
+    }
+
+    /// 更新接收目录。只有 descriptor-based 校验成功后才更新持久设置与运行时路径。
+    public func updateReceiveDirectory(_ url: URL?) {
+        _ = scheduleDirectoryResolution(
+            preferredPath: url?.path ?? "",
+            force: true
+        )
+    }
+
+    private func applyRuntimeSettings() {
+        let concurrentTransfers = settings.maxConcurrentFileTransfers
+        let configuredChunkSize = settings.transferBufferSize
+        let speedLimitMBps = settings.transferSpeedLimitMBps
+
+        guard (1...ClassicTransferInboundPolicy.maximumConcurrentConnections)
+            .contains(concurrentTransfers) else {
+            reportRuntimeValidationFailure(code: "invalid_concurrent_transfer_limit")
+            return
+        }
+        guard (ClassicTransferInboundPolicy.minimumDeclaredChunkSizeBytes...ClassicTransferInboundPolicy.maximumDeclaredChunkSizeBytes).contains(configuredChunkSize) else {
+            reportRuntimeValidationFailure(code: "invalid_transfer_chunk_size")
+            return
+        }
+        guard speedLimitMBps.isFinite,
+              speedLimitMBps >= 0,
+              speedLimitMBps <= SettingsManager.maximumTransferSpeedLimitMBps else {
+            reportRuntimeValidationFailure(code: "invalid_transfer_speed_limit")
+            return
+        }
+
+        let snapshot = RuntimeSettingsSnapshot(
+            concurrentTransfers: concurrentTransfers,
+            chunkSize: configuredChunkSize,
+            speedLimitMBps: speedLimitMBps,
+            automaticResumeEnabled: settings.autoRetryFailedTransfers,
+            keepTransferHistory: settings.keepTransferHistory,
+            keepSystemAwake: settings.keepSystemAwakeDuringTransfer,
+            virusScanEnabled: settings.scanTransferFilesForVirus,
+            scanLevel: settings.scanLevel.rawValue
+        )
+        guard snapshot != lastAppliedRuntimeSnapshot else { return }
+
+        let speedLimitBytesPerSecond = speedLimitMBps * 1_024 * 1_024
+        fileTransferManager.updateSettings(
+            maxConcurrentTransfers: concurrentTransfers,
+            chunkSize: configuredChunkSize,
+            maxTransferSpeedBytesPerSecond: speedLimitBytesPerSecond,
+            automaticResumeEnabled: settings.autoRetryFailedTransfers,
+            keepTransferHistory: settings.keepTransferHistory,
+            keepSystemAwakeDuringTransfer: settings.keepSystemAwakeDuringTransfer
+        )
+        fileTransferManager.updateSecuritySettings(
+            virusScanEnabled: settings.scanTransferFilesForVirus,
+            scanLevel: settings.scanLevel
+        )
+        lastAppliedRuntimeSnapshot = snapshot
+        NetworkActivityLogStore.shared.record(
+            category: "file-transfer",
+            message: "应用文件传输设置: 并发=\(concurrentTransfers), 分片=\(configuredChunkSize), 限速MBps=\(speedLimitMBps)"
+        )
+    }
+
+    @discardableResult
+    private func scheduleDirectoryResolution(
+        preferredPath: String,
+        force: Bool
+    ) -> Task<Void, Never>? {
+        let requestKey = preferredPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if FileTransferDirectoryResolutionCoalescingPolicy.shouldReuseActiveRequest(
+            requestKey: requestKey,
+            lastRequestedKey: lastRequestedDirectoryKey,
+            hasActiveTask: directoryResolutionTask != nil,
+            force: force
+        ), let directoryResolutionTask {
+            return directoryResolutionTask
+        }
+
+        directoryRevision &+= 1
+        let revision = directoryRevision
+        lastRequestedDirectoryKey = requestKey
+        directoryResolutionTask?.cancel()
+
+        let task = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+
+            let result = await Self.resolveReceiveDirectory(preferredPath: requestKey)
+            guard !Task.isCancelled,
+                  let self,
+                  revision == self.directoryRevision else {
+                return
+            }
+            self.applyDirectoryResolution(result)
+            if revision == self.directoryRevision {
+                self.directoryResolutionTask = nil
             }
         }
-        pendingApplyWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + debounceInterval, execute: work)
+        directoryResolutionTask = task
+        return task
     }
 
- /// 异步版本的应用接口，供需要 `await` 的调用场景（例如前台分层恢复）
-    public func applyAsync() async {
-        await MainActor.run {
-            self.apply()
+    nonisolated static func resolveReceiveDirectory(
+        preferredPath: String,
+        fallbackURL: URL? = nil
+    ) async -> FileTransferReceiveDirectoryResolution {
+        do {
+            try Task.checkCancellation()
+        } catch {
+            return .cancelled
+        }
+
+        let preferredURL = normalizedDirectoryURL(from: preferredPath)
+        var preferredFailure: FileTransferReceiveDirectoryFailure?
+        if let preferredURL {
+            do {
+                let resolved = try await InboundFileTransferIOActor.shared
+                    .prepareFirstWritableDirectory(from: [preferredURL])
+                return .success(
+                    url: resolved,
+                    usedFallback: false,
+                    preferredFailure: nil
+                )
+            } catch is CancellationError {
+                return .cancelled
+            } catch {
+                preferredFailure = FileTransferReceiveDirectoryFailure(error)
+            }
+        }
+
+        guard let fallback = fallbackURL ?? fallbackReceiveDirectory() else {
+            return .failure(
+                preferredFailure: preferredFailure,
+                terminalFailure: FileTransferReceiveDirectoryFailure(
+                    InboundFileTransferIOError.destinationUnavailable
+                )
+            )
+        }
+        do {
+            let resolved = try await InboundFileTransferIOActor.shared
+                .prepareFirstWritableDirectory(from: [fallback])
+            return .success(
+                url: resolved,
+                usedFallback: true,
+                preferredFailure: preferredFailure
+            )
+        } catch is CancellationError {
+            return .cancelled
+        } catch {
+            return .failure(
+                preferredFailure: preferredFailure,
+                terminalFailure: FileTransferReceiveDirectoryFailure(error)
+            )
         }
     }
-    
- /// 更新接收目录
-    public func updateReceiveDirectory(_ url: URL?) {
-        fileTransferManager.setReceiveBaseDirectory(url)
+
+    private func applyDirectoryResolution(_ result: FileTransferReceiveDirectoryResolution) {
+        switch result {
+        case .success(let url, let usedFallback, let preferredFailure):
+            if let preferredFailure {
+                recordDirectoryCandidateFailure(preferredFailure)
+            }
+            fileTransferManager.setReceiveBaseDirectory(url)
+            if settings.defaultTransferPath != url.path {
+                settings.defaultTransferPath = url.path
+            }
+            guard usedFallback else { return }
+
+            SkyBridgeLogger.fileTransfer.warning("⚠️ 默认接收目录不可用，已使用受验证的回退目录")
+            NetworkActivityLogStore.shared.record(
+                category: "file-transfer",
+                message: "默认接收目录不可用，已使用受验证的回退目录",
+                level: "WARN"
+            )
+            NotificationCenter.default.post(
+                name: NSNotification.Name("FileTransferReceivePathFallback"),
+                object: nil,
+                userInfo: ["path": url.path]
+            )
+        case .failure(let preferredFailure, let terminalFailure):
+            if let preferredFailure {
+                recordDirectoryCandidateFailure(preferredFailure)
+            }
+            reportTerminalDirectoryFailure(terminalFailure)
+        case .cancelled:
+            break
+        }
     }
-    
-    private func applyFileTransferSettings() {
- // 并发、缓冲区等运行时设置
-        fileTransferManager.updateSettings(
-            maxConcurrentTransfers: Int(settings.maxConcurrentConnections),
-            chunkSize: settings.transferBufferSize,
-            enableCompression: settings.enableConnectionEncryption, // 保持与UI一致的命名：这里代表传输层开关
-            enableEncryption: settings.enableConnectionEncryption
+
+    private func recordDirectoryCandidateFailure(_ failure: FileTransferReceiveDirectoryFailure) {
+        SkyBridgeLogger.fileTransfer.warning(
+            "候选文件接收目录不可用: domain=\(failure.domain, privacy: .private) code=\(failure.code, privacy: .public)"
         )
- // 通知开关、自动重试等策略在下一步扩展（需要在 FileTransferManager 增加策略接口）
     }
-    
-    private func applyVideoSettings() {
- // 将视频传输设置同步到远程桌面设置管理器
-        let rd = RemoteDesktopSettingsManager.shared
-        rd.settings.displaySettings.refreshRate = videoSettings.selectedFrameRate.refreshRate
-        rd.settings.displaySettings.videoQuality = videoSettings.compressionQuality.videoQuality
-        rd.saveSettings()
-        
- // 通知活动会话应用新设置
-        Task { @MainActor in
- // 通过RemoteDesktopManager通知活动会话更新设置
- // 会话会自动从RemoteDesktopSettingsManager读取最新设置
-            NotificationCenter.default.post(name: NSNotification.Name("RemoteDesktopSettingsDidUpdate"), object: nil)
-        }
-    }
-}
 
-private extension VideoFrameRate {
-    var refreshRate: RefreshRate {
-        switch self {
-        case .fps30: return .hz30
-        case .fps60: return .hz60
-        case .fps120: return .hz120
-        }
+    private func reportTerminalDirectoryFailure(_ failure: FileTransferReceiveDirectoryFailure) {
+        SkyBridgeLogger.fileTransfer.error(
+            "文件接收目录配置失败: domain=\(failure.domain, privacy: .private) code=\(failure.code, privacy: .public)"
+        )
+        NetworkActivityLogStore.shared.record(
+            category: "file-transfer",
+            message: "文件接收目录配置失败: domain=\(failure.domain) code=\(failure.code)",
+            level: "ERROR"
+        )
+        NotificationCenter.default.post(
+            name: NSNotification.Name("FileTransferReceivePathFailure"),
+            object: nil,
+            userInfo: ["domain": failure.domain, "code": failure.code]
+        )
     }
-}
 
-private extension VideoCompressionQuality {
-    var videoQuality: VideoQuality {
-        switch self {
-        case .none: return .ultra
-        case .fast: return .low
-        case .balanced: return .medium
-        case .maximum: return .high
+    private func reportRuntimeValidationFailure(code: String) {
+        SkyBridgeLogger.fileTransfer.error(
+            "文件传输运行时设置校验失败: code=\(code, privacy: .public)"
+        )
+        NetworkActivityLogStore.shared.record(
+            category: "file-transfer",
+            message: "文件传输运行时设置校验失败: code=\(code)",
+            level: "ERROR"
+        )
+        NotificationCenter.default.post(
+            name: Notification.Name("FileTransferSettingsValidationFailure"),
+            object: nil,
+            userInfo: ["code": code]
+        )
+    }
+
+    private nonisolated static func normalizedDirectoryURL(from rawPath: String) -> URL? {
+        let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        #if os(iOS)
+        // `~/Downloads` is the persisted macOS default. On iOS it would expand to a different
+        // container-root directory and silently bypass the established Documents/Downloads
+        // layout. Treat that one legacy default as the canonical iOS receive directory; explicit
+        // user-selected absolute paths remain untouched.
+        if trimmed == "~/Downloads" {
+            return FileTransferDirectoryLayout.defaultReceiveDirectory()
         }
+        #endif
+        let expandedPath = (trimmed as NSString).expandingTildeInPath
+        return URL(fileURLWithPath: expandedPath, isDirectory: true).standardizedFileURL
+    }
+
+    private nonisolated static func fallbackReceiveDirectory() -> URL? {
+        FileTransferDirectoryLayout.defaultReceiveDirectory()
     }
 }

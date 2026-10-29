@@ -28,4 +28,3 @@ Build scripts (optional):
 - CSV outputs: `Artifacts/*.csv`
 - Generated tables: `Docs/tables/` and `Docs/supp_tables/`
 - Generated figures: `figures/*.pdf`
-

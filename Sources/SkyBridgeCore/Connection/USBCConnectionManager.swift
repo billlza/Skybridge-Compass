@@ -1,9 +1,15 @@
+// macOS-exclusive: this file is built on frameworks that exist only on macOS
+// (AppKit / IOKit / ScreenCaptureKit / CoreWLAN / MetalFX / ServiceManagement /
+// ApplicationServices). It is excluded from other platforms so SkyBridgeCore can be
+// the single shared core for iOS as well. No behaviour changes on macOS.
+#if os(macOS)
 import Foundation
 import Network
 import OSLog
 import ExternalAccessory
 import IOKit
 import IOKit.usb
+import SkyBridgeAppleTransport
 
 /// USB-C设备类型枚举
 public enum USBCDeviceType: String, CaseIterable, Sendable {
@@ -13,7 +19,7 @@ public enum USBCDeviceType: String, CaseIterable, Sendable {
     case usbFlashDrive = "usb_flash"      // U盘
     case audioDevice = "audio"            // 音频设备（耳机/音箱/声卡）
     case unknown = "unknown"              // 未知设备
-    
+
  /// 设备类型的中文描述
     public var description: String {
         switch self {
@@ -44,8 +50,11 @@ public struct USBDeviceInfo: Sendable {
     public let isMFiCertified: Bool
     public let connectionInterface: String
     public let capabilities: [String]
-    
-    public init(deviceID: String, name: String, deviceType: USBCDeviceType, vendorID: UInt16, productID: UInt16, serialNumber: String?, isMFiCertified: Bool, connectionInterface: String, capabilities: [String]) {
+    /// Current physical routing only; neither field authenticates a product peer.
+    public let registryEntryID: UInt64?
+    public let locationID: UInt32?
+
+    public init(deviceID: String, name: String, deviceType: USBCDeviceType, vendorID: UInt16, productID: UInt16, serialNumber: String?, isMFiCertified: Bool, connectionInterface: String, capabilities: [String], registryEntryID: UInt64? = nil, locationID: UInt32? = nil) {
         self.deviceID = deviceID
         self.name = name
         self.deviceType = deviceType
@@ -55,20 +64,40 @@ public struct USBDeviceInfo: Sendable {
         self.isMFiCertified = isMFiCertified
         self.connectionInterface = connectionInterface
         self.capabilities = capabilities
+        self.registryEntryID = registryEntryID
+        self.locationID = locationID
     }
 }
 
 /// USB-C连接管理器 - 支持MFi认证和多设备类型识别
 @MainActor
 public final class USBCConnectionManager: ObservableObject {
-    
+    private final class ResumeState: @unchecked Sendable {
+        var resumed = false
+    }
+
+    private struct USBEnumerationSnapshot: Sendable {
+        let devices: [USBDeviceInfo]
+        let processedCount: Int
+    }
+
  // MARK: - 发布属性
-    
+
     @Published public var discoveredUSBDevices: [USBDeviceInfo] = []
-    
+    @Published public private(set) var lastScanCompletedAt: Date?
+    @Published public private(set) var lastScanError: String?
+    @Published public private(set) var isPreparingAndroidUSB = false
+    @Published public private(set) var androidUSBPreparationReceipt: USBHostAccessoryReceipt?
+    @Published private var androidUSBPreparation: USBHostAccessoryPreparation?
+    private var androidUSBPreparationAttemptID: UUID?
+    typealias AndroidPreparationFactory = (UInt64, UUID, @escaping @Sendable () throws -> Void) throws -> USBHostAccessoryPreparation
+    private let androidPreparationFactory: AndroidPreparationFactory
+    public var androidUSBCleanupBlocked: Bool { androidUSBPreparation != nil && !isPreparingAndroidUSB }
+
  // MARK: - 私有属性
-    
+
     private let logger = Logger(subsystem: "com.skybridge.connection", category: "USBCConnectionManager")
+    public static let shared = USBCConnectionManager()
     private let verboseLogging = false
     private let connectionQueue = DispatchQueue(label: "usbc.connection.queue", qos: .userInitiated)
     private var connections: [UUID: NWConnection] = [:]
@@ -79,16 +108,16 @@ public final class USBCConnectionManager: ObservableObject {
             discoveredUSBDevices = Array(connectedUSBDevices.values)
         }
     }
-    
+
  // MFi认证相关
-    private var accessoryManager: EAAccessoryManager
+    private var accessoryManager: EAAccessoryManager?
     private var mfiAccessories: [EAAccessory] = []
-    
+
  // 已知的Apple设备供应商ID
-    private let appleVendorIDs: Set<UInt16> = [0x05AC] // Apple Inc.
-    
+    nonisolated private static let appleVendorIDs: Set<UInt16> = [0x05AC] // Apple Inc.
+
  // 已知的Android设备供应商ID（主要厂商）
-    private let androidVendorIDs: Set<UInt16> = [
+    nonisolated private static let androidVendorIDs: Set<UInt16> = [
         0x18D1, // Google
         0x04E8, // Samsung
         0x0BB4, // HTC
@@ -101,9 +130,9 @@ public final class USBCConnectionManager: ObservableObject {
         0x2717, // Xiaomi
         0x2A45  // OnePlus
     ]
-    
+
  // 已知的存储设备供应商ID
-    private let storageVendorIDs: Set<UInt16> = [
+    nonisolated private static let storageVendorIDs: Set<UInt16> = [
         0x0781, // SanDisk
         0x0930, // Toshiba
         0x058F, // Alcor Micro
@@ -115,25 +144,72 @@ public final class USBCConnectionManager: ObservableObject {
         0x04C5, // Fujitsu
         0x0480  // Toshiba America
     ]
-    
+
  // MARK: - 初始化
-    
-    public init() {
-        self.accessoryManager = EAAccessoryManager.shared()
-        logger.info("USB-C连接管理器已初始化，支持MFi认证")
-        
- // 设置MFi配件通知
-        setupMFiNotifications()
-        
- // 初始化时扫描已连接的MFi设备
-        Task {
-            await scanForMFiDevices()
-            await scanForUSBDevices()
+
+    public convenience init() {
+        self.init(androidPreparationFactory: { registryID, nonce, authority in
+            try USBHostAccessoryPreparation(deviceRegistryID: registryID,
+                mode: .start(attachmentNonce: nonce, linkProfile: .epochV2), requireAttemptCurrent: authority)
+        })
+    }
+
+    init(androidPreparationFactory: @escaping AndroidPreparationFactory) {
+        self.androidPreparationFactory = androidPreparationFactory
+        self.accessoryManager = nil
+        logger.info("USB-C连接管理器已初始化（USB/MFi 扫描均按需启用）")
+    }
+
+    private static var isRunningUnderTests: Bool {
+        #if DEBUG || SKYBRIDGE_TESTING
+        let env = ProcessInfo.processInfo.environment
+        if env["XCTestConfigurationFilePath"] != nil { return true }
+        if env["XCTestBundlePath"] != nil { return true }
+        if env["XCTestSessionIdentifier"] != nil { return true }
+        // 兜底：如果 XCTest 符号存在，也视为测试进程
+        if NSClassFromString("XCTestCase") != nil { return true }
+        return false
+        #else
+        return false
+        #endif
+    }
+
+    static var canUseExternalAccessory: Bool {
+        guard !isRunningUnderTests else { return false }
+        guard hasBluetoothUsageDescription else { return false }
+        return isLaunchServicesAppProcess
+    }
+
+    static var hasBluetoothUsageDescription: Bool {
+        let candidateKeys = [
+            "NSBluetoothAlwaysUsageDescription",
+            "NSBluetoothPeripheralUsageDescription"
+        ]
+
+        return candidateKeys.contains { key in
+            guard let value = Bundle.main.object(forInfoDictionaryKey: key) as? String else {
+                return false
+            }
+            return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
     }
-    
+
+    static var isLaunchServicesAppProcess: Bool {
+        let env = ProcessInfo.processInfo.environment
+        guard env["XPC_SERVICE_NAME"]?.hasPrefix("application.") == true else {
+            return false
+        }
+        guard let bundleIdentifier = Bundle.main.bundleIdentifier, !bundleIdentifier.isEmpty else {
+            return false
+        }
+        guard env["__CFBundleIdentifier"] == bundleIdentifier else {
+            return false
+        }
+        return Bundle.main.bundleURL.pathExtension == "app"
+    }
+
  // MARK: - 公共方法
-    
+
  /// 检查USB-C是否可用
     public func isAvailable() async -> Bool {
         return await withCheckedContinuation { continuation in
@@ -144,44 +220,52 @@ public final class USBCConnectionManager: ObservableObject {
                     continuation.resume(returning: false)
                     return
                 }
-                
-                defer { freeifaddrs(ifaddr) }
-                
-                var current = ifaddr
-                while current != nil {
-                    let interface = current!.pointee
-                    guard let namePtr = interface.ifa_name else { 
-                        current = current!.pointee.ifa_next
-                        continue 
-                    }
+
+                guard let first = ifaddr else {
+                    continuation.resume(returning: false)
+                    return
+                }
+
+                defer { freeifaddrs(first) }
+
+                var current: UnsafeMutablePointer<ifaddrs>? = first
+                while let interfacePointer = current {
+                    let interface = interfacePointer.pointee
+                    current = interface.ifa_next
+
+                    guard let namePtr = interface.ifa_name else { continue }
  // 使用统一的 UTF8 安全解码替代已弃用的 String(cString:)
                     let name = decodeCString(namePtr)
-                    
+
  // 检查是否为USB-C以太网接口（通常是en5, en6等）
-                    if (name.hasPrefix("en") && name != "en0" && name != "en1") && 
+                    if (name.hasPrefix("en") && name != "en0" && name != "en1") &&
                        (interface.ifa_flags & UInt32(IFF_UP)) != 0 {
                         continuation.resume(returning: true)
                         return
                     }
-                    
-                    current = interface.ifa_next
                 }
-                
+
                 continuation.resume(returning: false)
             }
         }
     }
-    
+
  /// 扫描MFi认证设备
     public func scanForMFiDevices() async {
+        guard Self.canUseExternalAccessory else {
+            logger.info("跳过MFi认证设备扫描：当前进程缺少可安全访问 ExternalAccessory 的 bundle/权限上下文")
+            return
+        }
+
         if verboseLogging { SkyBridgeLogger.connection.debugOnly("🔍 USBCConnectionManager: 开始扫描MFi认证设备") }
         logger.info("开始扫描MFi认证设备")
-        
-        let accessories = accessoryManager.connectedAccessories
+
+        guard let manager = ensureAccessoryManager() else { return }
+        let accessories = manager.connectedAccessories
         mfiAccessories = accessories
-        
+
         if verboseLogging { SkyBridgeLogger.connection.debugOnly("🔍 USBCConnectionManager: 发现 \(accessories.count) 个MFi设备") }
-        
+
         for accessory in accessories {
             let deviceInfo = USBDeviceInfo(
                 deviceID: "\(accessory.connectionID)",
@@ -194,106 +278,202 @@ public final class USBCConnectionManager: ObservableObject {
                 connectionInterface: "Lightning/USB-C",
                 capabilities: accessory.protocolStrings
             )
-            
+
             connectedUSBDevices[deviceInfo.deviceID] = deviceInfo
             if verboseLogging { SkyBridgeLogger.connection.debugOnly("✅ USBCConnectionManager: 发现MFi认证设备: \(accessory.name)") }
             logger.info("发现MFi认证设备: \(accessory.name)")
         }
-        
+
         if verboseLogging { SkyBridgeLogger.connection.debugOnly("🔍 USBCConnectionManager: MFi设备扫描完成") }
     }
-    
+
  /// 扫描USB设备（包括Android设备、硬盘、U盘）
     public func scanForUSBDevices() async {
         if verboseLogging { SkyBridgeLogger.connection.debugOnly("🔍 USBCConnectionManager: 开始扫描USB设备") }
         logger.info("开始扫描USB设备")
-        
-        await withCheckedContinuation { continuation in
-            connectionQueue.async { [weak self] in
-                guard let self = self else {
-                    continuation.resume()
-                    return
-                }
-                
-                if verboseLogging { SkyBridgeLogger.connection.debugOnly("🔍 USBCConnectionManager: 在后台队列中枚举USB设备") }
-                
-                Task { @MainActor in
-                    self.enumerateUSBDevices()
-                    if verboseLogging { SkyBridgeLogger.connection.debugOnly("🔍 USBCConnectionManager: USB设备枚举完成") }
-                    continuation.resume()
-                }
-            }
+
+        let snapshot: USBEnumerationSnapshot
+        do {
+            snapshot = try await readUSBInventory(hostOnly: false)
+            lastScanError = nil
+        } catch {
+            lastScanError = error.localizedDescription
+            logger.error("USB 设备枚举失败，保留上次扫描记录：\(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
+            return
         }
-        
+
+        let mfiDevices = connectedUSBDevices.filter { _, device in
+            device.connectionInterface == "Lightning/USB-C"
+        }
+        let scannedDevices = Dictionary(
+            snapshot.devices.map { ($0.deviceID, $0) },
+            uniquingKeysWith: { _, newest in newest }
+        )
+        lastScanCompletedAt = Date()
+        connectedUSBDevices = mfiDevices.merging(scannedDevices) { _, scanned in scanned }
+
+        if verboseLogging { SkyBridgeLogger.connection.debugOnly("🔍 USBCConnectionManager: USB设备枚举完成") }
+        logger.info("USB设备扫描完成，处理 \(snapshot.processedCount) 个USB服务，识别 \(snapshot.devices.count) 台可展示设备")
         if verboseLogging { SkyBridgeLogger.connection.debugOnly("🔍 USBCConnectionManager: USB设备扫描完成，共发现 \(connectedUSBDevices.count) 个设备") }
     }
-    
+
  /// 获取已连接的USB设备列表
     public func getConnectedUSBDevices() -> [USBDeviceInfo] {
         return Array(connectedUSBDevices.values)
     }
-    
+
+    /// Current native device generations. Does not deduplicate by optional
+    /// hardware serials, open interfaces or treat an enumeration error as no cable.
+    public func readNativeAndroidUSBDevices() async throws -> [USBDeviceInfo] {
+        try await readUSBInventory(hostOnly: true).devices.filter { $0.deviceType == .androidDevice }
+    }
+
+    private func readUSBInventory(hostOnly: Bool) async throws -> USBEnumerationSnapshot {
+        try await withCheckedThrowingContinuation { continuation in
+            connectionQueue.async {
+                continuation.resume(with: Result {
+                    if hostOnly {
+                        return try Self.enumerateUSBDevicesByClassName("IOUSBHostDevice", includeInterfaceCapabilities: false)
+                    }
+                    return try Self.enumerateUSBDevicesSnapshot()
+                })
+            }
+        }
+    }
+
+    /// App-owned Android startup, using the actual selected registry generation.
+    /// A completed receipt still needs re-enumeration and the ordinary authenticated
+    /// MAIN connection. Never replace this path with a network endpoint or infer
+    /// identity from the vendor, hardware serial, location or attachment nonce.
+    public func prepareAndroidUSB(_ device: USBDeviceInfo, attemptID: UUID = UUID(),
+                                  requireAttemptCurrent: @escaping @Sendable () throws -> Void) async throws -> AndroidUSBPreparedAttachment {
+        guard androidUSBPreparation == nil else { throw USBHostByteError.alreadyStarted }
+        guard device.deviceType == .androidDevice,
+              let registryID = device.registryEntryID, registryID != 0,
+              let locationID = device.locationID, locationID != 0 else {
+            throw USBHostByteError.invalidRegistryEntry
+        }
+        try requireAttemptCurrent()
+        let nonce = UUID()
+        let preparation = try androidPreparationFactory(registryID, nonce, requireAttemptCurrent)
+        androidUSBPreparationAttemptID = attemptID
+        androidUSBPreparation = preparation
+        androidUSBPreparationReceipt = nil
+        isPreparingAndroidUSB = true
+        defer {
+            // A cleanup observer must not release admission while this caller
+            // still owns completion. An older caller must never clear a successor.
+            if androidUSBPreparation === preparation {
+                isPreparingAndroidUSB = false
+                releaseAndroidPreparationIfComplete(preparation)
+            }
+        }
+        let result: Result<USBHostAccessoryReceipt, any Error>
+        do { result = .success(try await preparation.run()) }
+        catch { result = .failure(error) }
+        androidUSBPreparationReceipt = preparation.receipt
+        let cleanupFailure: (any Error)?
+        do { try await preparation.closeAndAwait(); cleanupFailure = nil }
+        catch { cleanupFailure = error }
+        if let cleanupFailure {
+            if case .failure(let primary) = result {
+                throw AndroidUSBPreparationCleanupFailure(primary: primary, cleanup: cleanupFailure)
+            }
+            throw cleanupFailure
+        }
+        let receipt = try result.get()
+        guard receipt.startCompletionConfirmed else { throw USBHostByteError.notReady }
+        guard receipt.requestedLinkProfile == .epochV2 else { throw USBHostAccessoryError.profileMismatch }
+        return AndroidUSBPreparedAttachment(source: device, locationID: locationID, attachmentNonce: nonce,
+            linkProfile: .epochV2, receipt: receipt)
+    }
+
+    public func cancelAndroidUSBPreparation(attemptID: UUID? = nil) {
+        guard attemptID == nil || attemptID == androidUSBPreparationAttemptID else { return }
+        androidUSBPreparation?.cancel()
+    }
+
+    func retainsAndroidUSBPreparation(attemptID: UUID) -> Bool {
+        androidUSBPreparation != nil && androidUSBPreparationAttemptID == attemptID
+    }
+
+    public func awaitAndroidUSBCleanup(attemptID: UUID? = nil) async throws {
+        guard attemptID == nil || attemptID == androidUSBPreparationAttemptID else { return }
+        guard let preparation = androidUSBPreparation else { return }
+        defer { releaseAndroidPreparationIfComplete(preparation) }
+        try await preparation.closeAndAwait()
+    }
+
+    private func releaseAndroidPreparationIfComplete(_ preparation: USBHostAccessoryPreparation) {
+        // Worker exit and reference release remain separate from operation success.
+        // A never-started, retired owner has no native resources to release.
+        guard !isPreparingAndroidUSB, androidUSBPreparation === preparation,
+              preparation.workerExited, preparation.receipt?.referencesReleased != false else { return }
+        androidUSBPreparation = nil
+        androidUSBPreparationAttemptID = nil
+    }
+
  /// 检查设备是否为MFi认证
     public func isMFiCertified(deviceID: String) -> Bool {
         return connectedUSBDevices[deviceID]?.isMFiCertified ?? false
     }
-    
+
  /// 建立USB-C连接
     public func connect(to device: DiscoveredDevice, interface: String) async throws -> ActiveConnection {
         logger.info("建立USB-C连接到设备: \(device.name)")
-        
+
  // 从设备信息中获取连接地址和端口
         guard let address = device.ipv4 ?? device.ipv6 else {
             throw ConnectionError.networkUnreachable
         }
-        
+
         let host = NWEndpoint.Host(address)
-        
+
  // 从端口映射中获取连接端口，默认使用22端口
         let portNumber = device.portMap["ssh"] ?? device.portMap["rdp"] ?? 22
         let port = NWEndpoint.Port(integerLiteral: UInt16(portNumber))
         let endpoint = NWEndpoint.hostPort(host: host, port: port)
-        
+
  // 创建TCP连接参数，针对USB-C优化
         let tcpOptions = NWProtocolTCP.Options()
         tcpOptions.enableKeepalive = true
         tcpOptions.keepaliveIdle = 15
         tcpOptions.noDelay = true  // 禁用Nagle算法
-        
+
         let parameters = NWParameters(tls: nil, tcp: tcpOptions)
  // 注意：NWInterface(name:) 在某些版本中可能不可用，使用替代方案
         if let interface = self.findInterface(named: interface) {
             parameters.requiredInterface = interface
         }
-        
+
         let connection = NWConnection(to: endpoint, using: parameters)
         let connectionId = UUID()
-        
+
         return try await withCheckedThrowingContinuation { continuation in
-            var resumed = false
-            
+            let resumeState = ResumeState()
+
             connection.stateUpdateHandler = { state in
                 Task { @MainActor in
                     switch state {
                     case .ready:
-                        if !resumed {
-                            resumed = true
+                        if !resumeState.resumed {
+                            resumeState.resumed = true
                             self.connections[connectionId] = connection
                             self.updateStats(for: connectionId)
-                            
+
                             let activeConnection = ActiveConnection(method: .usbc(interface: interface), device: device)
                             self.logger.info("USB-C连接建立成功: \(connectionId)")
                             continuation.resume(returning: activeConnection)
                         }
                     case .failed(let error):
-                        if !resumed {
-                            resumed = true
+                        if !resumeState.resumed {
+                            resumeState.resumed = true
                             self.logger.error("USB-C连接失败: \(error.localizedDescription)")
                             continuation.resume(throwing: error)
                         }
                     case .cancelled:
-                        if !resumed {
-                            resumed = true
+                        if !resumeState.resumed {
+                            resumeState.resumed = true
                             continuation.resume(throwing: ConnectionError.networkUnreachable)
                         }
                     default:
@@ -301,28 +481,28 @@ public final class USBCConnectionManager: ObservableObject {
                     }
                 }
             }
-            
+
             connection.start(queue: self.connectionQueue)
         }
     }
-    
+
  /// 断开连接
     public func disconnect(_ connectionId: UUID) {
         logger.info("断开USB-C连接: \(connectionId)")
-        
+
         if let connection = connections[connectionId] {
             connection.cancel()
             connections.removeValue(forKey: connectionId)
             stats.removeValue(forKey: connectionId)
         }
     }
-    
+
  /// 发送数据
     public func sendData(_ data: Data, connectionId: UUID) async throws {
         guard let connection = connections[connectionId] else {
             throw ConnectionError.connectionNotFound
         }
-        
+
         return try await withCheckedThrowingContinuation { continuation in
             connection.send(content: data, completion: .contentProcessed { error in
                 if let error = error {
@@ -333,14 +513,14 @@ public final class USBCConnectionManager: ObservableObject {
             })
         }
     }
-    
+
  /// 获取连接统计信息
     public func getStats(_ connectionId: UUID) -> ConnectionStats? {
         return stats[connectionId]
     }
-    
+
  // MARK: - 私有方法
-    
+
  /// 设置MFi配件通知
     private func setupMFiNotifications() {
         NotificationCenter.default.addObserver(
@@ -353,7 +533,7 @@ public final class USBCConnectionManager: ObservableObject {
                 let accessoryID = UInt(accessory.connectionID)
                 let accessorySerial = accessory.serialNumber
                 let accessoryProtocols = accessory.protocolStrings
-                
+
                 Task { @MainActor in
                     await self?.handleMFiAccessoryConnected(
                         name: accessoryName,
@@ -364,7 +544,7 @@ public final class USBCConnectionManager: ObservableObject {
                 }
             }
         }
-        
+
         NotificationCenter.default.addObserver(
             forName: .EAAccessoryDidDisconnect,
             object: nil,
@@ -373,7 +553,7 @@ public final class USBCConnectionManager: ObservableObject {
             if let accessory = notification.userInfo?[EAAccessoryKey] as? EAAccessory {
                 let accessoryID = UInt(accessory.connectionID)
                 let accessoryName = accessory.name
-                
+
                 Task { @MainActor in
                     await self?.handleMFiAccessoryDisconnected(
                         connectionID: accessoryID,
@@ -383,7 +563,21 @@ public final class USBCConnectionManager: ObservableObject {
             }
         }
     }
-    
+
+    private func ensureAccessoryManager() -> EAAccessoryManager? {
+        guard Self.canUseExternalAccessory else { return nil }
+
+        if let accessoryManager {
+            return accessoryManager
+        }
+
+        let manager = EAAccessoryManager.shared()
+        accessoryManager = manager
+        setupMFiNotifications()
+        logger.info("MFi认证扫描已启用")
+        return manager
+    }
+
  /// 处理MFi配件连接
     private func handleMFiAccessoryConnected(
         name: String,
@@ -397,9 +591,9 @@ public final class USBCConnectionManager: ObservableObject {
             SkyBridgeLogger.connection.debugOnly("🔌 USBCConnectionManager: 序列号: \(serialNumber ?? "无")")
             SkyBridgeLogger.connection.debugOnly("🔌 USBCConnectionManager: 支持协议: \(protocols)")
         }
-        
+
         logger.info("MFi配件已连接: \(name)")
-        
+
         let deviceInfo = USBDeviceInfo(
             deviceID: "\(connectionID)",
             name: name,
@@ -411,16 +605,16 @@ public final class USBCConnectionManager: ObservableObject {
             connectionInterface: "Lightning/USB-C",
             capabilities: protocols
         )
-        
+
         connectedUSBDevices[deviceInfo.deviceID] = deviceInfo
         if verboseLogging { SkyBridgeLogger.connection.debugOnly("✅ USBCConnectionManager: MFi设备已添加到列表") }
-        
+
  // 安全地添加到MFi配件列表
-        if let accessory = accessoryManager.connectedAccessories.first(where: { $0.connectionID == connectionID }) {
+        if let accessory = accessoryManager?.connectedAccessories.first(where: { $0.connectionID == connectionID }) {
             mfiAccessories.append(accessory)
         }
     }
-    
+
  /// 处理MFi配件断开
     private func handleMFiAccessoryDisconnected(
         connectionID: UInt,
@@ -428,73 +622,104 @@ public final class USBCConnectionManager: ObservableObject {
     ) async {
         SkyBridgeLogger.connection.debugOnly("🔌 USBCConnectionManager: MFi配件已断开: \(name)")
         SkyBridgeLogger.connection.debugOnly("🔌 USBCConnectionManager: 连接ID: \(connectionID)")
-        
+
         logger.info("MFi配件已断开: \(name)")
-        
+
         let deviceID = "\(connectionID)"
         connectedUSBDevices.removeValue(forKey: deviceID)
         mfiAccessories.removeAll { $0.connectionID == connectionID }
-        
+
         SkyBridgeLogger.connection.debugOnly("✅ USBCConnectionManager: MFi设备已从列表中移除")
     }
-    
+
  /// 枚举USB设备
-    private func enumerateUSBDevices() {
-        SkyBridgeLogger.connection.debugOnly("🔍 USBCConnectionManager: 开始使用IOKit枚举USB设备")
+    nonisolated private static func enumerateUSBDevicesSnapshot() throws -> USBEnumerationSnapshot {
  // 同时枚举旧版栈（kIOUSBDeviceClassName）与新版栈（IOUSBHostDevice），提升覆盖率
-        let totalA = enumerateUSBDevicesByClassName(kIOUSBDeviceClassName)
-        let totalB = enumerateUSBDevicesByClassName("IOUSBHostDevice")
-        let deviceCount = totalA + totalB
-        SkyBridgeLogger.connection.debugOnly("🔍 USBCConnectionManager: USB设备枚举完成，共处理 \(deviceCount) 个设备，成功识别 \(connectedUSBDevices.count) 个")
+        let legacy = try enumerateUSBDevicesByClassName(kIOUSBDeviceClassName)
+        let host = try enumerateUSBDevicesByClassName("IOUSBHostDevice")
+        let devices = Dictionary(
+            (legacy.devices + host.devices).map { ($0.deviceID, $0) },
+            uniquingKeysWith: { _, newest in newest }
+        )
+        return USBEnumerationSnapshot(
+            devices: Array(devices.values),
+            processedCount: legacy.processedCount + host.processedCount
+        )
     }
 
-    private func enumerateUSBDevicesByClassName(_ className: String) -> Int {
-        var iterator: io_iterator_t = 0
-        let matchingDict = IOServiceMatching(className)
-        let result = IOServiceGetMatchingServices(kIOMainPortDefault, matchingDict, &iterator)
-        guard result == KERN_SUCCESS else { return 0 }
-        defer { IOObjectRelease(iterator) }
-        var processed = 0
-        var service: io_service_t = IOIteratorNext(iterator)
-        while service != 0 {
-            defer { IOObjectRelease(service); service = IOIteratorNext(iterator) }
-            processed += 1
-            if let deviceInfo = extractUSBDeviceInfo(from: service) {
-                connectedUSBDevices[deviceInfo.deviceID] = deviceInfo
-                logger.info("发现USB设备: \(deviceInfo.name) (\(deviceInfo.deviceType.description))")
-            }
+    nonisolated private static func withRegistryReference<T>(_ object: io_object_t, body: () throws -> T) throws -> T {
+        let result = Result { try body() }
+        let released = IOObjectRelease(object)
+        guard released == KERN_SUCCESS else {
+            let primary: (any Error)? = if case .failure(let error) = result { error } else { nil }
+            throw USBDeviceInventoryError.cleanup(primary: primary, object: object, code: released)
         }
-        return processed
+        return try result.get()
     }
-    
+
+    nonisolated private static func enumerateUSBDevicesByClassName(
+        _ className: String, includeInterfaceCapabilities: Bool = true
+    ) throws -> USBEnumerationSnapshot {
+        var iterator: io_iterator_t = 0
+        guard let matching = IOServiceMatching(className) else { throw USBDeviceInventoryError.unavailable }
+        let result = IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator)
+        guard iterator != IO_OBJECT_NULL else {
+            if result != KERN_SUCCESS { throw USBDeviceInventoryError.native(operation: "matching-services", code: result) }
+            throw USBDeviceInventoryError.unavailable
+        }
+        return try withRegistryReference(iterator) {
+            guard result == KERN_SUCCESS else { throw USBDeviceInventoryError.native(operation: "matching-services", code: result) }
+            var devices: [USBDeviceInfo] = []
+            var processed = 0
+            while true {
+                let service = IOIteratorNext(iterator)
+                if service == IO_OBJECT_NULL { break }
+                let device = try withRegistryReference(service) {
+                    processed += 1
+                    guard processed <= 512 else { throw USBDeviceInventoryError.tooManyDevices }
+                    return try extractUSBDeviceInfo(from: service, includeInterfaceCapabilities: includeInterfaceCapabilities)
+                }
+                if let device { devices.append(device) }
+            }
+            guard IOIteratorIsValid(iterator) != 0 else { throw USBDeviceInventoryError.enumerationChanged }
+            return USBEnumerationSnapshot(devices: devices, processedCount: processed)
+        }
+    }
+
  /// 从IOKit服务中提取USB设备信息
-    private func extractUSBDeviceInfo(from service: io_service_t) -> USBDeviceInfo? {
+    nonisolated private static func extractUSBDeviceInfo(from service: io_service_t, includeInterfaceCapabilities: Bool) throws -> USBDeviceInfo? {
  // 获取设备属性
-        guard let properties = getServiceProperties(service) else { return nil }
-        
+        let properties = try getServiceProperties(service)
+
         let vendorID = properties["idVendor"] as? UInt16 ?? 0
         let productID = properties["idProduct"] as? UInt16 ?? 0
         let productName = properties["USB Product Name"] as? String ?? "未知USB设备"
         let serialNumber = properties["USB Serial Number"] as? String
         let deviceClass = properties["bDeviceClass"] as? UInt8 ?? 0
-        
+
  // 🔍 过滤掉不应该显示的设备
         if !shouldDisplayUSBDevice(vendorID: vendorID, productID: productID, deviceClass: deviceClass, properties: properties) {
             return nil
         }
-        
+
  // 确定设备类型
         let deviceType = determineDeviceType(vendorID: vendorID, productID: productID, properties: properties)
-        
+
  // 检查是否为MFi认证设备（通过供应商ID和产品特征）
         let isMFiCertified = appleVendorIDs.contains(vendorID) || checkMFiCertification(properties: properties)
-        
+
  // 获取设备能力（包含音频接口解析）
         var capabilities = extractDeviceCapabilities(properties: properties)
-        capabilities.append(contentsOf: extractAudioInterfaceDetails(service: service, properties: properties))
-        
+        if includeInterfaceCapabilities { capabilities.append(contentsOf: extractAudioInterfaceDetails(service: service, properties: properties)) }
+
         let deviceID = "\(vendorID):\(productID):\(serialNumber ?? "unknown")"
-        
+        var registryID: UInt64 = 0
+        let registryStatus = IORegistryEntryGetRegistryEntryID(service, &registryID)
+        guard registryStatus == KERN_SUCCESS, registryID != 0 else {
+            throw USBDeviceInventoryError.native(operation: "registry-id", code: registryStatus)
+        }
+        let nativeRegistryID = registryID
+
         return USBDeviceInfo(
             deviceID: deviceID,
             name: productName,
@@ -504,12 +729,14 @@ public final class USBCConnectionManager: ObservableObject {
             serialNumber: serialNumber,
             isMFiCertified: isMFiCertified,
             connectionInterface: "USB-C/USB-A",
-            capabilities: capabilities
+            capabilities: capabilities,
+            registryEntryID: nativeRegistryID,
+            locationID: properties["locationID"] as? UInt32
         )
     }
 
  /// 解析音频接口详情（采样率、通道数等）
-    private func extractAudioInterfaceDetails(service: io_service_t, properties: [String: Any]) -> [String] {
+    nonisolated private static func extractAudioInterfaceDetails(service: io_service_t, properties: [String: Any]) -> [String] {
         var caps: [String] = []
  // 优先从常见驱动键读取
         let sampleRateKeys = ["CurrentSampleRate", "SampleRate", "AudioSampleRate"]
@@ -537,28 +764,28 @@ public final class USBCConnectionManager: ObservableObject {
         }
         return caps
     }
-    
+
  /// 判断是否应该显示此USB设备（过滤内部设备和非移动设备）
-    private func shouldDisplayUSBDevice(vendorID: UInt16, productID: UInt16, deviceClass: UInt8, properties: [String: Any]) -> Bool {
+    nonisolated private static func shouldDisplayUSBDevice(vendorID: UInt16, productID: UInt16, deviceClass: UInt8, properties: [String: Any]) -> Bool {
  // ✅ 允许显示的设备类型：
  // 1. Apple移动设备 (iPhone, iPad, etc.)
         if appleVendorIDs.contains(vendorID) {
  // Apple设备中，只显示移动设备（iPhone, iPad等）
  // 排除MacBook内部设备（如摄像头、触控板等）
             let productName = (properties["USB Product Name"] as? String ?? "").lowercased()
-            
+
  // 允许的Apple设备关键词
             let allowedKeywords = ["iphone", "ipad", "ipod"]
             if allowedKeywords.contains(where: { productName.contains($0) }) {
                 return true
             }
-            
+
  // 排除Mac内部设备
             let blockedKeywords = ["camera", "keyboard", "trackpad", "touch bar", "bluetooth", "hub", "controller", "sensor"]
             if blockedKeywords.contains(where: { productName.contains($0) }) {
                 return false
             }
-            
+
  // 如果是Apple设备但不确定类型，检查是否有移动设备特征
             if let locationID = properties["locationID"] as? UInt32, locationID < 0x14000000 {
  // 高locationID通常是内部设备
@@ -568,61 +795,59 @@ public final class USBCConnectionManager: ObservableObject {
             let audioKeywords = ["airpods", "earpods", "audio", "headphone", "speaker", "beats"]
             if audioKeywords.contains(where: { productName.contains($0) }) { return true }
         }
-        
+
  // 2. Android设备
         if androidVendorIDs.contains(vendorID) {
             return true
         }
-        
+
  // 3. 外置存储设备（U盘、移动硬盘）
         if storageVendorIDs.contains(vendorID) || deviceClass == 8 { // Class 8 = Mass Storage
             return true
         }
-        
+
  // ❌ 排除的设备类型：
  // Hub设备
         if deviceClass == 9 {
             return false
         }
-        
+
  // HID设备（键盘、鼠标）
         if deviceClass == 3 {
             return false
         }
-        
+
  // 音频设备：允许显示（用于识别 USB 音频，如 AirPods Max）
         if deviceClass == 1 {
             return true
         }
-        
+
  // 视频设备（摄像头）
         if deviceClass == 14 {
             return false
         }
-        
+
  // 蓝牙和无线设备
         if deviceClass == 224 {
             return false
         }
-        
+
  // 默认：如果不确定，不显示（更安全）
         return false
     }
-    
+
  /// 获取IOKit服务属性
-    private func getServiceProperties(_ service: io_service_t) -> [String: Any]? {
+    nonisolated private static func getServiceProperties(_ service: io_service_t) throws -> [String: Any] {
         var properties: Unmanaged<CFMutableDictionary>?
         let result = IORegistryEntryCreateCFProperties(service, &properties, kCFAllocatorDefault, 0)
-        
-        guard result == KERN_SUCCESS, let props = properties?.takeRetainedValue() else {
-            return nil
-        }
-        
-        return props as? [String: Any]
+        let value = properties?.takeRetainedValue()
+        guard result == KERN_SUCCESS else { throw USBDeviceInventoryError.native(operation: "properties", code: result) }
+        guard let converted = value as? [String: Any] else { throw USBDeviceInventoryError.malformedProperties }
+        return converted
     }
-    
+
  /// 确定设备类型
-    private func determineDeviceType(vendorID: UInt16, productID: UInt16, properties: [String: Any]) -> USBCDeviceType {
+    nonisolated private static func determineDeviceType(vendorID: UInt16, productID: UInt16, properties: [String: Any]) -> USBCDeviceType {
  // Apple设备
         if appleVendorIDs.contains(vendorID) {
  // 优先识别 Apple 音频设备
@@ -631,17 +856,17 @@ public final class USBCConnectionManager: ObservableObject {
             if audioKeywords.contains(where: { name.contains($0) }) { return .audioDevice }
             return .appleMFi
         }
-        
+
  // Android设备
         if androidVendorIDs.contains(vendorID) {
             return .androidDevice
         }
-        
+
  // 存储设备
         if storageVendorIDs.contains(vendorID) {
             return .externalDrive
         }
-        
+
  // 通过设备类别判断
         if let deviceClass = properties["bDeviceClass"] as? UInt8 {
             switch deviceClass {
@@ -663,40 +888,40 @@ public final class USBCConnectionManager: ObservableObject {
             default: break
             }
         }
-        
+
  // 通过接口类别判断
         if properties["IOUSBConfigurationDescriptor"] as? Data != nil {
  // 解析配置描述符以确定设备类型
  // 这里简化处理，实际应该解析USB描述符
             return .usbFlashDrive
         }
-        
+
  // 通过产品名关键词判断音频设备
         let name = (properties["USB Product Name"] as? String ?? "").lowercased()
         let audioKeywords = ["audio", "headphone", "speaker", "earpods", "airpods", "beats"]
         if audioKeywords.contains(where: { name.contains($0) }) { return .audioDevice }
         return .unknown
     }
-    
+
  /// 检查MFi认证
-    private func checkMFiCertification(properties: [String: Any]) -> Bool {
+    nonisolated private static func checkMFiCertification(properties: [String: Any]) -> Bool {
  // 检查是否有MFi认证相关的属性
         if let _ = properties["MFi Authentication Chip"] {
             return true
         }
-        
+
  // 检查是否有Apple认证协议
         if let protocols = properties["Supported Protocols"] as? [String] {
             return protocols.contains("com.apple.mfi")
         }
-        
+
         return false
     }
-    
+
  /// 提取设备能力
-    private func extractDeviceCapabilities(properties: [String: Any]) -> [String] {
+    nonisolated private static func extractDeviceCapabilities(properties: [String: Any]) -> [String] {
         var capabilities: [String] = []
-        
+
  // USB版本
         if let usbVersion = properties["bcdUSB"] as? UInt16 {
             switch usbVersion {
@@ -710,12 +935,12 @@ public final class USBCConnectionManager: ObservableObject {
                 capabilities.append("USB")
             }
         }
-        
+
  // 电源能力
         if let maxPower = properties["MaxPower"] as? UInt16 {
             capabilities.append("功耗: \(maxPower * 2)mA")
         }
-        
+
  // 数据传输能力
         if let speed = properties["Device Speed"] as? UInt32 {
             switch speed {
@@ -737,12 +962,12 @@ public final class USBCConnectionManager: ObservableObject {
             let audioKeywords = ["audio", "headphone", "speaker", "earpods", "airpods", "beats"]
             if audioKeywords.contains(where: { name.contains($0) }) { capabilities.append("USB 音频") }
         }
-        
+
         return capabilities
     }
 
  // 解析配置描述符中的第一个接口的 bInterfaceClass（简单回退解析）
-    public static func parseInterfaceClass(from data: Data) -> UInt8? {
+    nonisolated public static func parseInterfaceClass(from data: Data) -> UInt8? {
         var idx = 0
         let bytes = [UInt8](data)
         while idx + 2 <= bytes.count {
@@ -757,48 +982,46 @@ public final class USBCConnectionManager: ObservableObject {
         }
         return nil
     }
-    
+
  /// 查找指定名称的网络接口
     private func findInterface(named name: String) -> NWInterface? {
  // 使用系统调用查找接口
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifaddr) == 0 else { return nil }
-        
-        defer { freeifaddrs(ifaddr) }
-        
-        var current = ifaddr
-        while current != nil {
-            let interface = current!.pointee
-            guard let namePtr = interface.ifa_name else { 
-                current = current!.pointee.ifa_next
-                continue 
-            }
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
+
+        defer { freeifaddrs(first) }
+
+        var current: UnsafeMutablePointer<ifaddrs>? = first
+        while let interfacePointer = current {
+            let interface = interfacePointer.pointee
+            current = interface.ifa_next
+
+            guard let namePtr = interface.ifa_name else { continue }
  // 使用统一的 UTF8 安全解码替代已弃用的 String(cString:)
             let interfaceName = decodeCString(namePtr)
-            
+
             if interfaceName == name {
  // 这里需要根据实际的NWInterface API来创建接口对象
  // 由于NWInterface的构造函数限制，我们返回nil让系统自动选择
                 return nil
             }
-            
-            current = interface.ifa_next
         }
-        
+
         return nil
     }
-    
+
  /// 更新连接统计信息（真实测量）
     private func updateStats(for connectionId: UUID) {
         guard let connection = connections[connectionId] else { return }
-        
+
  // 🔧 真实测量：USB-C 连接质量
         var bandwidth: Double = 200.0 // 默认 200 Mbps
         var latency: Double = 1.5 // 默认 1.5ms
         var packetLoss: Double = 0.01 // 默认 1%
-        
- // 从 NWConnection 的 currentPath 获取质量指标
-        if let path = connection.currentPath {
+
+// 从 NWConnection 的 currentPath 获取质量指标
+// 仅在连接 ready 后再访问，避免 Network.framework 打印 "unconnected nw_connection" 警告刷屏
+        if case .ready = connection.state, let path = connection.currentPath {
             if path.status == .satisfied {
  // USB-C 典型带宽：USB 3.0 (100-300 Mbps), USB 3.1+ (300-500 Mbps)
                 if path.usesInterfaceType(.wiredEthernet) {
@@ -812,7 +1035,7 @@ public final class USBCConnectionManager: ObservableObject {
                     latency = 1.5
                     packetLoss = 0.01
                 }
-                
+
  // 根据路径质量调整
                 if path.isConstrained {
                     bandwidth *= 0.6
@@ -826,7 +1049,7 @@ public final class USBCConnectionManager: ObservableObject {
                 packetLoss = 0.1
             }
         }
-        
+
         let stats = ConnectionStats(
             connectionId: connectionId,
             bandwidth: bandwidth,
@@ -834,12 +1057,13 @@ public final class USBCConnectionManager: ObservableObject {
             packetLoss: packetLoss,
             uptime: Date().timeIntervalSince1970
         )
-        
+
         self.stats[connectionId] = stats
     }
-    
+
     deinit {
  // 清理通知观察者
         NotificationCenter.default.removeObserver(self)
     }
 }
+#endif

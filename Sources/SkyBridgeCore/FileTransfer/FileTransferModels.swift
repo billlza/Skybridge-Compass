@@ -220,6 +220,44 @@ public struct TransferConfiguration: Codable, Sendable {
     )
 }
 
+/// File-transfer payload encryption is currently a fixed AES-256-GCM protocol.
+/// Unsupported persisted values are rejected instead of being presented as selectable algorithms.
+public enum FileTransferEncryptionAlgorithm: String, CaseIterable, Codable, Sendable {
+    case aes256GCM = "AES-256-GCM"
+
+    public var displayName: String {
+        switch self {
+        case .aes256GCM:
+            return "AES-256-GCM"
+        }
+    }
+
+    public init(persistedValue: String) throws {
+        let normalized = persistedValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased()
+            .replacingOccurrences(of: "_", with: "-")
+
+        switch normalized {
+        case "AES-256-GCM", "AES256-GCM", "AES-256":
+            self = .aes256GCM
+        default:
+            throw FileTransferEncryptionAlgorithmError.unsupportedAlgorithm(persistedValue)
+        }
+    }
+}
+
+public enum FileTransferEncryptionAlgorithmError: LocalizedError, Sendable {
+    case unsupportedAlgorithm(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .unsupportedAlgorithm(let value):
+            return "Unsupported file-transfer encryption algorithm: \(value)"
+        }
+    }
+}
+
 // MARK: - 文件传输会话
 
 /// 文件传输会话 - 管理单个文件的传输状态和进度
@@ -376,7 +414,7 @@ public class FileTransferSession: ObservableObject, Identifiable {
 // MARK: - 传输类型
 
 /// 传输类型枚举
-public enum TransferType: String, CaseIterable, Codable {
+public enum TransferType: String, CaseIterable, Codable, Sendable {
     case send = "send"      // 发送文件
     case receive = "receive" // 接收文件
     
@@ -511,7 +549,7 @@ public struct FileTransferRequest: Codable, Identifiable {
 // MARK: - 文件传输元数据
 
 /// 文件传输元数据结构
-public struct FileTransferMetadata: Codable {
+public struct FileTransferMetadata: Codable, Sendable {
     public let transferId: String
     public let fileName: String
     public let fileSize: Int64
@@ -579,7 +617,7 @@ public struct FileTransferMetadata: Codable {
 // MARK: - 文件数据块包
 
 /// 文件数据块包结构
-public struct FileChunkPacket: Codable {
+public struct FileChunkPacket: Codable, Sendable {
     public let transferId: String
     public let chunkIndex: Int
     public let totalChunks: Int
@@ -634,7 +672,7 @@ public struct FileChunkPacket: Codable {
 // MARK: - 传输记录
 
 /// 文件传输历史记录
-public struct FileTransferRecord: Codable, Identifiable {
+public struct FileTransferRecord: Codable, Identifiable, Sendable {
     public let id: String
     public let fileName: String
     public let fileSize: Int64

@@ -1,11 +1,18 @@
+// macOS-exclusive: built on macOS-only APIs (AppKit / IOKit / ScreenCaptureKit / CoreWLAN /
+// MetalFX / ServiceManagement / ApplicationServices / CoreGraphics display services).
+// Excluded from other platforms so SkyBridgeCore can be the single shared core for iOS as
+// well. No behaviour changes on macOS.
+#if os(macOS)
 import SwiftUI
 import Combine
 import UserNotifications
+import CryptoKit
 
 /// 设置界面 - 提供完整的应用配置和设备管理设置
 /// 适配平铺显示模式，符合macOS设计规范
 @available(macOS 14.0, *)
 public struct SettingsView: View {
+    private let onShowAccountDevices: (() -> Void)?
     
  // MARK: - 状态管理
     @StateObject private var settingsManager = SettingsManager.shared
@@ -18,15 +25,7 @@ public struct SettingsView: View {
     @StateObject private var remoteDesktopSettingsManager = RemoteDesktopSettingsManager.shared
  // 启用性能模式管理器
     @StateObject private var performanceModeManager = PerformanceModeManager.shared
- // Metal Performance HUD
-    @StateObject private var hud: MetalPerformanceHUD = {
-        if let device = MTLCreateSystemDefaultDevice(),
-           let hudInstance = try? MetalPerformanceHUD(device: device) {
-            return hudInstance
-        } else {
-            return MetalPerformanceHUD.fallback()
-        }
-    }()
+    @StateObject private var hud = MetalPerformanceHUD.shared
     
     @State private var selectedTab: SettingsTab = .general
     @StateObject private var ftBridge = FileTransferSettingsBridge.shared
@@ -34,7 +33,19 @@ public struct SettingsView: View {
     @State private var showingResetAlert = false
     @State private var showingExportDialog = false
     @State private var showingImportDialog = false
+    @State private var showingTransferPathFallbackAlert = false
+    @State private var transferPathFallbackMessage = ""
+    @State private var showingTransferPathFailureAlert = false
     @State private var newCustomServiceType = ""
+    @State private var cacheSizeDisplay = "..."
+    @State private var isCacheOperationInProgress = false
+    @State private var cacheOperationMessage: String?
+    @State private var requestedProtocolSigningAlgorithm: ProtocolSigningAlgorithm = .mlDSA65
+    @State private var requestedProtocolSigningSecureEnclave = false
+    @State private var cacheOperationIsError = false
+    @State private var settingsFileOperationError: String?
+
+    private let applicationCacheService = ApplicationCacheService.shared
     
  // MARK: - 设置标签页
     enum SettingsTab: String, CaseIterable {
@@ -90,7 +101,9 @@ public struct SettingsView: View {
         }
     }
     
-    public init() {}
+    public init(onShowAccountDevices: (() -> Void)? = nil) {
+        self.onShowAccountDevices = onShowAccountDevices
+    }
     
     public var body: some View {
         VStack(spacing: 0) {
@@ -154,14 +167,23 @@ public struct SettingsView: View {
                     do {
                         let exportedURL = try await settingsManager.exportSettings()
  // 将导出的文件复制到用户选择的位置
-                        try FileManager.default.copyItem(at: exportedURL, to: url)
+                        try await Task.detached(priority: .userInitiated) {
+                            try FileManager.default.copyItem(at: exportedURL, to: url)
+                        }.value
                     } catch {
- // 导出失败处理
+                        let operationError = error as NSError
+                        SkyBridgeLogger.ui.error(
+                            "导出设置失败: domain=\(operationError.domain, privacy: .private) code=\(operationError.code, privacy: .public)"
+                        )
+                        settingsFileOperationError = error.localizedDescription
                     }
                 }
-            case .failure(_):
- // 导出失败处理
-                SkyBridgeLogger.ui.error("导出设置失败")
+            case .failure(let error):
+                let operationError = error as NSError
+                SkyBridgeLogger.ui.error(
+                    "导出设置面板失败: domain=\(operationError.domain, privacy: .private) code=\(operationError.code, privacy: .public)"
+                )
+                settingsFileOperationError = error.localizedDescription
             }
         }
         .fileImporter(
@@ -177,14 +199,59 @@ public struct SettingsView: View {
                         do {
                             try await settingsManager.importSettings(from: url)
                         } catch {
- // 设置导入失败处理
+                            let operationError = error as NSError
+                            SkyBridgeLogger.ui.error(
+                                "导入设置失败: domain=\(operationError.domain, privacy: .private) code=\(operationError.code, privacy: .public)"
+                            )
+                            settingsFileOperationError = error.localizedDescription
                         }
                     }
                 }
-            case .failure(_):
- // 导入失败处理
-                SkyBridgeLogger.ui.error("导入设置失败")
+            case .failure(let error):
+                let operationError = error as NSError
+                SkyBridgeLogger.ui.error(
+                    "导入设置面板失败: domain=\(operationError.domain, privacy: .private) code=\(operationError.code, privacy: .public)"
+                )
+                settingsFileOperationError = error.localizedDescription
             }
+        }
+        .alert(
+            "设置文件操作失败",
+            isPresented: Binding(
+                get: { settingsFileOperationError != nil },
+                set: { if !$0 { settingsFileOperationError = nil } }
+            )
+        ) {
+            Button(localizationManager.localizedString("action.ok"), role: .cancel) {
+                settingsFileOperationError = nil
+            }
+        } message: {
+            Text(settingsFileOperationError ?? "")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FileTransferReceivePathFallback"))) { notification in
+            let fallbackPath = notification.userInfo?["path"] as? String ?? settingsManager.defaultTransferPath
+            transferPathFallbackMessage = String(
+                format: localizationManager.localizedString("settings.fileTransfer.pathFallback.message"),
+                fallbackPath
+            )
+            showingTransferPathFallbackAlert = true
+        }
+        .alert(localizationManager.localizedString("settings.fileTransfer.pathFallback.title"), isPresented: $showingTransferPathFallbackAlert) {
+            Button(localizationManager.localizedString("action.ok"), role: .cancel) {}
+        } message: {
+            Text(transferPathFallbackMessage)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FileTransferReceivePathFailure"))) { _ in
+            showingTransferPathFailureAlert = true
+        }
+        .alert(localizationManager.localizedString("settings.fileTransfer.pathFailure.title"), isPresented: $showingTransferPathFailureAlert) {
+            Button(localizationManager.localizedString("action.ok"), role: .cancel) {}
+        } message: {
+            Text(localizationManager.localizedString("settings.fileTransfer.pathFailure.message"))
+        }
+        .task(id: selectedTab) {
+            guard selectedTab == .general else { return }
+            await refreshApplicationCacheSize()
         }
     }
     
@@ -284,6 +351,15 @@ public struct SettingsView: View {
     private var generalSettings: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                if let onShowAccountDevices {
+                    settingsSection(localizationManager.localizedString("discovery.accountDevices.title")) {
+                        Button(action: onShowAccountDevices) {
+                            Label(localizationManager.localizedString("accountDevices.myDevices"),
+                                  systemImage: "person.crop.rectangle.stack")
+                        }
+                        .accessibilityIdentifier("settings.my-devices")
+                    }
+                }
                 settingsSection(localizationManager.localizedString("settings.general.language.sectionTitle")) {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
@@ -316,25 +392,19 @@ public struct SettingsView: View {
                 settingsSection(localizationManager.localizedString("settings.general.preferences")) {
                     VStack(alignment: .leading, spacing: 12) {
                         Toggle(localizationManager.localizedString("settings.general.autoScan"), isOn: $settingsManager.autoScanOnStartup)
-                            .onChange(of: settingsManager.autoScanOnStartup) { _, newValue in
- // 保存到UserDefaults
-                                UserDefaults.standard.set(newValue, forKey: "AutoScanOnStartup")
-                            }
                         
                         Toggle(localizationManager.localizedString("settings.general.systemNotifications"), isOn: $settingsManager.showSystemNotifications)
                             .onChange(of: settingsManager.showSystemNotifications) { _, newValue in
- // 请求通知权限
+// 请求通知权限
                                 if newValue {
                                     requestNotificationPermission()
                                 }
-                                UserDefaults.standard.set(newValue, forKey: "ShowSystemNotifications")
                             }
                         
                         Toggle(localizationManager.localizedString("settings.general.darkMode"), isOn: $settingsManager.useDarkMode)
                             .onChange(of: settingsManager.useDarkMode) { _, newValue in
- // 应用主题模式
+// 应用主题模式
                                 applyThemeMode(newValue ? "dark" : "light")
-                                UserDefaults.standard.set(newValue, forKey: "UseDarkMode")
                             }
                         
                         HStack {
@@ -348,9 +418,8 @@ public struct SettingsView: View {
                             .pickerStyle(MenuPickerStyle())
                             .frame(width: 100)
                             .onChange(of: settingsManager.scanInterval) { _, newValue in
- // 更新扫描定时器
+// 更新扫描定时器
                                 updateScanInterval(newValue)
-                                UserDefaults.standard.set(newValue, forKey: "ScanInterval")
                             }
                         }
                     }
@@ -359,37 +428,15 @@ public struct SettingsView: View {
                 settingsSection(localizationManager.localizedString("settings.general.interface")) {
                     VStack(alignment: .leading, spacing: 12) {
                         Toggle(localizationManager.localizedString("settings.general.showDeviceDetails"), isOn: $settingsManager.showDeviceDetails)
-                            .onChange(of: settingsManager.showDeviceDetails) { _, _ in
-                                UserDefaults.standard.set(settingsManager.showDeviceDetails, forKey: "ShowDeviceDetails")
- // 通知其他组件更新显示模式
-                                NotificationCenter.default.post(name: NSNotification.Name("DeviceDisplayModeChanged"), object: nil)
-                            }
                         
                         Toggle(localizationManager.localizedString("settings.general.showConnectionStats"), isOn: $settingsManager.showConnectionStats)
-                            .onChange(of: settingsManager.showConnectionStats) { _, _ in
-                                UserDefaults.standard.set(settingsManager.showConnectionStats, forKey: "ShowConnectionStats")
-                                NotificationCenter.default.post(name: NSNotification.Name("ConnectionStatsDisplayChanged"), object: nil)
-                            }
                         
                         Toggle(localizationManager.localizedString("settings.general.compactMode"), isOn: $settingsManager.compactMode)
-                            .onChange(of: settingsManager.compactMode) { _, _ in
-                                UserDefaults.standard.set(settingsManager.compactMode, forKey: "CompactMode")
- // 实际切换布局模式
-                                switchLayoutMode(isCompact: settingsManager.compactMode)
-                            }
                         
                         HStack {
                             Text(localizationManager.localizedString("settings.general.themeColor"))
                             ColorPicker("", selection: $settingsManager.themeColor)
                                 .frame(width: 50)
-                                .onChange(of: settingsManager.themeColor) { _, newColor in
- // 实际应用主题色彩
-                                    applyThemeColor(newColor)
- // 保存颜色到UserDefaults
-                                    if let colorData = try? NSKeyedArchiver.archivedData(withRootObject: NSColor(newColor), requiringSecureCoding: false) {
-                                        UserDefaults.standard.set(colorData, forKey: "ThemeColor")
-                                    }
-                                }
                         }
                     }
                 }
@@ -398,15 +445,26 @@ public struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
                             Button(localizationManager.localizedString("settings.general.clearCache")) {
- // 实际清除缓存操作
                                 clearApplicationCache()
                             }
                             .buttonStyle(.bordered)
-                            
+                            .disabled(isCacheOperationInProgress)
+
+                            if isCacheOperationInProgress {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+
                             Spacer()
-                            
-                            Text(String(format: localizationManager.localizedString("settings.general.cacheSize"), getFormattedCacheSize()))
+
+                            Text(String(format: localizationManager.localizedString("settings.general.cacheSize"), cacheSizeDisplay))
                                 .foregroundColor(.secondary)
+                        }
+
+                        if let cacheOperationMessage {
+                            Text(cacheOperationMessage)
+                                .font(.caption)
+                                .foregroundColor(cacheOperationIsError ? .red : .secondary)
                         }
                         
                         HStack {
@@ -433,15 +491,6 @@ public struct SettingsView: View {
                             Spacer()
                         }
 
-                        HStack {
-                            Button(localizationManager.localizedString("settings.general.deduplicateKeychain")) {
- // deduplicate 是 nonisolated 方法，可以直接同步调用
-                                KeychainManager.shared.deduplicate(servicePrefix: "SkyBridge.")
-                            }
-                            .buttonStyle(.borderedProminent)
-                            
-                            Spacer()
-                        }
                     }
                 }
             }
@@ -544,6 +593,17 @@ public struct SettingsView: View {
                         }
                     }
                 }
+
+                settingsSection(localizationManager.localizedString("settings.network.topBar.title")) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Toggle(localizationManager.localizedString("settings.network.topBar.showIPLocation"), isOn: $settingsManager.showTopBarIPLocation)
+                            .help(localizationManager.localizedString("settings.network.topBar.showIPLocation.help"))
+                        Toggle(localizationManager.localizedString("settings.network.topBar.showSpeed"), isOn: $settingsManager.showTopBarNetworkSpeed)
+                            .help(localizationManager.localizedString("settings.network.topBar.showSpeed.help"))
+                        Toggle(localizationManager.localizedString("settings.network.topBar.showLatency"), isOn: $settingsManager.showTopBarNetworkLatency)
+                            .help(localizationManager.localizedString("settings.network.topBar.showLatency.help"))
+                    }
+                }
                 
                 settingsSection(localizationManager.localizedString("settings.network.connection.title")) {
                     VStack(alignment: .leading, spacing: 12) {
@@ -560,9 +620,6 @@ public struct SettingsView: View {
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 60)
                         }
-                        
-                        Toggle(localizationManager.localizedString("settings.network.connection.enableEncryption"), isOn: $settingsManager.enableConnectionEncryption)
-                        Toggle(localizationManager.localizedString("settings.network.connection.verifyCertificates"), isOn: $settingsManager.verifyCertificates)
                     }
                 }
             }
@@ -905,109 +962,111 @@ public struct SettingsView: View {
                         Toggle(localizationManager.localizedString("settings.advanced.memory.optimize"), isOn: $settingsManager.optimizeMemoryUsage)
                         Toggle(localizationManager.localizedString("settings.advanced.backgroundScanning"), isOn: $settingsManager.enableBackgroundScanning)
                         
- // Metal Performance HUD 设置
-                        if hud.isEnabled {
-                            Divider()
-                            
-                            VStack(alignment: .leading, spacing: 8) {
-                                HStack {
-                                    Text("Metal Performance HUD")
-                                        .font(.system(size: 13, weight: .medium))
-                                    Spacer()
-                                    if hud.isEnabled {
-                                        Text(localizationManager.localizedString("status.enabled"))
-                                            .font(.caption)
-                                            .foregroundColor(.green)
+                        Divider()
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("Metal Performance HUD")
+                                    .font(.system(size: 13, weight: .medium))
+                                Spacer()
+                                if !hud.isAvailable {
+                                    Text(localizationManager.localizedString("status.unavailable"))
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                } else if hud.isEnabled {
+                                    Text(localizationManager.localizedString("status.enabled"))
+                                        .font(.caption)
+                                        .foregroundColor(.green)
+                                } else {
+                                    Text(localizationManager.localizedString("status.disabled"))
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+
+                            Toggle(localizationManager.localizedString("settings.hud.enableRealtimeMonitoring"), isOn: Binding(
+                                get: { hud.isEnabled },
+                                set: { enabled in
+                                    if enabled {
+                                        hud.enable()
                                     } else {
-                                        Text(localizationManager.localizedString("status.disabled"))
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
+                                        hud.disable()
                                     }
                                 }
-                                
-                                Toggle(localizationManager.localizedString("settings.hud.enableRealtimeMonitoring"), isOn: Binding(
-                                    get: { hud.isEnabled },
-                                    set: { enabled in
-                                        if enabled {
-                                            hud.enable()
-                                        } else {
-                                            hud.disable()
-                                        }
-                                    }
-                                ))
-                                .help(localizationManager.localizedString("settings.hud.enableRealtimeMonitoring.help"))
-                                
-                                if hud.isEnabled {
-                                    Toggle(localizationManager.localizedString("settings.hud.showHUD"), isOn: Binding(
-                                         get: { hud.isVisible },
-                                         set: { visible in
-                                             if visible {
-                                                 self.hud.isVisible = true
+                            ))
+                            .disabled(!hud.isAvailable)
+                            .help(localizationManager.localizedString("settings.hud.enableRealtimeMonitoring.help"))
+
+                            if hud.isEnabled {
+                                Toggle(localizationManager.localizedString("settings.hud.showHUD"), isOn: Binding(
+                                     get: { hud.isVisible },
+                                     set: { visible in
+                                         if visible {
+                                             self.hud.isVisible = true
                             } else {
                                 self.hud.isVisible = false
-                                             }
                                          }
-                                     ))
-                                    .help(localizationManager.localizedString("settings.hud.showHUD.help"))
-                                    
+                                        }
+                                 ))
+                                .help(localizationManager.localizedString("settings.hud.showHUD.help"))
+
+                                HStack {
+                                    Text(localizationManager.localizedString("settings.hud.position"))
+                                    Picker("", selection: Binding(
+                                        get: { hud.hudConfiguration.position },
+                                        set: { position in
+                                            var config = hud.hudConfiguration
+                                            config.position = position
+                                            hud.updateConfiguration(config)
+                                        }
+                                    )) {
+                                        Text(localizationManager.localizedString("position.topLeft")).tag(HUDPosition.topLeft)
+                                        Text(localizationManager.localizedString("position.topRight")).tag(HUDPosition.topRight)
+                                        Text(localizationManager.localizedString("position.bottomLeft")).tag(HUDPosition.bottomLeft)
+                                        Text(localizationManager.localizedString("position.bottomRight")).tag(HUDPosition.bottomRight)
+                                    }
+                                    .pickerStyle(MenuPickerStyle())
+                                    .frame(width: 100)
+                                }
+
+ // 性能指标显示选项
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(localizationManager.localizedString("settings.hud.metrics.title"))
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+
                                     HStack {
-                                        Text(localizationManager.localizedString("settings.hud.position"))
-                                        Picker("", selection: Binding(
-                                            get: { hud.hudConfiguration.position },
-                                            set: { position in
+                                        Toggle(localizationManager.localizedString("metric.frameRate"), isOn: Binding(
+                                            get: { hud.hudConfiguration.showFrameRate },
+                                            set: { show in
                                                 var config = hud.hudConfiguration
-                                                config.position = position
+                                                config.showFrameRate = show
                                                 hud.updateConfiguration(config)
                                             }
-                                        )) {
-                                            Text(localizationManager.localizedString("position.topLeft")).tag(HUDPosition.topLeft)
-                                            Text(localizationManager.localizedString("position.topRight")).tag(HUDPosition.topRight)
-                                            Text(localizationManager.localizedString("position.bottomLeft")).tag(HUDPosition.bottomLeft)
-                                            Text(localizationManager.localizedString("position.bottomRight")).tag(HUDPosition.bottomRight)
-                                        }
-                                        .pickerStyle(MenuPickerStyle())
-                                        .frame(width: 100)
+                                        ))
+                                        .toggleStyle(.checkbox)
+
+                                        Toggle(localizationManager.localizedString("metric.gpuTime"), isOn: Binding(
+                                            get: { hud.hudConfiguration.showGPUTime },
+                                            set: { show in
+                                                var config = hud.hudConfiguration
+                                                config.showGPUTime = show
+                                                hud.updateConfiguration(config)
+                                            }
+                                        ))
+                                        .toggleStyle(.checkbox)
+
+                                        Toggle(localizationManager.localizedString("metric.memory"), isOn: Binding(
+                                            get: { hud.hudConfiguration.showMemoryUsage },
+                                            set: { show in
+                                                var config = hud.hudConfiguration
+                                                config.showMemoryUsage = show
+                                                hud.updateConfiguration(config)
+                                            }
+                                        ))
+                                        .toggleStyle(.checkbox)
                                     }
-                                    
- // 性能指标显示选项
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(localizationManager.localizedString("settings.hud.metrics.title"))
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                        
-                                        HStack {
-                                            Toggle(localizationManager.localizedString("metric.frameRate"), isOn: Binding(
-                                                get: { hud.hudConfiguration.showFrameRate },
-                                                set: { show in
-                                                    var config = hud.hudConfiguration
-                                                    config.showFrameRate = show
-                                                    hud.updateConfiguration(config)
-                                                }
-                                            ))
-                                            .toggleStyle(.checkbox)
-                                            
-                                            Toggle(localizationManager.localizedString("metric.gpuTime"), isOn: Binding(
-                                                get: { hud.hudConfiguration.showGPUTime },
-                                                set: { show in
-                                                    var config = hud.hudConfiguration
-                                                    config.showGPUTime = show
-                                                    hud.updateConfiguration(config)
-                                                }
-                                            ))
-                                            .toggleStyle(.checkbox)
-                                            
-                                            Toggle(localizationManager.localizedString("metric.memory"), isOn: Binding(
-                                                get: { hud.hudConfiguration.showMemoryUsage },
-                                                set: { show in
-                                                    var config = hud.hudConfiguration
-                                                    config.showMemoryUsage = show
-                                                    hud.updateConfiguration(config)
-                                                }
-                                            ))
-                                            .toggleStyle(.checkbox)
-                                        }
-                                        .font(.caption)
-                                    }
+                                    .font(.caption)
                                 }
                             }
                         }
@@ -1037,23 +1096,118 @@ public struct SettingsView: View {
                 
                 settingsSection(localizationManager.localizedString("settings.advanced.pqc.title")) {
                     VStack(alignment: .leading, spacing: 12) {
-                        Toggle(localizationManager.localizedString("settings.advanced.pqc.enableAppLayer"), isOn: $settingsManager.enablePQC)
-                        Toggle(localizationManager.localizedString("settings.advanced.pqc.enableHybridTLS"), isOn: $settingsManager.enablePQCHybridTLS)
-                        HStack {
-                            Text(localizationManager.localizedString("settings.advanced.pqc.signatureAlgorithm"))
-                            Picker("", selection: $settingsManager.pqcSignatureAlgorithm) {
-                                Text("ML-DSA").tag("ML-DSA")
-                                Text("SLH-DSA").tag("SLH-DSA")
-                                Text("Falcon").tag("Falcon")
-                            }
-                            .pickerStyle(MenuPickerStyle())
-                            .frame(width: 120)
+                        HStack(spacing: 8) {
+                            Image(systemName: "lock.shield.fill")
+                                .foregroundColor(.green)
+                            Text(localizationManager.localizedString("settings.advanced.pqc.enableAppLayer"))
+                            Spacer()
+                            Text(localizationManager.localizedString("status.enabled"))
+                                .font(.caption)
+                                .foregroundColor(.green)
                         }
-                        Toggle(localizationManager.localizedString("settings.advanced.pqc.useSecureEnclaveMLDSA"), isOn: $settingsManager.useSecureEnclaveMLDSA)
-                        Toggle(localizationManager.localizedString("settings.advanced.pqc.useSecureEnclaveMLKEM"), isOn: $settingsManager.useSecureEnclaveMLKEM)
-                        Text(localizationManager.localizedString("settings.advanced.pqc.note"))
+                        Text("策略强制启用")
                             .font(.caption)
                             .foregroundColor(.secondary)
+                        Picker(
+                            "协议身份签名",
+                            selection: $requestedProtocolSigningAlgorithm
+                        ) {
+                            Text("ML-DSA-65 · Category 3")
+                                .tag(ProtocolSigningAlgorithm.mlDSA65)
+                            Text("ML-DSA-87 · Category 5")
+                                .tag(ProtocolSigningAlgorithm.mlDSA87)
+                        }
+                        .pickerStyle(.segmented)
+                        Toggle(
+                            "主协议 ML-DSA 私钥使用 Secure Enclave",
+                            isOn: $requestedProtocolSigningSecureEnclave
+                        )
+                        .disabled(!secureEnclaveMLDSAAvailable)
+                        .help(
+                            secureEnclaveMLDSAAvailable
+                                ? "仅保护本机 sigA/sigB 私钥；启用失败不会回退软件密钥。"
+                                : "需要 macOS 26+ 且当前设备 Secure Enclave 可用。"
+                        )
+                        HStack {
+                            Button("应用协议身份配置") {
+                                let protection: ProtocolSigningKeyProtection =
+                                    requestedProtocolSigningSecureEnclave
+                                        ? .secureEnclaveRequired
+                                        : .softwareKeychain
+                                Task { @MainActor in
+                                    do {
+                                        let expectedScope = try await CrossNetworkConnectionManager
+                                            .currentAuthenticatedIdentityRotationScope()
+                                        try await CurrentPathDeviceIdentityRotationCoordinator
+                                            .shared.rotate(
+                                                algorithm: requestedProtocolSigningAlgorithm,
+                                                protection: protection,
+                                                expectedScope: expectedScope
+                                            )
+                                    } catch {
+                                        SkyBridgeLogger.ui.error(
+                                            "协议身份轮换失败: \(error.localizedDescription, privacy: .private)"
+                                        )
+                                    }
+                                }
+                            }
+                            .disabled(
+                                settingsManager.protocolIdentityConfigurationState == .provisioning
+                                    || (requestedProtocolSigningSecureEnclave
+                                        && !secureEnclaveMLDSAAvailable)
+                            )
+                            Text(protocolIdentityConfigurationStatusText)
+                                .font(.caption)
+                                .foregroundColor(protocolIdentityConfigurationStatusColor)
+                        }
+                        if let error = settingsManager.protocolIdentityConfigurationError {
+                            Text(error)
+                                .font(.caption)
+                                .foregroundColor(.red)
+                                .textSelection(.enabled)
+                        }
+                        // 混合 PQC TLS 的密钥交换组（X25519MLKEM768）由系统 TLS 1.3 栈在 macOS 26+ 自动协商，
+                        // 没有公开 API 可供 App 强制开/关（C 层 sec_protocol_options 无此旋钮，SwiftTLSOptions.keyExchangeGroup
+                        // 未导出到公开接口）。因此此处不再提供仅改状态文字的假开关，改为如实说明。
+                        HStack {
+                            Text(localizationManager.localizedString("settings.advanced.pqc.enableHybridTLS"))
+                            Spacer()
+                            Text("由系统自动协商 (macOS 26+)")
+                                .font(.caption.weight(.semibold))
+                                .foregroundColor(.secondary)
+                        }
+                        .help("传输层 TLS 1.3 的混合后量子密钥交换组（X25519MLKEM768）由系统在双方支持时自动协商，App 无公开接口可强制开关。SkyBridge 的设备握手另行协商后量子算法，与此传输层 TLS 设置独立。")
+                        PQCModeSettingsView(settingsManager: settingsManager)
+                        Text("现有 peer 继续使用已 pin 的 ML-DSA-65；只有完成 87 公钥认证与持久化后才使用 ML-DSA-87，不会因失败自动降级。")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        HStack {
+                            Text(localizationManager.localizedString("settings.advanced.pqc.signatureAlgorithm"))
+                            Spacer()
+                            Text("\(settingsManager.activeProtocolSigningAlgorithm.rawValue) · 协议身份绑定")
+                                .font(.caption.weight(.semibold))
+                                .foregroundColor(.secondary)
+                        }
+                        HStack {
+                            Text("PQC 密钥执行")
+                            Spacer()
+                            Text(
+                                settingsManager.activeProtocolSigningKeyProtection == .secureEnclaveRequired
+                                    ? "主协议 ML-DSA · Secure Enclave"
+                                    : "主协议 ML-DSA · 软件 Keychain"
+                            )
+                                .font(.caption.weight(.semibold))
+                                .foregroundColor(.secondary)
+                        }
+                        .help("此状态来自已恢复并完成签名自检的本机协议身份 authority；不代表远端硬件证明。")
+                        Text("没有双方共同支持且允许的后量子算法时，连接会明确停止。不会自动改为经典算法。")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .onAppear {
+                        requestedProtocolSigningAlgorithm = settingsManager.activeProtocolSigningAlgorithm
+                        requestedProtocolSigningSecureEnclave =
+                            settingsManager.activeProtocolSigningKeyProtection == .secureEnclaveRequired
                     }
                 }
                 
@@ -1163,20 +1317,86 @@ public struct SettingsView: View {
         }
         .padding(.vertical, 4)
     }
+
+    private var strictCertificateValidationNotice: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "lock.shield")
+                .foregroundColor(.blue)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(localizationManager.localizedString("settings.security.certificateValidation.alwaysOn"))
+                    .font(.subheadline)
+                Text(localizationManager.localizedString("settings.security.certificateValidation.alwaysOn.detail"))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var requiredFileTransferEncryptionNotice: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "lock.fill")
+                .foregroundColor(.blue)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(localizationManager.localizedString("settings.fileTransfer.security.encryption.alwaysOn"))
+                    .font(.subheadline)
+                Text(localizationManager.localizedString("settings.fileTransfer.security.encryption.alwaysOn.detail"))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var secureEnclaveMLDSAAvailable: Bool {
+        #if HAS_APPLE_PQC_SDK
+        guard #available(macOS 26.0, *) else { return false }
+        return SecureEnclave.isAvailable
+        #else
+        return false
+        #endif
+    }
+
+    private var protocolIdentityConfigurationStatusText: String {
+        switch settingsManager.protocolIdentityConfigurationState {
+        case .active:
+            return "已激活"
+        case .provisioning:
+            return "正在创建并验证身份…"
+        case .waitingForPeerRepin:
+            return "本机已就绪；既有 peer 待认证新 pin"
+        case .requiresExplicitConfirmation:
+            return "需要显式确认"
+        case .unavailable:
+            return "当前设备不可用"
+        case .failed:
+            return "配置失败；原身份保持不变"
+        }
+    }
+
+    private var protocolIdentityConfigurationStatusColor: Color {
+        switch settingsManager.protocolIdentityConfigurationState {
+        case .active: return .green
+        case .provisioning, .waitingForPeerRepin: return .orange
+        case .requiresExplicitConfirmation, .unavailable, .failed: return .red
+        }
+    }
     
  // MARK: - 文件传输设置
     private var fileTransferSettings: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
- // 视频传输配置部分
-                videoTransferConfigurationSection
-                
                 settingsSection(localizationManager.localizedString("settings.fileTransfer.config.title")) {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
                             Text(localizationManager.localizedString("settings.fileTransfer.defaultPath"))
                             TextField(localizationManager.localizedString("unit.path"), text: $settingsManager.defaultTransferPath)
                                 .textFieldStyle(.roundedBorder)
+                                .onSubmit {
+                                    applyDefaultTransferPathFromSettings()
+                                }
                             Button(localizationManager.localizedString("action.select")) {
                                 let panel = NSOpenPanel()
                                 panel.canChooseDirectories = true
@@ -1185,7 +1405,7 @@ public struct SettingsView: View {
                                 panel.begin { response in
                                     if response == .OK, let url = panel.url {
                                         settingsManager.defaultTransferPath = url.path
-                                        ftBridge.updateReceiveDirectory(url)
+                                        applyDefaultTransferPathFromSettings()
                                     }
                                 }
                             }
@@ -1194,57 +1414,71 @@ public struct SettingsView: View {
                         
                         HStack {
                             Text(localizationManager.localizedString("settings.fileTransfer.maxConcurrentTransfers"))
-                            TextField(localizationManager.localizedString("unit.count.short"), value: $settingsManager.maxConcurrentConnections, format: .number)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 60)
+                            Spacer()
+                            Stepper(
+                                value: $settingsManager.maxConcurrentFileTransfers,
+                                in: 1...SettingsManager.maximumConcurrentFileTransfers
+                            ) {
+                                Text("\(settingsManager.maxConcurrentFileTransfers)")
+                                    .monospacedDigit()
+                            }
+                            .fixedSize()
                         }
                         
                         HStack {
-                            Text(localizationManager.localizedString("settings.fileTransfer.bufferSize"))
+                            Text(localizationManager.localizedString("settings.fileTransfer.chunkSize"))
                             Picker("", selection: $settingsManager.transferBufferSize) {
                                 Text("64KB").tag(65536)
                                 Text("128KB").tag(131072)
                                 Text("256KB").tag(262144)
                                 Text("512KB").tag(524288)
-                                Text("1MB").tag(1048576)
                             }
                             .pickerStyle(MenuPickerStyle())
                             .frame(width: 100)
+                        }
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text(localizationManager.localizedString("settings.fileTransfer.rateLimit"))
+                                Spacer()
+                                if settingsManager.transferSpeedLimitMBps <= 0 {
+                                    Text(localizationManager.localizedString("settings.fileTransfer.rateLimit.unlimited"))
+                                        .foregroundColor(.secondary)
+                                } else {
+                                    Text("\(settingsManager.transferSpeedLimitMBps, specifier: "%.0f") MB/s")
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+
+                            Slider(value: $settingsManager.transferSpeedLimitMBps, in: 0...500, step: 5)
                         }
                     }
                 }
                 
                 settingsSection(localizationManager.localizedString("settings.fileTransfer.options.title")) {
                     VStack(alignment: .leading, spacing: 12) {
-                        Toggle(localizationManager.localizedString("settings.fileTransfer.options.showNotification"), isOn: $settingsManager.showSystemNotifications)
-                        Toggle(localizationManager.localizedString("settings.fileTransfer.options.autoRetryFailed"), isOn: $settingsManager.autoRetryFailedTransfers)
+                        Toggle(localizationManager.localizedString("settings.fileTransfer.options.showNotification"), isOn: $settingsManager.showFileTransferNotifications)
+                        Toggle(localizationManager.localizedString("settings.fileTransfer.options.resumeEnabled"), isOn: $settingsManager.autoRetryFailedTransfers)
                         Toggle(localizationManager.localizedString("settings.fileTransfer.options.keepHistory"), isOn: $settingsManager.keepTransferHistory)
                         Toggle(localizationManager.localizedString("settings.fileTransfer.options.keepAwake"), isOn: $settingsManager.keepSystemAwakeDuringTransfer)
-                        
-                        HStack {
-                            Text(localizationManager.localizedString("settings.common.retryCount"))
-                            TextField(localizationManager.localizedString("unit.times.short"), value: $settingsManager.retryCount, format: .number)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 60)
-                        }
                     }
                 }
                 
                 settingsSection(localizationManager.localizedString("settings.fileTransfer.security.title")) {
                     VStack(alignment: .leading, spacing: 12) {
-                        Toggle(localizationManager.localizedString("settings.fileTransfer.security.enableEncrypt"), isOn: $settingsManager.enableConnectionEncryption)
-                        Toggle(localizationManager.localizedString("settings.fileTransfer.security.verifyIntegrity"), isOn: $settingsManager.verifyCertificates)
+                        requiredFileTransferEncryptionNotice
+                        strictCertificateValidationNotice
                         Toggle(localizationManager.localizedString("settings.fileTransfer.security.scanVirus"), isOn: $settingsManager.scanTransferFilesForVirus)
                         
                         HStack {
                             Text(localizationManager.localizedString("settings.fileTransfer.security.scanLevel"))
                             Picker("", selection: $settingsManager.scanLevel) {
                                 Text(localizationManager.localizedString("settings.fileTransfer.security.scanLevel.quick"))
-                                    .tag(FileScanService.ScanLevel.quick)
+                                    .tag(FileScanLevel.quick)
                                 Text(localizationManager.localizedString("settings.fileTransfer.security.scanLevel.standard"))
-                                    .tag(FileScanService.ScanLevel.standard)
+                                    .tag(FileScanLevel.standard)
                                 Text(localizationManager.localizedString("settings.fileTransfer.security.scanLevel.deep"))
-                                    .tag(FileScanService.ScanLevel.deep)
+                                    .tag(FileScanLevel.deep)
                             }
                             .pickerStyle(MenuPickerStyle())
                             .frame(width: 120)
@@ -1253,13 +1487,9 @@ public struct SettingsView: View {
                         
                         HStack {
                             Text(localizationManager.localizedString("settings.fileTransfer.security.algorithm"))
-                            Picker("", selection: $settingsManager.encryptionAlgorithm) {
-                                Text("AES-256").tag("AES-256")
-                                Text("ChaCha20").tag("ChaCha20")
-                                Text("AES-128").tag("AES-128")
-                            }
-                            .pickerStyle(MenuPickerStyle())
-                            .frame(width: 120)
+                            Spacer()
+                            Text(settingsManager.encryptionAlgorithm.displayName)
+                                .foregroundColor(.secondary)
                         }
                     }
                 }
@@ -1278,7 +1508,7 @@ public struct SettingsView: View {
  // MARK: - 视频传输配置部分
     
     private var videoTransferConfigurationSection: some View {
-        settingsSection(localizationManager.localizedString("settings.videoTransfer.title")) {
+        settingsSection(localizationManager.localizedString("settings.remote.qualityPerformance.title")) {
             VStack(alignment: .leading, spacing: 16) {
  // 当前配置状态显示 - 增强版本，包含实时状态指示器
                 HStack {
@@ -1583,25 +1813,26 @@ public struct SettingsView: View {
         .buttonStyle(.plain)
         .help(preset.description)
     }
+
+    private var remoteNetworkCompressionEnabled: Binding<Bool> {
+        Binding(
+            get: { remoteDesktopSettingsManager.settings.networkSettings.compressionLevel > 0 },
+            set: { isEnabled in
+                let currentLevel = remoteDesktopSettingsManager.settings.networkSettings.boundedCompressionLevel
+                let restoredLevel = currentLevel > 0 ? currentLevel : 6
+                remoteDesktopSettingsManager.settings.networkSettings.compressionLevel = isEnabled ? restoredLevel : 0
+            }
+        )
+    }
     
  // MARK: - 远程桌面设置
     private var remoteDesktopSettings: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                videoTransferConfigurationSection
+
                 settingsSection(localizationManager.localizedString("settings.remote.display.title")) {
                     VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Text(localizationManager.localizedString("settings.remote.display.videoQuality"))
-                            Picker("", selection: $remoteDesktopSettingsManager.settings.displaySettings.videoQuality) {
-                                Text(localizationManager.localizedString("quality.low")).tag(VideoQuality.low)
-                                Text(localizationManager.localizedString("quality.medium")).tag(VideoQuality.medium)
-                                Text(localizationManager.localizedString("quality.high")).tag(VideoQuality.high)
-                                Text(localizationManager.localizedString("quality.ultra")).tag(VideoQuality.ultra)
-                            }
-                            .pickerStyle(MenuPickerStyle())
-                            .frame(width: 100)
-                        }
-                        
                         HStack {
                             Text(localizationManager.localizedString("settings.remote.display.compressionLevel"))
                             Slider(
@@ -1613,21 +1844,6 @@ public struct SettingsView: View {
                                 .foregroundColor(.secondary)
                                 .frame(width: 20)
                         }
-                        
-                        HStack {
-                            Text(localizationManager.localizedString("settings.remote.display.refreshRate"))
-                            Picker("", selection: $remoteDesktopSettingsManager.settings.displaySettings.refreshRate) {
-                                Text("30 Hz").tag(RefreshRate.hz30)
-                                Text("60 Hz").tag(RefreshRate.hz60)
-                                Text("75 Hz").tag(RefreshRate.hz75)
-                                Text("120 Hz").tag(RefreshRate.hz120)
-                                Text("144 Hz").tag(RefreshRate.hz144)
-                            }
-                            .pickerStyle(MenuPickerStyle())
-                            .frame(width: 100)
-                        }
-                        
-                        Toggle(localizationManager.localizedString("settings.remote.network.enableAdaptiveQuality"), isOn: $remoteDesktopSettingsManager.settings.networkSettings.enableAdaptiveQuality)
                         Toggle(localizationManager.localizedString("settings.remote.display.fullScreenMode"), isOn: $remoteDesktopSettingsManager.settings.displaySettings.fullScreenMode)
                     }
                 }
@@ -1670,8 +1886,31 @@ public struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         Toggle(localizationManager.localizedString("settings.remote.network.enableBandwidthAdaptive"), isOn: $remoteDesktopSettingsManager.settings.networkSettings.enableAdaptiveQuality)
                         Toggle(localizationManager.localizedString("settings.remote.network.enableUDP"), isOn: $remoteDesktopSettingsManager.settings.networkSettings.enableUDPTransport)
-                        Toggle(localizationManager.localizedString("settings.remote.network.enableCompression"), isOn: $remoteDesktopSettingsManager.settings.networkSettings.enableEncryption)
-                        
+                        HStack {
+                            Text(localizationManager.localizedString("settings.remote.network.enableEncryption"))
+                            Spacer()
+                            Text("Strict-PQC / TLS 1.3")
+                                .font(.caption.weight(.semibold))
+                                .foregroundColor(.green)
+                        }
+                        Toggle(localizationManager.localizedString("settings.remote.network.enableCompression"), isOn: remoteNetworkCompressionEnabled)
+                        HStack {
+                            Text(localizationManager.localizedString("settings.remote.display.compressionLevel"))
+                            Slider(
+                                value: Binding(
+                                    get: { Double(remoteDesktopSettingsManager.settings.networkSettings.boundedCompressionLevel) },
+                                    set: { remoteDesktopSettingsManager.settings.networkSettings.compressionLevel = Int($0) }
+                                ),
+                                in: 1...9,
+                                step: 1
+                            )
+                            .disabled(!remoteNetworkCompressionEnabled.wrappedValue)
+                            Text("\(remoteDesktopSettingsManager.settings.networkSettings.boundedCompressionLevel)")
+                                .foregroundColor(.secondary)
+                                .frame(width: 20)
+                        }
+                        .help("网络数据压缩级别（1 = 最低，9 = 最大压缩）。关闭压缩时写入 0。")
+
                         HStack {
                             Text(localizationManager.localizedString("settings.remote.network.bandwidthLimit"))
                             TextField(localizationManager.localizedString("unit.bandwidth"), 
@@ -1688,10 +1927,10 @@ public struct SettingsView: View {
                         HStack {
                             Text(localizationManager.localizedString("settings.remote.network.bufferSize"))
                             Picker("", selection: $remoteDesktopSettingsManager.settings.networkSettings.bufferSize) {
-                                Text("32KB").tag(32768)
-                                Text("64KB").tag(65536)
-                                Text("128KB").tag(131072)
-                                Text("256KB").tag(262144)
+                                Text("512KB").tag(512)
+                                Text("1MB").tag(1024)
+                                Text("2MB").tag(2048)
+                                Text("4MB").tag(4096)
                             }
                             .pickerStyle(MenuPickerStyle())
                             .frame(width: 100)
@@ -1702,7 +1941,7 @@ public struct SettingsView: View {
  // 添加设置操作按钮
                 HStack {
                     Button(localizationManager.localizedString("action.resetToDefaults")) {
-                        remoteDesktopSettingsManager.resetToDefaults()
+                        resetRemoteDesktopSettingsToDefaults()
                     }
                     .buttonStyle(.bordered)
                     
@@ -1715,6 +1954,9 @@ public struct SettingsView: View {
                 }
                 .padding(.top, 20)
             }
+        }
+        .onAppear {
+            hydrateVideoQualityFromRemoteDesktopSettings()
         }
     }
     
@@ -1738,45 +1980,54 @@ public struct SettingsView: View {
                             .pickerStyle(MenuPickerStyle())
                             .frame(width: 80)
                         }
-                        
+
                         Toggle(localizationManager.localizedString("settings.systemMonitor.config.enableRealtime"), isOn: $settingsManager.enableAutoRefresh)
                         Toggle(localizationManager.localizedString("settings.systemMonitor.config.enableHistory"), isOn: $settingsManager.showTrendIndicators)
-                        Toggle(localizationManager.localizedString("settings.systemMonitor.config.enablePerformanceAlerts"), isOn: $settingsManager.enableSystemNotifications)
-                        
+                        Toggle(localizationManager.localizedString("settings.systemMonitor.config.enablePerformanceAlerts"), isOn: $settingsManager.enablePerformanceAlerts)
+
                         HStack {
                             Text(localizationManager.localizedString("settings.systemMonitor.config.retentionDays"))
-                            TextField(localizationManager.localizedString("unit.days.short"), value: Binding(
-                                get: { Int(settingsManager.maxHistoryPoints / 24) }, // 假设每小时一个点，转换为天数
-                                set: { settingsManager.maxHistoryPoints = Double($0 * 24) }
-                            ), format: .number)
+                            TextField(
+                                localizationManager.localizedString("unit.days.short"),
+                                value: $settingsManager.systemMonitorRetentionDays,
+                                format: .number
+                            )
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 60)
                         }
+
+                        HStack {
+                            Text(localizationManager.localizedString("settings.systemMonitor.config.maxHistoryPoints"))
+                            Slider(value: $settingsManager.maxHistoryPoints, in: 50...2000, step: 50)
+                            Text("\(Int(settingsManager.maxHistoryPoints))")
+                                .foregroundColor(.secondary)
+                                .frame(width: 50)
+                        }
                     }
                 }
-                
+
                 settingsSection(localizationManager.localizedString("settings.systemMonitor.display.title")) {
                     VStack(alignment: .leading, spacing: 12) {
-                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.cpu"), isOn: $settingsManager.showDeviceDetails)
-                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.memory"), isOn: $settingsManager.showConnectionStats)
-                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.disk"), isOn: $settingsManager.showTrendIndicators)
-                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.network"), isOn: $settingsManager.enableSystemNotifications)
-                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.temperature"), isOn: $settingsManager.showDebugInfo)
-                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.fanSpeed"), isOn: $settingsManager.enableVerboseLogging)
-                        
+                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.cpu"), isOn: $settingsManager.showMonitorCPU)
+                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.memory"), isOn: $settingsManager.showMonitorMemory)
+                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.disk"), isOn: $settingsManager.showMonitorDisk)
+                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.network"), isOn: $settingsManager.showMonitorNetwork)
+                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.temperature"), isOn: $settingsManager.showMonitorTemperature)
+                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.fanSpeed"), isOn: $settingsManager.showMonitorFanSpeed)
+
                         HStack {
                             Text(localizationManager.localizedString("settings.systemMonitor.display.chartType"))
-                            Picker("", selection: $settingsManager.logLevel) {
-                                Text(localizationManager.localizedString("chart.line")).tag("Info")
-                                Text(localizationManager.localizedString("chart.bar")).tag("Warning")
-                                Text(localizationManager.localizedString("chart.area")).tag("Debug")
+                            Picker("", selection: $settingsManager.systemMonitorChartType) {
+                                Text(localizationManager.localizedString("chart.line")).tag(SettingsManager.SystemMonitorChartType.line)
+                                Text(localizationManager.localizedString("chart.bar")).tag(SettingsManager.SystemMonitorChartType.bar)
+                                Text(localizationManager.localizedString("chart.area")).tag(SettingsManager.SystemMonitorChartType.area)
                             }
                             .pickerStyle(MenuPickerStyle())
                             .frame(width: 100)
                         }
                     }
                 }
-                
+
                 settingsSection(localizationManager.localizedString("settings.systemMonitor.alerts.title")) {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
@@ -1794,7 +2045,29 @@ public struct SettingsView: View {
                                 .foregroundColor(.secondary)
                                 .frame(width: 40)
                         }
-                        
+
+                        Toggle(localizationManager.localizedString("settings.systemMonitor.alerts.enableTemperatureMonitoring"), isOn: $settingsManager.enableTemperatureMonitoring)
+
+                        HStack {
+                            Text(localizationManager.localizedString("settings.systemMonitor.alerts.temperatureThreshold"))
+                            Slider(value: $settingsManager.temperatureThreshold, in: 60...95, step: 5)
+                                .disabled(!settingsManager.enableTemperatureMonitoring)
+                            Text("\(Int(settingsManager.temperatureThreshold))°C")
+                                .foregroundColor(.secondary)
+                                .frame(width: 50)
+                        }
+
+                        Toggle(localizationManager.localizedString("settings.systemMonitor.alerts.enableFanSpeedMonitoring"), isOn: $settingsManager.enableFanSpeedMonitoring)
+
+                        HStack {
+                            Text(localizationManager.localizedString("settings.systemMonitor.alerts.fanSpeedThreshold"))
+                            Slider(value: $settingsManager.fanSpeedThreshold, in: 2000...8000, step: 200)
+                                .disabled(!settingsManager.enableFanSpeedMonitoring)
+                            Text("\(Int(settingsManager.fanSpeedThreshold)) RPM")
+                                .foregroundColor(.secondary)
+                                .frame(width: 80)
+                        }
+
                         HStack {
                             Text(localizationManager.localizedString("settings.systemMonitor.alerts.diskThreshold"))
                             Slider(value: $settingsManager.diskThreshold, in: 70...95, step: 5)
@@ -1802,40 +2075,46 @@ public struct SettingsView: View {
                                 .foregroundColor(.secondary)
                                 .frame(width: 40)
                         }
-                        
+
                         Toggle(localizationManager.localizedString("settings.systemMonitor.alerts.enableSound"), isOn: $settingsManager.enableSoundAlerts)
                         Toggle(localizationManager.localizedString("settings.systemMonitor.alerts.enableNotificationCenter"), isOn: $settingsManager.enableSystemNotifications)
                     }
                 }
-                
+
                 settingsSection(localizationManager.localizedString("settings.systemMonitor.advanced.title")) {
                     VStack(alignment: .leading, spacing: 12) {
-                        Toggle(localizationManager.localizedString("settings.systemMonitor.advanced.enableVerboseLogging"), isOn: $settingsManager.enableVerboseLogging)
-                        Toggle(localizationManager.localizedString("settings.systemMonitor.advanced.exportData"), isOn: $settingsManager.saveNetworkLogs)
-                        Toggle(localizationManager.localizedString("settings.systemMonitor.advanced.enableRemoteMonitoring"), isOn: $settingsManager.enableBackgroundScanning)
-                        
+                        Toggle(localizationManager.localizedString("settings.systemMonitor.alerts.thermalThrottling"), isOn: $settingsManager.enableThermalThrottlingAlert)
+                        Toggle(localizationManager.localizedString("settings.systemMonitor.advanced.enableRemoteMonitoring"), isOn: $settingsManager.enableRemoteMonitoring)
+
                         HStack {
                             Text(localizationManager.localizedString("settings.systemMonitor.advanced.samplingPrecision"))
-                            Picker("", selection: $settingsManager.logLevel) {
-                                Text(localizationManager.localizedString("precision.low")).tag("Error")
-                                Text(localizationManager.localizedString("precision.normal")).tag("Info")
-                                Text(localizationManager.localizedString("precision.high")).tag("Debug")
+                            Picker("", selection: $settingsManager.systemMonitorSamplingPrecision) {
+                                Text(localizationManager.localizedString("precision.low")).tag(SettingsManager.SystemMonitorSamplingPrecision.low)
+                                Text(localizationManager.localizedString("precision.normal")).tag(SettingsManager.SystemMonitorSamplingPrecision.normal)
+                                Text(localizationManager.localizedString("precision.high")).tag(SettingsManager.SystemMonitorSamplingPrecision.high)
                             }
                             .pickerStyle(MenuPickerStyle())
                             .frame(width: 80)
                         }
-                        
-                        Button(localizationManager.localizedString("action.resetMonitorData")) {
- // 重置监控数据的逻辑
-                            Task { @MainActor in
-                                settingsManager.cpuThreshold = 80.0
-                                settingsManager.memoryThreshold = 80.0
-                                settingsManager.diskThreshold = 90.0
-                                settingsManager.systemMonitorRefreshInterval = 1.0
-                                settingsManager.maxHistoryPoints = 300.0
+
+                        HStack {
+                            Button(localizationManager.localizedString("action.exportMonitorData")) {
+                                NotificationCenter.default.post(name: .systemMonitorExport, object: nil)
                             }
+                            .buttonStyle(.bordered)
+
+                            Button(localizationManager.localizedString("action.clearMonitorHistory")) {
+                                NotificationCenter.default.post(name: .systemMonitorClearHistory, object: nil)
+                            }
+                            .buttonStyle(.bordered)
+
+                            Spacer()
+
+                            Button(localizationManager.localizedString("action.resetMonitorData")) {
+                                settingsManager.resetSystemMonitorSettingsToDefaults()
+                            }
+                            .buttonStyle(.bordered)
                         }
-                        .buttonStyle(.bordered)
                     }
                 }
             }
@@ -1884,8 +2163,6 @@ public struct SettingsView: View {
     private func requestNotificationPermission() {
         Task { @MainActor in
             let granted = await settingsManager.requestNotificationPermission()
- // 将最终授权结果写入用户偏好，确保下次启动保持一致
-            UserDefaults.standard.set(granted, forKey: "ShowSystemNotifications")
         SkyBridgeLogger.ui.debugOnly("🔔 [设置] 通知权限已\(granted ? "授予" : "拒绝")")
         }
     }
@@ -1904,82 +2181,221 @@ public struct SettingsView: View {
     
  /// 清除应用缓存
     private func clearApplicationCache() {
- // 清除各种缓存
-        let cacheURLs = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
-        for cacheURL in cacheURLs {
-            do {
-                let contents = try FileManager.default.contentsOfDirectory(at: cacheURL, includingPropertiesForKeys: nil)
-                for fileURL in contents {
-                    try FileManager.default.removeItem(at: fileURL)
-                }
-            } catch {
- // 静默处理错误，避免在生产环境中输出调试信息
-            }
-        }
-        
- // 清除设备管理器缓存
-        DeviceManagementSettingsManager.shared.clearDeviceCache()
-        
- // 刷新设备列表
+        guard !isCacheOperationInProgress else { return }
+
+        isCacheOperationInProgress = true
+        cacheOperationIsError = false
+        cacheOperationMessage = localizationManager.localizedString("settings.general.cache.clearing")
+
         Task {
-            await wifiManager.refreshNetworks()
+            do {
+                let result = try await applicationCacheService.clearCaches()
+
+                DeviceManagementSettingsManager.shared.clearDeviceCache()
+                await wifiManager.refreshNetworks()
+                bluetoothManager.refreshDevices()
+                airplayManager.refreshDevices()
+
+                await refreshApplicationCacheSize(showErrorMessage: false)
+
+                cacheOperationIsError = false
+                cacheOperationMessage = String(
+                    format: localizationManager.localizedString("settings.general.cache.clearComplete"),
+                    formattedByteCount(result.clearedBytes)
+                )
+            } catch {
+                cacheOperationIsError = true
+                cacheOperationMessage = String(
+                    format: localizationManager.localizedString("settings.general.cache.clearFailed"),
+                    error.localizedDescription
+                )
+                SkyBridgeLogger.ui.error("清理缓存失败: \(error.localizedDescription, privacy: .private)")
+                await refreshApplicationCacheSize(showErrorMessage: false)
+            }
+
+            isCacheOperationInProgress = false
         }
-        bluetoothManager.refreshDevices()
-        airplayManager.refreshDevices()
     }
     
- /// 获取格式化的缓存大小
-    private func getFormattedCacheSize() -> String {
-        let cacheURLs = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
-        var totalSize: Int64 = 0
-        
-        for cacheURL in cacheURLs {
-            do {
-                let contents = try FileManager.default.contentsOfDirectory(at: cacheURL, includingPropertiesForKeys: [.fileSizeKey])
-                for fileURL in contents {
-                    let resourceValues = try fileURL.resourceValues(forKeys: [.fileSizeKey])
-                    totalSize += Int64(resourceValues.fileSize ?? 0)
-                }
-            } catch {
- // 忽略错误，继续计算其他文件
+    private func refreshApplicationCacheSize(showErrorMessage: Bool = true) async {
+        do {
+            let snapshot = try await applicationCacheService.cacheUsageSnapshot()
+            cacheSizeDisplay = formattedByteCount(snapshot.totalBytes)
+            if showErrorMessage && !isCacheOperationInProgress {
+                cacheOperationIsError = false
+                cacheOperationMessage = nil
+            }
+        } catch {
+            cacheSizeDisplay = localizationManager.localizedString("settings.general.cacheSize.unavailable")
+            SkyBridgeLogger.ui.error("计算缓存大小失败: \(error.localizedDescription, privacy: .private)")
+
+            if showErrorMessage {
+                cacheOperationIsError = true
+                cacheOperationMessage = String(
+                    format: localizationManager.localizedString("settings.general.cache.sizeFailed"),
+                    error.localizedDescription
+                )
             }
         }
-        
- // 格式化大小显示
+    }
+
+    private func formattedByteCount(_ byteCount: Int64) -> String {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useMB, .useGB]
         formatter.countStyle = .file
-        return formatter.string(fromByteCount: totalSize)
+        return formatter.string(fromByteCount: byteCount)
     }
     
- /// 切换布局模式
-    private func switchLayoutMode(isCompact: Bool) {
- // 发送通知给主界面切换布局
-        NotificationCenter.default.post(
-            name: NSNotification.Name("LayoutModeChanged"),
-            object: nil,
-            userInfo: ["isCompact": isCompact]
-        )
-    }
-    
- /// 应用主题色彩
-    private func applyThemeColor(_ color: Color) {
- // 更新全局主题色彩
-        NotificationCenter.default.post(
-            name: NSNotification.Name("ThemeColorChanged"),
-            object: nil,
-            userInfo: ["color": color]
-        )
+    private func applyDefaultTransferPathFromSettings() {
+        let path = settingsManager.defaultTransferPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty else {
+            ftBridge.updateReceiveDirectory(nil)
+            return
+        }
+
+        let expandedPath = (path as NSString).expandingTildeInPath
+        ftBridge.updateReceiveDirectory(URL(fileURLWithPath: expandedPath, isDirectory: true))
     }
     
  /// 应用远程桌面设置
     private func applyRemoteDesktopSettings() {
         Task { @MainActor in
- // 保存设置到持久化存储
+            syncVideoQualityToRemoteDesktopSettings()
             remoteDesktopSettingsManager.saveSettings()
             
  // 注意：设置将在下次创建新会话时自动应用
  // 如需立即应用到现有会话，请使用各会话的 applySettings 方法
+        }
+    }
+
+    private func resetRemoteDesktopSettingsToDefaults() {
+        Task { @MainActor in
+            videoSettingsManager.resetToDefaults()
+            remoteDesktopSettingsManager.resetToDefaults()
+            syncVideoQualityToRemoteDesktopSettings()
+            remoteDesktopSettingsManager.saveSettings()
+        }
+    }
+
+    private func syncVideoQualityToRemoteDesktopSettings() {
+        remoteDesktopSettingsManager.settings.displaySettings.resolution = remoteResolution(from: videoSettingsManager.selectedResolution)
+        remoteDesktopSettingsManager.settings.displaySettings.refreshRate = remoteRefreshRate(from: videoSettingsManager.selectedFrameRate)
+        remoteDesktopSettingsManager.settings.displaySettings.targetFrameRate = videoSettingsManager.selectedFrameRate.rawValue
+        remoteDesktopSettingsManager.settings.displaySettings.videoQuality = remoteVideoQuality(from: videoSettingsManager.compressionQuality)
+        remoteDesktopSettingsManager.settings.displaySettings.enableHardwareAcceleration = videoSettingsManager.enableHardwareAcceleration
+        remoteDesktopSettingsManager.settings.displaySettings.enableAppleSiliconOptimization = videoSettingsManager.enableAppleSiliconOptimization
+        remoteDesktopSettingsManager.settings.networkSettings.enableAdaptiveQuality = videoSettingsManager.enableAdaptiveBitrate
+    }
+
+    private func hydrateVideoQualityFromRemoteDesktopSettings() {
+        let displaySettings = remoteDesktopSettingsManager.settings.displaySettings
+        let networkSettings = remoteDesktopSettingsManager.settings.networkSettings
+
+        if let mappedResolution = videoResolution(from: displaySettings.resolution) {
+            videoSettingsManager.selectedResolution = mappedResolution
+        }
+        videoSettingsManager.selectedFrameRate = videoFrameRate(
+            fromTargetFrameRate: displaySettings.targetFrameRate,
+            legacyRefreshRate: displaySettings.refreshRate
+        )
+        videoSettingsManager.compressionQuality = compressionQuality(from: displaySettings.videoQuality)
+        videoSettingsManager.enableHardwareAcceleration = displaySettings.enableHardwareAcceleration
+        videoSettingsManager.enableAppleSiliconOptimization = displaySettings.enableAppleSiliconOptimization
+        videoSettingsManager.enableAdaptiveBitrate = networkSettings.enableAdaptiveQuality
+    }
+
+    private func remoteResolution(from resolution: VideoResolution) -> ResolutionSetting {
+        switch resolution {
+        case .hd1080p:
+            return .resolution1920x1080
+        case .qhd2k:
+            return .resolution2560x1440
+        case .uhd4k:
+            return .resolution3840x2160
+        case .apple5k:
+            return .resolution5120x2880
+        }
+    }
+
+    private func videoResolution(from resolution: ResolutionSetting) -> VideoResolution? {
+        switch resolution {
+        case .resolution2560x1440:
+            return .qhd2k
+        case .resolution3840x2160:
+            return .uhd4k
+        case .resolution5120x2880:
+            return .apple5k
+        case .resolution1024x768, .resolution1280x720, .resolution1366x768, .resolution1920x1080:
+            return .hd1080p
+        case .auto, .custom:
+            return nil
+        }
+    }
+
+    private func remoteRefreshRate(from frameRate: VideoFrameRate) -> RefreshRate {
+        switch frameRate {
+        case .fps30:
+            return .hz30
+        case .fps60:
+            return .hz60
+        case .fps120:
+            return .hz120
+        }
+    }
+
+    private func videoFrameRate(from refreshRate: RefreshRate) -> VideoFrameRate {
+        switch refreshRate {
+        case .hz30:
+            return .fps30
+        case .hz60, .hz75:
+            return .fps60
+        case .hz120, .hz144:
+            return .fps120
+        }
+    }
+
+    private func videoFrameRate(
+        fromTargetFrameRate targetFrameRate: Int,
+        legacyRefreshRate: RefreshRate
+    ) -> VideoFrameRate {
+        guard targetFrameRate > 0 else {
+            return videoFrameRate(from: legacyRefreshRate)
+        }
+        if targetFrameRate <= 45 {
+            return .fps30
+        }
+        if targetFrameRate < 90 {
+            return .fps60
+        }
+        if targetFrameRate >= 90 {
+            return .fps120
+        }
+        return videoFrameRate(from: legacyRefreshRate)
+    }
+
+    private func remoteVideoQuality(from compressionQuality: VideoCompressionQuality) -> VideoQuality {
+        switch compressionQuality {
+        case .none:
+            return .ultra
+        case .fast:
+            return .low
+        case .balanced:
+            return .medium
+        case .maximum:
+            return .high
+        }
+    }
+
+    private func compressionQuality(from videoQuality: VideoQuality) -> VideoCompressionQuality {
+        switch videoQuality {
+        case .low:
+            return .fast
+        case .medium:
+            return .balanced
+        case .high:
+            return .maximum
+        case .ultra:
+            return .none
         }
     }
     
@@ -2005,3 +2421,4 @@ public struct SettingsView: View {
         newCustomServiceType = ""
     }
 }
+#endif

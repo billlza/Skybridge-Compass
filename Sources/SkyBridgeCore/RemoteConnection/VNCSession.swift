@@ -1,3 +1,8 @@
+// macOS-exclusive: built on macOS-only APIs (AppKit / IOKit / ScreenCaptureKit / CoreWLAN /
+// MetalFX / ServiceManagement / ApplicationServices / CoreGraphics display services).
+// Excluded from other platforms so SkyBridgeCore can be the single shared core for iOS as
+// well. No behaviour changes on macOS.
+#if os(macOS)
 import Foundation
 import Network
 import os.log
@@ -10,6 +15,7 @@ public final class VNCSession: ObservableObject {
     public let host: String
     public let port: UInt16
     public let textureFeed = RemoteTextureFeed()
+    private lazy var textureFeedDeliveryGate = LatestTextureDeliveryGate(feed: textureFeed)
 
     private let logger = Logger(subsystem: "com.skybridge.compass", category: "VNCSession")
     private let queue = DispatchQueue(label: "com.skybridge.vnc.session")
@@ -26,11 +32,9 @@ public final class VNCSession: ObservableObject {
         self.host = host
         self.port = port
  // 将渲染器输出绑定到纹理发布器
-        renderer.frameHandler = { [weak self] texture in
+        renderer.frameHandler = { [weak self] texture, backing in
             guard let self else { return }
-            Task { @MainActor in
-                self.textureFeed.update(texture: texture)
-            }
+            self.textureFeedDeliveryGate.submit(texture: texture, backing: backing)
         }
     }
 
@@ -38,7 +42,7 @@ public final class VNCSession: ObservableObject {
     public func start() async throws {
         guard !running else { return }
         running = true
-        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!)
+        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: try NWEndpoint.Port.validated(port))
         let conn = NWConnection(to: endpoint, using: .tcp)
         connection = conn
         conn.start(queue: queue)
@@ -201,6 +205,7 @@ public final class VNCSession: ObservableObject {
         running = false
         connection?.cancel()
         connection = nil
+        textureFeedDeliveryGate.clear()
     }
 
  // MARK: - 私有方法
@@ -281,3 +286,4 @@ public final class VNCSession: ObservableObject {
         try? await send(bytes: msg)
     }
 }
+#endif

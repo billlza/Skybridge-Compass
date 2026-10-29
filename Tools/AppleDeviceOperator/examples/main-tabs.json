@@ -1,0 +1,14 @@
+{
+  "bundle_id": "com.skybridge.compass.ios",
+  "actions": [
+    {"action":"tap","identifier":"dashboard.tab.button.devices"},
+    {"action":"assert_exists","identifier":"dashboard.tab.devices"},
+    {"action":"tap","identifier":"dashboard.tab.button.files"},
+    {"action":"assert_exists","identifier":"dashboard.tab.files"},
+    {"action":"tap","identifier":"dashboard.tab.button.remote"},
+    {"action":"assert_exists","identifier":"dashboard.tab.remote"},
+    {"action":"tap","identifier":"dashboard.tab.button.home"},
+    {"action":"assert_exists","identifier":"dashboard.tab.home"},
+    {"action":"snapshot"}
+  ]
+}

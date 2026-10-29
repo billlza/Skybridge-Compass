@@ -106,20 +106,17 @@ class AppleSiliconSystemCoordinator: ObservableObject {
     }
     
     private func updatePrimaryData() {
- // 直接触发监控器的内部更新（通过重新启动监控来刷新数据）
-        systemMonitor.stopMonitoring()
-        systemMonitor.startMonitoring()
-        
-        fanMonitor.stopMonitoring()
-        fanMonitor.startMonitoring()
-        
+        systemMonitor.refreshNow()
+        gpuMonitor.refreshNow()
+        fanMonitor.refreshNow()
+
         lastUpdateTime = Date()
         SkyBridgeLogger.performance.debugOnly("📊 主要数据更新完成 - CPU: \(systemMonitor.cpuUsage)% 内存压力: \(systemMonitor.memoryPressure)%")
     }
     
     private func updateTemperatureData() {
- // 温度数据会通过监控器的内部定时器自动更新
- // 这里只需要记录日志
+        systemMonitor.refreshNow()
+        gpuMonitor.refreshNow()
         SkyBridgeLogger.performance.debugOnly("🌡️ 温度数据更新完成 - CPU: \(systemMonitor.cpuTemperature)°C GPU: \(gpuMonitor.gpuTemperature)°C")
     }
     

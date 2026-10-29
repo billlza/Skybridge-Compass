@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import csv
+import os
 from pathlib import Path
 
 ARTIFACTS = Path("Artifacts")
@@ -12,7 +13,18 @@ FAULT_CLASSES = {
 }
 
 
-def latest_csv(prefix: str) -> Path:
+def select_csv(prefix: str) -> Path:
+    requested_date = (
+        os.environ.get("ARTIFACT_DATE")
+        or os.environ.get("SKYBRIDGE_ARTIFACT_DATE")
+        or ""
+    ).strip()
+    if requested_date:
+        pinned = ARTIFACTS / f"{prefix}_{requested_date}.csv"
+        if not pinned.exists():
+            raise SystemExit(f"Missing pinned artifact: {pinned}")
+        return pinned
+
     files = sorted(ARTIFACTS.glob(f"{prefix}_*.csv"))
     if not files:
         raise SystemExit(f"No {prefix}_*.csv found in Artifacts/")
@@ -116,8 +128,8 @@ def svg_bar_chart(data):
 
 
 def main():
-    fault_path = latest_csv("fault_injection")
-    policy_path = latest_csv("policy_downgrade")
+    fault_path = select_csv("fault_injection")
+    policy_path = select_csv("policy_downgrade")
     fault_rows = load_fault_rows(fault_path)
     policy_rows = load_policy_rows(policy_path)
 

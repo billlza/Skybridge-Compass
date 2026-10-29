@@ -1,0 +1,28 @@
+--- a/configure
++++ b/configure
+@@ -1467 +1467 @@
+-int main(void){ return (int) foo; }
++int main(void){ float (*volatile probe)(float, float) = foo; return probe(1.0f, 1.0f) != 0.0f; }
+@@ -6098 +6098 @@
+-        SHFLAGS='-dynamiclib -Wl,-single_module -Wl,-install_name,$(INSTALL_NAME_DIR)/$(SLIBNAME_WITH_MAJOR),-current_version,$(LIBVERSION),-compatibility_version,$(LIBMAJOR)'
++        SHFLAGS='-dynamiclib -Wl,-install_name,$(INSTALL_NAME_DIR)/$(SLIBNAME_WITH_MAJOR),-current_version,$(LIBVERSION),-compatibility_version,$(LIBMAJOR)'
+@@ -7038,4 +7038,7 @@
+-check_apple_framework CoreFoundation
+-check_apple_framework CoreMedia
+-check_apple_framework CoreVideo
+-check_apple_framework CoreAudio
++# Honor explicit minimal builds when no Apple framework consumer is requested.
++if ! disabled autodetect || enabled_any appkit audiotoolbox avfoundation coreimage metal videotoolbox; then
++    check_apple_framework CoreFoundation
++    check_apple_framework CoreMedia
++    check_apple_framework CoreVideo
++    check_apple_framework CoreAudio
++fi
+@@ -7216 +7219 @@
+-check_lib libm math.h sin -lm
++check_lib libm math.h sin || check_lib libm math.h sin -lm
+--- a/ffbuild/common.mak
++++ b/ffbuild/common.mak
+@@ -58 +58 @@
+-LDFLAGS    := $(ALLFFLIBS:%=$(LD_PATH)lib%) $(LDFLAGS)
++LDFLAGS    := $(patsubst %,$(LD_PATH)lib%,$(filter $(FFLIBS) $(FFLIBS-yes),$(ALLFFLIBS))) $(LDFLAGS)

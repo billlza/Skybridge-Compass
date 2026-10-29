@@ -1,8 +1,12 @@
 #!/bin/bash
 #
-# SkyBridge Compass 构建脚本（包含 Widget Extension）
+# SkyBridge Compass 旧版开发构建脚本（包含 Widget Extension）
 #
-# 由于 SwiftPM 不支持构建 App Extensions，此脚本：
+# 该脚本保留给历史调试。发布/验收必须使用原生 Xcode app target：
+#   Scripts/build_dmg.sh
+#   Scripts/package_app.sh
+#
+# 由于 SwiftPM 不支持构建 App Extensions，旧脚本曾经：
 # 1. 使用 SwiftPM 构建主应用
 # 2. 使用 xcodebuild 构建 Widget Extension
 # 3. 将 Widget Extension 嵌入主应用
@@ -19,8 +23,12 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$PROJECT_ROOT/.build/release"
 DIST_DIR="$PROJECT_ROOT/dist"
 APP_NAME="SkyBridge Compass Pro"
+APP_EXECUTABLE="SkyBridgeCompassApp"
+APP_INFO_PLIST_SOURCE="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/Info.plist"
+APP_PACKAGING_ENTITLEMENTS="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.packaging.entitlements"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 WIDGET_EXT_NAME="SkyBridgeCompassWidgetsExtension"
+BG_SRC_PNG="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/Resources/AppIcon.png"
 
 # ============================================================================
 # 辅助函数
@@ -45,6 +53,13 @@ log_step() {
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
 
+if [ "${SKYBRIDGE_ALLOW_LEGACY_WIDGET_BUILD:-0}" != "1" ]; then
+    log_error "Scripts/build_with_widgets.sh 是旧的 SwiftPM 手工拼包脚本，不能作为发布或验收入口。"
+    log_error "请使用 Scripts/build_dmg.sh 或 Scripts/package_app.sh，它们会走原生 Xcode macOS app target 并校验 WebRTC.framework。"
+    log_error "如只做历史调试，可显式设置 SKYBRIDGE_ALLOW_LEGACY_WIDGET_BUILD=1。"
+    exit 1
+fi
+
 # ============================================================================
 # 步骤 1: 使用 SwiftPM 构建主应用
 # ============================================================================
@@ -55,6 +70,25 @@ cd "$PROJECT_ROOT"
 
 log_info "清理旧构建..."
 swift package clean 2>/dev/null || true
+
+log_info "检测 Apple PQC SDK 可用性（用于编译期开关 HAS_APPLE_PQC_SDK）..."
+source "$SCRIPT_DIR/apple_pqc_sdk_probe.sh"
+skybridge_detect_apple_pqc_sdk
+if [ "${SKYBRIDGE_PQC_SDK_AVAILABLE:-0}" = "1" ]; then
+    export SKYBRIDGE_ENABLE_APPLE_PQC_SDK=1
+    log_info "Apple PQC SDK 探测通过（mode=${SKYBRIDGE_PQC_PROBE_MODE}, SDK=${SKYBRIDGE_PQC_SDK_VER:-unknown}），启用 Apple PQC 编译条件"
+else
+    export SKYBRIDGE_ENABLE_APPLE_PQC_SDK=0
+    log_info "Apple PQC SDK 探测未通过（mode=${SKYBRIDGE_PQC_PROBE_MODE}, SDK=${SKYBRIDGE_PQC_SDK_VER:-unknown}），拒绝构建 Release 产物"
+    if [ -n "${SKYBRIDGE_PQC_PROBE_ERROR:-}" ]; then
+        log_info "PQC 探测详情: ${SKYBRIDGE_PQC_PROBE_ERROR}"
+    fi
+    if [ "${SKYBRIDGE_ALLOW_RELEASE_WITHOUT_APPLE_PQC_SDK:-0}" != "1" ]; then
+        log_error "Release 构建必须通过 Apple PQC SDK symbol probe。仅本地诊断可显式设置 SKYBRIDGE_ALLOW_RELEASE_WITHOUT_APPLE_PQC_SDK=1。"
+        exit 1
+    fi
+    log_info "已显式允许本地诊断构建不启用 Apple PQC SDK；禁止用于发布。"
+fi
 
 log_info "构建 Release 版本..."
 swift build -c release
@@ -73,70 +107,61 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 mkdir -p "$APP_BUNDLE/Contents/PlugIns"
+mkdir -p "$APP_BUNDLE/Contents/Frameworks"
 
 # 复制可执行文件
-EXECUTABLE="$BUILD_DIR/SkyBridgeCompassApp"
+EXECUTABLE="$BUILD_DIR/$APP_EXECUTABLE"
 if [ ! -f "$EXECUTABLE" ]; then
     log_error "找不到可执行文件: $EXECUTABLE"
     exit 1
 fi
 
-cp "$EXECUTABLE" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+cp "$EXECUTABLE" "$APP_BUNDLE/Contents/MacOS/$APP_EXECUTABLE"
+chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_EXECUTABLE"
 
-# 创建 Info.plist
-VERSION="1.0.0"
-cat > "$APP_BUNDLE/Contents/Info.plist" << EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>zh_CN</string>
-    <key>CFBundleExecutable</key>
-    <string>$APP_NAME</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.skybridge.compass</string>
-    <key>CFBundleInfoDictionaryVersion</key>
-    <string>6.0</string>
-    <key>CFBundleName</key>
-    <string>$APP_NAME</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>$VERSION</string>
-    <key>CFBundleVersion</key>
-    <string>$VERSION</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSPrincipalClass</key>
-    <string>NSApplication</string>
-    <key>LSUIElement</key>
-    <false/>
-    <key>NSSupportsAutomaticTermination</key>
-    <true/>
-    <key>NSSupportsSuddenTermination</key>
-    <false/>
-    <key>NSLocalNetworkUsageDescription</key>
-    <string>SkyBridge 需要访问本地网络以发现和连接附近设备。</string>
-    <key>NSBluetoothAlwaysUsageDescription</key>
-    <string>SkyBridge 需要蓝牙权限以发现和连接附近设备。</string>
-    <key>NSCameraUsageDescription</key>
-    <string>SkyBridge 需要摄像头权限以进行屏幕共享。</string>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>SkyBridge 需要麦克风权限以进行音频传输。</string>
-</dict>
-</plist>
-EOF
+# 复制真实主应用 Info.plist，保持 bundle id / executable / entitlements 契约一致
+if [ ! -f "$APP_INFO_PLIST_SOURCE" ]; then
+    log_error "找不到主应用 Info.plist: $APP_INFO_PLIST_SOURCE"
+    exit 1
+fi
+cp "$APP_INFO_PLIST_SOURCE" "$APP_BUNDLE/Contents/Info.plist"
+
+if ! VERSION="$(bash "$PROJECT_ROOT/Scripts/check_macos_release_version.sh")" || [ -z "$VERSION" ]; then
+    log_error "无法验证主应用发布版本配置"
+    exit 1
+fi
 
 # 复制图标
 ICON_SOURCE="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/Resources/AppIcon.icns"
 if [ -f "$ICON_SOURCE" ]; then
     cp "$ICON_SOURCE" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
     log_info "已复制应用图标"
+fi
+
+# 复制 Frameworks（例如 WebRTC.framework）
+log_info "复制嵌入式 Frameworks..."
+for framework in "$BUILD_DIR"/*.framework; do
+    if [ -d "$framework" ]; then
+        framework_name=$(basename "$framework")
+        log_info "  复制 $framework_name"
+        cp -R "$framework" "$APP_BUNDLE/Contents/Frameworks/"
+    fi
+done
+
+# 兼容主二进制里已有的 @executable_path/../lib 运行时查找路径。
+rm -rf "$APP_BUNDLE/Contents/lib"
+ln -s "Frameworks" "$APP_BUNDLE/Contents/lib"
+log_info "已创建兼容链接: Contents/lib -> Frameworks"
+
+# 确保主可执行文件可以从 Frameworks 目录加载动态框架
+APP_EXECUTABLE_PATH="$APP_BUNDLE/Contents/MacOS/$APP_EXECUTABLE"
+if ! otool -l "$APP_EXECUTABLE_PATH" 2>/dev/null | grep -q "@executable_path/../Frameworks"; then
+    log_info "注入 Frameworks rpath..."
+    if install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_EXECUTABLE_PATH" 2>/dev/null; then
+        log_info "Frameworks rpath 注入成功"
+    else
+        log_info "Frameworks rpath 注入失败，将依赖 Contents/lib 兼容链接"
+    fi
 fi
 
 # 复制 SPM 资源 bundle
@@ -183,12 +208,12 @@ if [ -z "$XCODE_PROJECT" ]; then
 else
     log_info "尝试构建 Widget Extension..."
     log_info "使用项目: $XCODE_PROJECT"
-    
+
     # 尝试构建 Widget Extension
     WIDGET_BUILD_DIR="$PROJECT_ROOT/.build/widget-release"
     mkdir -p "$WIDGET_BUILD_DIR"
-    
-    # 使用 xcodebuild 构建 Widget Extension
+
+    # 使用 xcodebuild 构建 Widget Extension；构建日志必须完整保留，失败即停止发布流程。
     xcodebuild -project "$XCODE_PROJECT" \
         -target SkyBridgeCompassWidgetsExtension \
         -configuration Release \
@@ -198,11 +223,8 @@ else
         CODE_SIGNING_REQUIRED=NO \
         CODE_SIGNING_ALLOWED=NO \
         CONFIGURATION_BUILD_DIR="$WIDGET_BUILD_DIR" \
-        build 2>&1 | tail -20 || {
-            log_info "Widget Extension 构建失败，跳过嵌入"
-            log_info "Widget 功能将不可用，但主应用仍可正常使用"
-        }
-    
+        build
+
     # 如果构建成功，嵌入 Widget Extension
     WIDGET_APPEX="$WIDGET_BUILD_DIR/$WIDGET_EXT_NAME.appex"
     if [ -d "$WIDGET_APPEX" ]; then
@@ -230,6 +252,13 @@ fi
 # 签名嵌入的库（必须先签名库，再签名应用）
 log_info "签名嵌入的库..."
 if [ -d "$APP_BUNDLE/Contents/Frameworks" ]; then
+    for framework in "$APP_BUNDLE/Contents/Frameworks"/*.framework; do
+        if [ -d "$framework" ]; then
+            log_info "  签名 $(basename "$framework")..."
+            codesign --force --sign "$SIGNING_IDENTITY" --options runtime "$framework" 2>/dev/null || \
+            codesign --force --sign - "$framework"
+        fi
+    done
     for lib in "$APP_BUNDLE/Contents/Frameworks"/*.dylib; do
         if [ -f "$lib" ]; then
             log_info "  签名 $(basename "$lib")..."
@@ -254,15 +283,19 @@ fi
 # 签名主应用
 log_info "签名主应用..."
 codesign --force --sign "$SIGNING_IDENTITY" --options runtime \
-    --entitlements "$PROJECT_ROOT/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.entitlements" \
+    --entitlements "$APP_PACKAGING_ENTITLEMENTS" \
     "$APP_BUNDLE" 2>/dev/null || \
-codesign --force --sign - \
+codesign --force --sign - --entitlements "$APP_PACKAGING_ENTITLEMENTS" \
     "$APP_BUNDLE"
 log_success "主应用已签名"
 
 # 验证签名
 log_info "验证签名..."
-codesign --verify --verbose "$APP_BUNDLE" && log_success "签名验证通过" || log_info "签名验证警告（ad-hoc 签名正常）"
+if ! codesign --verify --verbose "$APP_BUNDLE"; then
+    log_error "签名验证失败"
+    exit 1
+fi
+log_success "签名验证通过"
 
 # ============================================================================
 # 步骤 5: 创建 DMG
@@ -291,15 +324,11 @@ rm -rf "$STAGING_DIR"
 mkdir -p "$BG_DIR"
 cp -R "$APP_BUNDLE" "$STAGING_DIR/"
 ln -s /Applications "$STAGING_DIR/Applications"
-
-SKYBRIDGE_DMG_BG_PATH="$BG_PNG" \
-SKYBRIDGE_DMG_BG_SIZE="2000x1200" \
-SKYBRIDGE_DMG_BG_DELAY="2.2" \
-"$APP_BUNDLE/Contents/MacOS/$APP_NAME"
-
-if [ ! -f "$BG_PNG" ]; then
-    log_error "DMG 背景渲染失败: $BG_PNG"
-    exit 1
+if [ -f "$BG_SRC_PNG" ]; then
+    cp "$BG_SRC_PNG" "$BG_PNG"
+    sips -Z 1600 "$BG_PNG" >/dev/null 2>&1 || true
+else
+    log_info "未找到背景源图：$BG_SRC_PNG（将使用默认白底）"
 fi
 
 hdiutil create -volname "$VOLUME_NAME" -srcfolder "$STAGING_DIR" -ov -format UDRW "$TEMP_DMG" >/dev/null

@@ -128,7 +128,7 @@ public final class FileTransferSignalingService: ObservableObject {
         )
         
         activeTransfers[fileId] = transferInfo
-        logger.info("📤 发送文件元数据: \(fileName, privacy: .public) (\(fileSize) bytes)")
+        logger.info("📤 发送文件元数据: \(fileName, privacy: .private) (\(fileSize) bytes)")
         
         return (message, transferInfo)
     }
@@ -156,7 +156,7 @@ public final class FileTransferSignalingService: ObservableObject {
             activeTransfers[fileId] = transfer
         }
         
-        logger.info("📤 发送文件结束: fileId=\(fileId, privacy: .public) success=\(success)")
+        logger.info("📤 发送文件结束: fileId=\(fileId, privacy: .private) success=\(success)")
         
         return message
     }
@@ -167,8 +167,9 @@ public final class FileTransferSignalingService: ObservableObject {
  /// - Parameter message: 文件元数据消息
  /// - Returns: 确认消息
     public func handleFileMeta(_ message: FileMetaMessage) -> FileAckMetaMessage {
- // 检查是否接受文件
-        let accepted = onFileMetaReceived?(message) ?? true
+ // 检查是否接受文件。没有显式接收策略时必须 fail closed。
+        let approvalDecision = onFileMetaReceived?(message)
+        let accepted = approvalDecision == true
         
         if accepted {
             let transferInfo = FileTransferInfo(
@@ -182,15 +183,15 @@ public final class FileTransferSignalingService: ObservableObject {
             )
             
             activeTransfers[message.fileId] = transferInfo
-            logger.info("📥 接受文件: \(message.fileName, privacy: .public) (\(message.fileSize) bytes)")
+            logger.info("📥 接受文件: \(message.fileName, privacy: .private) (\(message.fileSize) bytes)")
         } else {
-            logger.info("📥 拒绝文件: \(message.fileName, privacy: .public)")
+            logger.info("📥 拒绝文件: \(message.fileName, privacy: .private)")
         }
         
         return FileAckMetaMessage(
             fileId: message.fileId,
             accepted: accepted,
-            reason: accepted ? nil : "用户拒绝接收"
+            reason: accepted ? nil : (approvalDecision == nil ? "explicit_file_receive_approval_required" : "用户拒绝接收")
         )
     }
     
@@ -198,16 +199,16 @@ public final class FileTransferSignalingService: ObservableObject {
  /// - Parameter message: 文件确认消息
     public func handleFileAckMeta(_ message: FileAckMetaMessage) {
         guard var transfer = activeTransfers[message.fileId] else {
-            logger.warning("⚠️ 收到未知文件的确认: \(message.fileId, privacy: .public)")
+            logger.warning("⚠️ 收到未知文件的确认: \(message.fileId, privacy: .private)")
             return
         }
         
         if message.accepted {
             transfer.state = .transferring
-            logger.info("✅ 文件传输已确认: \(transfer.fileName, privacy: .public)")
+            logger.info("✅ 文件传输已确认: \(transfer.fileName, privacy: .private)")
         } else {
             transfer.state = .failed
-            logger.warning("❌ 文件传输被拒绝: \(transfer.fileName, privacy: .public) - \(message.reason ?? "未知原因", privacy: .public)")
+            logger.warning("❌ 文件传输被拒绝: \(transfer.fileName, privacy: .private) - \(message.reason ?? "未知原因", privacy: .public)")
         }
         
         activeTransfers[message.fileId] = transfer
@@ -217,18 +218,20 @@ public final class FileTransferSignalingService: ObservableObject {
  /// - Parameter message: 文件结束消息
     public func handleFileEnd(_ message: FileEndMessage) {
         guard var transfer = activeTransfers[message.fileId] else {
-            logger.warning("⚠️ 收到未知文件的结束消息: \(message.fileId, privacy: .public)")
+            logger.warning("⚠️ 收到未知文件的结束消息: \(message.fileId, privacy: .private)")
             return
         }
         
-        transfer.state = message.success ? .completed : .failed
+        let byteCountMatches = transfer.fileSize == message.bytesTransferred
+        let completedSuccessfully = message.success && byteCountMatches
+        transfer.state = completedSuccessfully ? .completed : .failed
         transfer.bytesTransferred = message.bytesTransferred
         activeTransfers[message.fileId] = transfer
         
-        if message.success {
-            logger.info("✅ 文件传输完成: \(transfer.fileName, privacy: .public)")
+        if completedSuccessfully {
+            logger.info("✅ 文件传输完成: \(transfer.fileName, privacy: .private)")
         } else {
-            logger.warning("❌ 文件传输失败: \(transfer.fileName, privacy: .public)")
+            logger.warning("❌ 文件传输失败: \(transfer.fileName, privacy: .private)")
         }
         
  // 验证完整性
@@ -236,7 +239,7 @@ public final class FileTransferSignalingService: ObservableObject {
             logger.warning("⚠️ 文件大小不匹配: 预期 \(transfer.fileSize), 实际 \(message.bytesTransferred)")
         }
         
-        onFileTransferCompleted?(message.fileId, message.success)
+        onFileTransferCompleted?(message.fileId, completedSuccessfully)
     }
     
  // MARK: - Progress Updates
@@ -259,7 +262,7 @@ public final class FileTransferSignalingService: ObservableObject {
         guard var transfer = activeTransfers[fileId] else { return }
         transfer.state = .cancelled
         activeTransfers[fileId] = transfer
-        logger.info("⏹️ 文件传输已取消: \(transfer.fileName, privacy: .public)")
+        logger.info("⏹️ 文件传输已取消: \(transfer.fileName, privacy: .private)")
     }
     
  /// 清理已完成的传输

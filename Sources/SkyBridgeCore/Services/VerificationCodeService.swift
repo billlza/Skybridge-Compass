@@ -860,7 +860,8 @@ extension VerificationCodeService {
         case fallback = "fallback"   // 降级通道
     }
     
- /// 发送邮件验证码（带重试和降级）
+ /// 发送邮件验证码。
+ /// 1.0 认证邮件由 Supabase Auth + 服务端自定义 SMTP 负责，这里的旧客户端邮件通道已停用。
     public func sendEmailVerificationCode(
         email: String,
         deviceFingerprint: String,
@@ -888,63 +889,13 @@ extension VerificationCodeService {
                 nextRetry: abuseCheck.nextAvailableTime
             )
         }
-        
-        let code = generateVerificationCode()
         let recordId = UUID()
-        
- // 尝试主通道
-        do {
-            let success = try await sendEmailViaChannel(
-                channel: .primary,
-                email: email,
-                code: code
-            )
-            
-            if success {
-                await recordSendHistory(context: context)
-                return SendResult.success(recordId: recordId, channel: .chinaMobile, messageId: nil)
-            }
-        } catch {
-            logger.warning("📧 主通道失败: \(error.localizedDescription)")
-        }
-        
- // 尝试备用通道
-        do {
-            let success = try await sendEmailViaChannel(
-                channel: .secondary,
-                email: email,
-                code: code
-            )
-            
-            if success {
-                await recordSendHistory(context: context)
-                return SendResult.success(recordId: recordId, channel: .chinaMobile, messageId: nil)
-            }
-        } catch {
-            logger.warning("📧 备用通道失败: \(error.localizedDescription)")
-        }
-        
- // 尝试降级通道
-        do {
-            let success = try await sendEmailViaChannel(
-                channel: .fallback,
-                email: email,
-                code: code
-            )
-            
-            if success {
-                await recordSendHistory(context: context)
-                return SendResult.success(recordId: recordId, channel: .chinaMobile, messageId: nil)
-            }
-        } catch {
-            logger.error("📧 降级通道失败: \(error.localizedDescription)")
-        }
-        
+        logger.warning("📧 邮件验证码旧通道已停用，当前构建仅支持 Supabase Auth + 服务端自定义 SMTP 的认证邮件主链")
         return SendResult.failure(
             recordId: recordId,
             channel: .chinaMobile,
-            error: "邮件发送失败，请稍后重试",
-            retryCount: 3
+            error: "邮件验证码旧通道未上线。1.0 认证邮件已收敛到 Supabase Auth + 服务端自定义 SMTP。",
+            retryCount: 0
         )
     }
     
@@ -954,27 +905,11 @@ extension VerificationCodeService {
         email: String,
         code: String
     ) async throws -> Bool {
- // 这里调用实际的邮件服务
- // 根据不同通道使用不同的配置
-        let env = ProcessInfo.processInfo.environment
-        
-        let endpoint: String
-        switch channel {
-        case .primary:
-            endpoint = env["EMAIL_PRIMARY_ENDPOINT"] ?? "smtp.example.com"
-        case .secondary:
-            endpoint = env["EMAIL_SECONDARY_ENDPOINT"] ?? "smtp2.example.com"
-        case .fallback:
-            endpoint = env["EMAIL_FALLBACK_ENDPOINT"] ?? "smtp3.example.com"
-        }
-        
-        logger.info("📧 使用 \(channel.rawValue) 通道发送邮件: \(endpoint)")
-        
- // 调用 EmailService 发送（这里简化处理）
- // 实际实现需要根据不同通道配置发送
-        
- // 模拟发送（实际需要替换为真实实现）
-        return true
+        logger.warning("📧 sendEmailViaChannel(\(channel.rawValue)) 已停用，忽略客户端邮件验证码请求")
+        throw NSError(
+            domain: "VerificationCodeService",
+            code: -1001,
+            userInfo: [NSLocalizedDescriptionKey: "邮件验证码旧通道已停用"]
+        )
     }
 }
-

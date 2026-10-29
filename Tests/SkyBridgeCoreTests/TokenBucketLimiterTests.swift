@@ -45,17 +45,12 @@ final class TokenBucketLimiterTests: XCTestCase {
                 "Iteration \(iteration): Initial tokens (\(initialTokens)) should equal burst (\(burst))"
             )
             
- // Property 2: Can consume up to burst tokens immediately
-            var consumedCount = 0
-            for _ in 0..<burst {
-                let consumed = await limiter.tryConsume()
-                if consumed {
-                    consumedCount += 1
-                }
-            }
-            XCTAssertEqual(
-                consumedCount, burst,
-                "Iteration \(iteration): Should consume exactly \(burst) tokens, consumed \(consumedCount)"
+ // Property 2: Can consume up to burst tokens immediately.
+ // Use the atomic count API so the property is not distorted by refill time during hundreds of awaits.
+            let consumedBurst = await limiter.tryConsume(count: burst)
+            XCTAssertTrue(
+                consumedBurst,
+                "Iteration \(iteration): Should consume exactly \(burst) tokens"
             )
             
  // Property 3: After exhausting burst, next consume should fail
@@ -78,20 +73,20 @@ final class TokenBucketLimiterTests: XCTestCase {
     func testTokenRefillOverTime() async throws {
         let rate = 100.0 // 100 tokens per second
         let burst = 100
+        let clock = ManualTokenBucketClock()
         
-        let limiter = TokenBucketLimiter(rate: rate, burst: burst)
+        let limiter = TokenBucketLimiter(rate: rate, burst: burst, now: clock.now)
         
  // Consume all tokens
-        for _ in 0..<burst {
-            _ = await limiter.tryConsume()
-        }
+        let consumedInitialBurst = await limiter.tryConsume(count: burst)
+        XCTAssertTrue(consumedInitialBurst, "Should consume initial burst")
         
  // Verify tokens exhausted (tryConsume triggers refill internally)
         let exhausted = await limiter.tryConsume()
         XCTAssertFalse(exhausted, "Tokens should be exhausted")
         
- // Wait for some tokens to refill (100ms = 10 tokens at 100/s rate)
-        try await Task.sleep(nanoseconds: 100_000_000) // 100ms
+ // Advance deterministic monotonic time (100ms = 10 tokens at 100/s rate).
+        clock.advance(by: .milliseconds(100))
         
  // Should be able to consume at least one token now
  // tryConsume triggers refill, so this tests the refill mechanism
@@ -108,9 +103,8 @@ final class TokenBucketLimiterTests: XCTestCase {
             }
         }
         
- // Should have been able to consume roughly 10 tokens (with timing tolerance)
-        XCTAssertGreaterThan(consumedAfterWait, 5, "Should have refilled at least 5 tokens")
-        XCTAssertLessThan(consumedAfterWait, 16, "Should not have refilled more than expected")
+ // The injected clock makes refill deterministic and independent of CI scheduler latency.
+        XCTAssertEqual(consumedAfterWait, 10, "Should have refilled exactly 10 tokens")
     }
     
  /// Test that tokens are clamped to burst capacity on refill
@@ -145,10 +139,8 @@ final class TokenBucketLimiterTests: XCTestCase {
         let limiter1 = TokenBucketLimiter(rate: rate, burst: burst)
         let limiter2 = TokenBucketLimiter(rate: rate, burst: burst)
         
- // Exhaust limiter1
-        for _ in 0..<burst {
-            _ = await limiter1.tryConsume()
-        }
+ // Exhaust limiter1 atomically so high-rate refill cannot race the assertion.
+        _ = await limiter1.tryConsume(count: burst)
         
  // limiter1 should be exhausted
         let limiter1CanConsume = await limiter1.tryConsume()
@@ -190,10 +182,8 @@ final class TokenBucketLimiterTests: XCTestCase {
         let burst = 100
         let limiter = TokenBucketLimiter(rate: 100.0, burst: burst)
         
- // Exhaust tokens
-        for _ in 0..<burst {
-            _ = await limiter.tryConsume()
-        }
+ // Exhaust tokens atomically so refill time does not make the assertion timing-sensitive.
+        _ = await limiter.tryConsume(count: burst)
         
  // Verify exhausted
         let afterExhaust = await limiter.availableTokens
@@ -238,6 +228,23 @@ final class TokenBucketLimiterTests: XCTestCase {
  // Immediately try again - should fail (no ghost tokens from floating point)
         let ghostConsume = await limiter.tryConsume()
         XCTAssertFalse(ghostConsume, "Should not have ghost tokens from floating point precision")
+    }
+}
+
+private final class ManualTokenBucketClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var instant = ContinuousClock.now
+
+    func now() -> ContinuousClock.Instant {
+        lock.lock()
+        defer { lock.unlock() }
+        return instant
+    }
+
+    func advance(by duration: Duration) {
+        lock.lock()
+        instant = instant.advanced(by: duration)
+        lock.unlock()
     }
 }
 

@@ -8,6 +8,7 @@
 
 import SwiftUI
 import SkyBridgeCore
+import AppKit
 
 /// 菜单栏弹出面板视图
 /// Requirements: 1.2
@@ -94,86 +95,70 @@ struct HeaderSection: View {
     }
 }
 
-// MARK: - CompassIcon (司南图标)
+// MARK: - CompassIcon
 
-/// 司南/指南针风格图标
 @available(macOS 14.0, *)
 struct CompassIcon: View {
     let size: CGFloat
+    @State private var image: NSImage?
     
     var body: some View {
-        ZStack {
- // 外圈
-            Circle()
-                .stroke(
-                    LinearGradient(
-                        colors: [.blue.opacity(0.8), .cyan.opacity(0.6)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 2
-                )
-            
- // 内圈刻度
-            Circle()
-                .stroke(Color.secondary.opacity(0.3), lineWidth: 0.5)
-                .padding(4)
-            
- // 指针 - 北（红色）
-            CompassNeedle(isNorth: true)
-                .fill(
-                    LinearGradient(
-                        colors: [.red, .red.opacity(0.7)],
-                        startPoint: .top,
-                        endPoint: .center
-                    )
-                )
-            
- // 指针 - 南（白色/浅色）
-            CompassNeedle(isNorth: false)
-                .fill(
-                    LinearGradient(
-                        colors: [.white.opacity(0.9), .gray.opacity(0.5)],
-                        startPoint: .bottom,
-                        endPoint: .center
-                    )
-                )
-            
- // 中心点
-            Circle()
-                .fill(Color.blue)
-                .frame(width: size * 0.15, height: size * 0.15)
+        Group {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .antialiased(true)
+                    .aspectRatio(contentMode: .fit)
+                    .clipShape(RoundedRectangle(cornerRadius: size * 0.22, style: .continuous))
+            } else {
+                Color.clear
+            }
         }
         .frame(width: size, height: size)
+        .onAppear(perform: load)
+    }
+
+    private func load() {
+        guard image == nil else { return }
+        Task.detached(priority: .utility) {
+            let loadedImage = MenuBarBrandIconLoader.load()
+            guard let loadedImage else { return }
+            await MainActor.run { self.image = loadedImage }
+        }
     }
 }
 
-/// 指南针指针形状
-@available(macOS 14.0, *)
-struct CompassNeedle: Shape {
-    let isNorth: Bool
-    
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        let center = CGPoint(x: rect.midX, y: rect.midY)
-        let needleLength = rect.height * 0.35
-        let needleWidth = rect.width * 0.12
-        
-        if isNorth {
- // 北指针（向上）
-            path.move(to: CGPoint(x: center.x, y: center.y - needleLength))
-            path.addLine(to: CGPoint(x: center.x - needleWidth, y: center.y))
-            path.addLine(to: CGPoint(x: center.x + needleWidth, y: center.y))
-            path.closeSubpath()
-        } else {
- // 南指针（向下）
-            path.move(to: CGPoint(x: center.x, y: center.y + needleLength))
-            path.addLine(to: CGPoint(x: center.x - needleWidth, y: center.y))
-            path.addLine(to: CGPoint(x: center.x + needleWidth, y: center.y))
-            path.closeSubpath()
+private enum MenuBarBrandIconLoader {
+    static func load() -> NSImage? {
+        guard isRunningFromPackagedApp else { return nil }
+        return loadImageResource(named: "AppIcon", withExtension: "icns", bundle: .main)
+    }
+
+    private static func loadImageResource(named name: String, withExtension extensionName: String, bundle: Bundle) -> NSImage? {
+        guard let url = bundle.url(forResource: name, withExtension: extensionName),
+              let image = NSImage(contentsOf: url),
+              image.size.width > 0,
+              image.size.height > 0 else {
+            return nil
         }
-        
-        return path
+        return image
+    }
+
+    private static var isRunningFromPackagedApp: Bool {
+        guard let executablePath = CommandLine.arguments.first, !executablePath.isEmpty else {
+            return false
+        }
+
+        var url = URL(fileURLWithPath: executablePath).standardizedFileURL
+        while url.path != "/" {
+            if url.lastPathComponent == "Contents" {
+                return true
+            }
+            url.deleteLastPathComponent()
+        }
+
+        return false
     }
 }
 
@@ -279,8 +264,8 @@ struct DeviceRow: View {
                 
                 HStack(spacing: 4) {
  // 连接类型标签
-                    ForEach(Array(device.connectionTypes.prefix(2)), id: \.self) { (type: DeviceConnectionType) in
-                        Text(type.displayName)
+                    ForEach(connectionBadges, id: \.self) { badge in
+                        Text(badge)
                             .font(.caption2)
                             .foregroundColor(.secondary)
                             .padding(.horizontal, 4)
@@ -293,8 +278,11 @@ struct DeviceRow: View {
             
             Spacer()
             
- // 信号强度 - 始终显示，使用实际值或基于连接类型估算
-            SignalStrengthIndicator(strength: estimatedSignalStrength)
+            if let signalStrength {
+                SignalStrengthIndicator(strength: signalStrength)
+            } else {
+                SignalUnavailableIndicator()
+            }
             
             Image(systemName: "chevron.right")
                 .font(.caption)
@@ -310,6 +298,9 @@ struct DeviceRow: View {
     }
     
     private var deviceIcon: String {
+        if let networkLinkStatus = device.networkLinkStatus {
+            return networkLinkStatus.iconName
+        }
         if device.connectionTypes.contains(.usb) {
             return "cable.connector"
         } else if device.connectionTypes.contains(.bluetooth) {
@@ -320,7 +311,9 @@ struct DeviceRow: View {
     }
     
     private var connectionColor: Color {
-        let strength = estimatedSignalStrength
+        guard let strength = signalStrength else {
+            return .secondary
+        }
         if strength > 0.7 {
             return .green
         } else if strength > 0.3 {
@@ -329,27 +322,54 @@ struct DeviceRow: View {
             return .secondary
         }
     }
-    
- /// 估算信号强度：优先使用实际值，否则基于连接类型估算
-    private var estimatedSignalStrength: Double {
- // 如果有实际测量值，直接使用
-        if let strength = device.signalStrength {
-            return strength
+
+    private var signalStrength: Double? {
+        device.networkLinkStatus?.normalizedSignalStrength
+    }
+
+    private var connectionBadges: [String] {
+        var badges: [String] = []
+        var seen = Set<String>()
+
+        func append(_ label: String) {
+            let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            guard seen.insert(trimmed.lowercased()).inserted else { return }
+            badges.append(trimmed)
         }
-        
- // 基于连接类型估算信号强度
-        if device.connectionTypes.contains(.thunderbolt) {
-            return 1.0  // 雷电连接最强
-        } else if device.connectionTypes.contains(.usb) {
-            return 0.95 // USB 连接很强
-        } else if device.connectionTypes.contains(.ethernet) {
-            return 0.9  // 有线网络很强
-        } else if device.connectionTypes.contains(.wifi) {
-            return 0.7  // Wi-Fi 默认中等偏强
-        } else if device.connectionTypes.contains(.bluetooth) {
-            return 0.5  // 蓝牙默认中等
-        } else {
-            return 0.3  // 未知连接类型默认较弱
+
+        if let status = device.networkLinkStatus {
+            if status.kind == .unknown {
+                append(device.primaryConnectionType.displayName)
+            } else {
+                append(status.displayLabel)
+            }
+        }
+
+        for type in sortedConnectionTypes where badges.count < 2 {
+            append(type.displayName)
+        }
+
+        return Array(badges.prefix(2))
+    }
+
+    private var sortedConnectionTypes: [DeviceConnectionType] {
+        let priority: [DeviceConnectionType] = [
+            .cellular,
+            .wifi,
+            .thunderbolt,
+            .ethernet,
+            .usb,
+            .bluetooth,
+            .unknown
+        ]
+        return device.connectionTypes.sorted { lhs, rhs in
+            let lhsIndex = priority.firstIndex(of: lhs) ?? priority.count
+            let rhsIndex = priority.firstIndex(of: rhs) ?? priority.count
+            if lhsIndex != rhsIndex {
+                return lhsIndex < rhsIndex
+            }
+            return lhs.rawValue < rhs.rawValue
         }
     }
 }
@@ -388,6 +408,16 @@ struct SignalStrengthIndicator: View {
     private func barHeight(for index: Int) -> CGFloat {
  // iPhone 风格递增高度：4, 7, 10, 14
         CGFloat(4 + index * 3 + (index > 0 ? 1 : 0))
+    }
+}
+
+@available(macOS 14.0, *)
+struct SignalUnavailableIndicator: View {
+    var body: some View {
+        Text("—")
+            .font(.caption)
+            .foregroundColor(.secondary)
+            .frame(width: 22, height: 14)
     }
 }
 
@@ -482,6 +512,7 @@ struct TransferRow: View {
 struct QuickActionsSection: View {
     @ObservedObject var viewModel: MenuBarViewModel
     
+#if DEBUG || SKYBRIDGE_TESTING
  /// 快捷操作按钮标识符（用于测试）
     static let buttonIdentifiers = [
         "deviceDiscovery",
@@ -489,6 +520,7 @@ struct QuickActionsSection: View {
         "screenMirror",
         "settings"
     ]
+#endif
     
     var body: some View {
         LazyVGrid(columns: [
@@ -579,6 +611,7 @@ extension DeviceConnectionType {
     var displayName: String {
         switch self {
         case .wifi: return "Wi-Fi"
+        case .cellular: return "蜂窝"
         case .bluetooth: return "蓝牙"
         case .usb: return "USB"
         case .ethernet: return "以太网"

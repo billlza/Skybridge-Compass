@@ -1,3 +1,8 @@
+// macOS-exclusive: this file is built on frameworks that exist only on macOS
+// (AppKit / IOKit / ScreenCaptureKit / CoreWLAN / MetalFX / ServiceManagement /
+// ApplicationServices). It is excluded from other platforms so SkyBridgeCore can be
+// the single shared core for iOS as well. No behaviour changes on macOS.
+#if os(macOS)
 import Foundation
 import Combine
 import IOKit
@@ -21,7 +26,9 @@ public final class SystemMetricsService: ObservableObject {
     @Published public private(set) var networkOutTimeline: [Date: Double] = [:]
     
     private let log = Logger(subsystem: "com.skybridge.compass", category: "SystemMetrics")
+    private var lastMetricsLogAt: Date?
     @MainActor private var monitoringTimer: Timer?
+    private var notificationObserverTokens: [NSObjectProtocol] = []
     private let maxTimelinePoints = 30
     
  // CPU使用率计算所需的前一次采样数据
@@ -35,10 +42,7 @@ public final class SystemMetricsService: ObservableObject {
  /// 开始监控系统指标
     public func startMonitoring() {
         guard monitoringTimer == nil else { return }
-        
- // 立即获取一次指标
-        updateMetrics()
-        
+
  // 每5秒更新一次指标
         monitoringTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -49,25 +53,48 @@ public final class SystemMetricsService: ObservableObject {
         log.info("系统指标监控已启动")
 
  // 订阅清除历史与导出数据通知，实现设置视图到服务的闭环。
-        NotificationCenter.default.addObserver(forName: .systemMonitorClearHistory, object: nil, queue: .main) { [weak self] _ in
+        registerNotificationObserversIfNeeded()
+    }
+
+    private func registerNotificationObserversIfNeeded() {
+        guard notificationObserverTokens.isEmpty else { return }
+
+        let clearHistoryToken = NotificationCenter.default.addObserver(
+            forName: .systemMonitorClearHistory,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
             Task { @MainActor in
                 self?.clearHistory()
             }
         }
-        NotificationCenter.default.addObserver(forName: .systemMonitorExport, object: nil, queue: .main) { [weak self] _ in
+        let exportToken = NotificationCenter.default.addObserver(
+            forName: .systemMonitorExport,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
             Task { @MainActor in
                 self?.exportDataToDesktop()
             }
         }
+        notificationObserverTokens = [clearHistoryToken, exportToken]
     }
     
  /// 停止监控系统指标
     public func stopMonitoring() {
         monitoringTimer?.invalidate()
         monitoringTimer = nil
+        unregisterNotificationObservers()
         log.info("系统指标监控已停止")
     }
-    
+
+    private func unregisterNotificationObservers() {
+        for token in notificationObserverTokens {
+            NotificationCenter.default.removeObserver(token)
+        }
+        notificationObserverTokens.removeAll(keepingCapacity: false)
+    }
+
  /// 更新系统指标
  /// 更新系统指标
     @MainActor
@@ -129,7 +156,18 @@ public final class SystemMetricsService: ObservableObject {
             for key in keysToRemove { networkOutTimeline.removeValue(forKey: key) }
         }
         
-        log.debug("系统指标已更新 - CPU: \(String(format: "%.1f", newCpuUsage * 100))%, 内存: \(String(format: "%.1f", newMemoryUsage * 100))%, 网络: \(String(format: "%.1f", newNetworkSpeed)) Mbps")
+        // Metrics logs are also noisy; default OFF. Enable explicitly via env:
+        //   SKYBRIDGE_LOG_METRICS=1
+        let env = ProcessInfo.processInfo.environment["SKYBRIDGE_LOG_METRICS"] ?? "0"
+        let metricsLogsEnabled = (env == "1" || env.lowercased() == "true" || env.lowercased() == "yes")
+        if metricsLogsEnabled {
+            // Throttle noisy logs: metrics update frequently and can flood logs / waste CPU.
+            let now = Date()
+            if lastMetricsLogAt == nil || now.timeIntervalSince(lastMetricsLogAt!) >= 10 {
+                lastMetricsLogAt = now
+                log.debug("系统指标已更新 - CPU: \(String(format: "%.1f", newCpuUsage * 100))%, 内存: \(String(format: "%.1f", newMemoryUsage * 100))%, 网络: \(String(format: "%.1f", newNetworkSpeed)) Mbps")
+            }
+        }
     }
 
  /// 清除所有时间线历史数据。
@@ -169,6 +207,12 @@ public final class SystemMetricsService: ObservableObject {
             log.error("导出监控数据失败: \(error.localizedDescription)")
         }
     }
+
+#if DEBUG || SKYBRIDGE_TESTING
+    var notificationObserverCountForTesting: Int {
+        notificationObserverTokens.count
+    }
+#endif
     
  /// 获取CPU使用率（使用苹果系统API，改进版本）
     private func fetchCpuUsage() -> Double {
@@ -240,16 +284,30 @@ public final class SystemMetricsService: ObservableObject {
  /// 获取内存使用率（使用苹果系统API）
     private func fetchMemoryUsage() -> Double {
         var vmStats = vm_statistics64()
-        var count = mach_msg_type_number_t(MemoryLayout.size(ofValue: vmStats) / MemoryLayout<integer_t>.size)
-        
-        let result = withUnsafeMutablePointer(to: &vmStats) { statsPtr -> kern_return_t in
-            statsPtr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { reboundPtr in
-                host_statistics64(mach_host_self(), HOST_VM_INFO64, reboundPtr, &count)
-            }
+        // host_statistics64 的 count 是入参元素数量。某些内核对“按当前 SDK 结构体大小”算出的
+        // count 会返回 MIG_ARRAY_TOO_LARGE (-307)（陈旧二进制、或 SDK 结构体随系统版本增长）。
+        // 依次尝试：完整大小 → REV1(含压缩计数, 38) → REV0(legacy, 32)，任一成功即采用；
+        // 全部失败只在 debug 记录，避免每个刷新周期污染日志。
+        let fullCount = mach_msg_type_number_t(MemoryLayout.size(ofValue: vmStats) / MemoryLayout<integer_t>.size)
+        var candidateCounts: [mach_msg_type_number_t] = [fullCount]
+        for fallback in [mach_msg_type_number_t(38), mach_msg_type_number_t(32)] where !candidateCounts.contains(fallback) {
+            candidateCounts.append(fallback)
         }
-        
+
+        var result: kern_return_t = KERN_FAILURE
+        for candidate in candidateCounts {
+            vmStats = vm_statistics64()
+            var count = candidate
+            result = withUnsafeMutablePointer(to: &vmStats) { statsPtr -> kern_return_t in
+                statsPtr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { reboundPtr in
+                    host_statistics64(mach_host_self(), HOST_VM_INFO64, reboundPtr, &count)
+                }
+            }
+            if result == KERN_SUCCESS { break }
+        }
+
         guard result == KERN_SUCCESS else {
-            log.error("获取内存统计失败: \(result)")
+            log.debug("获取内存统计失败（已尝试全部 count 回退）: \(result)")
             return 0.0
         }
         
@@ -421,11 +479,6 @@ public final class SystemMetricsService: ObservableObject {
     public func formattedNetworkSpeed() -> String {
         return String(format: "%.1f Mbps", networkSpeed)
     }
-    
-    deinit {
- // 在 deinit 中不访问 MainActor 隔离的属性，避免并发问题
- // Timer 会在对象销毁时自动失效
-    }
 }
 
 /// 系统监控通知名称扩展。
@@ -433,3 +486,4 @@ extension Notification.Name {
     static let systemMonitorClearHistory = Notification.Name("SystemMonitor.ClearHistory")
     static let systemMonitorExport = Notification.Name("SystemMonitor.Export")
 }
+#endif

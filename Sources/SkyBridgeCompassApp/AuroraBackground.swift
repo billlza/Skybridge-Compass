@@ -9,7 +9,7 @@ struct AuroraBackground: View {
     
     @EnvironmentObject private var themeConfiguration: ThemeConfiguration
     
-    @State private var phase: Double = 0
+    private static let animationEpoch = Date()
     
  /// 风速影响极光摆动速度（范围保护）
     private var waveSpeed: Double {
@@ -42,6 +42,7 @@ struct AuroraBackground: View {
     
     var body: some View {
         TimelineView(.animation) { timeline in
+            let phase = timeline.date.timeIntervalSince(Self.animationEpoch) * waveSpeed * 60.0
             ZStack {
  // 主题渐变底色（极光效果更依赖叠加层，底色不宜过强）
                 LinearGradient(
@@ -79,13 +80,6 @@ struct AuroraBackground: View {
                 }
                 .blur(radius: softness * 22)
                 .opacity(0.9)
-            }
- // 采用 macOS 14+ 推荐的两参数 onChange API，并关闭 initial 触发，按帧推进相位
-            .onChange(of: timeline.date, initial: false) { _, _ in
-                withAnimation(.linear(duration: 0.016)) {
-                    phase += waveSpeed
-                    if phase > 10_000 { phase = 0 }
-                }
             }
         }
         .ignoresSafeArea()

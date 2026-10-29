@@ -1,0 +1,652 @@
+diff --git a/cmake/CompilerFlags.cmake b/cmake/CompilerFlags.cmake
+index 37a3d2b..db62d4f 100644
+--- a/cmake/CompilerFlags.cmake
++++ b/cmake/CompilerFlags.cmake
+@@ -2,8 +2,9 @@ include(CheckCCompilerFlag)
+ include(CommonCompilerFlags)
+ 
+ macro(checkCFlag FLAG)
+-  check_c_compiler_flag("${FLAG}" CFLAG${FLAG})
+-  if(CFLAG${FLAG})
++  string(MAKE_C_IDENTIFIER "CFLAG_${FLAG}" FLAG_CACHE_KEY)
++  check_c_compiler_flag("${FLAG}" "${FLAG_CACHE_KEY}")
++  if(${FLAG_CACHE_KEY})
+     string(APPEND CMAKE_C_FLAGS " ${FLAG}")
+   else()
+     message(WARNING "compiler does not support ${FLAG}")
+@@ -26,7 +27,7 @@ if(ENABLE_WARNING_VERBOSE)
+   endif()
+ endif()
+ 
+-list(APPEND COMMON_COMPILER_FLAGS -Wimplicit-function-declaration -Wno-jump-misses-init -Wno-c++-keyword)
++list(APPEND COMMON_COMPILER_FLAGS -Wimplicit-function-declaration)
+ 
+ foreach(FLAG ${COMMON_COMPILER_FLAGS})
+   checkcflag(${FLAG})
+diff --git a/cmake/DetectIntrinsicSupport.cmake b/cmake/DetectIntrinsicSupport.cmake
+index 375b634..5773102 100644
+--- a/cmake/DetectIntrinsicSupport.cmake
++++ b/cmake/DetectIntrinsicSupport.cmake
+@@ -20,7 +20,7 @@ macro(set_simd_source_file_properties INTRINSIC_TYPE)
+ 
+   set(SSE_X86_LIST "i686;x86")
+   set(SSE_LIST "x86_64;ia64;x64;amd64;ia64;em64t;${SSE_X86_LIST}")
+-  set(NEON_LIST "arm;armv7;armv8b;armv8l;aarch64")
++  set(NEON_LIST "arm;arm64;armv7;armv8b;armv8l;aarch64")
+   set(SUPPORTED_INTRINSICS_LIST "neon;sse2;sse3;ssse3;sse4.1;sse4.2;avx2")
+ 
+   string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" SYSTEM_PROCESSOR)
+@@ -89,7 +89,7 @@ macro(set_simd_source_file_properties INTRINSIC_TYPE)
+         if(MSVC)
+           set(SIMD_LINK_ARG "/arch:VFPv4")
+         elseif("${CMAKE_C_COMPILER_ID}" IN_LIST GCC_CLANG_NAMES)
+-          if("${SYSTEM_PROCESSOR}" STREQUAL "aarch64")
++          if("${SYSTEM_PROCESSOR}" STREQUAL "aarch64" OR "${SYSTEM_PROCESSOR}" STREQUAL "arm64")
+             set(SIMD_LINK_ARG "ignore")
+           else()
+             set(SIMD_LINK_ARG "-mfpu=neon")
+diff --git a/libfreerdp/CMakeLists.txt b/libfreerdp/CMakeLists.txt
+index d3d229a..3905ff8 100644
+--- a/libfreerdp/CMakeLists.txt
++++ b/libfreerdp/CMakeLists.txt
+@@ -138,7 +138,7 @@ if(WITH_FDK_AAC)
+ endif()
+ 
+ set(OPUS_DEFAULT OFF)
+-if(NOT WITH_DSP_FFMPEG)
++if(NOT DEFINED WITH_OPUS AND NOT WITH_DSP_FFMPEG)
+   find_package(Opus)
+   if(Opus_FOUND)
+     set(OPUS_DEFAULT ${OPUS_FOUND})
+@@ -206,7 +206,7 @@ if(WITH_CAIRO)
+   freerdp_library_add(${CAIRO_LIBRARY})
+ endif()
+ if(NOT WITH_SWSCALE AND NOT WITH_CAIRO)
+-  message(WARNING "-DWITH_SWSCALE=OFF and -DWITH_CAIRO=OFF, compiling without image scaling support!")
++  message(STATUS "-DWITH_SWSCALE=OFF and -DWITH_CAIRO=OFF: image scaling support intentionally disabled")
+ endif()
+ 
+ set(${MODULE_PREFIX}_SUBMODULES emu utils common gdi cache crypto locale core)
+@@ -216,7 +216,7 @@ foreach(${MODULE_PREFIX}_SUBMODULE ${${MODULE_PREFIX}_SUBMODULES})
+ endforeach()
+ 
+ if(NOT WITH_DSP_FFMPEG AND NOT WITH_FAAC AND NOT WITH_FDK_AAC)
+-  message(WARNING "Compiling without WITH_DSP_FFMPEG, WITH_FAAC and WITH_FDK_AAC. AAC encoder support disabled")
++  message(STATUS "AAC encoder support intentionally disabled")
+ endif()
+ 
+ add_subdirectory(codec)
+diff --git a/libfreerdp/codec/neon/rfx_neon.c b/libfreerdp/codec/neon/rfx_neon.c
+index d2c9827..0dac96b 100644
+--- a/libfreerdp/codec/neon/rfx_neon.c
++++ b/libfreerdp/codec/neon/rfx_neon.c
+@@ -254,6 +254,9 @@ static inline void rfx_idwt_extrapolate_horiz_neon(INT16* restrict pLowBand, siz
+ 	WINPR_ASSERT(pLowBand);
+ 	WINPR_ASSERT(pHighBand);
+ 	WINPR_ASSERT(pDstBand);
++	WINPR_ASSERT(nLowStep == nLowCount);
++	WINPR_ASSERT(nHighStep == nHighCount);
++	WINPR_ASSERT(nDstStep == (nLowCount + nHighCount));
+ 
+ 	INT16* l_ptr = pLowBand;
+ 	const INT16* h_ptr = pHighBand;
+@@ -338,6 +341,7 @@ static inline void rfx_idwt_extrapolate_vert_neon(const INT16* restrict pLowBand
+ 	WINPR_ASSERT(pLowBand);
+ 	WINPR_ASSERT(pHighBand);
+ 	WINPR_ASSERT(pDstBand);
++	WINPR_ASSERT(nLowStep == nDstCount);
+ 
+ 	const INT16* l_ptr = pLowBand;
+ 	const INT16* h_ptr = pHighBand;
+diff --git a/libfreerdp/common/settings_getters.c b/libfreerdp/common/settings_getters.c
+index 5e9423c..1571864 100644
+--- a/libfreerdp/common/settings_getters.c
++++ b/libfreerdp/common/settings_getters.c
+@@ -1647,7 +1647,7 @@ UINT32 freerdp_settings_get_uint32(WINPR_ATTR_UNUSED const rdpSettings* settings
+ {
+ 	WINPR_ASSERT(settings);
+ 
+-	switch (id)
++	switch ((UINT32)id)
+ 	{
+ 		case FreeRDP_AcceptedCertLength:
+ 			return settings->AcceptedCertLength;
+@@ -2059,7 +2059,7 @@ BOOL freerdp_settings_set_uint32(WINPR_ATTR_UNUSED rdpSettings* settings,
+ 
+ 	cnv.c = val;
+ 
+-	switch (id)
++	switch ((UINT32)id)
+ 	{
+ 		case FreeRDP_AcceptedCertLength:
+ 			settings->AcceptedCertLength = cnv.c;
+diff --git a/libfreerdp/core/tcp.c b/libfreerdp/core/tcp.c
+index cabdc38..c075a18 100644
+--- a/libfreerdp/core/tcp.c
++++ b/libfreerdp/core/tcp.c
+@@ -1220,6 +1220,8 @@ static int freerdp_vsock_connect(rdpContext* context, const char* hostname, int
+ 	}
+ 	return sockfd;
+ #else
++	freerdp_set_last_error_if_not(context, FREERDP_ERROR_CONNECT_FAILED);
++	WINPR_UNUSED(port);
+ 	WLog_ERR(TAG, "Compiled without AF_VSOCK, '%s' not supported", hostname);
+ 	return -1;
+ #endif
+diff --git a/libfreerdp/gdi/gfx.c b/libfreerdp/gdi/gfx.c
+index ec94f96..d2a3542 100644
+--- a/libfreerdp/gdi/gfx.c
++++ b/libfreerdp/gdi/gfx.c
+@@ -753,6 +753,9 @@ static UINT gdi_SurfaceCommand_AVC420(rdpGdi* gdi, RdpgfxClientContext* context,
+ fail:
+ 	return status;
+ #else
++	WINPR_UNUSED(gdi);
++	WINPR_UNUSED(context);
++	WINPR_UNUSED(cmd);
+ 	return ERROR_NOT_SUPPORTED;
+ #endif
+ }
+@@ -859,6 +862,9 @@ static UINT gdi_SurfaceCommand_AVC444(rdpGdi* gdi, RdpgfxClientContext* context,
+ fail:
+ 	return status;
+ #else
++	WINPR_UNUSED(gdi);
++	WINPR_UNUSED(context);
++	WINPR_UNUSED(cmd);
+ 	return ERROR_NOT_SUPPORTED;
+ #endif
+ }
+diff --git a/libfreerdp/locale/keyboard.c b/libfreerdp/locale/keyboard.c
+index 8d3cfde..1dd55f6 100644
+--- a/libfreerdp/locale/keyboard.c
++++ b/libfreerdp/locale/keyboard.c
+@@ -292,6 +292,7 @@ static int freerdp_keyboard_init_apple(WINPR_ATTR_UNUSED const DWORD* keyboardLa
+ }
+ #endif
+ 
++#if defined(WITH_X11) || defined(WITH_WAYLAND)
+ static int freerdp_keyboard_init_x11_evdev(WINPR_ATTR_UNUSED const DWORD* keyboardLayoutId,
+                                            DWORD* x11_keycode_to_rdp_scancode, size_t count)
+ {
+@@ -310,6 +311,7 @@ static int freerdp_keyboard_init_x11_evdev(WINPR_ATTR_UNUSED const DWORD* keyboa
+ 
+ 	return 0;
+ }
++#endif
+ 
+ DWORD freerdp_keyboard_init(DWORD keyboardLayoutId)
+ {
+diff --git a/libfreerdp/primitives/neon/prim_YUV_neon.c b/libfreerdp/primitives/neon/prim_YUV_neon.c
+index f44016c..f9a15aa 100644
+--- a/libfreerdp/primitives/neon/prim_YUV_neon.c
++++ b/libfreerdp/primitives/neon/prim_YUV_neon.c
+@@ -35,7 +35,7 @@
+ 
+ static primitives_t* generic = nullptr;
+ 
+-static inline uint8x8_t neon_YUV2R_single(uint16x8_t C, int16x8_t D, int16x8_t E)
++static inline uint8x8_t neon_YUV2R_single(uint16x8_t C, int16x8_t E)
+ {
+ 	/* R = (256 * Y + 403 * (V - 128)) >> 8 */
+ 	const int32x4_t Ch = vreinterpretq_s32_u32(vmovl_u16(vget_high_u16(C)));
+@@ -51,10 +51,10 @@ static inline uint8x8_t neon_YUV2R_single(uint16x8_t C, int16x8_t D, int16x8_t E
+ 	return vqmovun_s16(ce);
+ }
+ 
+-static inline uint8x8x2_t neon_YUV2R(uint16x8x2_t C, int16x8x2_t D, int16x8x2_t E)
++static inline uint8x8x2_t neon_YUV2R(uint16x8x2_t C, int16x8x2_t E)
+ {
+-	uint8x8x2_t res = { { neon_YUV2R_single(C.val[0], D.val[0], E.val[0]),
+-		                  neon_YUV2R_single(C.val[1], D.val[1], E.val[1]) } };
++	uint8x8x2_t res = { { neon_YUV2R_single(C.val[0], E.val[0]),
++		                  neon_YUV2R_single(C.val[1], E.val[1]) } };
+ 	return res;
+ }
+ 
+@@ -85,7 +85,7 @@ static inline uint8x8x2_t neon_YUV2G(uint16x8x2_t C, int16x8x2_t D, int16x8x2_t
+ 	return res;
+ }
+ 
+-static inline uint8x8_t neon_YUV2B_single(uint16x8_t C, int16x8_t D, int16x8_t E)
++static inline uint8x8_t neon_YUV2B_single(uint16x8_t C, int16x8_t D)
+ {
+ 	/* B = (256L * Y + 475 * (U - 128)) >> 8*/
+ 	const int32x4_t Ch = vreinterpretq_s32_u32(vmovl_u16(vget_high_u16(C)));
+@@ -101,16 +101,20 @@ static inline uint8x8_t neon_YUV2B_single(uint16x8_t C, int16x8_t D, int16x8_t E
+ 	return vqmovun_s16(cd);
+ }
+ 
+-static inline uint8x8x2_t neon_YUV2B(uint16x8x2_t C, int16x8x2_t D, int16x8x2_t E)
++static inline uint8x8x2_t neon_YUV2B(uint16x8x2_t C, int16x8x2_t D)
+ {
+-	uint8x8x2_t res = { { neon_YUV2B_single(C.val[0], D.val[0], E.val[0]),
+-		                  neon_YUV2B_single(C.val[1], D.val[1], E.val[1]) } };
++	uint8x8x2_t res = { { neon_YUV2B_single(C.val[0], D.val[0]),
++		                  neon_YUV2B_single(C.val[1], D.val[1]) } };
+ 	return res;
+ }
+ 
+ static inline void neon_store_bgrx(BYTE* WINPR_RESTRICT pRGB, uint8x8_t r, uint8x8_t g, uint8x8_t b,
+                                    uint8_t rPos, uint8_t gPos, uint8_t bPos, uint8_t aPos)
+ {
++	WINPR_ASSERT(aPos < 4);
++	WINPR_ASSERT(aPos != rPos);
++	WINPR_ASSERT(aPos != gPos);
++	WINPR_ASSERT(aPos != bPos);
+ 	uint8x8x4_t bgrx = vld4_u8(pRGB);
+ 	bgrx.val[rPos] = r;
+ 	bgrx.val[gPos] = g;
+@@ -126,9 +130,9 @@ static inline void neon_YuvToRgbPixel(BYTE* pRGB, uint8x8x2_t Y, int16x8x2_t D,
+ 	const uint16x8x2_t C = { { vshlq_n_u16(vmovl_u8(Y.val[0]), 8),
+ 		                       vshlq_n_u16(vmovl_u8(Y.val[1]), 8) } };
+ 
+-	const uint8x8x2_t r = neon_YUV2R(C, D, E);
++	const uint8x8x2_t r = neon_YUV2R(C, E);
+ 	const uint8x8x2_t g = neon_YUV2G(C, D, E);
+-	const uint8x8x2_t b = neon_YUV2B(C, D, E);
++	const uint8x8x2_t b = neon_YUV2B(C, D);
+ 
+ 	neon_store_bgrx(pRGB, r.val[0], g.val[0], b.val[0], rPos, gPos, bPos, aPos);
+ 	neon_store_bgrx(pRGB + sizeof(uint8x8x4_t), r.val[1], g.val[1], b.val[1], rPos, gPos, bPos,
+@@ -147,6 +151,10 @@ static inline int16x8x2_t loadUV(const BYTE* WINPR_RESTRICT pV, size_t x)
+ static inline void neon_write_pixel(BYTE* pRGB, BYTE Y, BYTE U, BYTE V, const uint8_t rPos,
+                                     const uint8_t gPos, const uint8_t bPos, const uint8_t aPos)
+ {
++	WINPR_ASSERT(aPos < 4);
++	WINPR_ASSERT(aPos != rPos);
++	WINPR_ASSERT(aPos != gPos);
++	WINPR_ASSERT(aPos != bPos);
+ 	const BYTE r = YUV2R(Y, U, V);
+ 	const BYTE g = YUV2G(Y, U, V);
+ 	const BYTE b = YUV2B(Y, U, V);
+@@ -711,6 +719,9 @@ static pstatus_t neon_ChromaV2ToYUV444(const BYTE* WINPR_RESTRICT pSrc[3], const
+                                        BYTE* WINPR_RESTRICT pDst[3], const UINT32 dstStep[3],
+                                        const RECTANGLE_16* WINPR_RESTRICT roi)
+ {
++	if ((roi->right > nTotalWidth) || (roi->bottom > nTotalHeight))
++		return -1;
++
+ 	const UINT32 nWidth = roi->right - roi->left;
+ 	const UINT32 nHeight = roi->bottom - roi->top;
+ 	const UINT32 halfWidth = (nWidth + 1) / 2;
+diff --git a/libfreerdp/utils/string.c b/libfreerdp/utils/string.c
+index 2720330..23d474d 100644
+--- a/libfreerdp/utils/string.c
++++ b/libfreerdp/utils/string.c
+@@ -167,6 +167,7 @@ const char* freerdp_input_touch_state_string(DWORD flags)
+ 	else
+ 		return "RDPINPUT_CONTACT_FLAG_UNKNOWN";
+ #else
++	WINPR_UNUSED(flags);
+ 	return "CHANNEL_RDPEI not supported";
+ #endif
+ }
+diff --git a/winpr/libwinpr/CMakeLists.txt b/winpr/libwinpr/CMakeLists.txt
+index b0e5d3d..d280a8b 100644
+--- a/winpr/libwinpr/CMakeLists.txt
++++ b/winpr/libwinpr/CMakeLists.txt
+@@ -217,6 +217,8 @@ list(REMOVE_DUPLICATES WINPR_LINK_OPTIONS)
+ list(REMOVE_DUPLICATES WINPR_LINK_DIRS)
+ list(REMOVE_DUPLICATES WINPR_INCLUDES)
+ list(REMOVE_DUPLICATES WINPR_SYSTEM_INCLUDES)
++list(REMOVE_DUPLICATES WINPR_LIBS_PRIVATE)
++list(REMOVE_DUPLICATES WINPR_LIBS_PUBLIC)
+ 
+ addtargetwithresourcefile(${MODULE_NAME} FALSE "${WINPR_VERSION}" WINPR_SRCS)
+ 
+diff --git a/winpr/libwinpr/crt/unicode_apple.m b/winpr/libwinpr/crt/unicode_apple.m
+index 0f010da..bdeefe9 100644
+--- a/winpr/libwinpr/crt/unicode_apple.m
++++ b/winpr/libwinpr/crt/unicode_apple.m
+@@ -43,10 +43,23 @@ int int_MultiByteToWideChar(UINT CodePage, DWORD dwFlags, LPCSTR lpMultiByteStr,
+                             LPWSTR lpWideCharStr, int cchWideChar)
+ {
+ 	const BOOL isNullTerminated = cbMultiByte < 0;
++	WINPR_UNUSED(dwFlags);
+ 
+ 	/* If cbMultiByte is 0, the function fails */
+ 	if ((cbMultiByte == 0) || (cbMultiByte < -1))
+ 		return 0;
++	if (cchWideChar < 0)
++		return -1;
++
++	switch (CodePage)
++	{
++		case CP_ACP:
++		case CP_UTF8:
++			break;
++		default:
++			WLog_ERR(TAG, "Unsupported encoding %u", CodePage);
++			return 0;
++	}
+ 
+ 	/* If cbMultiByte is -1, the string is null-terminated */
+ 	if (isNullTerminated)
+@@ -79,14 +92,14 @@ int int_MultiByteToWideChar(UINT CodePage, DWORD dwFlags, LPCSTR lpMultiByteStr,
+ 
+ 	if (cchWideChar == 0)
+ 		return WINPR_ASSERTING_INT_CAST(int, utf16CharLen);
+-	else if (cchWideChar < utf16CharLen)
++	else if ((size_t)cchWideChar < utf16CharLen)
+ 	{
+ 		SetLastError(ERROR_INSUFFICIENT_BUFFER);
+ 		return 0;
+ 	}
+ 	else
+ 	{
+-		const size_t mlen = MIN((size_t)utf16CharLen, cchWideChar);
++		const size_t mlen = utf16CharLen;
+ 		const size_t len = _wcsnlen(utf16, mlen);
+ 		memcpy(lpWideCharStr, utf16, len * sizeof(WCHAR));
+ 		if ((len < (size_t)cchWideChar) &&
+@@ -101,10 +114,25 @@ int int_WideCharToMultiByte(UINT CodePage, DWORD dwFlags, LPCWSTR lpWideCharStr,
+                             LPBOOL lpUsedDefaultChar)
+ {
+ 	const BOOL isNullTerminated = cchWideChar < 0;
++	WINPR_UNUSED(dwFlags);
++	WINPR_UNUSED(lpDefaultChar);
++	WINPR_UNUSED(lpUsedDefaultChar);
+ 
+ 	/* If cchWideChar is 0, the function fails */
+ 	if ((cchWideChar == 0) || (cchWideChar < -1))
+ 		return 0;
++	if (cbMultiByte < 0)
++		return -1;
++
++	switch (CodePage)
++	{
++		case CP_ACP:
++		case CP_UTF8:
++			break;
++		default:
++			WLog_ERR(TAG, "Unsupported encoding %u", CodePage);
++			return 0;
++	}
+ 
+ 	/* If cchWideChar is -1, the string is null-terminated */
+ 	if (isNullTerminated)
+@@ -132,14 +160,14 @@ int int_WideCharToMultiByte(UINT CodePage, DWORD dwFlags, LPCWSTR lpWideCharStr,
+ 
+ 	if (cbMultiByte == 0)
+ 		return WINPR_ASSERTING_INT_CAST(int, utf8Len);
+-	else if (cbMultiByte < utf8Len)
++	else if ((size_t)cbMultiByte < utf8Len)
+ 	{
+ 		SetLastError(ERROR_INSUFFICIENT_BUFFER);
+ 		return 0;
+ 	}
+ 	else
+ 	{
+-		const size_t mlen = MIN((size_t)cbMultiByte, utf8Len);
++		const size_t mlen = utf8Len;
+ 		const size_t len = strnlen(utf8, mlen);
+ 		memcpy(lpMultiByteStr, utf8, len * sizeof(char));
+ 		if ((len < (size_t)cbMultiByte) && (len > 0) && (lpMultiByteStr[len - 1] != '\0'))
+diff --git a/winpr/libwinpr/ncrypt/ncrypt.c b/winpr/libwinpr/ncrypt/ncrypt.c
+index 597d501..43adf8e 100644
+--- a/winpr/libwinpr/ncrypt/ncrypt.c
++++ b/winpr/libwinpr/ncrypt/ncrypt.c
+@@ -169,6 +169,10 @@ SECURITY_STATUS winpr_NCryptOpenStorageProviderEx(NCRYPT_PROV_HANDLE* phProvider
+ 	free(buffer);
+ 	return ERROR_NOT_SUPPORTED;
+ #else
++	WINPR_UNUSED(phProvider);
++	WINPR_UNUSED(pszProviderName);
++	WINPR_UNUSED(dwFlags);
++	WINPR_UNUSED(modulePaths);
+ 	WLog_WARN(TAG, "rebuild with -DWITH_PKCS11=ON to enable smartcard logon support");
+ 	return ERROR_NOT_SUPPORTED;
+ #endif
+@@ -358,6 +362,7 @@ const char* winpr_NCryptGetModulePath(NCRYPT_PROV_HANDLE phProvider)
+ #if defined(WITH_PKCS11)
+ 	return NCryptGetModulePath(phProvider);
+ #else
++	WINPR_UNUSED(phProvider);
+ 	return nullptr;
+ #endif
+ }
+diff --git a/winpr/libwinpr/synch/test/CMakeLists.txt b/winpr/libwinpr/synch/test/CMakeLists.txt
+index f0da185..42a10a1 100644
+--- a/winpr/libwinpr/synch/test/CMakeLists.txt
++++ b/winpr/libwinpr/synch/test/CMakeLists.txt
+@@ -1,8 +1,6 @@
+ set(MODULE_NAME "TestSynch")
+ set(MODULE_PREFIX "TEST_SYNCH")
+ 
+-disable_warnings_for_directory(${CMAKE_CURRENT_BINARY_DIR})
+-
+ set(${MODULE_PREFIX}_DRIVER ${MODULE_NAME}.c)
+ 
+ set(${MODULE_PREFIX}_TESTS
+diff --git a/winpr/libwinpr/synch/test/TestSynchAPC.c b/winpr/libwinpr/synch/test/TestSynchAPC.c
+index ccf1a6c..df7ae6b 100644
+--- a/winpr/libwinpr/synch/test/TestSynchAPC.c
++++ b/winpr/libwinpr/synch/test/TestSynchAPC.c
+@@ -47,56 +47,13 @@ static DWORD WINAPI uncleanThread(LPVOID lpThreadParameter)
+ 
+ static DWORD WINAPI cleanThread(LPVOID lpThreadParameter)
+ {
++	WINPR_UNUSED(lpThreadParameter);
+ 	Sleep(500);
+ 
+ 	SleepEx(500, TRUE);
+ 	return 0;
+ }
+ 
+-typedef struct
+-{
+-	HANDLE timer1;
+-	DWORD timer1Calls;
+-	HANDLE timer2;
+-	DWORD timer2Calls;
+-	BOOL endTest;
+-} UncleanCloseData;
+-
+-static VOID CALLBACK Timer1APCProc(LPVOID lpArg, DWORD dwTimerLowValue, DWORD dwTimerHighValue)
+-{
+-	UncleanCloseData* data = (UncleanCloseData*)lpArg;
+-	data->timer1Calls++;
+-	(void)CloseHandle(data->timer2);
+-	data->endTest = TRUE;
+-}
+-
+-static VOID CALLBACK Timer2APCProc(LPVOID lpArg, DWORD dwTimerLowValue, DWORD dwTimerHighValue)
+-{
+-	UncleanCloseData* data = (UncleanCloseData*)lpArg;
+-	data->timer2Calls++;
+-}
+-
+-static DWORD /*WINAPI*/ closeHandleTest(LPVOID lpThreadParameter)
+-{
+-	LARGE_INTEGER dueTime = WINPR_C_ARRAY_INIT;
+-	UncleanCloseData* data = (UncleanCloseData*)lpThreadParameter;
+-	data->endTest = FALSE;
+-
+-	dueTime.QuadPart = -500;
+-	if (!SetWaitableTimer(data->timer1, &dueTime, 0, Timer1APCProc, lpThreadParameter, FALSE))
+-		return 1;
+-
+-	dueTime.QuadPart = -900;
+-	if (!SetWaitableTimer(data->timer2, &dueTime, 0, Timer2APCProc, lpThreadParameter, FALSE))
+-		return 1;
+-
+-	while (!data->endTest)
+-	{
+-		SleepEx(100, TRUE);
+-	}
+-	return 0;
+-}
+-
+ int TestSynchAPC(int argc, char* argv[])
+ {
+ 	HANDLE thread = nullptr;
+diff --git a/winpr/libwinpr/synch/test/TestSynchBarrier.c b/winpr/libwinpr/synch/test/TestSynchBarrier.c
+index d7fce88..b01a0e8 100644
+--- a/winpr/libwinpr/synch/test/TestSynchBarrier.c
++++ b/winpr/libwinpr/synch/test/TestSynchBarrier.c
+@@ -178,7 +178,11 @@ static BOOL TestSynchBarrierWithFlags(DWORD dwFlags, DWORD dwThreads, DWORD dwLo
+ 	rc = TRUE;
+ fail:
+ 	free((void*)threads);
+-	DeleteSynchronizationBarrier(&gBarrier);
++	if (!DeleteSynchronizationBarrier(&gBarrier))
++	{
++		printf("%s: failed to delete synchronization barrier\n", __func__);
++		rc = FALSE;
++	}
+ 	if (gErrorCount > 0)
+ 	{
+ 		printf("%s: Error test failed with %" PRId32 " reported errors\n", __func__, gErrorCount);
+diff --git a/winpr/libwinpr/synch/test/TestSynchCritical.c b/winpr/libwinpr/synch/test/TestSynchCritical.c
+index d644614..bc9dfb8 100644
+--- a/winpr/libwinpr/synch/test/TestSynchCritical.c
++++ b/winpr/libwinpr/synch/test/TestSynchCritical.c
+@@ -132,7 +132,11 @@ static DWORD WINAPI TestSynchCritical_Main(LPVOID arg)
+ 	 */
+ 
+ 	dwSpinCount = 100;
+-	InitializeCriticalSectionEx(&critical, dwSpinCount, 0);
++	if (!InitializeCriticalSectionEx(&critical, dwSpinCount, 0))
++	{
++		printf("CriticalSection failure: InitializeCriticalSectionEx failed\n");
++		goto fail;
++	}
+ 	while (--dwSpinCount)
+ 	{
+ 		dwPreviousSpinCount = SetCriticalSectionSpinCount(&critical, dwSpinCount);
+@@ -264,7 +268,11 @@ static DWORD WINAPI TestSynchCritical_Main(LPVOID arg)
+ 				printf("CriticalSection failure: Failed to wait for thread #%d\n", i);
+ 				goto fail;
+ 			}
+-			GetExitCodeThread(hThreads[i], &dwThreadExitCode);
++			if (!GetExitCodeThread(hThreads[i], &dwThreadExitCode))
++			{
++				printf("CriticalSection failure: Failed to read thread #%d exit code\n", i);
++				goto fail;
++			}
+ 			if (dwThreadExitCode != 0)
+ 			{
+ 				printf("CriticalSection failure: Thread #%d returned error code %" PRIu32 "\n", i,
+@@ -309,7 +317,11 @@ static DWORD WINAPI TestSynchCritical_Main(LPVOID arg)
+ 		printf("CriticalSection failure: Failed to wait for thread\n");
+ 		goto fail;
+ 	}
+-	GetExitCodeThread(hThread, &dwThreadExitCode);
++	if (!GetExitCodeThread(hThread, &dwThreadExitCode))
++	{
++		printf("CriticalSection failure: Failed to read thread exit code\n");
++		goto fail;
++	}
+ 	if (dwThreadExitCode != 0)
+ 	{
+ 		printf("CriticalSection failure: Thread returned error code %" PRIu32 "\n",
+@@ -370,7 +382,11 @@ int TestSynchCritical(int argc, char* argv[])
+ 		return -1;
+ 	}
+ 
+-	GetExitCodeThread(hThread, &dwThreadExitCode);
++	if (!GetExitCodeThread(hThread, &dwThreadExitCode))
++	{
++		printf("CriticalSection failure: Failed to read deadlock-test thread exit code\n");
++		return -1;
++	}
+ 	(void)CloseHandle(hThread);
+ 
+ 	if (dwThreadExitCode != 0)
+diff --git a/winpr/libwinpr/synch/timer.c b/winpr/libwinpr/synch/timer.c
+index e5f68fb..e0ad451 100644
+--- a/winpr/libwinpr/synch/timer.c
++++ b/winpr/libwinpr/synch/timer.c
+@@ -281,6 +281,7 @@ static int InitializeWaitableTimer(WINPR_TIMER* timer)
+ 	return result;
+ }
+ 
++#ifdef TIMER_IMPL_TIMERFD
+ static BOOL timer_drain_fd(int fd)
+ {
+ 	UINT64 expr = 0;
+@@ -293,6 +294,7 @@ static BOOL timer_drain_fd(int fd)
+ 
+ 	return ret >= 0;
+ }
++#endif
+ 
+ static HANDLE_OPS ops = { TimerIsHandled, TimerCloseHandle, TimerGetFd, TimerCleanupHandle,
+ 	                      nullptr,        nullptr,          nullptr,    nullptr,
+@@ -447,9 +449,11 @@ BOOL SetWaitableTimer(HANDLE hTimer, const LARGE_INTEGER* lpDueTime, LONG lPerio
+ 	ULONG Type = 0;
+ 	WINPR_HANDLE* Object = nullptr;
+ 	WINPR_TIMER* timer = nullptr;
++#if defined(TIMER_IMPL_TIMERFD) || defined(TIMER_IMPL_POSIX)
+ 	LONGLONG seconds = 0;
+-	LONGLONG nanoseconds = 0;
+ 	int status = 0;
++#endif
++	LONGLONG nanoseconds = 0;
+ 
+ 	if (!winpr_Handle_GetInfo(hTimer, &Type, &Object))
+ 		return FALSE;
+@@ -539,12 +543,11 @@ BOOL SetWaitableTimer(HANDLE hTimer, const LARGE_INTEGER* lpDueTime, LONG lPerio
+ 	{
+ 		LONGLONG due = lpDueTime->QuadPart * (-1);
+ 		/* due time is in 100 nanosecond intervals */
+-		seconds = (due / 10000000);
+ 		nanoseconds = due * 100;
+ 	}
+ 	else if (lpDueTime->QuadPart == 0)
+ 	{
+-		seconds = nanoseconds = 0;
++		nanoseconds = 0;
+ 	}
+ 	else
+ 	{
+diff --git a/winpr/libwinpr/sysinfo/sysinfo.c b/winpr/libwinpr/sysinfo/sysinfo.c
+index c7a6ee0..2985359 100644
+--- a/winpr/libwinpr/sysinfo/sysinfo.c
++++ b/winpr/libwinpr/sysinfo/sysinfo.c
+@@ -48,7 +48,8 @@
+ 
+ #define FILETIME_TO_UNIX_OFFSET_S 11644473600UL
+ 
+-#if defined(__MACH__) && defined(__APPLE__)
++#if defined(__MACH__) && defined(__APPLE__) && \
++    (!defined(_POSIX_C_SOURCE) || (_POSIX_C_SOURCE < 199309L))
+ 
+ #include <mach/mach_time.h>
+ 
+@@ -1087,6 +1088,9 @@ DWORD GetTickCountPrecise(void)
+ BOOL IsProcessorFeaturePresentEx(DWORD ProcessorFeature)
+ {
+ 	BOOL ret = FALSE;
++#if (defined(_M_ARM) || defined(_M_ARM64)) && !defined(__linux__)
++	WINPR_UNUSED(ProcessorFeature);
++#endif
+ #if defined(_M_ARM) || defined(_M_ARM64)
+ #ifdef __linux__
+ 	unsigned caps;
+diff --git a/winpr/libwinpr/thread/process.c b/winpr/libwinpr/thread/process.c
+index d017ced..ab1b4fd 100644
+--- a/winpr/libwinpr/thread/process.c
++++ b/winpr/libwinpr/thread/process.c
+@@ -700,6 +700,7 @@ static int pidfd_open(pid_t pid)
+ 		return -1;
+ 	return (int)fd;
+ #else
++	WINPR_UNUSED(pid);
+ 	return -1;
+ #endif
+ }
+diff --git a/winpr/include/winpr/wtypes.h b/winpr/include/winpr/wtypes.h
+index bc675eb..694c0e5 100644
+--- a/winpr/include/winpr/wtypes.h
++++ b/winpr/include/winpr/wtypes.h
+@@ -42,7 +42,7 @@
+ #include <limits.h>
+ 
+ #if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 202311L)
+-#define WINPR_C23_ENUM_TYPE(x) : x /** 
++#define WINPR_C23_ENUM_TYPE(x) : x /**
+                                * @brief For C23 and up defines the type of the enum to the enclosed integer type
+                                * @since version 3.27.0
+ */

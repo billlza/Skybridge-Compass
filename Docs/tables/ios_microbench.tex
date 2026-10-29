@@ -1,0 +1,18 @@
+\begin{table*}[!t]
+\centering
+\caption{On-device micro-benchmark on iOS 26+ (two devices, schema v3 artifacts). Each device runs warmup=10, N=1000, batches=3. Cells report mean/p99 in ms from pooled measured iterations. Data from \texttt{Artifacts/ios\_microbench\_2026-01-23.csv} (generated via \texttt{Scripts/aggregate\_ios\_microbench.py}).}
+\label{tab:ios-microbench}
+{\setlength{\tabcolsep}{3pt}\scriptsize
+\begin{tabular}{@{}lcccccccc@{}}
+\toprule
+Configuration & \multicolumn{4}{c}{\texttt{ipad16\_3}} & \multicolumn{4}{c}{\texttt{iphone17\_1}} \\
+\cmidrule(lr){2-5}\cmidrule(lr){6-9}
+& KEM encap & Sign & Verify & KEM-DEM & KEM encap & Sign & Verify & KEM-DEM \\
+\midrule
+Classic (X25519 + Ed25519) & 0.182 / 7.314 & 0.105 / 0.072 & 0.067 / 0.049 & 0.388 / 7.588 & 0.190 / 7.479 & 0.111 / 0.086 & 0.066 / 0.046 & 0.426 / 8.052 \\
+CryptoKit PQC (ML-KEM-768 + ML-DSA-65) & 0.131 / 0.097 & 1.771 / 8.396 & 0.103 / 0.071 & 0.333 / 7.519 & 0.143 / 0.272 & 3.135 / 10.124 & 0.125 / 0.091 & 0.387 / 8.232 \\
+CryptoKit Hybrid (X-Wing + ML-DSA-65) & 0.215 / 7.375 & 1.671 / 8.454 & 0.106 / 0.072 & 0.424 / 7.558 & 0.255 / 8.108 & 2.711 / 9.960 & 0.127 / 0.096 & 0.520 / 8.591 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
