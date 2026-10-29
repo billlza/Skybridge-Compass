@@ -358,7 +358,7 @@ jobs:
           done
 
       - name: Upload Connectivity Matrix Evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: real-device-connectivity-matrix-public-redacted
           path: ${{ runner.temp }}/skybridge-release-evidence-archives/real-device-connectivity-matrix-public-redacted.tar.gz
@@ -366,7 +366,7 @@ jobs:
           retention-days: 30
 
       - name: Upload P2P Remote Evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: real-device-p2p-remote-smoke-public-redacted
           path: ${{ runner.temp }}/skybridge-release-evidence-archives/real-device-p2p-remote-smoke-public-redacted.tar.gz
@@ -374,7 +374,7 @@ jobs:
           retention-days: 30
 
       - name: Upload WebRTC Remote Evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: real-device-webrtc-smoke-public-redacted
           path: ${{ runner.temp }}/skybridge-release-evidence-archives/real-device-webrtc-smoke-public-redacted.tar.gz
@@ -382,7 +382,7 @@ jobs:
           retention-days: 30
 
       - name: Upload File Transfer Evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: real-device-file-transfer-smoke-public-redacted
           path: ${{ runner.temp }}/skybridge-release-evidence-archives/real-device-file-transfer-smoke-public-redacted.tar.gz
