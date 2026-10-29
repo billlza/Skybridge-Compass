@@ -459,7 +459,11 @@ final class IOSOpusFileSendSession: ObservableObject {
     private func fail(_ error: any Error) {
         guard primary == nil, !finished else { return }
         if case .peerStopped = error as? AudioStreamingChannelError { peerStopped = true }
-        primary = (Self.reason(error), error); changePhase(.stopping)
+        let reason = Self.reason(error)
+        let diagnostic = (error as? BluetoothAudioNativeFailure)?.diagnosticLabel
+            ?? AudioPlaybackFailureDiagnostic.label(for: error)
+        SkyBridgeLogger.shared.error("audio_bluetooth_file_failed phase=\(phase) reason=\(reason.rawValue) diagnostic=\(diagnostic)")
+        primary = (reason, error); changePhase(.stopping)
         authority.fail(error); source.cancel(); execution?.cancel(); membershipRenewal?.cancel(); signal()
     }
     private func changePhase(_ value: Phase) { phase = value; phaseBegan = .now; publishWorkProgress() }
