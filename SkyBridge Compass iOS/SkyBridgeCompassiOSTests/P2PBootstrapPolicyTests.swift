@@ -205,7 +205,7 @@ final class P2PListenerStartupGateTests: XCTestCase {
     private enum Failure: Error, Equatable { case startupFailed, waiterDidNotArrive }
 
     func testInboundOwnersWaitForTheExactStartupBeforeProceeding() async throws {
-        let gate = P2PListenerStartupGate()
+        let gate = P2POperationCompletionGate()
         let first = Task { try await gate.wait() }, second = Task { try await gate.wait() }
         try await wait(gate, count: 2)
         gate.finish(.success(()))
@@ -215,7 +215,7 @@ final class P2PListenerStartupGateTests: XCTestCase {
     }
 
     func testStartupFailureRejectsCurrentAndLateOwnersAndCannotBecomeSuccess() async throws {
-        let gate = P2PListenerStartupGate(), task = Task { try await gate.wait() }
+        let gate = P2POperationCompletionGate(), task = Task { try await gate.wait() }
         try await wait(gate, count: 1)
         gate.finish(.failure(Failure.startupFailed))
         gate.finish(.success(()))
@@ -227,7 +227,7 @@ final class P2PListenerStartupGateTests: XCTestCase {
     }
 
     func testCancellationReleasesOneOwnerWithoutCancellingSharedStartup() async throws {
-        let gate = P2PListenerStartupGate()
+        let gate = P2POperationCompletionGate()
         let cancelled = Task { try await gate.wait() }, retained = Task { try await gate.wait() }
         try await wait(gate, count: 2)
         cancelled.cancel()
@@ -240,7 +240,7 @@ final class P2PListenerStartupGateTests: XCTestCase {
     }
 
     func testAlreadyCancelledOwnerNeverLeavesAWaiter() async throws {
-        let gate = P2PListenerStartupGate()
+        let gate = P2POperationCompletionGate()
         let task = Task {
             withUnsafeCurrentTask { $0?.cancel() }
             try await gate.wait()
@@ -251,7 +251,7 @@ final class P2PListenerStartupGateTests: XCTestCase {
     }
 
     func testCancellationAfterStartupCompletesStillPreventsAdmission() async throws {
-        let gate = P2PListenerStartupGate(), task = Task { try await gate.wait() }
+        let gate = P2POperationCompletionGate(), task = Task { try await gate.wait() }
         try await wait(gate, count: 1)
         gate.finish(.success(()))
         task.cancel()
@@ -261,7 +261,7 @@ final class P2PListenerStartupGateTests: XCTestCase {
     }
 
     func testReplacementStartupCannotReleasePreviousGeneration() async throws {
-        let old = P2PListenerStartupGate(), replacement = P2PListenerStartupGate()
+        let old = P2POperationCompletionGate(), replacement = P2POperationCompletionGate()
         let oldOwner = Task { try await old.wait() }, newOwner = Task { try await replacement.wait() }
         try await wait(old, count: 1); try await wait(replacement, count: 1)
         replacement.finish(.success(())); try await newOwner.value
@@ -272,7 +272,41 @@ final class P2PListenerStartupGateTests: XCTestCase {
         XCTAssertEqual(old.waitingCount, 0)
     }
 
-    private func wait(_ gate: P2PListenerStartupGate, count: Int) async throws {
+    func testTimeoutReleasesOnlyItsWaiterAndLateCompletionCannotChangeTheFailure() async throws {
+        let gate = P2POperationCompletionGate()
+        let retained = Task { try await gate.wait() }
+        let bounded = Task { try await gate.wait(timeout: .milliseconds(30)) }
+        try await wait(gate, count: 2)
+        do { try await bounded.value; XCTFail("An unfinished operation exceeded its wait deadline") }
+        catch { XCTAssertEqual(error as? P2POperationCompletionGate.WaitError, .timedOut) }
+        XCTAssertEqual(gate.waitingCount, 1)
+        gate.finish(.success(()))
+        try await retained.value
+        do { try await bounded.value; XCTFail("Late completion replaced the timeout result") }
+        catch { XCTAssertEqual(error as? P2POperationCompletionGate.WaitError, .timedOut) }
+        XCTAssertEqual(gate.waitingCount, 0)
+    }
+
+    func testBoundedWaitCompletionCancelsTheTimer() async throws {
+        let gate = P2POperationCompletionGate()
+        let bounded = Task { try await gate.wait(timeout: .seconds(30)) }
+        try await wait(gate, count: 1)
+        gate.finish(.success(()))
+        try await bounded.value
+        XCTAssertEqual(gate.waitingCount, 0)
+    }
+
+    func testBoundedWaitCancellationReleasesTheWaiter() async throws {
+        let gate = P2POperationCompletionGate()
+        let bounded = Task { try await gate.wait(timeout: .seconds(30)) }
+        try await wait(gate, count: 1)
+        bounded.cancel()
+        do { try await bounded.value; XCTFail("Cancelled publication wait completed") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(gate.waitingCount, 0)
+    }
+
+    private func wait(_ gate: P2POperationCompletionGate, count: Int) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(2))
         while gate.waitingCount != count {
             guard ContinuousClock.now < deadline else { throw Failure.waiterDidNotArrive }

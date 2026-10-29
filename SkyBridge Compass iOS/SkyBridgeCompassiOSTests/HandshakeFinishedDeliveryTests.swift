@@ -55,6 +55,86 @@ private actor ControlledFinishedTransport: DiscoveryTransport {
 
 @available(macOS 14.0, iOS 17.0, *)
 final class HandshakeFinishedDeliveryTests: XCTestCase {
+    private enum PublicationOutcome { case published, replaced, cancelled, corruptCiphertext }
+
+    func testFirstAuthenticatedControlWaitsForInitiatorPublication() async throws {
+        try await exercisePublication(.published)
+    }
+
+    func testConnectionReplacementReleasesAndDiscardsPendingFirstFrame() async throws {
+        try await exercisePublication(.replaced)
+    }
+
+    func testCancelledPublicationWaitCannotDispatchTheFirstFrame() async throws {
+        try await exercisePublication(.cancelled)
+    }
+
+    func testReleasedFirstFrameStillRequiresValidAEAD() async throws {
+        try await exercisePublication(.corruptCiphertext)
+    }
+
+    private func exercisePublication(_ outcome: PublicationOutcome) async throws {
+        try await withBlockedResponderFinished(inspectInitiator: { driver, keys in
+            try await Self.exercisePendingPublication(driver: driver, keys: keys, outcome: outcome)
+        }) { responder, transport, peerFinished, peer, receiveTask in
+            await responder.handleMessage(peerFinished, from: peer)
+            await transport.resumeFinished(.success(()))
+            await receiveTask.value
+        }
+    }
+
+    @MainActor
+    private static func exercisePendingPublication(driver: HandshakeDriver, keys: SessionKeys,
+                                                   outcome: PublicationOutcome) async throws {
+        let manager = P2PConnectionManager.instance
+        let peerID = UUID().uuidString
+        defer { manager.testSimulateTerminalCleanup(runtimePeerId: peerID) }
+        manager.installTestPeerRuntimeState(runtimePeerId: peerID, name: "Before publication")
+        let token = try manager.testInstallPendingHandshakePublication(driver: driver, keys: keys, for: peerID)
+        let message = AppMessage.heartbeat(.init(deviceName: "Authenticated first frame"))
+        var sealed = try XCTUnwrap(AES.GCM.seal(JSONEncoder().encode(message),
+            using: SymmetricKey(data: keys.receiveKey)).combined)
+        if outcome == .corruptCiphertext { sealed[sealed.index(before: sealed.endIndex)] ^= 1 }
+        let frame = sealed
+        var receiveReturned = false
+        let receive = Task {
+            try await manager.testReceiveEstablishedControlFrame(frame, for: peerID)
+            receiveReturned = true
+        }
+        defer { receive.cancel() }
+        let deadline = ContinuousClock.now + .seconds(2)
+        while manager.testHandshakePublicationWaiterCount(for: peerID) == 0 && !receiveReturned,
+              ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertFalse(receiveReturned, "The first encrypted control must not be consumed by the completed handshake driver")
+        XCTAssertEqual(manager.testHandshakePublicationWaiterCount(for: peerID), 1)
+        XCTAssertEqual(manager.activeConnections.first(where: { $0.device.id == peerID })?.device.name,
+                       "Before publication", "Pending publication must not authorize app effects")
+        switch outcome {
+        case .published, .corruptCiphertext:
+            try manager.testFinishHandshakePublication(for: peerID, token: token)
+        case .replaced:
+            try manager.testInstallAuthenticatedSession(keys.negotiatedSuite, for: peerID)
+        case .cancelled:
+            receive.cancel()
+        }
+        try await receive.value
+        switch outcome {
+        case .published:
+            XCTAssertEqual(manager.activeConnections.first(where: { $0.device.id == peerID })?.device.name,
+                           "Authenticated first frame", "The retained frame must pass through real AEAD and app dispatch")
+        case .replaced:
+            let replacement = manager.activeConnections.first(where: { $0.device.id == peerID })
+            XCTAssertEqual(replacement?.device.name, "Before publication", "The old frame cannot mutate its replacement")
+            XCTAssertEqual(replacement?.status, .connected, "Old cleanup cannot retire the replacement")
+        case .cancelled, .corruptCiphertext:
+            XCTAssertFalse(manager.activeConnections.contains(where: { $0.device.id == peerID }),
+                           "A cancelled wait or invalid ciphertext must retire the exact connection")
+        }
+        XCTAssertEqual(manager.testHandshakePublicationWaiterCount(for: peerID), 0)
+    }
+
     func testResponderDoesNotPublishBeforeItsFinishedSendSucceeds() async throws {
         try await withBlockedResponderFinished { responder, transport, peerFinished, peer, receiveTask in
             await responder.handleMessage(peerFinished, from: peer)
@@ -250,6 +330,7 @@ final class HandshakeFinishedDeliveryTests: XCTestCase {
     private func withBlockedResponderFinished(
         responderTimeout: Duration = .seconds(30),
         audioIdentity: Bool = false, mismatchedLocalID: Bool = false,
+        inspectInitiator: ((HandshakeDriver, SessionKeys) async throws -> Void)? = nil,
         _ body: (
             HandshakeDriver,
             ControlledFinishedTransport,
@@ -287,6 +368,7 @@ final class HandshakeFinishedDeliveryTests: XCTestCase {
             await initiator.handleMessage(responderMessages[1], from: peer)
             let initiatorKeys = try await initiation.value
             XCTAssertEqual(initiatorKeys.negotiatedSuite, .x25519Ed25519)
+            try await inspectInitiator?(initiator, initiatorKeys)
             if audioIdentity {
                 let binding = await initiator.getAuthenticatedAudioHandshakeBinding(matching: initiatorKeys)
                 XCTAssertEqual(binding?.local.deviceId, Self.initiatorID)

@@ -12,7 +12,7 @@ import UIKit
 /// Identifies the one task that is allowed to publish and tear down a
 /// handshake operation's terminal state.
 ///
-/// The receive loop always delivers frames to the driver. It only owns the
+/// The receive loop delivers handshake frames to the driver. It only owns the
 /// terminal commit for responder handshakes that it created itself. An
 /// initiating task remains the sole owner of its driver, authority commit,
 /// session publication, and operation cleanup after `initiateHandshake`
@@ -302,13 +302,18 @@ public struct P2PAuthenticatedConnectionEvidence: Sendable, Equatable {
 }
 
 @MainActor
-final class P2PListenerStartupGate {
+final class P2POperationCompletionGate: Equatable {
+    enum WaitError: Error, Equatable { case timedOut }
+
+    nonisolated static func == (lhs: P2POperationCompletionGate, rhs: P2POperationCompletionGate) -> Bool {
+        lhs === rhs
+    }
+
     private var result: Result<Void, Error>?
     private var waiters: [UUID: CheckedContinuation<Void, Error>] = [:]
     var waitingCount: Int { waiters.count }
 
-    /// Waiters retain their existing provisional admission deadlines. Cancelling one inbound
-    /// owner releases only that waiter, never the shared listener startup or another connection.
+    /// Cancelling one waiter never cancels the shared operation or another waiter.
     func wait() async throws {
         try Task.checkCancellation()
         let id = UUID()
@@ -324,6 +329,18 @@ final class P2PListenerStartupGate {
             }
         }
         try Task.checkCancellation()
+    }
+
+    func wait(timeout: Duration) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { try await self.wait() }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                throw WaitError.timedOut
+            }
+            defer { group.cancelAll() }
+            _ = try await group.next()
+        }
     }
 
     func finish(_ outcome: Result<Void, Error>) {
@@ -513,7 +530,7 @@ public class P2PConnectionManager: ObservableObject {
     private struct ListeningStartupOperation {
         let id: UUID
         let task: Task<Void, Error>
-        let readiness: P2PListenerStartupGate
+        let readiness: P2POperationCompletionGate
     }
 
     private enum ListeningAuthorityError: LocalizedError {
@@ -669,6 +686,8 @@ public class P2PConnectionManager: ObservableObject {
         let connectionGeneration: UUID
         let completionAuthority: P2PHandshakeOperationCompletionAuthority
         let modePolicy: PQCModePolicySnapshot
+        /// Completion is a lifecycle notification, never an authentication grant.
+        let completion: P2POperationCompletionGate
     }
     private var handshakeOperationOwnerByPeerId: [String: HandshakeOperationOwner] = [:]
     private struct AuthenticatedConnectionReceipt: Sendable {
@@ -3635,7 +3654,7 @@ public class P2PConnectionManager: ObservableObject {
         }
 
         let operationID = UUID()
-        let readiness = P2PListenerStartupGate()
+        let readiness = P2POperationCompletionGate()
         let task = Task { @MainActor [weak self] in
             guard let self else {
                 readiness.finish(.failure(CancellationError()))
@@ -5596,6 +5615,10 @@ public class P2PConnectionManager: ObservableObject {
             "p2p-inbound message peer=\(Self.protocolIdentityLogRedaction) bytes=\(unwrapped.count) existingDriver=\(handshakeDrivers[peerId] == nil ? 0 : 1) hasSession=\(hasStoredSessionMaterial(for: peerId) ? 1 : 0)"
         )
 
+        guard await awaitInitiatorPublicationIfNeeded(for: unwrapped, originLease: originLease) else {
+            return
+        }
+
         // 已有握手驱动器：交给握手状态机处理
         if let driver = handshakeDrivers[peerId] {
             guard handshakeDriverConnectionGenerationByPeerId[peerId] == originLease.generation else {
@@ -7432,6 +7455,61 @@ public class P2PConnectionManager: ObservableObject {
             "p2p-inbound driver-created peer=\(Self.protocolIdentityLogRedaction) stage=inbound-rekey suites=\(Self.smokeSanitize(messageA.supportedSuites.map(\.rawValue).joined(separator: ",")))"
         )
         return handshakeDrivers[peerId]
+    }
+
+    /// Finished may complete the driver's actor before the initiating task publishes its
+    /// authority and session. Retain the first app frame in the serial receive loop until
+    /// that exact operation terminates; the gate itself confers no authentication.
+    private func awaitInitiatorPublicationIfNeeded(
+        for frame: Data,
+        originLease: P2PConnectionLease<NWConnection>
+    ) async -> Bool {
+        let peerId = originLease.peerId
+        guard let driver = handshakeDrivers[peerId],
+              let owner = handshakeOperationOwnerByPeerId[peerId],
+              owner.completionAuthority == .initiatingTask,
+              owner.connectionGeneration == originLease.generation,
+              handshakeDriverConnectionGenerationByPeerId[peerId] == originLease.generation,
+              handshakeDriverOperationTokenByPeerId[peerId] == owner.token,
+              !isLikelyHandshakeControlPacket(frame) else {
+            return true
+        }
+
+        let state = await driver.getCurrentState()
+        guard connections.isCurrent(originLease, for: peerId) else { return false }
+        // Do not hold traffic before Finished: the next frame may be the Finished
+        // needed to establish this handshake, including during a rekey.
+        guard case .established(let authenticatedKeys) = state else { return true }
+        do {
+            if isCurrentHandshakeOperation(owner) {
+                try await owner.completion.wait(timeout: .seconds(10))
+            }
+            try Task.checkCancellation()
+        } catch {
+            if isCurrentHandshakeOperation(owner) {
+                await cleanupBrokenInboundConnection(
+                    originLease.connection,
+                    peerId: peerId,
+                    reason: "握手会话发布等待失败: \(Self.diagnosticErrorSummary(error))"
+                )
+            }
+            return false
+        }
+
+        // A failed commit, retired connection or newer rekey cannot consume this frame.
+        // A successful commit still goes through the normal AEAD and app admission path.
+        guard connections.isCurrent(originLease, for: peerId),
+              handshakeDrivers[peerId] == nil,
+              handshakeOperationOwnerByPeerId[peerId] == nil,
+              sessionKeyConnectionGenerationByPeerId[peerId] == originLease.generation,
+              let publishedKeys = sessionKeys[peerId],
+              publishedKeys.sessionId == authenticatedKeys.sessionId,
+              publishedKeys.receiveKey == authenticatedKeys.receiveKey,
+              publishedKeys.negotiatedSuite == authenticatedKeys.negotiatedSuite else {
+            SkyBridgeLogger.shared.debug("ℹ️ 会话发布期间失效的业务帧已丢弃")
+            return false
+        }
+        return true
     }
 
     private func isLikelyHandshakeControlPacket(_ data: Data) -> Bool {
@@ -12310,8 +12388,9 @@ public class P2PConnectionManager: ObservableObject {
             bootstrapRekeyTasks.removeValue(forKey: peerId)
             bootstrapRekeyOperationByPeerId.removeValue(forKey: peerId)
         }
-        if handshakeOperationOwnerByPeerId[peerId]?.connectionGeneration != lease.generation {
-            handshakeOperationOwnerByPeerId.removeValue(forKey: peerId)
+        if let previousOwner = handshakeOperationOwnerByPeerId[peerId],
+           previousOwner.connectionGeneration != lease.generation {
+            finishHandshakeOperation(previousOwner)
         }
         if let previousLease {
             invalidatePendingPairingIdentityRequests(
@@ -12609,7 +12688,8 @@ public class P2PConnectionManager: ObservableObject {
             peerId: peerId,
             connectionGeneration: lease.generation,
             completionAuthority: completionAuthority,
-            modePolicy: try PQCModePolicyStore.standard.snapshot()
+            modePolicy: try PQCModePolicyStore.standard.snapshot(),
+            completion: P2POperationCompletionGate()
         )
         handshakeOperationOwnerByPeerId[peerId] = owner
         invalidateAudioAdmissionTicket(for: peerId, generation: lease.generation)
@@ -12646,6 +12726,7 @@ public class P2PConnectionManager: ObservableObject {
         if handshakeOperationOwnerByPeerId[expected.peerId] == expected {
             handshakeOperationOwnerByPeerId.removeValue(forKey: expected.peerId)
         }
+        expected.completion.finish(.success(()))
     }
 
     private func detachHandshakeDriverIfOwned(
@@ -14438,6 +14519,35 @@ extension P2PConnectionManager {
             throw TestStateInstallationError.authenticatedSessionLeaseNotOwned
         }
         await handleReceivedMessage(frame, from: runtimePeerId, over: lease.connection)
+    }
+
+    /// Holds the manager's commit boundary after a real driver has authenticated.
+    /// No socket is started and no persistent trust or account permission is supplied.
+    func testInstallPendingHandshakePublication(driver: HandshakeDriver, keys: SessionKeys,
+                                               for runtimePeerId: String) throws -> UUID {
+        let connection = NWConnection(host: "127.0.0.1", port: 9, using: .tcp)
+        let lease = try installTrackedConnection(connection, for: runtimePeerId)
+        let owner = try beginHandshakeOperation(for: lease, completionAuthority: .initiatingTask)
+        handshakeDrivers[runtimePeerId] = driver
+        handshakeDriverConnectionGenerationByPeerId[runtimePeerId] = lease.generation
+        handshakeDriverOperationTokenByPeerId[runtimePeerId] = owner.token
+        guard setSessionKeys(keys, for: runtimePeerId, connectionGeneration: lease.generation) else {
+            throw TestStateInstallationError.authenticatedSessionLeaseNotOwned
+        }
+        return owner.token
+    }
+
+    func testHandshakePublicationWaiterCount(for runtimePeerId: String) -> Int {
+        handshakeOperationOwnerByPeerId[runtimePeerId]?.completion.waitingCount ?? 0
+    }
+
+    func testFinishHandshakePublication(for runtimePeerId: String, token: UUID) throws {
+        guard let owner = handshakeOperationOwnerByPeerId[runtimePeerId], owner.token == token else {
+            throw TestStateInstallationError.authenticatedSessionLeaseNotOwned
+        }
+        _ = detachHandshakeDriverIfOwned(for: runtimePeerId,
+            connectionGeneration: owner.connectionGeneration, operationToken: token)
+        finishHandshakeOperation(owner)
     }
 
     func testResolveRuntimePeerId(forAnyPeerId peerId: String) -> String {
