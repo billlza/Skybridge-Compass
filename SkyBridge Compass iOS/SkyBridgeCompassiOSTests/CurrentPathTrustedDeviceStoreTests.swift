@@ -1,5 +1,6 @@
 import XCTest
 import CloudKit
+import os
 @testable import SkyBridgeCompass_iOS
 
 private actor CloudTrustSyncGate {
@@ -1589,6 +1590,85 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
             ),
             stableId
         )
+    }
+
+    func testExactAuthorityLookupDoesNotRepeatJournalIOForUnrelatedDevices() throws {
+        let journalReads = OSAllocatedUnfairLock(initialState: 0)
+        let store = TrustedDeviceStore(testingLoad: { [] }, testingSave: { _ in },
+            pairingAcceptanceJournalExists: {
+                journalReads.withLock { $0 += 1 }
+                return false
+            })
+        let records = (0..<32).map { exactLookupRecord(index: $0) }
+        try store.replaceTrustedDevicesForTesting(records)
+        journalReads.withLock { $0 = 0 }
+        let key = protocolIdentityKey(.ed25519, seed: 1)
+        XCTAssertEqual(store.uniqueExactActiveProtocolIdentityAuthorityDeviceId(
+            algorithm: .ed25519, fingerprint: protocolIdentityFingerprint(algorithm: .ed25519, key: key),
+            publicKey: key), records[0].id)
+        XCTAssertLessThanOrEqual(journalReads.withLock { $0 }, 2,
+            "One exact-key lookup must not perform filesystem journal checks for unrelated records.")
+    }
+
+    func testExactAuthorityLookupPreservesLifecycleDominanceWithoutMatchingRawKey() throws {
+        let store = TrustedDeviceStore(testingLoad: { [] }, testingSave: { _ in },
+            pairingAcceptanceJournalExists: { false })
+        let active = exactLookupRecord(index: 0)
+        let key = protocolIdentityKey(.ed25519, seed: 1)
+        let fingerprint = protocolIdentityFingerprint(algorithm: .ed25519, key: key)
+        var tombstone = exactLookupRecord(index: 1)
+        tombstone.knownDeviceIds = [active.id]
+        tombstone.protocolIdentityKeyBindings = nil
+        tombstone.currentPathLifecycleState = .revoked
+        tombstone.currentPathLifecycleGeneration = 0
+        try store.replaceTrustedDevicesForTesting([active, tombstone])
+        XCTAssertNil(store.uniqueExactActiveProtocolIdentityAuthorityDeviceId(
+            algorithm: .ed25519, fingerprint: fingerprint, publicKey: key),
+            "A same-generation revocation by stable alias must dominate even without the queried key.")
+        var repaired = active
+        repaired.currentPathLifecycleGeneration = 1
+        try store.replaceTrustedDevicesForTesting([repaired, tombstone])
+        XCTAssertEqual(store.uniqueExactActiveProtocolIdentityAuthorityDeviceId(
+            algorithm: .ed25519, fingerprint: fingerprint, publicKey: key), repaired.id)
+        tombstone.currentPathLifecycleGeneration = 2
+        try store.replaceTrustedDevicesForTesting([repaired, tombstone])
+        XCTAssertNil(store.uniqueExactActiveProtocolIdentityAuthorityDeviceId(
+            algorithm: .ed25519, fingerprint: fingerprint, publicKey: key))
+    }
+
+    func testExactAuthorityLookupObservesJournalAndAmbiguousIdentityOnEveryCall() throws {
+        let journalExists = OSAllocatedUnfairLock(initialState: false)
+        let store = TrustedDeviceStore(testingLoad: { [] }, testingSave: { _ in },
+            pairingAcceptanceJournalExists: { journalExists.withLock { $0 } })
+        let active = exactLookupRecord(index: 0)
+        let key = protocolIdentityKey(.ed25519, seed: 1)
+        let fingerprint = protocolIdentityFingerprint(algorithm: .ed25519, key: key)
+        try store.replaceTrustedDevicesForTesting([active])
+        XCTAssertEqual(store.uniqueExactActiveProtocolIdentityAuthorityDeviceId(
+            algorithm: .ed25519, fingerprint: fingerprint, publicKey: key), active.id)
+        journalExists.withLock { $0 = true }
+        XCTAssertNil(store.uniqueExactActiveProtocolIdentityAuthorityDeviceId(
+            algorithm: .ed25519, fingerprint: fingerprint, publicKey: key))
+        journalExists.withLock { $0 = false }
+        var duplicate = exactLookupRecord(index: 1)
+        duplicate.protocolPublicKeyFingerprint = active.protocolPublicKeyFingerprint
+        duplicate.protocolIdentityKeyBindings = active.protocolIdentityKeyBindings
+        try store.replaceTrustedDevicesForTesting([active, duplicate])
+        XCTAssertNil(store.uniqueExactActiveProtocolIdentityAuthorityDeviceId(
+            algorithm: .ed25519, fingerprint: fingerprint, publicKey: key))
+    }
+
+    private func exactLookupRecord(index: Int) -> TrustedDeviceStore.TrustedDevice {
+        let key = protocolIdentityKey(.ed25519, seed: UInt8(index + 1))
+        let fingerprint = protocolIdentityFingerprint(algorithm: .ed25519, key: key)
+        let id = "id:exact-lookup-device-\(index)"
+        return .init(id: id, name: "Lookup fixture", platform: .macOS, ipAddress: nil,
+            protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+            protocolPublicKeyFingerprint: fingerprint,
+            protocolIdentityKeyBindings: [.init(algorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+                fingerprint: fingerprint, publicKeyBytes: key, approvedAt: Date(timeIntervalSince1970: 1),
+                source: "pib-1-operator-approval")],
+            currentDeviceId: id, currentPathLifecycleState: .active, currentPathLifecycleGeneration: 0)
     }
 
     func testRecordAuthenticatedRemoteAuthorityKeepsUnknownEphemeralKeySessionOnly() throws {

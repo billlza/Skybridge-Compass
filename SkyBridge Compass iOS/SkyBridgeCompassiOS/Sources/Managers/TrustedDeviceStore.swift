@@ -1778,11 +1778,16 @@ public final class TrustedDeviceStore: ObservableObject {
             return nil
         }
         let matchingRecords = trustedDevices.filter { record in
-            isActive(record) && protocolIdentityKeyBindings(for: record).contains { binding in
+            // Audio checks this authority before every effect. Resolve the exact
+            // key first so unrelated rows do not repeat journal I/O and alias
+            // expansion. The matching row still checks the live journal and its
+            // lifecycle against the entire current store, including tombstones
+            // which have no raw key binding.
+            protocolIdentityKeyBindings(for: record).contains { binding in
                 binding.algorithm == algorithm.rawValue
                     && binding.fingerprint == normalizedFingerprint
                     && binding.publicKeyBytes == publicKey
-            }
+            } && isActive(record)
         }
         guard matchingRecords.count == 1 else { return nil }
         return normalizedTrustedDeviceIdentifier(
@@ -2258,20 +2263,20 @@ public final class TrustedDeviceStore: ObservableObject {
         guard (device.currentPathLifecycleState ?? .active) == .active else { return false }
 
         let deviceOrderingKey = lifecycleOrderingKey(for: device)
+        let newerRecords = records.filter { lifecycleOrderingKey(for: $0) > deviceOrderingKey }
+        guard !newerRecords.isEmpty else { return true }
         let stableAliases = stableTrustedAliasCandidates(for: device)
         let fingerprints = authorityFingerprints(for: device)
 
         // Legacy or partially-synced stores can contain duplicate authority
         // rows. Never authorize an older positive row when an equivalent row
         // carries a later lifecycle transition (including a revocation).
-        return !records.contains { candidate in
-            let representsSameAuthority = candidate.id == device.id
+        return !newerRecords.contains { candidate in
+            candidate.id == device.id
                 || (!stableAliases.isEmpty
                     && !stableTrustedAliasCandidates(for: candidate).isDisjoint(with: stableAliases))
                 || (!fingerprints.isEmpty
                     && !authorityFingerprints(for: candidate).isDisjoint(with: fingerprints))
-            guard representsSameAuthority else { return false }
-            return lifecycleOrderingKey(for: candidate) > deviceOrderingKey
         }
     }
 
