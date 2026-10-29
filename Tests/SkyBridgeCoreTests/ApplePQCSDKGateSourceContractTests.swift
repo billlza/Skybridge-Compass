@@ -928,14 +928,17 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
         let loadCommands = try XCTUnwrap(String(data: data, encoding: .utf8))
         let paths = loadCommands.components(separatedBy: "cmd LC_RPATH").dropFirst().compactMap { command in
             command.components(separatedBy: "\n").first { $0.trimmingCharacters(in: .whitespaces).hasPrefix("path ") }
-                .map { $0.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "path ", with: "")
+                .map { String($0.trimmingCharacters(in: .whitespaces).dropFirst("path ".count))
                     .components(separatedBy: " (offset ")[0] }
         }
+        // SwiftPM's native builder spells the product-root path with a trailing
+        // slash; Swift Build omits it. Both checks must compare path semantics.
+        let normalizedPaths = paths.map { ($0 as NSString).standardizingPath }
         XCTAssertFalse(paths.isEmpty)
-        XCTAssertEqual(Set(paths.map { ($0 as NSString).standardizingPath }).count, paths.count,
-            "The linked XCTest image must not contain duplicate runtime search paths")
-        XCTAssertEqual(paths.filter { $0 == "@loader_path/../../.." }.count, 1,
-            "SwiftPM must provide the product-root runtime path exactly once")
+        XCTAssertEqual(Set(normalizedPaths).count, paths.count,
+            "The linked XCTest image must not contain duplicate runtime search paths: \(paths)")
+        XCTAssertEqual(normalizedPaths.filter { $0 == "@loader_path/../../.." }.count, 1,
+            "SwiftPM must provide the product-root runtime path exactly once: \(paths)")
     }
 
     func testSwiftPMMetalResourcesDoNotCheckInCompilerIntermediates() throws {
