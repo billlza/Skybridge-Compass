@@ -14,11 +14,13 @@ use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Response, Server, StatusCode};
 use ice::candidate::candidate_relay::CandidateRelayConfig;
 use log::{error, info, trace};
+use rtc::crypto;
+use rtc::data_channel::RTCDataChannelId;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCDataChannelEvent;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::RTCMessage;
+use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::state::RTCIceConnectionState;
 use rtc::peer_connection::state::RTCPeerConnectionState;
@@ -186,10 +188,13 @@ async fn run_main_loop(
         realm: turn_realm.to_string(),
         software: String::new(),
         rto_in_ms: 0,
+        allocation_refresh_interval_cap: None,
     };
 
-    let mut turn_client = Client::new(cfg)?;
-    let allocate_tid = turn_client.allocate()?;
+    // An application is the outside caller, so it selects the crypto provider explicitly.
+    // Library code never resolves a default.
+    let mut turn_client = Client::new(cfg, crypto::default_provider()?)?;
+    let allocate_tid = turn_client.allocate(Instant::now())?;
     let mut relay_addr: Option<SocketAddr> = None;
     let relay_local_addr = local_addr;
     let mut relay_candidate_added = false;
@@ -200,7 +205,7 @@ async fn run_main_loop(
 
     // State for the main loop
     let mut peer_connection: Option<RTCPeerConnection> = None;
-    let mut data_channel_id: Option<u16> = None;
+    let mut data_channel_id: Option<RTCDataChannelId> = None;
     let mut last_send = Instant::now();
     let mut ws_stream: Option<WebSocketStream<TcpStream>> = None;
     let mut buf = vec![0; 2000];
@@ -225,44 +230,42 @@ async fn run_main_loop(
                 Event::TransactionTimeout(_) => {
                     error!("TURN transaction timeout");
                 }
-                Event::AllocateResponse(tid, addr) => {
-                    if tid == allocate_tid {
-                        println!("TURN allocation successful, relay address: {}", addr);
-                        relay_addr = Some(addr);
+                Event::AllocateResponse(tid, addr) if tid == allocate_tid => {
+                    println!("TURN allocation successful, relay address: {}", addr);
+                    relay_addr = Some(addr);
 
-                        // If peer connection already exists and we haven't added the relay candidate yet, add it now
-                        if let Some(pc) = peer_connection.as_mut() {
-                            if !relay_candidate_added {
-                                match add_relay_candidate(pc, addr, relay_local_addr) {
-                                    Ok(local_candidate_init) => {
-                                        relay_candidate_added = true;
-                                        println!(
-                                            "Added local Relay ICE candidate: {}",
-                                            local_candidate_init.candidate
-                                        );
+                    // If peer connection already exists and we haven't added the relay candidate yet, add it now
+                    if let Some(pc) = peer_connection.as_mut() {
+                        if !relay_candidate_added {
+                            match add_relay_candidate(pc, addr, relay_local_addr) {
+                                Ok(local_candidate_init) => {
+                                    relay_candidate_added = true;
+                                    println!(
+                                        "Added local Relay ICE candidate: {}",
+                                        local_candidate_init.candidate
+                                    );
 
-                                        // Send to browser via WebSocket
-                                        if let Some(ref mut ws) = ws_stream {
-                                            if let Ok(json) =
-                                                serde_json::to_string(&local_candidate_init)
+                                    // Send to browser via WebSocket
+                                    if let Some(ref mut ws) = ws_stream {
+                                        if let Ok(json) =
+                                            serde_json::to_string(&local_candidate_init)
+                                        {
+                                            info!(
+                                                "Sending local ICE candidate: {}",
+                                                local_candidate_init.candidate
+                                            );
+                                            if let Err(e) =
+                                                ws.send(Message::Text(json.into())).await
                                             {
-                                                info!(
-                                                    "Sending local ICE candidate: {}",
-                                                    local_candidate_init.candidate
+                                                error!(
+                                                    "Failed to send relay candidate to browser: {}",
+                                                    e
                                                 );
-                                                if let Err(e) =
-                                                    ws.send(Message::Text(json.into())).await
-                                                {
-                                                    error!(
-                                                        "Failed to send relay candidate to browser: {}",
-                                                        e
-                                                    );
-                                                }
                                             }
                                         }
                                     }
-                                    Err(e) => error!("Failed to add relay candidate: {}", e),
                                 }
+                                Err(e) => error!("Failed to add relay candidate: {}", e),
                             }
                         }
                     }
@@ -270,11 +273,11 @@ async fn run_main_loop(
                 Event::AllocateError(_, err) => {
                     error!("TURN allocation error: {}", err);
                 }
-                Event::CreatePermissionResponse(tid, peer_addr) => {
-                    if pending_permissions.remove(&tid).is_some() {
-                        println!("CreatePermission for peer addr {} is granted", peer_addr);
-                        granted_permissions.insert(peer_addr);
-                    }
+                Event::CreatePermissionResponse(tid, peer_addr)
+                    if pending_permissions.remove(&tid).is_some() =>
+                {
+                    println!("CreatePermission for peer addr {} is granted", peer_addr);
+                    granted_permissions.insert(peer_addr);
                 }
                 Event::CreatePermissionError(_, err) => {
                     error!("CreatePermission error: {}", err);
@@ -309,10 +312,11 @@ async fn run_main_loop(
                     // Check if we have permission for this peer
                     if granted_permissions.contains(&msg.transport.peer_addr) {
                         // Send through TURN relay
-                        if let Err(err) = turn_client
-                            .relay(relay)?
-                            .send_to(&msg.message, msg.transport.peer_addr)
-                        {
+                        if let Err(err) = turn_client.relay(relay)?.send_to(
+                            msg.now,
+                            &msg.message,
+                            msg.transport.peer_addr,
+                        ) {
                             error!("TURN relay send error: {}", err);
                         } else {
                             trace!(
@@ -349,27 +353,26 @@ async fn run_main_loop(
                             println!("Peer Connection connected!");
                         }
                     }
-                    RTCPeerConnectionEvent::OnDataChannel(dc_event) => match dc_event {
-                        RTCDataChannelEvent::OnOpen(channel_id) => {
-                            if let Some(dc) = pc.data_channel(channel_id) {
-                                println!(
-                                    "{} - Data channel '{}'-'{}' open",
-                                    chrono::Local::now().format("%H:%M:%S"),
-                                    dc.label(),
-                                    dc.id()
-                                );
-                                data_channel_id = Some(channel_id);
-                                last_send = Instant::now();
-                            }
+                    RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(
+                        channel_id,
+                    )) => {
+                        if let Some(dc) = pc.data_channel(channel_id) {
+                            println!(
+                                "{} - Data channel '{}'-'{}' open",
+                                chrono::Local::now().format("%H:%M:%S"),
+                                dc.label(),
+                                dc.id()
+                            );
+                            data_channel_id = Some(channel_id);
+                            last_send = Instant::now();
                         }
-                        _ => {}
-                    },
+                    }
                     _ => {}
                 }
             }
 
             // Poll reads (data channel messages)
-            while let Some(message) = pc.poll_read() {
+            while let Some(TaggedRTCMessage { message, .. }) = pc.poll_read() {
                 match message {
                     RTCMessage::RtpPacket(_, _) => {}
                     RTCMessage::RtcpPacket(_, _) => {}
@@ -378,6 +381,7 @@ async fn run_main_loop(
                             .unwrap_or_default();
                         println!("Message from DataChannel: '{}'", msg_str);
                     }
+                    _ => {}
                 }
             }
 
@@ -387,7 +391,7 @@ async fn run_main_loop(
                     if let Some(mut dc) = pc.data_channel(channel_id) {
                         let message = chrono::Local::now().to_string();
                         println!("Data Channel {} - send {}", channel_id, message);
-                        if let Err(e) = dc.send_text(message) {
+                        if let Err(e) = dc.send_text(Instant::now(), message) {
                             println!(
                                 "{} - DataChannel closed, stopping send loop: {}",
                                 chrono::Local::now().format("%H:%M:%S"),
@@ -467,7 +471,7 @@ async fn run_main_loop(
 
                                                 // Create permission if relay is allocated
                                                 if let Some(relay) = relay_addr {
-                                                    if let Some(tid) = turn_client.relay(relay)?.create_permission(addr)? {
+                                                    if let Some(tid) = turn_client.relay(relay)?.create_permission(Instant::now(), addr)? {
                                                         pending_permissions.insert(tid, addr);
                                                         println!("Requesting permission for peer {}", addr);
                                                     }
@@ -575,8 +579,9 @@ async fn run_main_loop(
                                     WsMessage::Offer(offer) => {
                                         println!("Received offer, creating peer connection");
 
-                                        let mut setting_engine = SettingEngine::default();
-                                        setting_engine.set_answering_dtls_role(RTCDtlsRole::Server)?;
+                                        let setting_engine = SettingEngineBuilder::new()
+                                            .with_answering_dtls_role(RTCDtlsRole::Server)
+                                            .build();
 
                                         let config = RTCConfigurationBuilder::new()
                                             .with_ice_servers(vec![RTCIceServer {
@@ -588,16 +593,16 @@ async fn run_main_loop(
 
                                             .build();
 
-                                        let mut pc = RTCPeerConnectionBuilder::new().with_configuration(config) .with_setting_engine(setting_engine).build()?;
+                                        let mut pc = RTCPeerConnectionBuilder::new().with_configuration(config) .with_setting_engine(setting_engine).build(Instant::now())?;
                                         println!("Created peer connection");
 
                                         // Set remote description
                                         println!("Setting remote description {}", offer);
-                                        pc.set_remote_description(offer)?;
+                                        pc.set_remote_description(Instant::now(), offer)?;
 
                                         // Create answer
                                         let answer = pc.create_answer(None)?;
-                                        pc.set_local_description(answer.clone())?;
+                                        pc.set_local_description(Instant::now(), answer.clone())?;
                                         println!("Created and set answer {}", answer);
 
                                         // Now that both local and remote descriptions are set,

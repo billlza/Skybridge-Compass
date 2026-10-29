@@ -12,7 +12,7 @@
 //! - Codec information
 //! - ICE candidate information
 //!
-//! # Example
+//! # Examples
 //!
 //! ```
 //! use rtc::peer_connection::RTCPeerConnection;
@@ -37,7 +37,7 @@
 
 use ::serde::{Deserialize, Serialize};
 use shared::serde::instant_to_epoch;
-use std::time::Instant;
+use shared::time::SystemInstant;
 
 pub mod certificate;
 pub mod codec;
@@ -59,6 +59,7 @@ pub mod transport;
 /// Values are serialized using the W3C-specified lowercase hyphenated format
 /// (e.g., `InboundRTP` serializes to `"inbound-rtp"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum RTCStatsType {
     /// Statistics for a media codec.
     #[serde(rename = "codec")]
@@ -127,7 +128,7 @@ pub struct RTCStats {
     ///
     /// Serialized as milliseconds since the Unix epoch for W3C compatibility.
     #[serde(with = "instant_to_epoch")]
-    pub timestamp: Instant,
+    pub timestamp: SystemInstant,
 
     /// The type of this statistics object.
     #[serde(rename = "type")]
@@ -142,6 +143,7 @@ pub struct RTCStats {
 /// This enum indicates why the video encoder may have reduced quality
 /// (resolution, frame rate, or bitrate) during encoding.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum RTCQualityLimitationReason {
     /// No quality limitation is active.
     #[default]

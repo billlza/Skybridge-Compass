@@ -16,11 +16,12 @@ use clap::Parser;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Client, Method, Request, Response, Server, StatusCode};
 use log::{error, info};
+use rtc::data_channel::RTCDataChannelId;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCDataChannelEvent;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::RTCMessage;
+use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::state::RTCIceConnectionState;
 use rtc::peer_connection::state::RTCPeerConnectionState;
@@ -206,7 +207,7 @@ async fn main() -> Result<()> {
     let mut peer_connection: Option<RTCPeerConnection> = None;
     let mut tcp_stream: Option<TcpStream> = None;
     let mut local_addr: Option<SocketAddr> = None;
-    let mut data_channel_id: Option<u16> = None;
+    let mut data_channel_id: Option<RTCDataChannelId> = None;
     let mut last_send = Instant::now();
     let mut buf = vec![0u8; 2000];
     let mut tcp_decoder = TcpFrameDecoder::new();
@@ -238,26 +239,21 @@ async fn main() -> Result<()> {
                             println!("[Answer] Connected!");
                         }
                     }
-                    RTCPeerConnectionEvent::OnDataChannel(dc_event) => match dc_event {
-                        RTCDataChannelEvent::OnOpen(channel_id) => {
-                            if let Some(dc) = pc.data_channel(channel_id) {
-                                println!(
-                                    "[Answer] Data channel '{}'-'{}' open",
-                                    dc.label(),
-                                    dc.id()
-                                );
-                                data_channel_id = Some(channel_id);
-                                last_send = Instant::now();
-                            }
+                    RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(
+                        channel_id,
+                    )) => {
+                        if let Some(dc) = pc.data_channel(channel_id) {
+                            println!("[Answer] Data channel '{}'-'{}' open", dc.label(), dc.id());
+                            data_channel_id = Some(channel_id);
+                            last_send = Instant::now();
                         }
-                        _ => {}
-                    },
+                    }
                     _ => {}
                 }
             }
 
             // Poll reads (data channel messages)
-            while let Some(message) = pc.poll_read() {
+            while let Some(TaggedRTCMessage { message, .. }) = pc.poll_read() {
                 match message {
                     RTCMessage::RtpPacket(_, _) => {}
                     RTCMessage::RtcpPacket(_, _) => {}
@@ -266,6 +262,7 @@ async fn main() -> Result<()> {
                             .unwrap_or_default();
                         println!("[Answer] Message from DataChannel: '{}'", msg_str);
                     }
+                    _ => {}
                 }
             }
 
@@ -274,7 +271,7 @@ async fn main() -> Result<()> {
                 if Instant::now().duration_since(last_send) >= Duration::from_secs(3) {
                     if let Some(mut dc) = pc.data_channel(channel_id) {
                         let message = format!("[Answer] {}", chrono::Local::now());
-                        if let Err(e) = dc.send_text(message) {
+                        if let Err(e) = dc.send_text(Instant::now(), message) {
                             println!("[Answer] DataChannel send error: {}", e);
                             data_channel_id = None;
                         }
@@ -388,22 +385,23 @@ async fn main() -> Result<()> {
                             };
                             local_addr = Some(SocketAddr::new(candidate_ip, tcp_local.port()));
 
-                            let mut setting_engine = SettingEngine::default();
-                            setting_engine.set_answering_dtls_role(RTCDtlsRole::Client)?;
-                            setting_engine.set_network_types(vec![
-                                ice::network_type::NetworkType::Tcp4,
-                                ice::network_type::NetworkType::Tcp6,
-                            ]);
+                            let setting_engine = SettingEngineBuilder::new()
+                                .with_answering_dtls_role(RTCDtlsRole::Client)
+                                .with_network_types(vec![
+                                    ice::network_type::NetworkType::Tcp4,
+                                    ice::network_type::NetworkType::Tcp6,
+                                ])
+                                .build();
 
                             let config = RTCConfigurationBuilder::new()
                                 .build();
 
-                            let mut pc = RTCPeerConnectionBuilder::new().with_configuration(config) .with_setting_engine(setting_engine).build()?;
+                            let mut pc = RTCPeerConnectionBuilder::new().with_configuration(config) .with_setting_engine(setting_engine).build(Instant::now())?;
                             println!("[Answer] Created peer connection");
 
                             // Set remote description
                             println!("[Answer] set_remote_description {}", offer);
-                            pc.set_remote_description(offer)?;
+                            pc.set_remote_description(Instant::now(), offer)?;
 
                             // Create TCP passive candidate
                             let candidate = CandidateHostConfig {
@@ -425,7 +423,7 @@ async fn main() -> Result<()> {
 
                             // Create and set answer
                             let answer = pc.create_answer(None)?;
-                            pc.set_local_description(answer.clone())?;
+                            pc.set_local_description(Instant::now(), answer.clone())?;
                             println!("[Answer] set_local_description {}", answer);
 
                             // Send answer back

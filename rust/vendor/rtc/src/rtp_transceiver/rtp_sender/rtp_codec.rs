@@ -10,6 +10,7 @@ use std::fmt;
 
 /// Codec kind identifying the media type.
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum RtpCodecKind {
     /// Unspecified or unknown codec type
     #[default]
@@ -22,6 +23,10 @@ pub enum RtpCodecKind {
     /// Video codec
     #[serde(rename = "video")]
     Video = 2,
+
+    /// Non-audio/video RTP-carried application data
+    #[serde(rename = "application")]
+    Application = 3,
 }
 
 impl From<&str> for RtpCodecKind {
@@ -29,6 +34,7 @@ impl From<&str> for RtpCodecKind {
         match raw {
             "audio" => RtpCodecKind::Audio,
             "video" => RtpCodecKind::Video,
+            "application" => RtpCodecKind::Application,
             _ => RtpCodecKind::Unspecified,
         }
     }
@@ -39,6 +45,7 @@ impl From<u8> for RtpCodecKind {
         match v {
             1 => RtpCodecKind::Audio,
             2 => RtpCodecKind::Video,
+            3 => RtpCodecKind::Application,
             _ => RtpCodecKind::Unspecified,
         }
     }
@@ -49,6 +56,7 @@ impl fmt::Display for RtpCodecKind {
         let s = match *self {
             RtpCodecKind::Audio => "audio",
             RtpCodecKind::Video => "video",
+            RtpCodecKind::Application => "application",
             RtpCodecKind::Unspecified => UNSPECIFIED_STR,
         };
         write!(f, "{s}")
@@ -59,7 +67,7 @@ impl fmt::Display for RtpCodecKind {
 ///
 /// ## Specifications
 ///
-/// * [W3C](https://w3c.github.io/webrtc-pc/#dictionary-rtcrtpcodeccapability-members)
+/// * [W3C](https://www.w3.org/TR/webrtc/#dictionary-rtcrtpcodec-members)
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct RTCRtpCodec {
     /// MIME type of the codec (e.g., "video/VP8", "audio/opus")
@@ -105,6 +113,8 @@ impl RTCRtpCodec {
             Ok(Box::<rtp::codec::g7xx::G7xxPayloader>::default())
         } else if mime_type == MIME_TYPE_AV1.to_lowercase() {
             Ok(Box::<rtp::codec::av1::Av1Payloader>::default())
+        } else if mime_type == MIME_TYPE_SMPTE336M.to_lowercase() {
+            Ok(Box::<rtp::codec::smpte336m::Smpte336mPayloader>::default())
         } else {
             Err(Error::ErrNoPayloaderForCodec)
         }
@@ -244,6 +254,23 @@ pub(crate) fn parse_rtx_apt(sdp_fmtp_line: &str) -> Option<PayloadType> {
         .find_map(|value| value.trim().parse::<PayloadType>().ok())
 }
 
+/// Whether `codec` repairs another stream rather than carrying media of its own.
+///
+/// Covers retransmission (RTX, RFC 4588) and forward error correction (FlexFEC, ULPFEC, RED).
+/// These are not alternative media formats a peer chooses between — they accompany whichever
+/// primary codec was chosen — which is why codec preferences leave them in place. See
+/// [setCodecPreferences](https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-setcodecpreferences):
+///
+/// > Codecs of type RTX, RED and FEC are always supported […] and are not affected by this method.
+pub(crate) fn is_repair_codec(codec: &RTCRtpCodec) -> bool {
+    let mime_type = codec.mime_type.to_lowercase();
+    let subtype = mime_type
+        .split_once('/')
+        .map_or(mime_type.as_str(), |(_, subtype)| subtype);
+
+    matches!(subtype, "rtx" | "ulpfec" | "red") || subtype.starts_with("flexfec")
+}
+
 // For now, only FlexFEC is supported.
 pub(crate) fn find_fec_payload_type(haystack: &[RTCRtpCodecParameters]) -> Option<PayloadType> {
     for c in haystack {
@@ -290,7 +317,7 @@ pub(crate) fn rtcp_feedback_intersection(
 }
 
 #[cfg(test)]
-mod rtx_apt_tests {
+mod rtx_apt_test {
     use super::{RTCRtpCodec, RTCRtpCodecParameters, find_rtx_payload_type, parse_rtx_apt};
 
     fn rtx(payload_type: u8, fmtp: &str) -> RTCRtpCodecParameters {

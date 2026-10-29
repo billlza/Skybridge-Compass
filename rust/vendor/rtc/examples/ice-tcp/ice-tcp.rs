@@ -21,11 +21,12 @@ use clap::Parser;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use log::{error, info};
+use rtc::data_channel::RTCDataChannelId;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCDataChannelEvent;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::RTCMessage;
+use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::state::RTCIceConnectionState;
 use rtc::peer_connection::state::RTCPeerConnectionState;
@@ -197,7 +198,7 @@ async fn run_main_loop(
     let mut peer_connection: Option<RTCPeerConnection> = None;
     let mut tcp_stream: Option<TcpStream> = None;
     let mut local_addr: Option<SocketAddr> = None;
-    let mut data_channel_id: Option<u16> = None;
+    let mut data_channel_id: Option<RTCDataChannelId> = None;
     let mut last_send = Instant::now();
     let mut buf = vec![0u8; 2000];
     let mut tcp_decoder = TcpFrameDecoder::new();
@@ -231,27 +232,26 @@ async fn run_main_loop(
                             println!("Peer Connection connected!");
                         }
                     }
-                    RTCPeerConnectionEvent::OnDataChannel(dc_event) => match dc_event {
-                        RTCDataChannelEvent::OnOpen(channel_id) => {
-                            if let Some(dc) = pc.data_channel(channel_id) {
-                                println!(
-                                    "{} - Data channel '{}'-'{}' open",
-                                    chrono::Local::now().format("%H:%M:%S"),
-                                    dc.label(),
-                                    dc.id()
-                                );
-                                data_channel_id = Some(channel_id);
-                                last_send = Instant::now();
-                            }
+                    RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(
+                        channel_id,
+                    )) => {
+                        if let Some(dc) = pc.data_channel(channel_id) {
+                            println!(
+                                "{} - Data channel '{}'-'{}' open",
+                                chrono::Local::now().format("%H:%M:%S"),
+                                dc.label(),
+                                dc.id()
+                            );
+                            data_channel_id = Some(channel_id);
+                            last_send = Instant::now();
                         }
-                        _ => {}
-                    },
+                    }
                     _ => {}
                 }
             }
 
             // Poll reads (data channel messages)
-            while let Some(message) = pc.poll_read() {
+            while let Some(TaggedRTCMessage { message, .. }) = pc.poll_read() {
                 match message {
                     RTCMessage::RtpPacket(_, _) => {}
                     RTCMessage::RtcpPacket(_, _) => {}
@@ -260,6 +260,7 @@ async fn run_main_loop(
                             .unwrap_or_default();
                         println!("Message from DataChannel: '{}'", msg_str);
                     }
+                    _ => {}
                 }
             }
 
@@ -268,7 +269,7 @@ async fn run_main_loop(
                 if Instant::now().duration_since(last_send) >= Duration::from_secs(3) {
                     if let Some(mut dc) = pc.data_channel(channel_id) {
                         let message = chrono::Local::now().to_string();
-                        if let Err(e) = dc.send_text(message) {
+                        if let Err(e) = dc.send_text(Instant::now(), message) {
                             println!(
                                 "{} - DataChannel closed, stopping send loop: {}",
                                 chrono::Local::now().format("%H:%M:%S"),
@@ -388,19 +389,20 @@ async fn run_main_loop(
                             // Set local_addr to match the candidate IP
                             local_addr = Some(SocketAddr::new(candidate_ip, tcp_local.port()));
 
-                            let mut setting_engine = SettingEngine::default();
-                            setting_engine.set_answering_dtls_role(RTCDtlsRole::Client)?;
+                            let setting_engine = SettingEngineBuilder::new()
+                                .with_answering_dtls_role(RTCDtlsRole::Client)
+                                .build();
 
                             let config = RTCConfigurationBuilder::new()
 
                                 .build();
 
-                            let mut pc = RTCPeerConnectionBuilder::new().with_configuration(config)  .with_setting_engine(setting_engine).build()?;
+                            let mut pc = RTCPeerConnectionBuilder::new().with_configuration(config)  .with_setting_engine(setting_engine).build(Instant::now())?;
                             println!("Created peer connection");
 
                             // Set remote description
                             println!("Setting remote description {}", offer);
-                            pc.set_remote_description(offer)?;
+                            pc.set_remote_description(Instant::now(), offer)?;
 
                             // Create TCP passive candidate using the same IP
                             let candidate = CandidateHostConfig {
@@ -423,7 +425,7 @@ async fn run_main_loop(
                             // Create and set answer - includes the TCP candidate in SDP
                             let answer = pc.create_answer(None)?;
                             println!("Answer with TCP candidate: {}", answer);
-                            pc.set_local_description(answer.clone())?;
+                            pc.set_local_description(Instant::now(), answer.clone())?;
 
                             // Send answer back via HTTP
                             let _ = response_tx.send(answer);

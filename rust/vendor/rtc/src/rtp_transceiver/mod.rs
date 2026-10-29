@@ -17,11 +17,12 @@
 //! ## Adding a transceiver from a track
 //!
 //! ```no_run
+//! # use std::time::Instant;
 //! # use rtc::peer_connection::RTCPeerConnectionBuilder;
 //! # use rtc::media_stream::MediaStreamTrack;
 //! # use rtc::rtp_transceiver::{RTCRtpTransceiverInit, RTCRtpTransceiverDirection};
 //! # fn example(audio_track: MediaStreamTrack) -> Result<(), Box<dyn std::error::Error>> {
-//! let mut peer_connection = RTCPeerConnectionBuilder::new().build()?;
+//! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
 //! // Add a transceiver for sending audio
 //! let init = RTCRtpTransceiverInit {
@@ -40,11 +41,12 @@
 //! ## Adding a transceiver by media kind
 //!
 //! ```no_run
+//! # use std::time::Instant;
 //! # use rtc::peer_connection::RTCPeerConnectionBuilder;
 //! # use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
 //! # use rtc::rtp_transceiver::{RTCRtpTransceiverInit, RTCRtpTransceiverDirection};
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let mut peer_connection = RTCPeerConnectionBuilder::new().build()?;
+//! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
 //! // Add a video transceiver for receiving only
 //! let init = RTCRtpTransceiverInit {
@@ -63,10 +65,11 @@
 //! ## Controlling transceiver direction
 //!
 //! ```no_run
+//! # use std::time::Instant;
 //! # use rtc::peer_connection::RTCPeerConnectionBuilder;
 //! # use rtc::rtp_transceiver::RTCRtpTransceiverDirection;
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let mut peer_connection = RTCPeerConnectionBuilder::new().build()?;
+//! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
 //! // Iterate through transceivers and change direction
 //! for transceiver_id in peer_connection.get_transceivers() {
@@ -81,10 +84,11 @@
 //! ## Setting codec preferences
 //!
 //! ```no_run
+//! # use std::time::Instant;
 //! # use rtc::peer_connection::RTCPeerConnectionBuilder;
 //! # use rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
 //! # fn example(preferred_codecs: Vec<RTCRtpCodecParameters>) -> Result<(), Box<dyn std::error::Error>> {
-//! let mut peer_connection = RTCPeerConnectionBuilder::new().build()?;
+//! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
 //! // Codec preferences would be set through peer connection methods
 //! // The exact API depends on your implementation
@@ -101,7 +105,6 @@ use crate::peer_connection::RTCPeerConnection;
 use crate::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
 use crate::rtp_transceiver::rtp_sender::rtp_encoding_parameters::RTCRtpEncodingParameters;
 pub use direction::RTCRtpTransceiverDirection;
-use interceptor::{Interceptor, NoopInterceptor};
 use log::trace;
 use shared::error::Result;
 
@@ -118,7 +121,7 @@ pub mod rtp_sender;
 ///
 /// # Specification
 ///
-/// See [RFC 3550 Section 3](https://tools.ietf.org/html/rfc3550#section-3).
+/// See [RFC 3550 Section 3](https://datatracker.ietf.org/doc/html/rfc3550#section-3).
 #[allow(clippy::upper_case_acronyms)]
 pub type SSRC = u32;
 
@@ -129,7 +132,7 @@ pub type SSRC = u32;
 ///
 /// # Specification
 ///
-/// See [RFC 3550 Section 3](https://tools.ietf.org/html/rfc3550#section-3).
+/// See [RFC 3550 Section 3](https://datatracker.ietf.org/doc/html/rfc3550#section-3).
 pub type PayloadType = u8;
 
 /// RTP stream identifier.
@@ -138,7 +141,7 @@ pub type PayloadType = u8;
 ///
 /// # Specification
 ///
-/// See [RFC 8852 Section 3.1](https://tools.ietf.org/html/rfc8852#section-3.1).
+/// See [RFC 8852 Section 3.1](https://datatracker.ietf.org/doc/html/rfc8852#section-3.1).
 pub type RtpStreamId = String;
 
 /// Repaired RTP stream identifier.
@@ -147,7 +150,7 @@ pub type RtpStreamId = String;
 ///
 /// # Specification
 ///
-/// See [RFC 8852 Section 3.2](https://tools.ietf.org/html/rfc8852#section-3.2).
+/// See [RFC 8852 Section 3.2](https://datatracker.ietf.org/doc/html/rfc8852#section-3.2).
 pub type RepairedStreamId = String;
 
 /// Internal identifier for an RTP transceiver.
@@ -213,18 +216,12 @@ pub struct RTCRtpTransceiverInit {
 /// # Specification
 ///
 /// See [RTCRtpTransceiver](https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver) in the W3C WebRTC specification.
-pub struct RTCRtpTransceiver<'a, I = NoopInterceptor>
-where
-    I: Interceptor,
-{
+pub struct RTCRtpTransceiver<'a> {
     pub(crate) id: RTCRtpTransceiverId,
-    pub(crate) peer_connection: &'a mut RTCPeerConnection<I>,
+    pub(crate) peer_connection: &'a mut RTCPeerConnection,
 }
 
-impl<I> RTCRtpTransceiver<'_, I>
-where
-    I: Interceptor,
-{
+impl RTCRtpTransceiver<'_> {
     /// Returns the media stream identification tag (mid) for this transceiver.
     ///
     /// The mid uniquely identifies the media description in the SDP. When not already set,
@@ -232,14 +229,16 @@ where
     ///
     /// # Specification
     ///
-    /// See [RTCRtpTransceiver.mid](https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-mid).
+    /// See [RTCRtpTransceiver.mid](https://www.w3.org/TR/webrtc/#dom-rtptransceiver-mid).
     pub fn mid(&self) -> &Option<String> {
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized,
         // so, [self.id] here is safe.
         self.peer_connection.rtp_transceivers[self.id].mid()
     }
 
-    /// sender returns the RTPTransceiver's RTPSender if it has one
+    /// Returns the id of this transceiver's [`RTCRtpSender`], if it has one.
+    ///
+    /// [`RTCRtpSender`]: crate::rtp_transceiver::rtp_sender::RTCRtpSender
     pub fn sender(&self) -> Option<RTCRtpSenderId> {
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized,
         // so, [self.id] here is safe.
@@ -253,7 +252,9 @@ where
         }
     }
 
-    /// receiver returns the RTPTransceiver's RTPReceiver if it has one
+    /// Returns the id of this transceiver's [`RTCRtpReceiver`], if it has one.
+    ///
+    /// [`RTCRtpReceiver`]: crate::rtp_transceiver::rtp_receiver::RTCRtpReceiver
     pub fn receiver(&self) -> Option<RTCRtpReceiverId> {
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized,
         // so, [self.id] here is safe.
@@ -328,6 +329,10 @@ where
     /// After calling this method, the transceiver will no longer send or receive media.
     /// This operation cannot be undone.
     ///
+    /// # Errors
+    ///
+    /// Returns an error if the sender's interceptor bindings cannot be torn down.
+    ///
     /// # Specification
     ///
     /// See [RTCRtpTransceiver.stop()](https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-stop).
@@ -363,6 +368,7 @@ where
 #[cfg(test)]
 mod tests {
     use sansio::Protocol;
+    use std::time::Instant;
 
     use crate::peer_connection::configuration::media_engine::MediaEngine;
     use crate::peer_connection::event::RTCPeerConnectionEvent;
@@ -377,7 +383,7 @@ mod tests {
             .expect("register default codecs");
         RTCPeerConnectionBuilder::new()
             .with_media_engine(media_engine)
-            .build()
+            .build(Instant::now())
             .expect("build peer connection")
     }
 
@@ -398,17 +404,17 @@ mod tests {
     fn negotiate(offerer: &mut RTCPeerConnection, answerer: &mut RTCPeerConnection) {
         let offer = offerer.create_offer(None).expect("create offer");
         offerer
-            .set_local_description(offer.clone())
+            .set_local_description(Instant::now(), offer.clone())
             .expect("offerer set local");
         answerer
-            .set_remote_description(offer)
+            .set_remote_description(Instant::now(), offer)
             .expect("answerer set remote");
         let answer = answerer.create_answer(None).expect("create answer");
         answerer
-            .set_local_description(answer.clone())
+            .set_local_description(Instant::now(), answer.clone())
             .expect("answerer set local");
         offerer
-            .set_remote_description(answer)
+            .set_remote_description(Instant::now(), answer)
             .expect("offerer set remote");
     }
 

@@ -132,17 +132,17 @@
 //! - **Codec information**: Supported formats and parameters
 //! - **DTLS fingerprints**: For secure communication
 //!
-//! # Specifications
+//! # Specification
 //!
 //! - [RFC 8866] - SDP: Session Description Protocol
 //! - [RFC 3264] - An Offer/Answer Model with SDP
-//! - [RFC 8829] - JavaScript Session Establishment Protocol (JSEP)
+//! - [RFC 9429] - JavaScript Session Establishment Protocol (JSEP)
 //! - [W3C WebRTC Specification]
 //!
 //! [RFC 8866]: https://datatracker.ietf.org/doc/html/rfc8866
 //! [RFC 3264]: https://datatracker.ietf.org/doc/html/rfc3264
-//! [RFC 8829]: https://datatracker.ietf.org/doc/html/rfc8829
-//! [W3C WebRTC Specification]: https://w3c.github.io/webrtc-pc/#session-description-model
+//! [RFC 9429]: https://datatracker.ietf.org/doc/html/rfc9429
+//! [W3C WebRTC Specification]: https://www.w3.org/TR/webrtc/#session-description-model
 
 //TODO: #[cfg(test)]
 //TODO: mod sdp_test;
@@ -169,7 +169,6 @@ use crate::rtp_transceiver::{
     rtp_sender::rtcp_parameters::RTCPFeedback,
 };
 use ice::candidate::{Candidate, unmarshal_candidate};
-use interceptor::Interceptor;
 use sdp::description::common::{Address, ConnectionInformation};
 use sdp::description::media::*;
 use sdp::description::session::*;
@@ -244,6 +243,10 @@ pub(crate) fn track_details_from_sdp(s: &SessionDescription) -> Vec<TrackDetails
             Some(mid_value) if !mid_value.is_empty() => mid_value,
             _ => continue,
         };
+
+        if media.is_webrtc_datachannel() {
+            continue;
+        }
 
         let codec_type = RtpCodecKind::from(media.media_name.media.as_str());
         if codec_type == RtpCodecKind::Unspecified {
@@ -630,16 +633,13 @@ pub(crate) struct AddTransceiverSdpParams {
     write_ssrc_attributes_for_simulcast: bool,
 }
 
-impl<I> RTCPeerConnection<I>
-where
-    I: Interceptor,
-{
+impl RTCPeerConnection {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn add_transceiver_sdp(
         mut d: SessionDescription,
         dtls_fingerprints: &[RTCDtlsFingerprint],
         media_engine: &MediaEngine,
-        transceivers: &mut [RTCRtpTransceiverInternal<I>],
+        transceivers: &mut [RTCRtpTransceiverInternal],
         ice_params: &RTCIceParameters,
         candidates: &[RTCIceCandidate],
         media_section: &MediaSection,
@@ -680,6 +680,7 @@ where
                 .mime_type
                 .trim_start_matches("audio/")
                 .trim_start_matches("video/")
+                .trim_start_matches("application/")
                 .to_owned();
             media = media.with_codec(
                 codec.payload_type,
@@ -710,7 +711,7 @@ where
             }
 
             // Explicitly reject track if we don't have the codec
-            // RFC 8829 Section 5.3.1: Set port=0 to reject, further processing can be skipped
+            // RFC 9429 Section 5.3.1: Set port=0 to reject, further processing can be skipped
             // However, mid attribute is still needed for offer/answer correlation with BUNDLE
             d = d.with_media(
                 MediaDescription {
@@ -799,11 +800,22 @@ where
         }
 
         media = {
+            // When the remote description requested simulcast reception, the
+            // rid loop above already emitted one `a=rid:<id> send` line per
+            // offered rid (honoring pause state and the offered preference
+            // order) and collected them into `send_sc_list`. In that case the
+            // sender must not describe its encodings a second time: doing so
+            // duplicated every `a=rid:<id> send` line and produced a second
+            // `send` list in the simulcast attribute (`a=simulcast:send f;h;q
+            // send f;h;q`), which is invalid per the RFC 8853 Section 5.1 ABNF
+            // (at most one list per direction) and rejected by WebKit with
+            // "Malformed simulcast line".
             let (media, send_rids) = RTCPeerConnection::add_sender_sdp(
                 media,
                 media_engine,
                 transceiver,
                 write_ssrc_attributes_for_simulcast,
+                send_sc_list.is_empty(),
             );
 
             // Simulcast
@@ -840,11 +852,15 @@ where
         Ok((d.with_media(media), true))
     }
 
+    /// `write_rid_attributes` is false when the media section's rid map has
+    /// already emitted the `a=rid:<id> send` lines for this section, in which
+    /// case the sender's encodings must not be described a second time.
     fn add_sender_sdp(
         mut media: MediaDescription,
         media_engine: &MediaEngine,
-        transceiver: &mut RTCRtpTransceiverInternal<I>,
+        transceiver: &mut RTCRtpTransceiverInternal,
         write_ssrc_attributes_for_simulcast: bool,
+        write_rid_attributes: bool,
     ) -> (MediaDescription, Vec<RtpStreamId>) {
         let mut send_rids = vec![];
 
@@ -879,11 +895,17 @@ where
                         }
 
                         if let Some(fec) = encoding.rtp_coding_parameters.fec.as_ref() {
+                            // `FEC-FR` (RFC 5956), not the older `FEC` semantic of RFC 4756:
+                            // FlexFEC repair flows are grouped under the FEC framework, and
+                            // `parse_media_section` below only recognises `FEC-FR`, so writing
+                            // `FEC` here produced an offer this crate could not parse back.
                             media = media.with_value_attribute(
                                 ATTR_KEY_SSRC_GROUP.to_owned(),
                                 format!(
                                     "{} {} {}",
-                                    SEMANTIC_TOKEN_FORWARD_ERROR_CORRECTION, ssrc, fec.ssrc
+                                    SEMANTIC_TOKEN_FORWARD_ERROR_CORRECTION_FRAMEWORK,
+                                    ssrc,
+                                    fec.ssrc
                                 ),
                             );
                         }
@@ -916,7 +938,7 @@ where
                 }
             }
 
-            if is_simulcast {
+            if is_simulcast && write_rid_attributes {
                 for encoding in &encodings {
                     media = media.with_value_attribute(
                         SDP_ATTRIBUTE_RID.to_owned(),
@@ -1008,13 +1030,10 @@ pub(crate) struct PopulateSdpParams {
     pub(crate) write_ssrc_attributes_for_simulcast: bool,
 }
 
-impl<I> RTCPeerConnection<I>
-where
-    I: Interceptor,
-{
+impl RTCPeerConnection {
     pub(crate) fn find_by_mid(
         mid: &String,
-        local_transceivers: &[RTCRtpTransceiverInternal<I>],
+        local_transceivers: &[RTCRtpTransceiverInternal],
     ) -> Option<usize> {
         local_transceivers
             .iter()
@@ -1028,8 +1047,8 @@ where
     pub(crate) fn satisfy_type_and_direction(
         remote_kind: RtpCodecKind,
         remote_direction: RTCRtpTransceiverDirection,
-        local_transceivers: &mut [RTCRtpTransceiverInternal<I>],
-    ) -> Option<&mut RTCRtpTransceiverInternal<I>> {
+        local_transceivers: &mut [RTCRtpTransceiverInternal],
+    ) -> Option<&mut RTCRtpTransceiverInternal> {
         // Get direction order from most preferred to least
         let get_preferred_directions = || -> Vec<RTCRtpTransceiverDirection> {
             match remote_direction {
@@ -1064,7 +1083,7 @@ where
         mut d: SessionDescription,
         dtls_fingerprints: &[RTCDtlsFingerprint],
         media_engine: &MediaEngine,
-        transceivers: &mut [RTCRtpTransceiverInternal<I>],
+        transceivers: &mut [RTCRtpTransceiverInternal],
         candidates: &[RTCIceCandidate],
         ice_params: &RTCIceParameters,
         media_sections: &[MediaSection],
@@ -1148,7 +1167,7 @@ where
         }
 
         if params.is_ice_lite {
-            // RFC 5245 S15.3
+            // RFC 8839 §5.3
             d = d.with_property_attribute(ATTR_KEY_ICELITE.to_owned());
         }
 
@@ -1289,10 +1308,23 @@ pub(crate) fn is_lite_set(desc: &SessionDescription) -> bool {
     false
 }
 
+pub(crate) trait MediaDescriptionExt {
+    /// Reports whether `self` is the WebRTC SCTP data channel m-line, as opposed to some
+    /// other RTP-carried media that also uses the SDP media name `"application"`.
+    fn is_webrtc_datachannel(&self) -> bool;
+}
+
+impl MediaDescriptionExt for MediaDescription {
+    fn is_webrtc_datachannel(&self) -> bool {
+        self.media_name.media == MEDIA_SECTION_APPLICATION
+            && self.media_name.formats == ["webrtc-datachannel"]
+    }
+}
+
 pub(crate) fn get_application_media_section_sctp_port(
     media_desc: &MediaDescription,
 ) -> Option<u16> {
-    if media_desc.media_name.media == MEDIA_SECTION_APPLICATION {
+    if media_desc.is_webrtc_datachannel() {
         return if let Some(sctp_port_attr) = media_desc
             .attributes
             .iter()
@@ -1325,7 +1357,7 @@ pub(crate) fn get_application_media_section_sctp_port(
 pub(crate) fn get_application_media_section_max_message_size(
     media_desc: &MediaDescription,
 ) -> Option<u32> {
-    if media_desc.media_name.media == MEDIA_SECTION_APPLICATION {
+    if media_desc.is_webrtc_datachannel() {
         media_desc
             .attribute(ATTR_KEY_MAX_MESSAGE_SIZE)??
             .parse()
@@ -1354,7 +1386,7 @@ pub(crate) fn get_by_mid<'a>(
 pub(crate) fn get_application_media(desc: &SessionDescription) -> Option<&MediaDescription> {
     desc.media_descriptions
         .iter()
-        .find(|media_description| media_description.media_name.media == MEDIA_SECTION_APPLICATION)
+        .find(|media_description| media_description.is_webrtc_datachannel())
 }
 
 /// have_data_channel return MediaDescription with MediaName equal application
@@ -1444,7 +1476,7 @@ pub(crate) fn rtp_extensions_from_media_description(
 /// update_sdp_origin saves sdp.Origin in PeerConnection when creating 1st local SDP;
 /// for subsequent calling, it updates Origin for SessionDescription from saved one
 /// and increments session version by one.
-/// <https://tools.ietf.org/html/draft-ietf-rtcweb-jsep-25#section-5.2.2>
+/// <https://datatracker.ietf.org/doc/html/rfc9429#section-5.2.2>
 pub(crate) fn update_sdp_origin(origin: &mut Origin, d: &mut SessionDescription) {
     if origin.session_version == 0 {
         // store
@@ -1483,7 +1515,7 @@ pub(crate) fn is_ext_map_allow_mixed_set(
 /// the presence of "trickle" in space-separated "ice-options" attribute values
 /// at either session level or media level.
 ///
-/// # Arguments
+/// # Parameters
 ///
 /// * `desc` - The parsed SDP session description
 ///

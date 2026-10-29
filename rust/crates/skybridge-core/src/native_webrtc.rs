@@ -27,6 +27,7 @@ use crate::{
 };
 
 mod app_secure;
+mod control_channel;
 mod handshake;
 mod support;
 #[cfg(test)]
@@ -36,6 +37,7 @@ use app_secure::{
     OpenedPayload, ReplayWindow, WebRtcAppSecurePacketType, open as open_secure_app_payload,
     seal as seal_secure_app_payload, unwrap_traffic_padding,
 };
+use control_channel::{ControlDataChannel, NativeControlDataChannel};
 use handshake::NativeSessionHandshake;
 use support::{build_ice_servers, native_webrtc_udp_bind_addrs, now_unix_seconds};
 
@@ -242,7 +244,7 @@ struct NativeWebRtcInner {
     role: RuntimeSessionRole,
     peer: Arc<dyn PeerConnection>,
     events_tx: mpsc::Sender<NativeWebRtcEvent>,
-    data_channel: Mutex<Option<Arc<dyn DataChannel>>>,
+    data_channel: Mutex<Option<Arc<dyn ControlDataChannel>>>,
     outbound_frame_gate: Mutex<()>,
     gather_complete_rx: Mutex<mpsc::Receiver<()>>,
     state: Mutex<NativeWebRtcState>,
@@ -256,7 +258,7 @@ pub struct NativeWebRtcSession {
 struct NativeWebRtcEventRouter {
     session_id: String,
     role: RuntimeSessionRole,
-    data_channel_tx: mpsc::Sender<Arc<dyn DataChannel>>,
+    data_channel_tx: mpsc::Sender<Arc<dyn ControlDataChannel>>,
     disconnect_tx: mpsc::Sender<Option<String>>,
     gather_complete_tx: mpsc::Sender<()>,
 }
@@ -277,7 +279,8 @@ fn ice_candidate_type_label(candidate_type: RTCIceCandidateType) -> Option<&'sta
         RTCIceCandidateType::Srflx => Some("srflx"),
         RTCIceCandidateType::Prflx => Some("prflx"),
         RTCIceCandidateType::Relay => Some("relay"),
-        RTCIceCandidateType::Unspecified => None,
+        // Unknown candidate kinds cannot authorize a selected route.
+        _ => None,
     }
 }
 
@@ -302,7 +305,7 @@ fn validate_signaling_payload_bounds(payload: &WebRtcSignalingPayload) -> Result
     Ok(())
 }
 
-async fn close_rejected_data_channel(data_channel: &Arc<dyn DataChannel>) -> Result<()> {
+async fn close_rejected_data_channel(data_channel: &Arc<dyn ControlDataChannel>) -> Result<()> {
     run_native_setup_with_timeout(
         "rejected_data_channel_close",
         NATIVE_WEBRTC_SETUP_TIMEOUT,
@@ -376,6 +379,8 @@ impl PeerConnectionEventHandler for NativeWebRtcEventRouter {
     }
 
     async fn on_data_channel(&self, data_channel: Arc<dyn DataChannel>) {
+        let data_channel: Arc<dyn ControlDataChannel> =
+            Arc::new(NativeControlDataChannel(data_channel));
         info!(
             kind = "native_webrtc.data_channel.discovered",
             session_id = %self.session_id,
@@ -408,6 +413,13 @@ impl PeerConnectionEventHandler for NativeWebRtcEventRouter {
 
 impl NativeWebRtcSession {
     pub async fn new(config: NativeWebRtcConfig) -> Result<Self> {
+        Self::new_with_bind_addrs(config, None).await
+    }
+
+    async fn new_with_bind_addrs(
+        config: NativeWebRtcConfig,
+        udp_bind_addrs: Option<Vec<String>>,
+    ) -> Result<Self> {
         let local_device_name = config
             .classic_initiator
             .as_ref()
@@ -479,7 +491,7 @@ impl NativeWebRtcSession {
             disconnect_tx,
             gather_complete_tx,
         });
-        let udp_bind_addrs = native_webrtc_udp_bind_addrs();
+        let udp_bind_addrs = udp_bind_addrs.unwrap_or_else(native_webrtc_udp_bind_addrs);
         let peer_builder = PeerConnectionBuilder::new()
             .with_configuration(rtc_configuration)
             .with_media_engine(media_engine)
@@ -579,7 +591,9 @@ impl NativeWebRtcSession {
                         .peer
                         .create_data_channel(CONTROL_CHANNEL_LABEL, None)
                         .await?;
-                    self.inner.attach_data_channel(data_channel).await
+                    self.inner
+                        .attach_data_channel(Arc::new(NativeControlDataChannel(data_channel)))
+                        .await
                 },
             )
             .await?;
@@ -855,7 +869,7 @@ impl NativeWebRtcInner {
 
     async fn attach_data_channel(
         self: &Arc<Self>,
-        data_channel: Arc<dyn DataChannel>,
+        data_channel: Arc<dyn ControlDataChannel>,
     ) -> Result<()> {
         let label = match run_native_setup_with_timeout(
             "data_channel_label_read",
@@ -1023,6 +1037,26 @@ impl NativeWebRtcInner {
                     DataChannelEvent::OnClosing
                     | DataChannelEvent::OnBufferedAmountLow
                     | DataChannelEvent::OnBufferedAmountHigh => {}
+                    unsupported => {
+                        warn!(
+                            kind = "native_webrtc.data_channel.unsupported_event",
+                            session_id = %channel_self.session_id,
+                            role = ?channel_self.role,
+                            event = ?unsupported,
+                            "closing control channel after an unsupported event"
+                        );
+                        if let Err(error) = close_rejected_data_channel(&data_channel).await {
+                            warn!(
+                                kind = "native_webrtc.data_channel.reject_close_failed",
+                                session_id = %channel_self.session_id,
+                                error = %error,
+                                "failed to close control channel after an unsupported event"
+                            );
+                        }
+                        // The common task-exit path clears this channel and emits
+                        // TransportDisconnected; never leave it admitted for traffic.
+                        break;
+                    }
                 }
             }
             if channel_self
@@ -1044,7 +1078,10 @@ impl NativeWebRtcInner {
         Ok(())
     }
 
-    async fn clear_data_channel_if_current(&self, data_channel: &Arc<dyn DataChannel>) -> bool {
+    async fn clear_data_channel_if_current(
+        &self,
+        data_channel: &Arc<dyn ControlDataChannel>,
+    ) -> bool {
         let mut slot = self.data_channel.lock().await;
         if slot
             .as_ref()
@@ -1249,7 +1286,7 @@ impl NativeWebRtcInner {
 
     async fn handle_data_channel_open(
         self: &Arc<Self>,
-        data_channel: Arc<dyn DataChannel>,
+        data_channel: Arc<dyn ControlDataChannel>,
     ) -> Result<()> {
         let label = self
             .validate_open_control_channel_label(&data_channel)
@@ -1308,7 +1345,7 @@ impl NativeWebRtcInner {
 
     async fn validate_open_control_channel_label(
         &self,
-        data_channel: &Arc<dyn DataChannel>,
+        data_channel: &Arc<dyn ControlDataChannel>,
     ) -> Result<String> {
         let label = data_channel.label();
         let label = run_native_setup_with_timeout(
@@ -1978,7 +2015,7 @@ impl NativeWebRtcInner {
 
     async fn send_framed_payload(
         &self,
-        data_channel: &Arc<dyn DataChannel>,
+        data_channel: &Arc<dyn ControlDataChannel>,
         payload: &[u8],
     ) -> Result<()> {
         self.send_framed_payload_with_timeout(data_channel, payload, DATA_CHANNEL_SEND_TIMEOUT)
@@ -1987,7 +2024,7 @@ impl NativeWebRtcInner {
 
     async fn send_framed_payload_with_timeout(
         &self,
-        data_channel: &Arc<dyn DataChannel>,
+        data_channel: &Arc<dyn ControlDataChannel>,
         payload: &[u8],
         send_timeout: Duration,
     ) -> Result<()> {

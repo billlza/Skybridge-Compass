@@ -30,7 +30,7 @@
 //! let config = RTCConfigurationBuilder::new().build();
 //! let mut peer_connection = RTCPeerConnectionBuilder::new()
 //!     .with_configuration(config)
-//!     .build()?;
+//!     .build(Instant::now())?;
 //!
 //! loop {
 //!     // Poll and handle events
@@ -149,6 +149,7 @@ use crate::peer_connection::state::ice_gathering_state::RTCIceGatheringState;
 use crate::peer_connection::state::peer_connection_state::RTCPeerConnectionState;
 use crate::peer_connection::state::signaling_state::RTCSignalingState;
 use srtp::context::Context;
+use std::time::Instant;
 
 pub(crate) mod data_channel_event;
 pub(crate) mod ice_error_event;
@@ -224,6 +225,7 @@ pub use track_event::{RTCTrackEvent, RTCTrackEventInit};
 /// See [RTCPeerConnection Events](https://www.w3.org/TR/webrtc/#rtcpeerconnection-interface)
 #[allow(clippy::enum_variant_names)]
 #[derive(Default, Clone, Debug)]
+#[non_exhaustive]
 pub enum RTCPeerConnectionEvent {
     /// Fired when negotiation is needed to maintain the connection.
     ///
@@ -520,7 +522,23 @@ pub enum RTCPeerConnectionEvent {
 ///
 /// This enum is currently empty but reserved for potential future event types.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum RTCEvent {}
+
+/// An [`RTCEvent`] together with the instant its condition was observed at.
+///
+/// The counterpart of [`TaggedRTCMessage`](crate::peer_connection::message::TaggedRTCMessage)
+/// for the event channel, so that all three of the core's input channels carry a timestamp
+/// rather than two of them carrying one and the third leaving the core to ask the clock.
+///
+/// [`RTCEvent`] is currently uninhabited, so no value of this type can be constructed yet; it
+/// exists so the signature is already right when the first event variant is added.
+pub struct TaggedRTCEvent {
+    /// When the condition this event reports was observed.
+    pub now: Instant,
+    /// The event itself.
+    pub event: RTCEvent,
+}
 
 /// Internal event types for WebRTC implementation.
 ///
@@ -548,6 +566,12 @@ pub(crate) enum RTCEventInternal {
         Option<Context>, /*remote_srtp_context*/
     ),
 
+    /// The peer closed the DTLS transport with a `close_notify` alert.
+    ///
+    /// Everything that runs over it ends with it: the SCTP handler closes its associations and
+    /// the data channel handler closes every data channel.
+    DTLSClosed,
+
     /// SCTP handshake completed successfully
     ///
     /// Parameter: Association handle
@@ -572,4 +596,29 @@ pub(crate) enum RTCEventInternal {
         u16,   /*StreamID*/
         usize, /*n_bytes*/
     ),
+
+    /// A stream's outgoing buffer fell to or below its low threshold.
+    ///
+    /// Carries the SCTP stream id, because that is all the SCTP layer knows. The data channel
+    /// handler translates it into the public
+    /// [`RTCDataChannelEvent::OnBufferedAmountLow`](crate::peer_connection::event::RTCDataChannelEvent::OnBufferedAmountLow),
+    /// which names the channel by handle like every other application-facing event.
+    ///
+    /// Parameters:
+    /// - Association handle
+    /// - Stream ID
+    SCTPBufferedAmountLow(usize /*AssociationHandle*/, u16 /*StreamID*/),
+
+    /// A stream's outgoing buffer rose to or above its high threshold. The handle/stream-id
+    /// note on [`Self::SCTPBufferedAmountLow`] applies here too.
+    ///
+    /// Parameters:
+    /// - Association handle
+    /// - Stream ID
+    SCTPBufferedAmountHigh(usize /*AssociationHandle*/, u16 /*StreamID*/),
+}
+
+pub(crate) struct TaggedRTCEventInternal {
+    pub(crate) now: Instant,
+    pub(crate) event: RTCEventInternal,
 }

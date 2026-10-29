@@ -12,10 +12,10 @@ use tokio::{net::UdpSocket, sync::broadcast};
 
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCDataChannelEvent;
-use rtc::peer_connection::event::{RTCEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::RTCMessage;
+use rtc::peer_connection::event::{RTCEvent, RTCPeerConnectionEvent, TaggedRTCEvent};
+use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use rtc::peer_connection::state::RTCIceConnectionState;
 use rtc::peer_connection::state::RTCPeerConnectionState;
 use rtc::peer_connection::transport::RTCDtlsRole;
@@ -135,12 +135,13 @@ async fn run(
     let socket = UdpSocket::bind(format!("{host}:{port}")).await?;
     let local_addr = socket.local_addr()?;
 
-    let mut setting_engine = SettingEngine::default();
-    setting_engine.set_answering_dtls_role(if is_client {
-        RTCDtlsRole::Client
-    } else {
-        RTCDtlsRole::Server
-    })?;
+    let setting_engine = SettingEngineBuilder::new()
+        .with_answering_dtls_role(if is_client {
+            RTCDtlsRole::Client
+        } else {
+            RTCDtlsRole::Server
+        })
+        .build();
 
     let config = RTCConfigurationBuilder::new()
         .with_ice_servers(vec![RTCIceServer {
@@ -153,7 +154,7 @@ async fn run(
     let mut peer_connection = RTCPeerConnectionBuilder::new()
         .with_configuration(config)
         .with_setting_engine(setting_engine)
-        .build()?;
+        .build(Instant::now())?;
 
     // Wait for the offer to be pasted
     let line = if input_sdp_file.is_empty() {
@@ -166,7 +167,7 @@ async fn run(
     println!("Offer received: {}", offer);
 
     // Set the remote SessionDescription
-    peer_connection.set_remote_description(offer)?;
+    peer_connection.set_remote_description(Instant::now(), offer)?;
 
     // Add local candidate
     let candidate = CandidateHostConfig {
@@ -187,7 +188,7 @@ async fn run(
     let answer = peer_connection.create_answer(None)?;
 
     // Sets the LocalDescription
-    peer_connection.set_local_description(answer)?;
+    peer_connection.set_local_description(Instant::now(), answer)?;
 
     // Output the answer in base64 so we can paste it in browser
     if let Some(local_desc) = peer_connection.local_description() {
@@ -269,7 +270,7 @@ async fn run(
             }
         }
 
-        while let Some(message) = peer_connection.poll_read() {
+        while let Some(TaggedRTCMessage { message, .. }) = peer_connection.poll_read() {
             match message {
                 RTCMessage::RtpPacket(_, _) => {}
                 RTCMessage::RtcpPacket(_, _) => {}
@@ -280,6 +281,7 @@ async fn run(
                     let msg_str = String::from_utf8(data_channel_message.data.to_vec())?;
                     println!("Message from DataChannel '{}': '{}'", dc.label(), msg_str);
                 }
+                _ => {}
             }
         }
 
@@ -309,7 +311,7 @@ async fn run(
             res = message_rx.recv() => {
                 match res {
                     Ok(message) => {
-                        peer_connection.handle_write(message)?;
+                        peer_connection.handle_write(TaggedRTCMessage { now: Instant::now(), message: message })?;
                     }
                     Err(err) => {
                         eprintln!("write_rx error: {}", err);
@@ -320,7 +322,7 @@ async fn run(
             res = event_rx.recv() => {
                 match res {
                     Ok(event) => {
-                        peer_connection.handle_event(event)?;
+                        peer_connection.handle_event(TaggedRTCEvent { now: Instant::now(), event: event })?;
                     }
                     Err(err) => {
                         eprintln!("event_rx error: {}", err);
@@ -340,7 +342,7 @@ async fn run(
 
                         let message = math_rand_alpha(15);
                         println!("Sending '{message}'");
-                        dc.send_text(message)?;
+                        dc.send_text(Instant::now(), message)?;
                         data_channel_last_sent = now;
 
                         close_after -= 1;

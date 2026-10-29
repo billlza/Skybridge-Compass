@@ -16,10 +16,10 @@ use tokio::sync::mpsc;
 use tokio_util::codec::{BytesCodec, FramedRead};
 
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCDataChannelEvent;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::RTCMessage;
+use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::state::RTCIceConnectionState;
 use rtc::peer_connection::state::RTCPeerConnectionState;
@@ -249,21 +249,20 @@ async fn main() -> Result<()> {
                             println!("Peer Connection connected!");
                         }
                     }
-                    RTCPeerConnectionEvent::OnDataChannel(dc_event) => match dc_event {
-                        RTCDataChannelEvent::OnOpen(channel_id) => {
-                            if let Some(dc) = pc.data_channel(channel_id) {
-                                println!("Data channel '{}'-'{}' open", dc.label(), dc.id());
-                                data_channel_opened = Some(channel_id);
-                                last_send = Instant::now();
-                            }
+                    RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(
+                        channel_id,
+                    )) => {
+                        if let Some(dc) = pc.data_channel(channel_id) {
+                            println!("Data channel '{}'-'{}' open", dc.label(), dc.id());
+                            data_channel_opened = Some(channel_id);
+                            last_send = Instant::now();
                         }
-                        _ => {}
-                    },
+                    }
                     _ => {}
                 }
             }
 
-            while let Some(message) = pc.poll_read() {
+            while let Some(TaggedRTCMessage { message, .. }) = pc.poll_read() {
                 match message {
                     RTCMessage::RtpPacket(_, _) => {}
                     RTCMessage::RtcpPacket(_, _) => {}
@@ -272,6 +271,7 @@ async fn main() -> Result<()> {
                             .unwrap_or_default();
                         println!("Message from DataChannel: '{}'", msg_str);
                     }
+                    _ => {}
                 }
             }
 
@@ -280,7 +280,7 @@ async fn main() -> Result<()> {
                 if Instant::now().duration_since(last_send) >= Duration::from_secs(3) {
                     if let Some(mut dc) = pc.data_channel(channel_id) {
                         let message = format!("{:?}", Instant::now());
-                        let _ = dc.send_text(message);
+                        let _ = dc.send_text(Instant::now(), message);
                         last_send = Instant::now();
                     }
                 }
@@ -333,10 +333,10 @@ async fn main() -> Result<()> {
 
                             // For ICE restart, we process the new offer
                             println!("Set remote description {} for ICE restart", offer);
-                            pc.set_remote_description(offer)?;
+                            pc.set_remote_description(Instant::now(), offer)?;
 
                             let answer = pc.create_answer(None)?;
-                            pc.set_local_description(answer.clone())?;
+                            pc.set_local_description(Instant::now(), answer.clone())?;
                             println!("Created and set answer {} for ICE restart", answer);
 
                             // Send answer back to HTTP handler
@@ -363,8 +363,9 @@ async fn main() -> Result<()> {
                             local_addr = Some(local);
                             println!("Bound to {}", local);
 
-                            let mut setting_engine = SettingEngine::default();
-                            setting_engine.set_answering_dtls_role(RTCDtlsRole::Client)?;
+                            let setting_engine = SettingEngineBuilder::new()
+                                .with_answering_dtls_role(RTCDtlsRole::Client)
+                                .build();
 
                             let config = RTCConfigurationBuilder::new()
                                 .with_ice_servers(vec![RTCIceServer {
@@ -375,7 +376,7 @@ async fn main() -> Result<()> {
                                 .build();
 
                             let mut pc = RTCPeerConnectionBuilder::new().with_configuration(config)
-                               .with_setting_engine(setting_engine).build()?;
+                               .with_setting_engine(setting_engine).build(Instant::now())?;
                             println!("Created peer connection");
 
                             // Add local candidate
@@ -395,10 +396,10 @@ async fn main() -> Result<()> {
 
                             // Process the offer
                             println!("Set remote description {}", offer);
-                            pc.set_remote_description(offer)?;
+                            pc.set_remote_description(Instant::now(), offer)?;
 
                             let answer = pc.create_answer(None)?;
-                            pc.set_local_description(answer.clone())?;
+                            pc.set_local_description(Instant::now(), answer.clone())?;
                             println!("Created and set answer {}", answer);
 
                             // Send answer back to HTTP handler

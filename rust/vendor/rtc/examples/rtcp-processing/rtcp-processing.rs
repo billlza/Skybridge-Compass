@@ -1,21 +1,28 @@
 //! rtcp-processing demonstrates the Public API for processing RTCP packets in sansio RTC.
 //!
 //! This example shows:
-//! - How to create a custom RTCP forwarder interceptor
+//! - How to get inbound RTCP to reach the application, with an interceptor of your own
 //! - How to receive and process incoming RTCP packets
 //! - Displaying RTCP packet information (Sender Reports, Receiver Reports, etc.)
 //! - Handling track events and connection state changes
 //!
-//! Note: By default, RTCP packets are consumed by the interceptor chain and not forwarded
-//! to the application. This example demonstrates how to create a custom interceptor that
-//! forwards RTCP packets to the application via `poll_read()`.
+//! Note: by default inbound RTCP is consumed by the interceptor chain and does not reach the
+//! application — it is control traffic the interceptors act on, not media that was asked for. To
+//! see it, put an interceptor in the chain that attaches `Attribute::DeliverToApplication` to the
+//! packets you want, as [`DeliverRtcp`] below does; the terminus that ends the inbound RTCP path
+//! passes those through, and RTCP then arrives from `poll_read()` alongside the media.
+//!
+//! Marking is what gets a packet past the terminus. Re-emitting a copy does not: a chain is a flat
+//! list, and what an interceptor emits from `poll_read` rejoins the list *behind* itself, where the
+//! terminus is still ahead of it. Marking also keeps the choice per-packet — this example takes
+//! everything, but a real application usually wants one kind of packet and not the rest.
 
 use anyhow::Result;
 use bytes::BytesMut;
 use clap::Parser;
 use env_logger::Target;
 use log::{error, trace};
-use rtc::interceptor::{Interceptor, Packet, Registry, StreamInfo, TaggedPacket, interceptor};
+use rtc::interceptor::{Attribute, Interceptor, Packet, Registry, Slot, StreamInfo, TaggedPacket};
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
@@ -23,15 +30,15 @@ use rtc::peer_connection::configuration::media_engine::{
     MIME_TYPE_OPUS, MIME_TYPE_VP8, MediaEngine,
 };
 use rtc::peer_connection::event::RTCTrackEvent;
-use rtc::peer_connection::event::{RTCEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::RTCMessage;
+use rtc::peer_connection::event::{RTCEvent, RTCPeerConnectionEvent, TaggedRTCEvent};
+use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::state::RTCPeerConnectionState;
 use rtc::peer_connection::transport::RTCIceServer;
 use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
 use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
 use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters};
-use rtc::sansio::{self, Protocol}; // Required for #[interceptor] macro and Protocol trait methods
+use rtc::sansio::Protocol;
 use rtc::shared::error::Error;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::collections::{HashMap, VecDeque};
@@ -42,94 +49,66 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::channel;
 
-const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(86400); // 1 day
-
-// ============================================================================
-// RTCP Forwarder Interceptor
-// ============================================================================
-//
-// This interceptor forwards RTCP packets to the application via poll_read().
-// By default, RTCP packets are consumed by the interceptor chain (for generating
-// statistics, NACK, etc.) and not forwarded to the application.
-
-/// Builder for the RtcpForwarderInterceptor.
-pub struct RtcpForwarderBuilder<P> {
-    _phantom: std::marker::PhantomData<P>,
-}
-
-impl<P> Default for RtcpForwarderBuilder<P> {
-    fn default() -> Self {
-        Self {
-            _phantom: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<P> RtcpForwarderBuilder<P> {
-    /// Create a new builder.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Build the interceptor.
-    pub fn build(self) -> impl FnOnce(P) -> RtcpForwarderInterceptor<P> {
-        move |inner| RtcpForwarderInterceptor::new(inner)
-    }
-}
-
-/// Interceptor that forwards RTCP packets to the application.
+/// Hands every inbound RTCP packet to the application.
 ///
-/// This interceptor intercepts incoming RTCP packets and queues them for
-/// `poll_read()`, allowing the application to receive and process RTCP packets.
-#[derive(Interceptor)]
-pub struct RtcpForwarderInterceptor<P> {
-    #[next]
-    next: P,
+/// The whole of what an application needs to write to see RTCP: mark the packets, and the terminus
+/// lets them past. Marked, not consumed — the packet carries on to the interceptors after this one,
+/// which are still entitled to act on it.
+///
+/// A real application usually wants a predicate here rather than everything: an SFU relaying
+/// keyframe requests marks those and leaves the receiver reports its own chain is already acting on
+/// alone.
+#[derive(Default)]
+struct DeliverRtcp {
     read_queue: VecDeque<TaggedPacket>,
+    write_queue: VecDeque<TaggedPacket>,
 }
 
-impl<P> RtcpForwarderInterceptor<P> {
-    /// Create a new RtcpForwarderInterceptor.
-    fn new(next: P) -> Self {
-        Self {
-            next,
-            read_queue: VecDeque::new(),
-        }
-    }
-}
+impl Protocol<TaggedPacket, TaggedPacket, ()> for DeliverRtcp {
+    type Rout = TaggedPacket;
+    type Wout = TaggedPacket;
+    type Eout = ();
+    type Error = Error;
+    type Time = Instant;
 
-#[interceptor]
-impl<P: Interceptor> RtcpForwarderInterceptor<P> {
-    #[overrides]
-    fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
-        // If this is an RTCP packet, queue a copy for the application
-        if let Packet::Rtcp(rtcp_packets) = &msg.message {
-            self.read_queue.push_back(TaggedPacket {
-                now: msg.now,
-                transport: msg.transport,
-                message: Packet::Rtcp(rtcp_packets.clone()),
-            });
+    fn handle_read(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
+        if matches!(msg.message.packet, Packet::Rtcp(_)) {
+            msg.message.add(Attribute::DeliverToApplication);
         }
-        // Always pass to next interceptor for normal processing
-        self.next.handle_read(msg)
+        self.read_queue.push_back(msg);
+        Ok(())
     }
 
-    #[overrides]
     fn poll_read(&mut self) -> Option<Self::Rout> {
-        // First return any queued RTCP packets
-        if let Some(pkt) = self.read_queue.pop_front() {
-            return Some(pkt);
-        }
-        // Then check next interceptor
-        self.next.poll_read()
+        self.read_queue.pop_front()
     }
 
-    #[overrides]
-    fn close(&mut self) -> Result<(), Self::Error> {
-        self.read_queue.clear();
-        self.next.close()
+    fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        self.write_queue.push_back(msg);
+        Ok(())
+    }
+
+    fn poll_write(&mut self) -> Option<Self::Wout> {
+        self.write_queue.pop_front()
+    }
+
+    fn handle_timeout(&mut self, _now: Instant) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn poll_timeout(&mut self) -> Option<Self::Time> {
+        None
     }
 }
+
+impl Interceptor for DeliverRtcp {
+    fn bind_local_stream(&mut self, _info: &StreamInfo) {}
+    fn unbind_local_stream(&mut self, _info: &StreamInfo) {}
+    fn bind_remote_stream(&mut self, _info: &StreamInfo) {}
+    fn unbind_remote_stream(&mut self, _info: &StreamInfo) {}
+}
+
+const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(86400); // 1 day
 
 // ============================================================================
 // Main Application
@@ -230,15 +209,13 @@ async fn run(input_sdp_file: String) -> Result<()> {
         RtpCodecKind::Audio,
     )?;
 
-    // Create interceptor registry with RTCP forwarder
-    let registry = Registry::new();
+    // Inbound RTCP is for the interceptors unless something marks it for the application. This
+    // example is about reading it, so it marks all of it — application-ward of everything the
+    // default chain registers, so those have already acted on the packet by the time it is marked.
+    let registry = Registry::new().with(Slot::from(14_000), DeliverRtcp::default());
 
     // Register default interceptors (NACK, reports, etc.)
     let registry = register_default_interceptors(registry, &mut media_engine)?;
-
-    // Add our RTCP forwarder interceptor as the outermost layer
-    // This ensures RTCP packets are captured before being consumed
-    let registry = registry.with(RtcpForwarderBuilder::new().build());
 
     let config = RTCConfigurationBuilder::new()
         .with_ice_servers(vec![RTCIceServer {
@@ -251,7 +228,7 @@ async fn run(input_sdp_file: String) -> Result<()> {
         .with_configuration(config)
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
-        .build()?;
+        .build(Instant::now())?;
 
     // Wait for the offer to be pasted
     println!("Paste your offer here:");
@@ -264,7 +241,7 @@ async fn run(input_sdp_file: String) -> Result<()> {
     let offer = serde_json::from_str::<RTCSessionDescription>(&desc_data)?;
     println!("Offer received: {}", offer);
 
-    peer_connection.set_remote_description(offer)?;
+    peer_connection.set_remote_description(Instant::now(), offer)?;
 
     let candidate = CandidateHostConfig {
         base_config: CandidateConfig {
@@ -281,7 +258,7 @@ async fn run(input_sdp_file: String) -> Result<()> {
     peer_connection.add_local_candidate(local_candidate_init)?;
 
     let answer = peer_connection.create_answer(None)?;
-    peer_connection.set_local_description(answer.clone())?;
+    peer_connection.set_local_description(Instant::now(), answer.clone())?;
 
     println!("RTCP Processing listening on {}...", socket.local_addr()?);
 
@@ -361,7 +338,7 @@ async fn run(input_sdp_file: String) -> Result<()> {
         }
 
         // Poll for incoming RTP/RTCP packets
-        while let Some(message) = peer_connection.poll_read() {
+        while let Some(TaggedRTCMessage { message, .. }) = peer_connection.poll_read() {
             match message {
                 RTCMessage::RtpPacket(_track_id, _rtp_packet) => {
                     // We're not processing RTP packets in this example
@@ -391,6 +368,7 @@ async fn run(input_sdp_file: String) -> Result<()> {
                     println!();
                 }
                 RTCMessage::DataChannelMessage(_, _) => {}
+                _ => {}
             }
         }
 
@@ -421,7 +399,7 @@ async fn run(input_sdp_file: String) -> Result<()> {
             res = event_rx.recv() => {
                 match res {
                     Some(event) => {
-                        peer_connection.handle_event(event)?;
+                        peer_connection.handle_event(TaggedRTCEvent { now: Instant::now(), event: event })?;
                     }
                     None => {
                         eprintln!("event_rx closed");

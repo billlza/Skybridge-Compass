@@ -1,7 +1,17 @@
-# rtc 0.20.0 — SkyBridge patched copy
+# rtc 0.21.1 — SkyBridge patched copy
 
-Byte-identical to the crates.io `rtc 0.20.0` release except for one surgical
-fix, applied via `[patch.crates-io]` in `rust/Cargo.toml`.
+Based on the crates.io `rtc 0.21.1` release (archive SHA-256
+`4e2ca201de5ccc83aa3c08d49a2f08d7ed0aeeb2052fb1ccc517a8b77a6927ce`,
+upstream commit `2a732df55ca4bcf26b80914fa0f570cfaf74cfcb`). Source files are
+unchanged except for the two files described below and one trailing-whitespace
+cleanup in the RFC documentation list in `src/lib.rs` and a final blank line
+removed from `docs/sans-io-deterministic-time-allowlist.txt`. The unused upstream
+Cargo.lock is omitted; the application uses rust/Cargo.lock.
+
+Version 0.21.1 moves DTLS curve arithmetic behind native crypto providers,
+removing the old crypto-bigint 0.5 dependency affected by RUSTSEC-2026-0387.
+The default ring provider is retained. The existing selected-route fix is
+still needed in this stable version.
 
 ## The defect
 
@@ -33,7 +43,7 @@ Grep for `SKYBRIDGE PATCH` to find every modified line.
 
 ## Retiring this patch
 
-Upstream `rtc 0.21` was beta-only at the time of this patch. When a stable
+Upstream `rtc 0.21.1` still omits these candidate registrations. When a stable
 release registers prflx candidates (or otherwise makes the selected pair's
 endpoints resolvable from `get_stats`), delete this directory and the
 `[patch.crates-io]` entry, and confirm

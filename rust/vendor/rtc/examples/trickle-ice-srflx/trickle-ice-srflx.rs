@@ -14,11 +14,12 @@ use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Response, Server, StatusCode};
 use ice::candidate::candidate_server_reflexive::CandidateServerReflexiveConfig;
 use log::{error, info, trace};
+use rtc::data_channel::RTCDataChannelId;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCDataChannelEvent;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::RTCMessage;
+use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::state::RTCIceConnectionState;
 use rtc::peer_connection::state::RTCPeerConnectionState;
@@ -158,7 +159,7 @@ async fn run_main_loop() -> Result<()> {
 
     // State for the main loop
     let mut peer_connection: Option<RTCPeerConnection> = None;
-    let mut data_channel_id: Option<u16> = None;
+    let mut data_channel_id: Option<RTCDataChannelId> = None;
     let mut last_send = Instant::now();
     let mut ws_stream: Option<WebSocketStream<TcpStream>> = None;
     let mut buf = vec![0; 2000];
@@ -193,27 +194,26 @@ async fn run_main_loop() -> Result<()> {
                             println!("Peer Connection connected!");
                         }
                     }
-                    RTCPeerConnectionEvent::OnDataChannel(dc_event) => match dc_event {
-                        RTCDataChannelEvent::OnOpen(channel_id) => {
-                            if let Some(dc) = pc.data_channel(channel_id) {
-                                println!(
-                                    "{} - Data channel '{}'-'{}' open",
-                                    chrono::Local::now().format("%H:%M:%S"),
-                                    dc.label(),
-                                    dc.id()
-                                );
-                                data_channel_id = Some(channel_id);
-                                last_send = Instant::now();
-                            }
+                    RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(
+                        channel_id,
+                    )) => {
+                        if let Some(dc) = pc.data_channel(channel_id) {
+                            println!(
+                                "{} - Data channel '{}'-'{}' open",
+                                chrono::Local::now().format("%H:%M:%S"),
+                                dc.label(),
+                                dc.id()
+                            );
+                            data_channel_id = Some(channel_id);
+                            last_send = Instant::now();
                         }
-                        _ => {}
-                    },
+                    }
                     _ => {}
                 }
             }
 
             // Poll reads (data channel messages)
-            while let Some(message) = pc.poll_read() {
+            while let Some(TaggedRTCMessage { message, .. }) = pc.poll_read() {
                 match message {
                     RTCMessage::RtpPacket(_, _) => {}
                     RTCMessage::RtcpPacket(_, _) => {}
@@ -222,6 +222,7 @@ async fn run_main_loop() -> Result<()> {
                             .unwrap_or_default();
                         println!("Message from DataChannel: '{}'", msg_str);
                     }
+                    _ => {}
                 }
             }
 
@@ -230,7 +231,7 @@ async fn run_main_loop() -> Result<()> {
                 if Instant::now().duration_since(last_send) >= Duration::from_secs(3) {
                     if let Some(mut dc) = pc.data_channel(channel_id) {
                         let message = chrono::Local::now().to_string();
-                        if let Err(e) = dc.send_text(message) {
+                        if let Err(e) = dc.send_text(Instant::now(), message) {
                             println!(
                                 "{} - DataChannel closed, stopping send loop: {}",
                                 chrono::Local::now().format("%H:%M:%S"),
@@ -353,8 +354,9 @@ async fn run_main_loop() -> Result<()> {
                                     WsMessage::Offer(offer) => {
                                         println!("Received offer, creating peer connection");
 
-                                        let mut setting_engine = SettingEngine::default();
-                                        setting_engine.set_answering_dtls_role(RTCDtlsRole::Server)?;
+                                        let setting_engine = SettingEngineBuilder::new()
+                                            .with_answering_dtls_role(RTCDtlsRole::Server)
+                                            .build();
 
                                         let config = RTCConfigurationBuilder::new()
                                             .with_ice_servers(vec![RTCIceServer {
@@ -365,16 +367,16 @@ async fn run_main_loop() -> Result<()> {
                                             .build();
 
                                         let mut pc = RTCPeerConnectionBuilder::new().with_configuration(config)
-                                          .with_setting_engine(setting_engine).build()?;
+                                          .with_setting_engine(setting_engine).build(Instant::now())?;
                                         println!("Created peer connection");
 
                                         // Set remote description
                                         println!("Setting remote description {}", offer);
-                                        pc.set_remote_description(offer)?;
+                                        pc.set_remote_description(Instant::now(), offer)?;
 
                                         // Create answer
                                         let answer = pc.create_answer(None)?;
-                                        pc.set_local_description(answer.clone())?;
+                                        pc.set_local_description(Instant::now(), answer.clone())?;
                                         println!("Created and set answer {}", answer);
 
                                         // Now that both local and remote descriptions are set,
@@ -464,13 +466,17 @@ async fn gather_srflx_candidate(
     let transport_context = TransportContext::default();
     let local_addr = stun_udp_socket.local_addr()?;
     let mut client = ClientBuilder::new().build(
+        Instant::now(),
         local_addr,
         transport_context.peer_addr,
         TransportProtocol::UDP,
     )?;
     let mut msg = rtc::stun::message::Message::new();
     msg.build(&[Box::<TransactionId>::default(), Box::new(BINDING_REQUEST)])?;
-    client.handle_write(msg)?;
+    client.handle_write(TaggedMessage {
+        now: Instant::now(),
+        message: msg,
+    })?;
     while let Some(transmit) = client.poll_write() {
         stun_udp_socket
             .send_to(&transmit.message, stun_server)

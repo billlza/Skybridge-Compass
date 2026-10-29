@@ -16,7 +16,6 @@ use crate::rtp_transceiver::rtp_sender::set_parameter_options::RTCSetParameterOp
 use interceptor::Interceptor;
 use shared::error::{Error, Result};
 use shared::util::math_rand_alpha;
-use std::marker::PhantomData;
 
 /// Internal RTP sender implementation.
 ///
@@ -29,12 +28,9 @@ use std::marker::PhantomData;
 /// * [W3C]
 ///
 /// [MDN]: https://developer.mozilla.org/en-US/docs/Web/API/RTCRtpSender
-/// [W3C]: https://w3c.github.io/webrtc-pc/#rtcrtpsender-interface
+/// [W3C]: https://www.w3.org/TR/webrtc/#rtcrtpsender-interface
 #[derive(Default, Debug, Clone)]
-pub(crate) struct RTCRtpSenderInternal<I>
-where
-    I: Interceptor,
-{
+pub(crate) struct RTCRtpSenderInternal {
     /// The codec kind (audio or video) for this sender
     kind: RtpCodecKind,
     /// The media track being sent
@@ -52,14 +48,9 @@ where
     /// Whether SDP negotiation has occurred for this sender
     negotiated: bool,
     sent: bool,
-
-    _phantom: PhantomData<I>,
 }
 
-impl<I> RTCRtpSenderInternal<I>
-where
-    I: Interceptor,
-{
+impl RTCRtpSenderInternal {
     /// Creates a new RTP sender internal state.
     ///
     /// # Parameters
@@ -90,8 +81,6 @@ where
             last_returned_parameters: None,
             negotiated: false,
             sent: false,
-
-            _phantom: PhantomData,
         }
     }
 
@@ -198,12 +187,7 @@ where
                 }
             }
 
-            if self.kind() == RtpCodecKind::Audio {
-                parameters.encodings.retain(|encoding| {
-                    encoding.scale_resolution_down_by.is_none() && encoding.max_framerate.is_none()
-                });
-            } else {
-                // Video
+            if self.kind() == RtpCodecKind::Video {
                 parameters.encodings.iter_mut().for_each(|encoding| {
                     encoding.scale_resolution_down_by.get_or_insert(1.0);
                 });
@@ -217,6 +201,11 @@ where
                         "scaleResolutionDownBy must be >= 1.0".to_string(),
                     ));
                 }
+            } else {
+                // Audio and Application have no resolution/framerate to scale.
+                parameters.encodings.retain(|encoding| {
+                    encoding.scale_resolution_down_by.is_none() && encoding.max_framerate.is_none()
+                });
             }
         }
 
@@ -326,7 +315,11 @@ where
     }
 
     /// Stops the sender (placeholder for future implementation).
-    pub(crate) fn stop(&mut self, media_engine: &MediaEngine, interceptor: &mut I) -> Result<()> {
+    pub(crate) fn stop(
+        &mut self,
+        media_engine: &MediaEngine,
+        interceptor: &mut dyn Interceptor,
+    ) -> Result<()> {
         if self.has_sent() && !self.track().codings().is_empty() {
             self.interceptor_local_streams_op(media_engine, interceptor, false);
         }
@@ -367,7 +360,7 @@ where
     pub(crate) fn interceptor_local_streams_op(
         &mut self,
         media_engine: &MediaEngine,
-        interceptor: &mut I,
+        interceptor: &mut dyn Interceptor,
         is_binding: bool,
     ) {
         let parameters = self.get_parameters(media_engine).clone();

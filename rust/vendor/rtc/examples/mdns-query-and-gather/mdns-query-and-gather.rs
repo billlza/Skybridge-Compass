@@ -14,10 +14,10 @@ use rtc::ice::mdns::MulticastDnsMode;
 use rtc::mdns::{MDNS_PORT, MulticastSocket};
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCDataChannelEvent;
-use rtc::peer_connection::event::{RTCEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::RTCMessage;
+use rtc::peer_connection::event::{RTCEvent, RTCPeerConnectionEvent, TaggedRTCEvent};
+use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use rtc::peer_connection::state::RTCIceConnectionState;
 use rtc::peer_connection::state::RTCPeerConnectionState;
 use rtc::peer_connection::transport::RTCDtlsRole;
@@ -141,23 +141,25 @@ async fn run(
     let pc_udp_socket = UdpSocket::bind(format!("{host}:{port}")).await?;
     let pc_local_addr = pc_udp_socket.local_addr()?;
 
-    let mut setting_engine = SettingEngine::default();
-    setting_engine.set_answering_dtls_role(if is_client {
-        RTCDtlsRole::Client
-    } else {
-        RTCDtlsRole::Server
-    })?;
+    let mut builder = SettingEngineBuilder::new()
+        .with_answering_dtls_role(if is_client {
+            RTCDtlsRole::Client
+        } else {
+            RTCDtlsRole::Server
+        })
+        .with_multicast_dns_timeout(Some(Duration::from_secs(10)));
 
-    setting_engine.set_multicast_dns_timeout(Some(Duration::from_secs(10)));
-    if query_only {
-        setting_engine.set_multicast_dns_mode(MulticastDnsMode::QueryOnly);
+    builder = if query_only {
+        builder.with_multicast_dns_mode(MulticastDnsMode::QueryOnly)
     } else {
-        setting_engine.set_multicast_dns_mode(MulticastDnsMode::QueryAndGather);
-        setting_engine
-            .set_multicast_dns_local_name("webrtc-rs-hides-local-ip-by-mdns.local".to_string());
-        // In below Add local host candidate, this pc_local_addr will be hided with "webrtc-rs-hides-local-ip-by-mdns.local"
-        setting_engine.set_multicast_dns_local_ip(Some(pc_local_addr.ip()));
-    }
+        builder
+            .with_multicast_dns_mode(MulticastDnsMode::QueryAndGather)
+            .with_multicast_dns_local_name("webrtc-rs-hides-local-ip-by-mdns.local".to_string())
+            // In below Add local host candidate, this pc_local_addr will be hided with "webrtc-rs-hides-local-ip-by-mdns.local"
+            .with_multicast_dns_local_ip(Some(pc_local_addr.ip()))
+    };
+
+    let setting_engine = builder.build();
 
     let config = RTCConfigurationBuilder::new()
         .with_ice_servers(vec![RTCIceServer {
@@ -170,7 +172,7 @@ async fn run(
     let mut peer_connection = RTCPeerConnectionBuilder::new()
         .with_configuration(config)
         .with_setting_engine(setting_engine)
-        .build()?;
+        .build(Instant::now())?;
 
     // Wait for the offer to be pasted
     let line = if input_sdp_file.is_empty() {
@@ -183,7 +185,7 @@ async fn run(
     println!("Offer received: {}", offer);
 
     // Set the remote SessionDescription
-    peer_connection.set_remote_description(offer)?;
+    peer_connection.set_remote_description(Instant::now(), offer)?;
 
     // Add local candidate
     let candidate = CandidateHostConfig {
@@ -205,7 +207,7 @@ async fn run(
     let answer = peer_connection.create_answer(None)?;
 
     // Sets the LocalDescription
-    peer_connection.set_local_description(answer)?;
+    peer_connection.set_local_description(Instant::now(), answer)?;
 
     // Output the answer in base64 so we can paste it in browser
     if let Some(local_desc) = peer_connection.local_description() {
@@ -295,7 +297,7 @@ async fn run(
             }
         }
 
-        while let Some(message) = peer_connection.poll_read() {
+        while let Some(TaggedRTCMessage { message, .. }) = peer_connection.poll_read() {
             match message {
                 RTCMessage::RtpPacket(_, _) => {}
                 RTCMessage::RtcpPacket(_, _) => {}
@@ -309,8 +311,9 @@ async fn run(
                         dc.label(),
                         msg_str
                     );
-                    dc.send_text(msg_str)?;
+                    dc.send_text(Instant::now(), msg_str)?;
                 }
+                _ => {}
             }
         }
 
@@ -340,7 +343,7 @@ async fn run(
             res = message_rx.recv() => {
                 match res {
                     Ok(message) => {
-                        peer_connection.handle_write(message)?;
+                        peer_connection.handle_write(TaggedRTCMessage { now: Instant::now(), message: message })?;
                     }
                     Err(err) => {
                         eprintln!("write_rx error: {}", err);
@@ -351,7 +354,7 @@ async fn run(
             res = event_rx.recv() => {
                 match res {
                     Ok(event) => {
-                        peer_connection.handle_event(event)?;
+                        peer_connection.handle_event(TaggedRTCEvent { now: Instant::now(), event: event })?;
                     }
                     Err(err) => {
                         eprintln!("event_rx error: {}", err);

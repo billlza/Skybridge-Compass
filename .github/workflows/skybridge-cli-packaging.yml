@@ -134,6 +134,20 @@ jobs:
       - name: Check workspace lint
         run: CARGO_TARGET_DIR=/tmp/skybridge-workspace-clippy cargo clippy --locked --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings
 
+      # The default FFI build does not enable the template generator. Exercise
+      # both configured template sets, including the patched TOML reader.
+      - name: Generate Swift and Kotlin FFI bindings
+        working-directory: rust
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_TARGET_DIR: /tmp/skybridge-workspace-tests
+        run: |
+          cargo build --locked -p skybridge-ffi --features uniffi-cli --lib --bin uniffi-bindgen --jobs 2
+          "$CARGO_TARGET_DIR/debug/uniffi-bindgen" generate "$CARGO_TARGET_DIR/debug/libskybridge_ffi.so" --language swift --out-dir "$RUNNER_TEMP/skybridge-uniffi-bindings/swift" --no-format
+          "$CARGO_TARGET_DIR/debug/uniffi-bindgen" generate "$CARGO_TARGET_DIR/debug/libskybridge_ffi.so" --language kotlin --out-dir "$RUNNER_TEMP/skybridge-uniffi-bindings/kotlin" --no-format
+          test -s "$RUNNER_TEMP/skybridge-uniffi-bindings/swift/skybridge_ffi.swift"
+          test -s "$RUNNER_TEMP/skybridge-uniffi-bindings/kotlin/uniffi/skybridge_ffi/skybridge_ffi.kt"
+
       - name: Validate npm wrapper scripts
         run: |
           node --check rust/packaging/npm/skybridge-cli/bin/skybridge.js

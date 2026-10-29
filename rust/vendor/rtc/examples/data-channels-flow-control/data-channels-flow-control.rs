@@ -15,7 +15,7 @@ use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::event::RTCDataChannelEvent;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::RTCMessage;
+use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::state::RTCPeerConnectionState;
 use rtc::peer_connection::transport::RTCIceServer;
@@ -137,7 +137,7 @@ async fn run_requester(
     // Create requester (sender) peer connection
     let mut requester = RTCPeerConnectionBuilder::new()
         .with_configuration(requester_config)
-        .build()?;
+        .build(Instant::now())?;
     let options = Some(RTCDataChannelInit {
         ordered: false,
         max_retransmits: Some(0u16),
@@ -171,12 +171,12 @@ async fn run_requester(
 
     // Create offer
     let offer = requester.create_offer(None)?;
-    requester.set_local_description(offer.clone())?;
+    requester.set_local_description(Instant::now(), offer.clone())?;
     offer_tx.send(offer).await?;
 
     let answer = answer_rx.recv().await.unwrap();
     // set answer
-    requester.set_remote_description(answer)?;
+    requester.set_remote_description(Instant::now(), answer)?;
 
     // Track state for requester (sender)
     let mut req_data_channel_opened = None;
@@ -200,11 +200,11 @@ async fn run_requester(
         // Poll requester events
         while let Some(event) = requester.poll_event() {
             match event {
-                RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) => {
-                    if state == RTCPeerConnectionState::Failed {
-                        eprintln!("Requester peer connection failed");
-                        break 'EventLoop;
-                    }
+                RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state)
+                    if state == RTCPeerConnectionState::Failed =>
+                {
+                    eprintln!("Requester peer connection failed");
+                    break 'EventLoop;
                 }
                 RTCPeerConnectionEvent::OnDataChannel(data_channel_event) => {
                     match data_channel_event {
@@ -231,7 +231,7 @@ async fn run_requester(
         if req_data_channel_opened.is_some() && req_can_send_more {
             let channel_id = req_data_channel_opened.unwrap();
             if let Some(mut dc) = requester.data_channel(channel_id) {
-                let _ = dc.send(BytesMut::from(&send_buf[..]));
+                let _ = dc.send(Instant::now(), BytesMut::from(&send_buf[..]));
             }
         }
 
@@ -302,7 +302,7 @@ async fn run_responder(
     // Create responder (receiver) peer connection
     let mut responder = RTCPeerConnectionBuilder::new()
         .with_configuration(responder_config)
-        .build()?;
+        .build(Instant::now())?;
 
     // Create sockets first
     let resp_socket = UdpSocket::bind("127.0.0.1:0").await?;
@@ -328,11 +328,11 @@ async fn run_responder(
 
     let offer = offer_rx.recv().await.unwrap();
     // set offer
-    responder.set_remote_description(offer)?;
+    responder.set_remote_description(Instant::now(), offer)?;
 
     // Create answer
     let answer = responder.create_answer(None)?;
-    responder.set_local_description(answer.clone())?;
+    responder.set_local_description(Instant::now(), answer.clone())?;
     answer_tx.send(answer).await?;
 
     // Track state for responder (receiver)
@@ -358,33 +358,29 @@ async fn run_responder(
         // Poll responder events
         while let Some(event) = responder.poll_event() {
             match event {
-                RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) => {
-                    if state == RTCPeerConnectionState::Failed {
-                        eprintln!("Responder peer connection failed");
-                        break 'EventLoop;
-                    }
+                RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state)
+                    if state == RTCPeerConnectionState::Failed =>
+                {
+                    eprintln!("Responder peer connection failed");
+                    break 'EventLoop;
                 }
-                RTCPeerConnectionEvent::OnDataChannel(data_channel_event) => {
-                    match data_channel_event {
-                        RTCDataChannelEvent::OnOpen(_channel_id) => {
-                            println!("Responder: Data channel opened");
-                            resp_data_channel_opened = true;
-                            throughput_start = Instant::now();
-                        }
-                        _ => {}
-                    }
+                RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(_channel_id)) => {
+                    println!("Responder: Data channel opened");
+                    resp_data_channel_opened = true;
+                    throughput_start = Instant::now();
                 }
                 _ => {}
             }
         }
 
-        while let Some(message) = responder.poll_read() {
+        while let Some(TaggedRTCMessage { message, .. }) = responder.poll_read() {
             match message {
                 RTCMessage::RtpPacket(_, _) => {}
                 RTCMessage::RtcpPacket(_, _) => {}
                 RTCMessage::DataChannelMessage(_channel_id, data_channel_message) => {
                     total_bytes_received += data_channel_message.data.len();
                 }
+                _ => {}
             }
         }
 

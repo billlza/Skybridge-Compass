@@ -9,10 +9,10 @@ use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCTrackEvent;
-use rtc::peer_connection::event::{RTCEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::RTCMessage;
+use rtc::peer_connection::event::{RTCEvent, RTCPeerConnectionEvent, TaggedRTCEvent};
+use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::state::RTCPeerConnectionState;
 use rtc::peer_connection::transport::RTCDtlsRole;
@@ -172,8 +172,9 @@ async fn run_broadcaster(
     let socket = UdpSocket::bind("127.0.0.1:0").await?;
     let local_addr = socket.local_addr()?;
 
-    let mut setting_engine = SettingEngine::default();
-    setting_engine.set_answering_dtls_role(RTCDtlsRole::Server)?;
+    let setting_engine = SettingEngineBuilder::new()
+        .with_answering_dtls_role(RTCDtlsRole::Server)
+        .build();
 
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs()?;
@@ -195,12 +196,12 @@ async fn run_broadcaster(
         .with_setting_engine(setting_engine)
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
-        .build()?;
+        .build(Instant::now())?;
 
     // Add transceiver to receive video
     peer_connection.add_transceiver_from_kind(RtpCodecKind::Video, None)?;
 
-    peer_connection.set_remote_description(offer)?;
+    peer_connection.set_remote_description(Instant::now(), offer)?;
 
     let candidate = CandidateHostConfig {
         base_config: CandidateConfig {
@@ -217,7 +218,7 @@ async fn run_broadcaster(
     peer_connection.add_local_candidate(local_candidate_init)?;
 
     let answer = peer_connection.create_answer(None)?;
-    peer_connection.set_local_description(answer)?;
+    peer_connection.set_local_description(Instant::now(), answer)?;
 
     if let Some(local_desc) = peer_connection.local_description() {
         let json_str = serde_json::to_string(&local_desc)?;
@@ -305,7 +306,7 @@ async fn run_broadcaster(
             }
         }
 
-        while let Some(message) = peer_connection.poll_read() {
+        while let Some(TaggedRTCMessage { message, .. }) = peer_connection.poll_read() {
             match message {
                 RTCMessage::RtpPacket(track_id, rtp_packet) => {
                     packet_count += 1;
@@ -326,6 +327,7 @@ async fn run_broadcaster(
                     trace!("[Receiver] Received RTCP packets");
                 }
                 RTCMessage::DataChannelMessage(_, _) => {}
+                _ => {}
             }
         }
 
@@ -354,7 +356,7 @@ async fn run_broadcaster(
             res = event_rx.recv() => {
                 match res {
                     Some(event) => {
-                        peer_connection.handle_event(event)?;
+                        peer_connection.handle_event(TaggedRTCEvent { now: Instant::now(), event: event })?;
                     }
                     None => {
                         eprintln!("[Receiver] event_rx closed");
@@ -378,7 +380,7 @@ async fn run_broadcaster(
                             .ok_or(Error::ErrRTPReceiverNotExisted)?;
 
                         debug!("sending PLI rtcp packet with media_ssrc={}", media_ssrc);
-                        rtp_receiver.write_rtcp(vec![Box::new(PictureLossIndication{
+                        rtp_receiver.write_rtcp(Instant::now(), vec![Box::new(PictureLossIndication{
                                         sender_ssrc: 0,
                                         media_ssrc,
                                 })])?;
@@ -513,8 +515,9 @@ async fn run_viewer(
     let socket = UdpSocket::bind("127.0.0.1:0").await?;
     let local_addr = socket.local_addr()?;
 
-    let mut setting_engine = SettingEngine::default();
-    setting_engine.set_answering_dtls_role(RTCDtlsRole::Server)?;
+    let setting_engine = SettingEngineBuilder::new()
+        .with_answering_dtls_role(RTCDtlsRole::Server)
+        .build();
 
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs()?;
@@ -536,7 +539,7 @@ async fn run_viewer(
         .with_setting_engine(setting_engine)
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
-        .build()?;
+        .build(Instant::now())?;
 
     // Wait for codec information from broadcaster
     println!(
@@ -588,7 +591,7 @@ async fn run_viewer(
 
     let _rtp_sender_id = peer_connection.add_track(video_track)?;
 
-    peer_connection.set_remote_description(offer)?;
+    peer_connection.set_remote_description(Instant::now(), offer)?;
 
     let candidate = CandidateHostConfig {
         base_config: CandidateConfig {
@@ -605,7 +608,7 @@ async fn run_viewer(
     peer_connection.add_local_candidate(local_candidate_init)?;
 
     let answer = peer_connection.create_answer(None)?;
-    peer_connection.set_local_description(answer)?;
+    peer_connection.set_local_description(Instant::now(), answer)?;
 
     if let Some(local_desc) = peer_connection.local_description() {
         let json_str = serde_json::to_string(&local_desc)?;
@@ -714,7 +717,7 @@ async fn run_viewer(
                                     .ssrcs()
                                     .last()
                                     .ok_or(Error::ErrSenderWithNoSSRCs)?;
-                                if let Err(err) = sender.write_rtp(packet.clone()) {
+                                if let Err(err) = sender.write_rtp(Instant::now(), packet.clone()) {
                                     if err != Error::ErrClosedPipe {
                                         debug!("[Viewer {}] sender {:?} write error: {}", viewer_id, sender_id, err);
                                     }
@@ -739,7 +742,7 @@ async fn run_viewer(
             res = event_rx.recv() => {
                 match res {
                     Some(event) => {
-                        peer_connection.handle_event(event)?;
+                        peer_connection.handle_event(TaggedRTCEvent { now: Instant::now(), event: event })?;
                     }
                     None => break 'EventLoop,
                 }

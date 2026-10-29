@@ -1,9 +1,9 @@
-use crate::peer_connection::event::RTCEventInternal;
 use crate::peer_connection::event::RTCPeerConnectionEvent;
+use crate::peer_connection::event::{RTCEventInternal, TaggedRTCEventInternal};
 use crate::peer_connection::message::internal::{
     RTCMessageInternal, STUNMessage, TaggedRTCMessageInternal,
 };
-use crate::peer_connection::transport::ice::RTCIceTransport;
+use crate::peer_connection::transport::ice::IceTransport;
 use crate::statistics::accumulator::RTCStatsAccumulator;
 use crate::statistics::stats::ice_candidate_pair::RTCStatsIceCandidatePairState;
 use log::{debug, trace};
@@ -12,13 +12,12 @@ use shared::{TransportContext, TransportMessage};
 use std::collections::VecDeque;
 use std::time::Instant;
 
-#[derive(Default)]
 pub(crate) struct IceHandlerContext {
-    pub(crate) ice_transport: RTCIceTransport,
+    pub(crate) ice_transport: IceTransport,
 
     pub(crate) read_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) write_outs: VecDeque<TaggedRTCMessageInternal>,
-    pub(crate) event_outs: VecDeque<RTCEventInternal>,
+    pub(crate) event_outs: VecDeque<TaggedRTCEventInternal>,
 
     /// Cached stats key of the currently selected ICE candidate pair
     /// (`RTCIceCandidatePair_<local>_<remote>`), refreshed only when the selected
@@ -29,7 +28,7 @@ pub(crate) struct IceHandlerContext {
 }
 
 impl IceHandlerContext {
-    pub(crate) fn new(ice_transport: RTCIceTransport) -> Self {
+    pub(crate) fn new(ice_transport: IceTransport) -> Self {
         Self {
             ice_transport,
 
@@ -58,12 +57,13 @@ impl<'a> IceHandler<'a> {
     }
 }
 
-impl<'a> sansio::Protocol<TaggedRTCMessageInternal, TaggedRTCMessageInternal, RTCEventInternal>
+impl<'a>
+    sansio::Protocol<TaggedRTCMessageInternal, TaggedRTCMessageInternal, TaggedRTCEventInternal>
     for IceHandler<'a>
 {
     type Rout = TaggedRTCMessageInternal;
     type Wout = TaggedRTCMessageInternal;
-    type Eout = RTCEventInternal;
+    type Eout = TaggedRTCEventInternal;
     type Error = Error;
     type Time = Instant;
 
@@ -161,14 +161,18 @@ impl<'a> sansio::Protocol<TaggedRTCMessageInternal, TaggedRTCMessageInternal, RT
         self.ctx.write_outs.pop_front()
     }
 
-    fn handle_event(&mut self, evt: RTCEventInternal) -> Result<()> {
+    fn handle_event(&mut self, evt: TaggedRTCEventInternal) -> Result<()> {
         self.ctx.event_outs.push_back(evt);
         Ok(())
     }
 
     fn poll_event(&mut self) -> Option<Self::Eout> {
         if let Some(evt) = self.ctx.ice_transport.agent.poll_event() {
-            match evt {
+            // The agent stamps its own events, so this drain *propagates* that instant rather
+            // than retaining one: the condition was observed when the agent saw it, not when
+            // the pipeline got round to polling for it.
+            let now = evt.now;
+            match evt.event {
                 ::ice::Event::ConnectionStateChange(state) => {
                     let ice_connection_state = state.into();
                     self.ctx.ice_transport.ice_connection_state = ice_connection_state;
@@ -177,13 +181,14 @@ impl<'a> sansio::Protocol<TaggedRTCMessageInternal, TaggedRTCMessageInternal, RT
                     // Use the original ice state which converts to RTCIceTransportState
                     self.stats.transport.on_ice_state_changed(state.into());
 
-                    self.ctx
-                        .event_outs
-                        .push_back(RTCEventInternal::RTCPeerConnectionEvent(
+                    self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::RTCPeerConnectionEvent(
                             RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(
                                 ice_connection_state,
                             ),
-                        ));
+                        ),
+                    });
                 }
                 ::ice::Event::SelectedCandidatePairChange(local, remote) => {
                     debug!(
@@ -207,13 +212,15 @@ impl<'a> sansio::Protocol<TaggedRTCMessageInternal, TaggedRTCMessageInternal, RT
                     // Update transport stats for selected candidate pair change
                     self.stats.transport.on_selected_candidate_pair_changed(key);
 
-                    self.ctx
-                        .event_outs
-                        .push_back(RTCEventInternal::ICESelectedCandidatePairChange);
+                    self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::ICESelectedCandidatePairChange,
+                    });
                 }
                 ::ice::Event::RoleChange(is_controlling) => {
                     self.stats.transport.on_ice_role_changed(is_controlling);
                 }
+                _ => {}
             }
         }
 

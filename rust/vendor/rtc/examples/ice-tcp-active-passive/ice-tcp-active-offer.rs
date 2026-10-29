@@ -20,12 +20,13 @@ use clap::Parser;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Client, Method, Request, Response, Server, StatusCode};
 use log::{error, info};
+use rtc::data_channel::RTCDataChannelId;
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCDataChannelEvent;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::RTCMessage;
+use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::state::RTCIceConnectionState;
 use rtc::peer_connection::state::RTCPeerConnectionState;
@@ -179,11 +180,12 @@ async fn main() -> Result<()> {
     let answer_addr = cli.answer_address.clone();
 
     // Configure for TCP only
-    let mut setting_engine = SettingEngine::default();
-    setting_engine.set_network_types(vec![
-        ice::network_type::NetworkType::Tcp4,
-        ice::network_type::NetworkType::Tcp6,
-    ]);
+    let setting_engine = SettingEngineBuilder::new()
+        .with_network_types(vec![
+            ice::network_type::NetworkType::Tcp4,
+            ice::network_type::NetworkType::Tcp6,
+        ])
+        .build();
 
     let config = RTCConfigurationBuilder::new().build();
 
@@ -191,7 +193,7 @@ async fn main() -> Result<()> {
     let mut peer_connection = RTCPeerConnectionBuilder::new()
         .with_configuration(config)
         .with_setting_engine(setting_engine)
-        .build()?;
+        .build(Instant::now())?;
 
     // Create a datachannel with label 'data'
     let _ = peer_connection.create_data_channel("data", None)?;
@@ -223,7 +225,7 @@ async fn main() -> Result<()> {
 
     // Create an offer to send to the other process
     let offer = peer_connection.create_offer(None)?;
-    peer_connection.set_local_description(offer.clone())?;
+    peer_connection.set_local_description(Instant::now(), offer.clone())?;
     println!("[Offer] set_local_description {}", offer);
 
     // Create channel for HTTP server to send commands to event loop
@@ -267,7 +269,7 @@ async fn main() -> Result<()> {
     let body_bytes = hyper::body::to_bytes(resp.into_body()).await?;
     let answer: RTCSessionDescription = serde_json::from_slice(&body_bytes)?;
     println!("[Offer] Received answer {}", answer);
-    peer_connection.set_remote_description(answer)?;
+    peer_connection.set_remote_description(Instant::now(), answer)?;
 
     // Send local candidate
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -287,7 +289,7 @@ async fn main() -> Result<()> {
     // State
     let mut tcp_stream: Option<TcpStream> = None;
     let mut local_addr: Option<SocketAddr> = None;
-    let mut data_channel_id: Option<u16> = None;
+    let mut data_channel_id: Option<RTCDataChannelId> = None;
     let mut last_send = Instant::now();
     let mut buf = vec![0u8; 2000];
     let mut tcp_decoder = TcpFrameDecoder::new();
@@ -319,22 +321,19 @@ async fn main() -> Result<()> {
                         println!("[Offer] Connected!");
                     }
                 }
-                RTCPeerConnectionEvent::OnDataChannel(dc_event) => match dc_event {
-                    RTCDataChannelEvent::OnOpen(channel_id) => {
-                        if let Some(dc) = peer_connection.data_channel(channel_id) {
-                            println!("[Offer] Data channel '{}'-'{}' open", dc.label(), dc.id());
-                            data_channel_id = Some(channel_id);
-                            last_send = Instant::now();
-                        }
+                RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(channel_id)) => {
+                    if let Some(dc) = peer_connection.data_channel(channel_id) {
+                        println!("[Offer] Data channel '{}'-'{}' open", dc.label(), dc.id());
+                        data_channel_id = Some(channel_id);
+                        last_send = Instant::now();
                     }
-                    _ => {}
-                },
+                }
                 _ => {}
             }
         }
 
         // Poll reads (data channel messages)
-        while let Some(message) = peer_connection.poll_read() {
+        while let Some(TaggedRTCMessage { message, .. }) = peer_connection.poll_read() {
             match message {
                 RTCMessage::RtpPacket(_, _) => {}
                 RTCMessage::RtcpPacket(_, _) => {}
@@ -343,6 +342,7 @@ async fn main() -> Result<()> {
                         String::from_utf8(data_channel_message.data.to_vec()).unwrap_or_default();
                     println!("[Offer] Message from DataChannel: '{}'", msg_str);
                 }
+                _ => {}
             }
         }
 
@@ -374,7 +374,7 @@ async fn main() -> Result<()> {
             if Instant::now().duration_since(last_send) >= Duration::from_secs(3) {
                 if let Some(mut dc) = peer_connection.data_channel(channel_id) {
                     let message = format!("[Offer] {}", chrono::Local::now());
-                    if let Err(e) = dc.send_text(message) {
+                    if let Err(e) = dc.send_text(Instant::now(), message) {
                         println!("[Offer] DataChannel send error: {}", e);
                         data_channel_id = None;
                     }
@@ -460,7 +460,7 @@ async fn main() -> Result<()> {
                         }
                     }
                     Command::SetRemoteDescription(sdp) => {
-                        if let Err(e) = peer_connection.set_remote_description(sdp) {
+                        if let Err(e) = peer_connection.set_remote_description(Instant::now(), sdp) {
                             error!("Failed to set remote description: {}", e);
                         }
                     }

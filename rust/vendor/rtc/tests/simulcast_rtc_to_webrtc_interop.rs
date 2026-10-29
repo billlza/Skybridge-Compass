@@ -18,13 +18,14 @@
 /// 6. Test verifies webrtc received packets from all 3 simulcast layers
 use anyhow::Result;
 use bytes::BytesMut;
+use rtc::interceptor::Registry as RtcRegistry;
 use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::media_engine::{
     MIME_TYPE_OPUS, MIME_TYPE_VP8, MediaEngine,
 };
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
 use rtc::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
 use rtc::peer_connection::transport::RTCDtlsRole;
@@ -138,8 +139,9 @@ async fn test_simulcast_rtc_to_webrtc() -> Result<()> {
     let local_addr = socket.local_addr()?;
     log::info!("RTC peer bound to {}", local_addr);
 
-    let mut setting_engine = SettingEngine::default();
-    setting_engine.set_answering_dtls_role(RTCDtlsRole::Server)?;
+    let setting_engine = SettingEngineBuilder::new()
+        .with_answering_dtls_role(RTCDtlsRole::Server)
+        .build();
 
     // Create MediaEngine with simulcast support
     let mut media_engine = MediaEngine::default();
@@ -186,7 +188,7 @@ async fn test_simulcast_rtc_to_webrtc() -> Result<()> {
         )?;
     }
 
-    let registry = rtc::interceptor::Registry::new();
+    let registry = RtcRegistry::new();
 
     // Use the default set of Interceptors
     let registry =
@@ -207,7 +209,7 @@ async fn test_simulcast_rtc_to_webrtc() -> Result<()> {
         .with_setting_engine(setting_engine)
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
-        .build()?;
+        .build(Instant::now())?;
     log::info!("Created RTC peer connection");
 
     // Create 3 tracks for simulcast layers with RIDs
@@ -266,7 +268,7 @@ async fn test_simulcast_rtc_to_webrtc() -> Result<()> {
     log::info!("RTC created offer {}", offer);
 
     // Set local description on rtc
-    rtc_pc.set_local_description(offer.clone())?;
+    rtc_pc.set_local_description(Instant::now(), offer.clone())?;
     log::info!("RTC set local description");
 
     // Convert rtc offer to webrtc offer
@@ -300,7 +302,7 @@ async fn test_simulcast_rtc_to_webrtc() -> Result<()> {
 
     // Set remote description on rtc
     log::info!("RTC set remote description {}", rtc_answer);
-    rtc_pc.set_remote_description(rtc_answer)?;
+    rtc_pc.set_remote_description(Instant::now(), rtc_answer)?;
 
     // Run event loops
     let rtc_socket = Arc::new(socket);
@@ -438,7 +440,7 @@ async fn test_simulcast_rtc_to_webrtc() -> Result<()> {
                     payload: bytes::Bytes::from(dummy_frame.clone()),
                 };
 
-                if let Err(e) = rtp_sender.write_rtp(packet) {
+                if let Err(e) = rtp_sender.write_rtp(Instant::now(), packet) {
                     log::debug!("Failed to send RTP on {}: {}", rid, e);
                 }
                 sequence_number += 1;

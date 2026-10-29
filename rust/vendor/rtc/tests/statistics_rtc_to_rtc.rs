@@ -16,9 +16,9 @@ use anyhow::Result;
 use bytes::BytesMut;
 use rtc::data_channel::RTCDataChannelState;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::RTCMessage;
+use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use rtc::peer_connection::state::RTCPeerConnectionState;
 use rtc::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCDtlsTransportState, RTCIceCandidate,
@@ -51,8 +51,9 @@ impl PeerRunner {
         let offer_socket = UdpSocket::bind("127.0.0.1:0").await?;
         let offer_local_addr = offer_socket.local_addr()?;
 
-        let mut offer_setting_engine = SettingEngine::default();
-        offer_setting_engine.set_answering_dtls_role(RTCDtlsRole::Server)?;
+        let offer_setting_engine = SettingEngineBuilder::new()
+            .with_answering_dtls_role(RTCDtlsRole::Server)
+            .build();
 
         let offer_config = RTCConfigurationBuilder::new()
             .with_ice_servers(vec![RTCIceServer {
@@ -64,7 +65,7 @@ impl PeerRunner {
         let mut offer_pc = RTCPeerConnectionBuilder::new()
             .with_configuration(offer_config)
             .with_setting_engine(offer_setting_engine)
-            .build()?;
+            .build(Instant::now())?;
 
         // Add local candidate for offer peer
         let offer_candidate = CandidateHostConfig {
@@ -84,8 +85,9 @@ impl PeerRunner {
         let answer_socket = UdpSocket::bind("127.0.0.1:0").await?;
         let answer_local_addr = answer_socket.local_addr()?;
 
-        let mut answer_setting_engine = SettingEngine::default();
-        answer_setting_engine.set_answering_dtls_role(RTCDtlsRole::Client)?;
+        let answer_setting_engine = SettingEngineBuilder::new()
+            .with_answering_dtls_role(RTCDtlsRole::Client)
+            .build();
 
         let answer_config = RTCConfigurationBuilder::new()
             .with_ice_servers(vec![RTCIceServer {
@@ -97,7 +99,7 @@ impl PeerRunner {
         let mut answer_pc = RTCPeerConnectionBuilder::new()
             .with_configuration(answer_config)
             .with_setting_engine(answer_setting_engine)
-            .build()?;
+            .build(Instant::now())?;
 
         // Add local candidate for answer peer
         let answer_candidate = CandidateHostConfig {
@@ -150,12 +152,20 @@ async fn test_data_channel_statistics_collection() -> Result<()> {
 
     // Exchange offer/answer
     let offer = runner.offer_pc.create_offer(None)?;
-    runner.offer_pc.set_local_description(offer.clone())?;
-    runner.answer_pc.set_remote_description(offer)?;
+    runner
+        .offer_pc
+        .set_local_description(Instant::now(), offer.clone())?;
+    runner
+        .answer_pc
+        .set_remote_description(Instant::now(), offer)?;
 
     let answer = runner.answer_pc.create_answer(None)?;
-    runner.answer_pc.set_local_description(answer.clone())?;
-    runner.offer_pc.set_remote_description(answer)?;
+    runner
+        .answer_pc
+        .set_local_description(Instant::now(), answer.clone())?;
+    runner
+        .offer_pc
+        .set_remote_description(Instant::now(), answer)?;
 
     // Track state
     let mut offer_connected = false;
@@ -185,10 +195,10 @@ async fn test_data_channel_statistics_collection() -> Result<()> {
         // Process offer peer events
         while let Some(event) = runner.offer_pc.poll_event() {
             match event {
-                RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) => {
-                    if state == RTCPeerConnectionState::Connected {
-                        offer_connected = true;
-                    }
+                RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state)
+                    if state == RTCPeerConnectionState::Connected =>
+                {
+                    offer_connected = true;
                 }
                 RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(channel_id)) => {
                     offer_dc_id = Some(channel_id);
@@ -198,7 +208,7 @@ async fn test_data_channel_statistics_collection() -> Result<()> {
         }
 
         // Read messages from offer
-        while let Some(message) = runner.offer_pc.poll_read() {
+        while let Some(TaggedRTCMessage { message, .. }) = runner.offer_pc.poll_read() {
             if let RTCMessage::DataChannelMessage(_, _) = message {
                 // Handle any incoming messages
             }
@@ -215,10 +225,10 @@ async fn test_data_channel_statistics_collection() -> Result<()> {
         // Process answer peer events
         while let Some(event) = runner.answer_pc.poll_event() {
             match event {
-                RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) => {
-                    if state == RTCPeerConnectionState::Connected {
-                        answer_connected = true;
-                    }
+                RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state)
+                    if state == RTCPeerConnectionState::Connected =>
+                {
+                    answer_connected = true;
                 }
                 RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(channel_id)) => {
                     _answer_dc_id = Some(channel_id);
@@ -228,7 +238,7 @@ async fn test_data_channel_statistics_collection() -> Result<()> {
         }
 
         // Read messages from answer
-        while let Some(message) = runner.answer_pc.poll_read() {
+        while let Some(TaggedRTCMessage { message, .. }) = runner.answer_pc.poll_read() {
             if let RTCMessage::DataChannelMessage(_, _) = message {
                 answer_messages_received += 1;
             }
@@ -238,7 +248,7 @@ async fn test_data_channel_statistics_collection() -> Result<()> {
         if offer_connected && offer_dc_id.is_some() && offer_messages_sent < messages_to_send {
             if let Some(mut dc) = runner.offer_pc.data_channel(offer_dc_id.unwrap()) {
                 let msg = "x".repeat(message_size);
-                dc.send_text(msg)?;
+                dc.send_text(Instant::now(), msg)?;
                 offer_messages_sent += 1;
             }
         }
@@ -399,12 +409,20 @@ async fn test_transport_statistics_collection() -> Result<()> {
 
     // Exchange offer/answer
     let offer = runner.offer_pc.create_offer(None)?;
-    runner.offer_pc.set_local_description(offer.clone())?;
-    runner.answer_pc.set_remote_description(offer)?;
+    runner
+        .offer_pc
+        .set_local_description(Instant::now(), offer.clone())?;
+    runner
+        .answer_pc
+        .set_remote_description(Instant::now(), offer)?;
 
     let answer = runner.answer_pc.create_answer(None)?;
-    runner.answer_pc.set_local_description(answer.clone())?;
-    runner.offer_pc.set_remote_description(answer)?;
+    runner
+        .answer_pc
+        .set_local_description(Instant::now(), answer.clone())?;
+    runner
+        .offer_pc
+        .set_remote_description(Instant::now(), answer)?;
 
     // Wait for connection
     let mut offer_connected = false;
@@ -586,12 +604,20 @@ async fn test_stats_report_completeness() -> Result<()> {
 
     // Exchange offer/answer
     let offer = runner.offer_pc.create_offer(None)?;
-    runner.offer_pc.set_local_description(offer.clone())?;
-    runner.answer_pc.set_remote_description(offer)?;
+    runner
+        .offer_pc
+        .set_local_description(Instant::now(), offer.clone())?;
+    runner
+        .answer_pc
+        .set_remote_description(Instant::now(), offer)?;
 
     let answer = runner.answer_pc.create_answer(None)?;
-    runner.answer_pc.set_local_description(answer.clone())?;
-    runner.offer_pc.set_remote_description(answer)?;
+    runner
+        .answer_pc
+        .set_local_description(Instant::now(), answer.clone())?;
+    runner
+        .offer_pc
+        .set_remote_description(Instant::now(), answer)?;
 
     // Wait for connection and data channel open
     let mut connected = false;
@@ -773,12 +799,20 @@ async fn test_stats_json_serialization() -> Result<()> {
     runner.offer_pc.create_data_channel("json-test", None)?;
 
     let offer = runner.offer_pc.create_offer(None)?;
-    runner.offer_pc.set_local_description(offer.clone())?;
-    runner.answer_pc.set_remote_description(offer)?;
+    runner
+        .offer_pc
+        .set_local_description(Instant::now(), offer.clone())?;
+    runner
+        .answer_pc
+        .set_remote_description(Instant::now(), offer)?;
 
     let answer = runner.answer_pc.create_answer(None)?;
-    runner.answer_pc.set_local_description(answer.clone())?;
-    runner.offer_pc.set_remote_description(answer)?;
+    runner
+        .answer_pc
+        .set_local_description(Instant::now(), answer.clone())?;
+    runner
+        .offer_pc
+        .set_remote_description(Instant::now(), answer)?;
 
     // Wait for connection briefly
     let mut offer_buf = vec![0u8; 2000];
@@ -891,6 +925,7 @@ async fn test_stats_json_serialization() -> Result<()> {
             RTCStatsReportEntry::AudioSource(s) => serde_json::to_string(s),
             RTCStatsReportEntry::VideoSource(s) => serde_json::to_string(s),
             RTCStatsReportEntry::AudioPlayout(s) => serde_json::to_string(s),
+            _ => continue, // Skip unknown variants for forward compatibility
         };
 
         assert!(
@@ -954,12 +989,20 @@ async fn test_get_stats_selector_none_complete() -> Result<()> {
 
     // Exchange offer/answer
     let offer = runner.offer_pc.create_offer(None)?;
-    runner.offer_pc.set_local_description(offer.clone())?;
-    runner.answer_pc.set_remote_description(offer)?;
+    runner
+        .offer_pc
+        .set_local_description(Instant::now(), offer.clone())?;
+    runner
+        .answer_pc
+        .set_remote_description(Instant::now(), offer)?;
 
     let answer = runner.answer_pc.create_answer(None)?;
-    runner.answer_pc.set_local_description(answer.clone())?;
-    runner.offer_pc.set_remote_description(answer)?;
+    runner
+        .answer_pc
+        .set_local_description(Instant::now(), answer.clone())?;
+    runner
+        .offer_pc
+        .set_remote_description(Instant::now(), answer)?;
 
     // Wait for connection
     let mut connected = false;
@@ -1111,12 +1154,20 @@ async fn test_get_stats_selector_sender_filtering() -> Result<()> {
 
     // Exchange offer/answer
     let offer = runner.offer_pc.create_offer(None)?;
-    runner.offer_pc.set_local_description(offer.clone())?;
-    runner.answer_pc.set_remote_description(offer)?;
+    runner
+        .offer_pc
+        .set_local_description(Instant::now(), offer.clone())?;
+    runner
+        .answer_pc
+        .set_remote_description(Instant::now(), offer)?;
 
     let answer = runner.answer_pc.create_answer(None)?;
-    runner.answer_pc.set_local_description(answer.clone())?;
-    runner.offer_pc.set_remote_description(answer)?;
+    runner
+        .answer_pc
+        .set_local_description(Instant::now(), answer.clone())?;
+    runner
+        .offer_pc
+        .set_remote_description(Instant::now(), answer)?;
 
     // Wait for connection
     let mut connected = false;
@@ -1301,12 +1352,20 @@ async fn test_get_stats_selector_receiver_filtering() -> Result<()> {
 
     // Exchange offer/answer
     let offer = runner.offer_pc.create_offer(None)?;
-    runner.offer_pc.set_local_description(offer.clone())?;
-    runner.answer_pc.set_remote_description(offer)?;
+    runner
+        .offer_pc
+        .set_local_description(Instant::now(), offer.clone())?;
+    runner
+        .answer_pc
+        .set_remote_description(Instant::now(), offer)?;
 
     let answer = runner.answer_pc.create_answer(None)?;
-    runner.answer_pc.set_local_description(answer.clone())?;
-    runner.offer_pc.set_remote_description(answer)?;
+    runner
+        .answer_pc
+        .set_local_description(Instant::now(), answer.clone())?;
+    runner
+        .offer_pc
+        .set_remote_description(Instant::now(), answer)?;
 
     // Wait for connection
     let mut connected = false;
@@ -1481,12 +1540,20 @@ async fn test_get_stats_selector_filtering_behavior() -> Result<()> {
 
     // Exchange offer/answer
     let offer = runner.offer_pc.create_offer(None)?;
-    runner.offer_pc.set_local_description(offer.clone())?;
-    runner.answer_pc.set_remote_description(offer)?;
+    runner
+        .offer_pc
+        .set_local_description(Instant::now(), offer.clone())?;
+    runner
+        .answer_pc
+        .set_remote_description(Instant::now(), offer)?;
 
     let answer = runner.answer_pc.create_answer(None)?;
-    runner.answer_pc.set_local_description(answer.clone())?;
-    runner.offer_pc.set_remote_description(answer)?;
+    runner
+        .answer_pc
+        .set_local_description(Instant::now(), answer.clone())?;
+    runner
+        .offer_pc
+        .set_remote_description(Instant::now(), answer)?;
 
     let now = Instant::now();
 
@@ -1569,12 +1636,20 @@ async fn test_get_stats_selector_subset_property() -> Result<()> {
 
     // Exchange SDP
     let offer = runner.offer_pc.create_offer(None)?;
-    runner.offer_pc.set_local_description(offer.clone())?;
-    runner.answer_pc.set_remote_description(offer)?;
+    runner
+        .offer_pc
+        .set_local_description(Instant::now(), offer.clone())?;
+    runner
+        .answer_pc
+        .set_remote_description(Instant::now(), offer)?;
 
     let answer = runner.answer_pc.create_answer(None)?;
-    runner.answer_pc.set_local_description(answer.clone())?;
-    runner.offer_pc.set_remote_description(answer)?;
+    runner
+        .answer_pc
+        .set_local_description(Instant::now(), answer.clone())?;
+    runner
+        .offer_pc
+        .set_remote_description(Instant::now(), answer)?;
 
     let now = Instant::now();
 

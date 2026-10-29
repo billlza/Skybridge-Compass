@@ -9,7 +9,7 @@ use anyhow::{Result, anyhow};
 use bytes::BytesMut;
 use ed25519_dalek::SigningKey;
 use tokio::time::timeout;
-use webrtc::data_channel::{RTCDataChannelId, RTCDataChannelState};
+use webrtc::data_channel::RTCDataChannelId;
 use webrtc::error::{Error as WebRtcError, Result as WebRtcResult};
 
 use super::*;
@@ -109,53 +109,13 @@ impl TestDataChannel {
 }
 
 #[async_trait::async_trait]
-impl DataChannel for TestDataChannel {
+impl ControlDataChannel for TestDataChannel {
     async fn label(&self) -> WebRtcResult<String> {
         self.label.clone().ok_or(WebRtcError::ErrDataChannelClosed)
     }
 
-    async fn ordered(&self) -> WebRtcResult<bool> {
-        Ok(true)
-    }
-
-    async fn max_packet_life_time(&self) -> WebRtcResult<Option<u16>> {
-        Ok(None)
-    }
-
-    async fn max_retransmits(&self) -> WebRtcResult<Option<u16>> {
-        Ok(None)
-    }
-
-    async fn protocol(&self) -> WebRtcResult<String> {
-        Ok(String::new())
-    }
-
-    async fn negotiated(&self) -> WebRtcResult<bool> {
-        Ok(false)
-    }
-
     fn id(&self) -> RTCDataChannelId {
         self.id
-    }
-
-    async fn ready_state(&self) -> WebRtcResult<RTCDataChannelState> {
-        Ok(RTCDataChannelState::Open)
-    }
-
-    async fn buffered_amount_high_threshold(&self) -> WebRtcResult<u32> {
-        Ok(u32::MAX)
-    }
-
-    async fn set_buffered_amount_high_threshold(&self, _threshold: u32) -> WebRtcResult<()> {
-        Ok(())
-    }
-
-    async fn buffered_amount_low_threshold(&self) -> WebRtcResult<u32> {
-        Ok(0)
-    }
-
-    async fn set_buffered_amount_low_threshold(&self, _threshold: u32) -> WebRtcResult<()> {
-        Ok(())
     }
 
     async fn send(&self, data: BytesMut) -> WebRtcResult<()> {
@@ -175,14 +135,6 @@ impl DataChannel for TestDataChannel {
                     .expect("capture mutex poisoned")
                     .push(data.to_vec());
             }
-            Ok(())
-        }
-    }
-
-    async fn send_text(&self, _text: &str) -> WebRtcResult<()> {
-        if self.fail_send {
-            Err(WebRtcError::ErrDataChannelClosed)
-        } else {
             Ok(())
         }
     }
@@ -378,27 +330,33 @@ async fn new_started_classic_pair(
     session_id: &str,
 ) -> Result<(NativeWebRtcSession, NativeWebRtcSession)> {
     let (classic_initiator, classic_responder) = classic_config_pair()?;
-    let initiator = NativeWebRtcSession::new(NativeWebRtcConfig {
-        session_id: session_id.to_owned(),
-        local_device_id: "device-a".to_owned(),
-        role: RuntimeSessionRole::Initiator,
-        turn_credentials: None,
-        classic_initiator: Some(classic_initiator),
-        classic_responder: None,
-        pqc_initiator: None,
-        pqc_responder: None,
-    })
+    let initiator = NativeWebRtcSession::new_with_bind_addrs(
+        NativeWebRtcConfig {
+            session_id: session_id.to_owned(),
+            local_device_id: "device-a".to_owned(),
+            role: RuntimeSessionRole::Initiator,
+            turn_credentials: None,
+            classic_initiator: Some(classic_initiator),
+            classic_responder: None,
+            pqc_initiator: None,
+            pqc_responder: None,
+        },
+        Some(vec!["127.0.0.1:0".to_owned()]),
+    )
     .await?;
-    let responder = NativeWebRtcSession::new(NativeWebRtcConfig {
-        session_id: session_id.to_owned(),
-        local_device_id: "device-b".to_owned(),
-        role: RuntimeSessionRole::Responder,
-        turn_credentials: None,
-        classic_initiator: None,
-        classic_responder: Some(classic_responder),
-        pqc_initiator: None,
-        pqc_responder: None,
-    })
+    let responder = NativeWebRtcSession::new_with_bind_addrs(
+        NativeWebRtcConfig {
+            session_id: session_id.to_owned(),
+            local_device_id: "device-b".to_owned(),
+            role: RuntimeSessionRole::Responder,
+            turn_credentials: None,
+            classic_initiator: None,
+            classic_responder: Some(classic_responder),
+            pqc_initiator: None,
+            pqc_responder: None,
+        },
+        Some(vec!["127.0.0.1:0".to_owned()]),
+    )
     .await?;
     initiator.start().await?;
     responder.start().await?;
@@ -1261,7 +1219,7 @@ async fn native_webrtc_rejects_unreadable_labels_and_duplicate_control_channels(
     .await?;
 
     let unreadable = Arc::new(TestDataChannel::new(10, None, false));
-    let unreadable_channel: Arc<dyn DataChannel> = unreadable.clone();
+    let unreadable_channel: Arc<dyn ControlDataChannel> = unreadable.clone();
     let label_error = session
         .inner
         .attach_data_channel(unreadable_channel)
@@ -1271,7 +1229,7 @@ async fn native_webrtc_rejects_unreadable_labels_and_duplicate_control_channels(
     assert_eq!(unreadable.close_count.load(Ordering::SeqCst), 1);
 
     let empty_label = Arc::new(TestDataChannel::new(13, Some(""), false));
-    let empty_label_channel: Arc<dyn DataChannel> = empty_label;
+    let empty_label_channel: Arc<dyn ControlDataChannel> = empty_label;
     let open_error = session
         .inner
         .validate_open_control_channel_label(&empty_label_channel)
@@ -1284,11 +1242,11 @@ async fn native_webrtc_rejects_unreadable_labels_and_duplicate_control_channels(
     );
 
     let primary = Arc::new(TestDataChannel::new(11, Some(CONTROL_CHANNEL_LABEL), false));
-    let primary_channel: Arc<dyn DataChannel> = primary.clone();
+    let primary_channel: Arc<dyn ControlDataChannel> = primary.clone();
     session.inner.attach_data_channel(primary_channel).await?;
 
     let repeated_callback = Arc::new(TestDataChannel::new(11, Some(CONTROL_CHANNEL_LABEL), false));
-    let repeated_callback_channel: Arc<dyn DataChannel> = repeated_callback.clone();
+    let repeated_callback_channel: Arc<dyn ControlDataChannel> = repeated_callback.clone();
     session
         .inner
         .attach_data_channel(repeated_callback_channel)
@@ -1296,7 +1254,7 @@ async fn native_webrtc_rejects_unreadable_labels_and_duplicate_control_channels(
     assert_eq!(repeated_callback.close_count.load(Ordering::SeqCst), 0);
 
     let duplicate = Arc::new(TestDataChannel::new(12, Some(CONTROL_CHANNEL_LABEL), false));
-    let duplicate_channel: Arc<dyn DataChannel> = duplicate.clone();
+    let duplicate_channel: Arc<dyn ControlDataChannel> = duplicate.clone();
     let duplicate_error = session
         .inner
         .attach_data_channel(duplicate_channel)
@@ -1306,7 +1264,7 @@ async fn native_webrtc_rejects_unreadable_labels_and_duplicate_control_channels(
     assert_eq!(duplicate.close_count.load(Ordering::SeqCst), 1);
     let attached = session.inner.data_channel.lock().await;
     assert!(attached.as_ref().is_some_and(|value| {
-        let primary_trait: Arc<dyn DataChannel> = primary.clone();
+        let primary_trait: Arc<dyn ControlDataChannel> = primary.clone();
         Arc::ptr_eq(value, &primary_trait)
     }));
     drop(attached);
@@ -1405,7 +1363,7 @@ async fn heartbeat_send_failure_emits_disconnect_and_clears_live_state() -> Resu
     })
     .await?;
     let failing = Arc::new(TestDataChannel::new(20, Some(CONTROL_CHANNEL_LABEL), true));
-    let failing_channel: Arc<dyn DataChannel> = failing.clone();
+    let failing_channel: Arc<dyn ControlDataChannel> = failing.clone();
     *session.inner.data_channel.lock().await = Some(failing_channel);
     {
         let mut state = session.inner.state.lock().await;
@@ -1457,7 +1415,7 @@ async fn foreground_framed_send_timeout_returns_error_without_faking_disconnect(
         21,
         Some(CONTROL_CHANNEL_LABEL),
     ));
-    let channel: Arc<dyn DataChannel> = never_resolving.clone();
+    let channel: Arc<dyn ControlDataChannel> = never_resolving.clone();
 
     let error = timeout(
         Duration::from_secs(1),
@@ -1493,8 +1451,8 @@ async fn outbound_frame_gate_prevents_concurrent_chunk_interleaving() -> Result<
         Some(CONTROL_CHANNEL_LABEL),
         Duration::from_millis(1),
     ));
-    let first_channel: Arc<dyn DataChannel> = captured.clone();
-    let second_channel: Arc<dyn DataChannel> = captured.clone();
+    let first_channel: Arc<dyn ControlDataChannel> = captured.clone();
+    let second_channel: Arc<dyn ControlDataChannel> = captured.clone();
     let first_inner = Arc::clone(&session.inner);
     let second_inner = Arc::clone(&session.inner);
     let first_payload = vec![0x11; 18_000];
@@ -1534,7 +1492,7 @@ async fn outbound_frame_gate_prevents_concurrent_chunk_interleaving() -> Result<
 async fn outbound_framing_accepts_exact_cap_rejects_overflow_and_chunks_to_8k() -> Result<()> {
     let session = native_test_initiator("outbound-frame-boundary").await?;
     let channel_impl = Arc::new(TestDataChannel::new(31, Some(CONTROL_CHANNEL_LABEL), false));
-    let channel: Arc<dyn DataChannel> = channel_impl.clone();
+    let channel: Arc<dyn ControlDataChannel> = channel_impl.clone();
     let boundary = vec![0x5a; MAX_FRAMED_PAYLOAD_BYTES];
     session
         .inner
@@ -1576,7 +1534,7 @@ async fn outbound_frame_deadline_covers_all_chunks_and_partial_timeout_disconnec
         Some(CONTROL_CHANNEL_LABEL),
         Duration::from_millis(10),
     ));
-    let channel: Arc<dyn DataChannel> = delayed.clone();
+    let channel: Arc<dyn ControlDataChannel> = delayed.clone();
     let payload = vec![0x33; DATA_CHANNEL_FRAME_CHUNK_BYTES * 3];
     let error = session
         .inner
@@ -1624,7 +1582,7 @@ async fn sbwc_counter_is_shared_exhaustive_and_never_reused_after_send_failure()
         .await?;
 
     let failing = Arc::new(TestDataChannel::new(33, Some(CONTROL_CHANNEL_LABEL), true));
-    let failing_channel: Arc<dyn DataChannel> = failing;
+    let failing_channel: Arc<dyn ControlDataChannel> = failing;
     *session.inner.data_channel.lock().await = Some(failing_channel);
     assert!(session.inner.send_file_app_frame(&file).await.is_err());
     assert!(session.inner.send_file_app_frame(&file).await.is_err());
@@ -1731,7 +1689,7 @@ async fn background_framed_send_timeout_clears_live_state_and_disconnects() -> R
         22,
         Some(CONTROL_CHANNEL_LABEL),
     ));
-    let channel: Arc<dyn DataChannel> = never_resolving.clone();
+    let channel: Arc<dyn ControlDataChannel> = never_resolving.clone();
     let worker_inner = Arc::clone(&session.inner);
     let heartbeat_handle = tokio::spawn(async move {
         worker_inner

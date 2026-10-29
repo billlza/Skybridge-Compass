@@ -17,10 +17,10 @@ use rtc::peer_connection::configuration::interceptor_registry::register_default_
 use rtc::peer_connection::configuration::media_engine::{
     MIME_TYPE_H264, MIME_TYPE_HEVC, MIME_TYPE_OPUS, MediaEngine,
 };
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
 use rtc::peer_connection::event::RTCTrackEvent;
-use rtc::peer_connection::message::RTCMessage;
+use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::state::RTCPeerConnectionState;
 use rtc::peer_connection::transport::RTCDtlsRole;
@@ -152,12 +152,13 @@ async fn run(
     let socket = UdpSocket::bind(format!("{host}:{port}")).await?;
     let local_addr = socket.local_addr()?;
 
-    let mut setting_engine = SettingEngine::default();
-    setting_engine.set_answering_dtls_role(if is_client {
-        RTCDtlsRole::Client
-    } else {
-        RTCDtlsRole::Server
-    })?;
+    let setting_engine = SettingEngineBuilder::new()
+        .with_answering_dtls_role(if is_client {
+            RTCDtlsRole::Client
+        } else {
+            RTCDtlsRole::Server
+        })
+        .build();
 
     // Create a MediaEngine object to configure the supported codec
     let mut media_engine = MediaEngine::default();
@@ -223,7 +224,7 @@ async fn run(
         .with_setting_engine(setting_engine)
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
-        .build()?;
+        .build(Instant::now())?;
 
     // Allow us to receive 1 audio track, and 1 video track
     if audio_file.is_some() {
@@ -258,7 +259,7 @@ async fn run(
     println!("Offer received: {}", offer);
 
     // Set the remote SessionDescription
-    peer_connection.set_remote_description(offer)?;
+    peer_connection.set_remote_description(Instant::now(), offer)?;
 
     // Add local candidate
     let candidate = CandidateHostConfig {
@@ -279,7 +280,7 @@ async fn run(
     let answer = peer_connection.create_answer(None)?;
 
     // Sets the LocalDescription
-    peer_connection.set_local_description(answer)?;
+    peer_connection.set_local_description(Instant::now(), answer)?;
 
     // Output the answer in base64 so we can paste it in browser
     if let Some(local_desc) = peer_connection.local_description() {
@@ -355,7 +356,7 @@ async fn run(
             }
         }
 
-        while let Some(message) = peer_connection.poll_read() {
+        while let Some(TaggedRTCMessage { message, .. }) = peer_connection.poll_read() {
             match message {
                 RTCMessage::RtpPacket(track_id, rtp_packet) => {
                     let receiver_id = track_id2_receiver_id
@@ -419,6 +420,7 @@ async fn run(
                     // like NACK this needs to be called.
                 }
                 RTCMessage::DataChannelMessage(_, _) => {}
+                _ => {}
             }
         }
 
