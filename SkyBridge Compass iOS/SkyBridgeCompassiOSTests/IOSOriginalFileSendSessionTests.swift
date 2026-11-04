@@ -718,22 +718,42 @@ final class IOSOriginalFileSendSessionTests: XCTestCase {
     }
 
     func testRejectedBackgroundSubmissionClosesSourceWithoutSendingAnOffer() async throws {
-        try await withFixture(supportsOutputProgress: true) { f in
-            let scheduler = ControlledAudioBackgroundScheduler(); scheduler.submissionError = .registrationRejected
-            let background = try IOSAudioBackgroundExecution(identifier: "com.skybridge.compass.ios.audio-file." + UUID().uuidString,
-                title: "Audio test", scheduler: scheduler)
-            let service = IOSDeviceAudioPlaybackService(makeBackgroundExecution: { background }, makeSession: { source, _ in
-                f.serviceSource = source; return f.makeSender(sourceOverride: source)
-            })
-            f.service = service
-            let target = IOSAudioPlaybackTarget(deviceID: "selected-peer", name: "Computer",
-                                                identity: f.channel.remoteIdentity, sources: [.originalFile])
-            try service.start(url: f.directory.appendingPathComponent("unchanged.wav"), target: target, openChannel: { f.channel })
-            try await waitUntil { !service.isRunning }
-            XCTAssertTrue(f.frames.isEmpty); XCTAssertEqual(f.transferCalls, 0)
-            XCTAssertEqual(service.lastError as? IOSAudioBackgroundError, .registrationRejected)
-            XCTAssertFalse(service.cleanupPending)
-            let closed = await f.serviceSource?.isClosed; XCTAssertEqual(closed, true)
+        for holdSubmission in [false, true] {
+            try await withFixture(supportsOutputProgress: true) { f in
+                let scheduler = ControlledAudioBackgroundScheduler()
+                scheduler.holdSubmission = holdSubmission; scheduler.submissionError = .registrationRejected
+                var submissionResolved = !holdSubmission
+                defer {
+                    scheduler.holdSubmission = false
+                    if !submissionResolved, scheduler.submitting { scheduler.resolveSubmission() }
+                }
+                let background = try IOSAudioBackgroundExecution(identifier: "com.skybridge.compass.ios.audio-file." + UUID().uuidString,
+                    title: "Audio test", scheduler: scheduler)
+                let service = IOSDeviceAudioPlaybackService(makeBackgroundExecution: { background }, makeSession: { source, _ in
+                    f.serviceSource = source; return f.makeSender(sourceOverride: source)
+                })
+                f.service = service
+                let target = IOSAudioPlaybackTarget(deviceID: "selected-peer", name: "Computer",
+                                                    identity: f.channel.remoteIdentity, sources: [.originalFile])
+                try service.start(url: f.directory.appendingPathComponent("unchanged.wav"), target: target, openChannel: { f.channel })
+                // Establish the scheduler boundary before timing rejection cleanup.
+                // Worker startup and cleanup are separately bounded async phases.
+                try await waitUntil { scheduler.submitting }
+                if holdSubmission {
+                    XCTAssertTrue(service.isRunning); XCTAssertEqual(service.operation?.phase, .idle)
+                    XCTAssertTrue(f.frames.isEmpty); XCTAssertEqual(f.transferCalls, 0)
+                    let closed = await f.serviceSource?.isClosed; XCTAssertEqual(closed, false)
+                    scheduler.resolveSubmission()
+                    submissionResolved = true
+                }
+                try await waitUntil { !service.isRunning }
+                XCTAssertTrue(f.frames.isEmpty); XCTAssertEqual(f.transferCalls, 0)
+                XCTAssertEqual(service.lastError as? IOSAudioBackgroundError, .registrationRejected)
+                XCTAssertEqual(background.submissionFailure as? IOSAudioBackgroundError, .registrationRejected)
+                XCTAssertEqual(service.backgroundState, .failed)
+                XCTAssertFalse(service.cleanupPending)
+                let closed = await f.serviceSource?.isClosed; XCTAssertEqual(closed, true)
+            }
         }
     }
 
