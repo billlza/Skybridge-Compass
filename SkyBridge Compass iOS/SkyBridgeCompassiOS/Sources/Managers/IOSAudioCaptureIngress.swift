@@ -206,7 +206,7 @@ final class IOSAudioCaptureIngress: Sendable {
             $0.reader = id
         }
         defer { state.withLock { if $0.reader == id { $0.reader = nil } } }
-        return try await withTaskCancellationHandler {
+        let block: IOSCapturedPCMSequence.Chunk? = try await withTaskCancellationHandler {
             if Task.isCancelled { abortRead(id) }
             let block: IOSCapturedPCMSequence.Chunk? = try await withCheckedThrowingContinuation { continuation in
                 let immediate = state.withLock { value -> Result<IOSCapturedPCMSequence.Chunk?, Error>? in
@@ -222,9 +222,15 @@ final class IOSAudioCaptureIngress: Sendable {
                 }
                 if let immediate { continuation.resume(with: immediate) }
             }
-            try requireHealthy()
             return block
         } onCancel: { self.abortRead(id) }
+        // The cancellation-handler operation can resume away from the caller's
+        // actor. Validate after its result has crossed back to this isolation,
+        // so failure while the caller was suspended cannot publish stale PCM
+        // or a clean EOF. Cancellation may also arrive after the handler exits.
+        if Task.isCancelled { abortRead(id) }
+        try requireHealthy()
+        return block
     }
 
     private func abortRead(_ id: UUID) {

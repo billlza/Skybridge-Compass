@@ -517,6 +517,40 @@ final class IOSAudioCaptureSourceTests: XCTestCase {
         catch { XCTAssertTrue(error is FixtureError) }
     }
 
+    func testCancellationAfterDeliveryBeforeConsumerResumeCannotLeakABlock() async throws {
+        let backend = try CaptureBackendFixture()
+        let waiting = Task { try await backend.ingress.next() }
+        try await waitFor { backend.ingress.snapshot.waiting }
+        backend.ingress.receive(try sample(0), from: ObjectIdentifier(backend))
+        waiting.cancel()
+        do { _ = try await waiting.value; XCTFail("A cancelled read returned a delivered block") }
+        catch { XCTAssertEqual(error as? IOSAudioCaptureError, .cancelled) }
+        XCTAssertTrue(backend.ingress.snapshot.failed)
+        XCTAssertFalse(backend.ingress.snapshot.waiting)
+        XCTAssertEqual(backend.ingress.snapshot.bufferedBytes, 0)
+    }
+
+    func testFailureAfterSealBeforeConsumerResumeCannotBecomeCleanEOF() async throws {
+        let backend = try CaptureBackendFixture()
+        let waiting = Task { try await backend.ingress.next() }
+        try await waitFor { backend.ingress.snapshot.waiting }
+        backend.ingress.seal()
+        backend.ingress.abort(FixtureError.native)
+        do { _ = try await waiting.value; XCTFail("Source failure became a clean EOF") }
+        catch { XCTAssertEqual(error as? FixtureError, .native) }
+    }
+
+    func testFailureBeforeConsumerResumeRetainsItsCauseWhenTheReadIsCancelled() async throws {
+        let backend = try CaptureBackendFixture()
+        let waiting = Task { try await backend.ingress.next() }
+        try await waitFor { backend.ingress.snapshot.waiting }
+        backend.ingress.receive(try sample(0), from: ObjectIdentifier(backend))
+        backend.ingress.abort(FixtureError.native)
+        waiting.cancel()
+        do { _ = try await waiting.value; XCTFail("Failed and cancelled read returned a block") }
+        catch { XCTAssertEqual(error as? FixtureError, .native) }
+    }
+
     func testSecondPendingConsumerCannotStealOrCancelTheFirst() async throws {
         let backend = try CaptureBackendFixture()
         let first = Task { try await backend.ingress.next() }
