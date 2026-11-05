@@ -420,7 +420,7 @@ jobs:
 
       - name: Upload the darwin signing proof
         if: matrix.target == 'aarch64-apple-darwin'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: skybridge-cli-darwin-signing-proof
           path: ${{ runner.temp }}/signing-proof/darwin-signing-proof.json
@@ -439,7 +439,7 @@ jobs:
           fi
           /bin/rm -f "$RUNNER_TEMP/developer-id.p12" "$RUNNER_TEMP/notarytool-authkey.p8"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: skybridge-cli-${{ matrix.target }}
           path: ${{ runner.temp }}/release-asset/${{ matrix.asset }}
@@ -600,7 +600,7 @@ jobs:
             --workflow-sha "${GITHUB_WORKFLOW_SHA}"
 
       - id: upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: skybridge-cli-release-handoff-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -756,7 +756,7 @@ jobs:
             --proof-path "${RUNNER_TEMP}/proof/github-release-proof.json"
 
       - id: proof-upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: skybridge-cli-github-release-proof-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/proof/github-release-proof.json
@@ -864,7 +864,7 @@ jobs:
             --proof-path "${RUNNER_TEMP}/proof/npm-release-proof.json"
 
       - id: proof-upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: skybridge-cli-npm-release-proof-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/proof/npm-release-proof.json
@@ -1139,7 +1139,7 @@ jobs:
             --handoff-artifact-digest "${{ needs.assemble.outputs.artifact_digest }}" \
             --proof-path "${RUNNER_TEMP}/proof/homebrew-release-proof.json"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: skybridge-cli-homebrew-release-proof-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/proof/homebrew-release-proof.json
