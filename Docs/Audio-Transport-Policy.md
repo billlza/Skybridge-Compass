@@ -305,3 +305,19 @@ iOS 蓝牙文件服务已接入现有的有限后台任务所有权。系统实�
 正式生产 Release 已从干净的 `bff147a7` 完成严格归档、`release-testing` 导出、签名和源码身份校验后原位安装到 iPad。IPA SHA-256 为 `b6aa0fed9df8e67b789d10074ae33d5f0339aef589d820158b94592325c3d778`，源码摘要为 `8dee06522e251c5dd3d6efd0d243156751a60931ffd96229225e19bc5ccc9d4e`，编译条件为 `HAS_APPLE_PQC_SDK`，不包含测试或诊断开关。该包从普通文件选择入口复验相同 600 秒 WAVE，保持 128 kbps 和 64 包窗口；04:44:11.081–11.123 UTC 切回 Home 后保持后台，04:53:17.481 收到系统任务 `completed=true`，后台持续约 546 秒。Mac 最终排入和实际播放均为 28,800,000 帧、待播缓冲为零、最终编码信用为 9,600,320 字节；Mac 界面确认内容校验及设备播放进度完成，iPad 返回前台后显示“电脑已确认播放完成”。本轮最终认证回执和资源清理通过，无欠载或系统过期。
 
 证据位于 `.build/local-release-logs/ci-main-integration/`：`audio-systemtrace-profile-summary.json`、`ios-authority-red.log`、`audio-progress-ab-state.json`、`ios-progress-red2.log`、`ios-progress-green-summary.json`、`ios-progress-green-log-gate.log` 及 `ios-background-progress-release-device-run.json`。旧失败和隔离实验保留为本地诊断资产，不提交设备标识或完整私有日志。Mac 仍是显式启用蓝牙验收能力的同签名接收端；产品默认开关继续关闭。单组设备的十分钟合成输入不能代替小时级重复、干扰、锁屏、实际音乐与声学质量验收，也不覆盖 Android／Windows 原生路径或 USB 严格输出。
+
+### 2026-10-29：一小时播放与 iPad 锁屏复验
+
+PR #34 已通过最终提交的全部适用 CI，以合并提交 `0765a1da` 纳入 `main`；合并后的文件树与通过检查的 `43b2adbf` 相同，两侧历史均保留。本轮继续使用上述正式 iOS Release 与显式启用蓝牙验收能力的 Mac 接收包，核对签名及二进制摘要后测试，没有重新编译或更改产品代码。输入为单个连续 3,600 秒、48 kHz、双声道、24-bit 低幅合成 WAVE，共 172,800,000 个源帧；文件 SHA-256 为 `c0d54e37f98a5bbed0b9d8303d5c9f2ab2b7876ff7a410d32b605a5b4dd98651`。传输继续保持 128 kbps、20 ms 包和 64 包窗口。
+
+首轮没有通过：12:11:26 UTC 开始播放，期间经历锁屏、解锁和再次锁屏，约 53 分钟时收到原生后台任务过期。用户导出的本机系统日志显示，13:04:30.990 相机取景启动，13:04:32.727 DAS 的 `Viewfinder Policy` 因 `viewfinderActive` 不满足条件暂停该任务，13:04:32.731 交付原生过期回调；发送端随后停止并报告 `completed=false`。Mac 最后排入 152,868,168 帧、播放 152,814,408 帧、仍有 56 个待播缓冲，没有先行欠载或最终成功回执。该次系统记录的 `runtime limit` 为 `-1`，证据不支持将失败归因于一小时硬上限。保留这次失败，不绕过系统资源撤销，也不以无关代码修改掩盖它。
+
+用户同意避开相机活动后，用相同安装包和文件重新发起一次独立连续播放：13:24:56 UTC 在 Mac 允许，13:25:23 锁定 iPad，14:25:00.291 iOS 应用日志报告后台任务 `completed=true`。Mac 最终排入与实际播放均为 172,800,000 帧、待播为零，最终编码信用为 57,600,320 字节；Mac 界面确认内容校验及设备播放进度完成，iPad 解锁后显示“电脑已确认播放完成”。对应成功路径要求最终认证回执、实时授权及所属资源清理全部通过。本轮日志无欠载、后台过期或停止事件。
+
+锁屏至完成约 59 分 37 秒；13:26:40 至 14:24:54 的 59 次每分钟系统采样均为 `passcodeRequired=true`，没有采样错误或观察到的解锁。另有锁定后的即时确认及播放结束后的锁状态复核。采样不能证明未采样瞬间的状态，也不把播放开始至锁屏之间的约 27 秒算入锁屏时间。设备预览曾保留应用旧画面，因此以系统锁状态为证据，不声称截图证明了持续黑屏。
+
+本轮跨越了初始账户授权的到期边界：iPad 初始到期为 14:24:44，Mac 为 14:24:46，最终完成时间晚于两者。Mac 完成页面显示续期后到期为 15:22:46。iOS 完成页面按现有实现隐藏授权到期字段，没有直接记录其更新后的具体时间；发送端在最终回执及清理前仍执行绑定租约的墙钟和单调时钟有效性检查，成功完成与真实续期一致，不能把未观察到的时间写成直接读数。没有更改租约期限、时钟、账户准入、身份绑定、加密或回执校验。
+
+随后导出的系统日志补齐了原生完成证据：14:25:00.297，BackgroundTasks 将本轮任务标记为 `success: 1`／`Succeeded`；14:25:00.304，DAS 对同一任务记录 `COMPLETED`，开始时间为 13:24:44，实际运行 60.263548 分钟，下一条进度记录为 100%。ActivityProgressUI 将在 13:24:44 创建的本轮锁屏活动标为 `dismissed` 并移除。14:38 画面中另有一张“任务失败 37%”卡片；14:39 锁屏场景记录使用的是另一个仍保留的活动标识，不是本轮已移除的活动。现有日志不足以把该残留卡片精确映射到某一次早期尝试，因而保留归属边界，不把它当成本轮进度，也不声称已清理所有历史系统提示。
+
+本地证据为 `audio-long-lock-failure-review.json`、`audio-long-lock-system-expiry-window.log`、`audio-long-lock-retest-review.json`、`audio-long-lock-retest-watch-reviewed.json`、`audio-long-lock-retest-identity.json`、`audio-long-lock-retest-mac-final-trace.log`、`audio-long-lock-retest-system-completion.log` 及 `audio-long-lock-retest-activity-ui-completion.log`；原始日志与设备身份不提交。本轮只验证这一组设备上的一小时合成输入、上述锁屏采样及授权跨期完成，不代表真实音乐声学质量、相机并发、无线干扰、反复小时级稳定性、其他客户端或 USB 严格输出均已通过。产品蓝牙验收总开关继续关闭。
