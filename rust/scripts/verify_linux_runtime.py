@@ -25,10 +25,10 @@ def require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
-def run(binary: Path, state: Path, *arguments: str) -> subprocess.CompletedProcess:
+def run(binary: Path, state: Path, *arguments: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         [str(binary), "--state-dir", str(state), *arguments],
-        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15,
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15, cwd=cwd,
     )
 
 
@@ -40,12 +40,12 @@ def failure_json(result: subprocess.CompletedProcess) -> dict:
     return payload
 
 
-def wait_healthy(binary: Path, state: Path, process: subprocess.Popen) -> dict:
+def wait_healthy(binary: Path, state: Path, process: subprocess.Popen, *, cwd: Path | None = None) -> dict:
     deadline = time.monotonic() + 20
     last_error = "no status observed"
     while time.monotonic() < deadline:
         require(process.poll() is None, "agent exited before healthy status")
-        result = run(binary, state, "agent", "status", "--json")
+        result = run(binary, state, "agent", "status", "--json", cwd=cwd)
         if result.returncode == 0:
             payload = json.loads(result.stdout)
             require(payload["status"] == "healthy", "status command accepted unhealthy runtime")
@@ -83,12 +83,12 @@ def pty_read_until(master: int, expected: bytes, process: subprocess.Popen) -> b
     raise RuntimeError(f"menu did not render {expected!r}")
 
 
-def verify_terminal(binary: Path, state: Path) -> list[str]:
-    require(run(binary, state, "tui").returncode != 0, "menu accepted non-terminal input")
+def verify_terminal(binary: Path, state: Path, *, cwd: Path | None = None) -> list[str]:
+    require(run(binary, state, "tui", cwd=cwd).returncode != 0, "menu accepted non-terminal input")
     master, slave = pty.openpty()
     process = subprocess.Popen(
         [str(binary), "--state-dir", str(state), "tui"],
-        stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
+        stdin=slave, stdout=slave, stderr=slave, start_new_session=True, cwd=cwd,
     )
     os.close(slave)
     try:
@@ -132,6 +132,22 @@ def verify_terminal_agent(binary: Path, state: Path) -> list[str]:
         cleanup_process(process)
         os.close(master)
     return ["pty_foreground_agent_sigint_returns_to_menu"]
+
+
+def verify_relative_state(binary: Path, cwd: Path) -> None:
+    state = Path("relative-state")
+    process = subprocess.Popen(
+        [str(binary), "--state-dir", str(state), "agent", "run", "--no-discovery-scan"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, cwd=cwd,
+    )
+    try:
+        wait_healthy(binary, state, process, cwd=cwd)
+        verify_terminal(binary, state, cwd=cwd)
+        stop_agent(process)
+    finally:
+        cleanup_process(process)
+        if process.stderr is not None:
+            process.stderr.close()
 
 
 def verify(binary: Path) -> dict:
@@ -217,6 +233,8 @@ def verify(binary: Path) -> dict:
             finally:
                 cleanup_process(restarted)
         checks.extend(verify_terminal_agent(binary, root / "menu-agent"))
+        verify_relative_state(binary, root)
+        checks.append("relative_state_menu_respects_runtime_binding")
         version = run(binary, state, "version", "--json")
         require(version.returncode == 0, "version failed")
         return {

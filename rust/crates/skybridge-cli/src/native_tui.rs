@@ -41,10 +41,11 @@ pub(crate) async fn run(state_dir: Option<PathBuf>) -> Result<()> {
             "Linux guided menus require an interactive terminal; use --help for scriptable commands"
         );
     }
-    // Resolve once: actions must not silently pick another runtime if a caller
-    // supplied a relative path or SKYBRIDGE_STATE_DIR.
+    // Preserve the selected root's spelling: the existing runtime lease binds
+    // state_dir verbatim, including relative paths. The dispatcher does not
+    // change the process working directory between menu actions.
     let paths = skybridge_agent::resolve_paths(state_dir)?;
-    let state_dir = std::path::absolute(paths.root)?;
+    let state_dir = paths.root;
     loop {
         print!("{MENU}");
         let Some(selection) = read_value(&mut io::stdin().lock(), &mut io::stdout(), "选择: ")?
