@@ -36,6 +36,16 @@ pub(crate) async fn require_active_agent(paths: &AgentPaths) -> Result<(), Agent
 pub(crate) async fn load_active_agent_health(
     paths: &AgentPaths,
 ) -> Result<AgentHealthSnapshot, AgentRuntimeGuardError> {
+    let health = load_owned_agent_health(paths).await?;
+    evaluate_health_snapshot(paths, Some(&health), OffsetDateTime::now_utc())?;
+    Ok(health)
+}
+
+/// Shutdown may target a degraded runtime, but still requires its current lock,
+/// lease, schema, state directory and fresh heartbeat binding.
+pub(crate) async fn load_owned_agent_health(
+    paths: &AgentPaths,
+) -> Result<AgentHealthSnapshot, AgentRuntimeGuardError> {
     evaluate_runtime_lock(agent_runtime_is_active(paths))?;
     let lease_before = load_runtime_lease(paths).await?;
     let health = load_health_snapshot(paths)
@@ -53,7 +63,7 @@ pub(crate) async fn load_active_agent_health(
         retryable: true,
     })?;
     evaluate_runtime_lease_binding(paths, &lease_before, &health, &lease_after)?;
-    evaluate_health_snapshot(paths, Some(&health), OffsetDateTime::now_utc())?;
+    evaluate_owned_health_snapshot(paths, Some(&health), OffsetDateTime::now_utc())?;
     Ok(health)
 }
 
@@ -98,6 +108,27 @@ fn evaluate_health_snapshot(
     health: Option<&AgentHealthSnapshot>,
     now: OffsetDateTime,
 ) -> Result<(), AgentRuntimeGuardError> {
+    evaluate_owned_health_snapshot(paths, health, now)?;
+    if let Some(health) = health
+        && health.status != AgentRuntimeStatus::Healthy
+    {
+        return Err(AgentRuntimeGuardError {
+            code: "agent_not_healthy",
+            message: format!(
+                "the lock-owning SkyBridge agent is `{}` rather than `healthy`",
+                agent_status_label(health.status)
+            ),
+            retryable: true,
+        });
+    }
+    Ok(())
+}
+
+fn evaluate_owned_health_snapshot(
+    paths: &AgentPaths,
+    health: Option<&AgentHealthSnapshot>,
+    now: OffsetDateTime,
+) -> Result<(), AgentRuntimeGuardError> {
     let Some(health) = health else {
         return Err(AgentRuntimeGuardError {
             code: "agent_health_missing",
@@ -129,16 +160,6 @@ fn evaluate_health_snapshot(
             message: "the lock-owning agent health snapshot belongs to a different state directory"
                 .to_owned(),
             retryable: false,
-        });
-    }
-    if health.status != AgentRuntimeStatus::Healthy {
-        return Err(AgentRuntimeGuardError {
-            code: "agent_not_healthy",
-            message: format!(
-                "the lock-owning SkyBridge agent is `{}` rather than `healthy`",
-                agent_status_label(health.status)
-            ),
-            retryable: true,
         });
     }
     let age = now - health.updated_at;
@@ -259,12 +280,17 @@ mod tests {
         let degraded_error = evaluate_health_snapshot(&paths, Some(&degraded), now)
             .expect_err("degraded health must fail");
         assert_eq!(degraded_error.code, "agent_not_healthy");
+        // Recovery may stop a degraded agent; it must not authorize ordinary
+        // session work or weaken incarnation/freshness validation.
+        assert!(evaluate_owned_health_snapshot(&paths, Some(&degraded), now).is_ok());
+        assert!(evaluate_owned_health_snapshot(&paths, Some(&stale), now).is_err());
 
         let mut wrong_state_dir = healthy;
         wrong_state_dir.state_dir = "/different/state-dir".to_owned();
         let mismatch = evaluate_health_snapshot(&paths, Some(&wrong_state_dir), now)
             .expect_err("health from a different state directory must fail");
         assert_eq!(mismatch.code, "agent_health_state_dir_mismatch");
+        assert!(evaluate_owned_health_snapshot(&paths, Some(&wrong_state_dir), now).is_err());
         Ok(())
     }
 

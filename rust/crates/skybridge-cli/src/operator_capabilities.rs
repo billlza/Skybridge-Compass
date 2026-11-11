@@ -37,6 +37,7 @@ enum OperatorRuntimeTarget {
     NativeHeadlessStateDir,
     AgentOwnedRegistry,
     ArtifactOnly,
+    LinuxHeadlessRuntime,
 }
 
 impl OperatorRuntimeTarget {
@@ -48,6 +49,7 @@ impl OperatorRuntimeTarget {
             Self::NativeHeadlessStateDir => "native_headless_state_dir",
             Self::AgentOwnedRegistry => "agent_owned_registry",
             Self::ArtifactOnly => "artifact_only",
+            Self::LinuxHeadlessRuntime => "linux_headless_runtime",
         }
     }
 }
@@ -103,6 +105,46 @@ const OPERATOR_CAPABILITY_SCHEMA_VERSION: u32 = 1;
 
 fn operator_capabilities() -> &'static [OperatorCapability] {
     &[
+        OperatorCapability {
+            id: "native.menu",
+            status: OperatorCapabilityStatus::Available,
+            runtime_target: OperatorRuntimeTarget::LinuxHeadlessRuntime,
+            control_effect: OperatorControlEffect::NativeMutation,
+            command: "skybridge tui",
+            owner_module: "native_tui + cli_dispatch",
+            authority_boundary: "Guided Linux terminal actions use the existing native CLI dispatcher and selected state directory. Mutations need explicit confirmation, receipt and session authorization contracts remain unchanged, and no desktop/media backend is implied.",
+            verification_gate: "native_menu_actions_use_the_real_parser_and_literal_paths + native_menu_cancellation_and_bad_input_never_dispatch + Linux PTY and real-agent lifecycle acceptance",
+        },
+        OperatorCapability {
+            id: "agent.stop",
+            status: OperatorCapabilityStatus::Available,
+            runtime_target: OperatorRuntimeTarget::LinuxHeadlessRuntime,
+            control_effect: OperatorControlEffect::NativeMutation,
+            command: "skybridge agent stop [--instance-id <id>] [--timeout-seconds <1..300>] [--json]",
+            owner_module: "linux_agent + agent_runtime_guard",
+            authority_boundary: "Requires a fresh lock-bound agent twice, opens a Linux pidfd, sends SIGTERM only to that incarnation and waits for process exit. Timeout neither kills nor retries, and process exit is distinct from session cleanup verification.",
+            verification_gate: "Linux real-process stop, stale incarnation rejection and restart acceptance",
+        },
+        OperatorCapability {
+            id: "agent.run",
+            status: OperatorCapabilityStatus::Available,
+            runtime_target: OperatorRuntimeTarget::NativeHeadlessStateDir,
+            control_effect: OperatorControlEffect::NativeMutation,
+            command: "skybridge agent run [--no-discovery-scan] [--discovery-scan-interval-seconds <1..3600>] [--discovery-scan-window-seconds <1..30>]",
+            owner_module: "cli_dispatch + skybridge-agent runtime",
+            authority_boundary: "Foreground runtime owns an exclusive state-directory lock and drains managed sessions on SIGINT/SIGTERM. Disabling background scans does not authorize peers or prevent explicit scans.",
+            verification_gate: "Linux PTY and real-agent lifecycle acceptance",
+        },
+        OperatorCapability {
+            id: "agent.status",
+            status: OperatorCapabilityStatus::ReadOnly,
+            runtime_target: OperatorRuntimeTarget::NativeHeadlessStateDir,
+            control_effect: OperatorControlEffect::ReadOnly,
+            command: "skybridge agent status [--json]",
+            owner_module: "operator_status + agent_runtime_guard",
+            authority_boundary: "Success requires fresh healthy state bound to the currently lock-owning runtime incarnation. A PID or stale health file alone is insufficient.",
+            verification_gate: "Linux PTY and real-agent lifecycle acceptance",
+        },
         OperatorCapability {
             id: "app.instances",
             status: OperatorCapabilityStatus::ReadOnly,
@@ -664,6 +706,7 @@ fn capabilities_for_host(host: &str) -> Vec<&'static OperatorCapability> {
                 host == "macos"
             }
             OperatorRuntimeTarget::WindowsAppRuntime => host == "windows",
+            OperatorRuntimeTarget::LinuxHeadlessRuntime => host == "linux",
             _ => true,
         })
         .collect()

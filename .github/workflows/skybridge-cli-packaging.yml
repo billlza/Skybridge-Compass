@@ -48,12 +48,12 @@ jobs:
 
       - name: Install the pinned Rust toolchain
         run: |
-          rustup toolchain install 1.94.0 --profile minimal --component clippy --component rustfmt --component llvm-tools-preview
-          rustup override set 1.94.0
-          [[ "$(rustc --version)" == "rustc 1.94.0 "* ]]
+          rustup toolchain install 1.99.1 --profile minimal --component clippy --component rustfmt --component llvm-tools-preview
+          rustup override set 1.99.1
+          [[ "$(rustc --version)" == "rustc 1.99.1 "* ]]
 
-      # The native operator client and guided menus are macOS-only modules.
-      # The Linux packaging job cannot compile or test these code paths.
+      # Mac app IPC and its guided menus are separate from the native Linux
+      # menus. Linux builds cannot compile or test the Mac-only code paths.
       - name: Compile macOS CLI and operator tests
         run: cargo build --locked --manifest-path rust/Cargo.toml -p skybridge -p skybridge-crossnet-client --all-targets --keep-going
 
@@ -65,10 +65,21 @@ jobs:
 
   packaging-check:
     needs: supabase-security
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     env:
       RUSTFLAGS: -Dwarnings
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -93,9 +104,9 @@ jobs:
 
       - name: Install the pinned Rust toolchain
         run: |
-          rustup toolchain install 1.94.0 --profile minimal --component clippy --component rustfmt --component llvm-tools-preview
-          rustup override set 1.94.0
-          [[ "$(rustc --version)" == "rustc 1.94.0 "* ]]
+          rustup toolchain install 1.99.1 --profile minimal --component clippy --component rustfmt --component llvm-tools-preview
+          rustup override set 1.99.1
+          [[ "$(rustc --version)" == "rustc 1.99.1 "* ]]
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -158,12 +169,32 @@ jobs:
       - name: Build Linux release archive
         env:
           PYTHON_BIN: python
+          TARGET: ${{ matrix.target }}
         run: |
           mkdir -p /tmp/skybridge-release-asset
           bash rust/scripts/build_release_artifact.sh \
-            --target x86_64-unknown-linux-gnu \
+            --target "${TARGET}" \
             --out-dir /tmp/skybridge-release-asset
-          test -f /tmp/skybridge-release-asset/skybridge-x86_64-unknown-linux-gnu.tar.gz
+          test -f "/tmp/skybridge-release-asset/skybridge-${TARGET}.tar.gz"
+
+      - name: Verify extracted Linux runtime with real processes and terminal
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/skybridge-installed"
+          tar -xzf "/tmp/skybridge-release-asset/skybridge-${TARGET}.tar.gz" -C "${RUNNER_TEMP}/skybridge-installed"
+          python rust/scripts/verify_linux_runtime.py \
+            --binary "${RUNNER_TEMP}/skybridge-installed/skybridge" \
+            --output "${RUNNER_TEMP}/skybridge-linux-runtime.json"
+
+      - name: Retain Linux runtime acceptance result
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-runtime-${{ matrix.target }}
+          path: ${{ runner.temp }}/skybridge-linux-runtime.json
+          if-no-files-found: error
 
       - name: Stage npm package
         run: |

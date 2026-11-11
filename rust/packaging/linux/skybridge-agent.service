@@ -1,0 +1,22 @@
+[Unit]
+Description=SkyBridge native user agent
+Documentation=https://github.com/billlza/Skybridge-Compass
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=exec
+ExecStart=%h/.local/bin/skybridge agent run
+EnvironmentFile=-%E/skybridge/agent.env
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+KillSignal=SIGTERM
+KillMode=mixed
+UMask=0077
+NoNewPrivileges=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

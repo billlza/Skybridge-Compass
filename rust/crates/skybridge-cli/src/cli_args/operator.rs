@@ -38,7 +38,38 @@ pub(crate) struct ConnectCommand {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum AgentSubcommand {
-    Run,
+    /// Run the native agent in the foreground (SIGINT/SIGTERM shuts it down).
+    Run(AgentRunArgs),
+    /// Require a live, healthy agent owning the selected state directory.
+    Status(OutputOptions),
+    /// Stop one Linux agent incarnation and wait for its process to exit.
+    #[cfg(target_os = "linux")]
+    Stop(AgentStopArgs),
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct AgentStopArgs {
+    /// Reject a replacement agent rather than stopping it.
+    #[arg(long)]
+    pub(crate) instance_id: Option<String>,
+    #[arg(long, default_value_t = 45, value_parser = clap::value_parser!(u64).range(1..=300))]
+    pub(crate) timeout_seconds: u64,
+    #[command(flatten)]
+    pub(crate) output: OutputOptions,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AgentRunArgs {
+    /// Disable background mDNS browsing; explicit device scans remain available.
+    #[arg(long)]
+    pub(crate) no_discovery_scan: bool,
+    /// Nominal seconds between background discovery passes; scans never overlap.
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=3600))]
+    pub(crate) discovery_scan_interval_seconds: u64,
+    /// Bounded mDNS browse window for each background pass.
+    #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u64).range(1..=30))]
+    pub(crate) discovery_scan_window_seconds: u64,
 }
 
 #[derive(Debug, Args)]

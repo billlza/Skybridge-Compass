@@ -315,6 +315,7 @@ pub fn agent_runtime_is_active(paths: &AgentPaths) -> Result<bool> {
 }
 
 pub async fn run_agent(options: AgentRuntimeOptions) -> Result<()> {
+    options.validate()?;
     let paths = resolve_paths(options.state_dir)?;
     ensure_layout(&paths).await?;
     let runtime_lock = acquire_agent_runtime_lock(&paths)?;
