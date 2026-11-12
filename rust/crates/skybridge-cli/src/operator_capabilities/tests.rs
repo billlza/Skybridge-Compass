@@ -18,7 +18,19 @@ fn host_catalog_excludes_commands_absent_from_the_non_mac_parser() {
         mac.iter()
             .any(|capability| capability.id == "crossnet.connect")
     );
-    assert!(portable.iter().all(|capability| mac.contains(capability)));
+    assert!(
+        portable
+            .iter()
+            .filter(|capability| capability.runtime_target
+                != OperatorRuntimeTarget::LinuxHeadlessRuntime)
+            .all(|capability| mac.contains(capability))
+    );
+    assert!(
+        portable
+            .iter()
+            .any(|capability| capability.id == "native.menu")
+    );
+    assert!(!mac.iter().any(|capability| capability.id == "native.menu"));
 }
 
 #[test]

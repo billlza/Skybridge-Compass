@@ -1598,6 +1598,11 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
         descriptor: RemoteControlSecurityDescriptor,
         missingMetadata: [String]
     ) {
+        // These labels come only from missingRequiredNoticeMetadata. Do not log
+        // account values, addresses, credentials or session identifiers here.
+        SkyBridgeLogger.security.error(
+            "Remote-control consent metadata incomplete: \(missingMetadata.joined(separator: ","), privacy: .public)"
+        )
         RemoteControlSmokeStatusWriter.append(
             """
             remoteControlNoticeRejected session=\(Self.statusValue(descriptor.sessionId)) \

@@ -566,6 +566,25 @@ final class WebRTCStreamConfigurationIngressPolicyTests: XCTestCase {
         XCTAssertEqual(missingPlan.commitMode, .none)
     }
 
+    @MainActor
+    func testOnlySupportedPhysicalNamespaceIsConfirmedInTheExactTransactionReceipt() throws {
+        for namespace in [CanonicalKeyboard.namespace, "unknown-key-space"] {
+            let config = streamConfiguration(keyboardCodeNamespace: namespace)
+            let decoded = try JSONDecoder().decode(RemoteDesktopStreamConfiguration.self,
+                from: JSONEncoder().encode(config))
+            XCTAssertEqual(decoded.keyboardCodeNamespace, namespace)
+            let plan = CrossNetworkConnectionManager.planWebRTCStreamConfigurationIngress(
+                decoded, previousConfig: nil, advertisedFormats: ["h264"], hasSessionKeys: true)
+            let receipt = try XCTUnwrap(plan.acknowledgement).payload(acceptedAt: 123)
+            XCTAssertEqual(receipt.transaction, config.streamConfigurationTransaction)
+            XCTAssertEqual(receipt.keyboardCodeNamespace,
+                namespace == CanonicalKeyboard.namespace ? CanonicalKeyboard.namespace : nil)
+            let roundTrip = try JSONDecoder().decode(RemoteDesktopStreamConfigurationAcknowledgement.self,
+                from: JSONEncoder().encode(receipt))
+            XCTAssertEqual(roundTrip.keyboardCodeNamespace, receipt.keyboardCodeNamespace)
+        }
+    }
+
     private func streamConfiguration(
         preferredCodec: String? = "h264",
         supportedVideoFormats: [String] = ["h264"],
@@ -573,6 +592,7 @@ final class WebRTCStreamConfigurationIngressPolicyTests: XCTestCase {
         screenFrameTransport: String? = "webrtc-native-main+sbrf-fallback",
         screenDataChannelEnabled: Bool? = false,
         clipboardSyncEnabled: Bool = true,
+        keyboardCodeNamespace: String? = nil,
         audioRedirectionEnabled: Bool? = nil,
         audioTransport: String? = nil,
         audioMode: String? = nil,
@@ -590,6 +610,7 @@ final class WebRTCStreamConfigurationIngressPolicyTests: XCTestCase {
             enableHardwareAcceleration: true,
             enableAppleSiliconOptimization: true,
             clipboardSyncEnabled: clipboardSyncEnabled,
+            keyboardCodeNamespace: keyboardCodeNamespace,
             screenFrameTransport: screenFrameTransport,
             screenDataChannelEnabled: screenDataChannelEnabled,
             audioRedirectionEnabled: audioRedirectionEnabled,

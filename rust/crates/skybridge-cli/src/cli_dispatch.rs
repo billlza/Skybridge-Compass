@@ -26,15 +26,24 @@ pub(super) async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
         #[cfg(target_os = "macos")]
         Commands::Tui => crate::tui::run().await,
+        #[cfg(target_os = "linux")]
+        Commands::Tui => crate::native_tui::run(cli.state_dir).await,
         Commands::Agent(agent) => match agent.command {
-            AgentSubcommand::Run => {
+            AgentSubcommand::Run(args) => {
                 run_agent(skybridge_agent::AgentRuntimeOptions {
                     state_dir: cli.state_dir,
                     heartbeat_interval: Duration::from_secs(2),
-                    ..skybridge_agent::AgentRuntimeOptions::default()
+                    discovery_scan_enabled: !args.no_discovery_scan,
+                    discovery_scan_interval: Duration::from_secs(
+                        args.discovery_scan_interval_seconds,
+                    ),
+                    discovery_scan_window: Duration::from_secs(args.discovery_scan_window_seconds),
                 })
                 .await
             }
+            AgentSubcommand::Status(output) => metrics(cli.state_dir, output.json).await,
+            #[cfg(target_os = "linux")]
+            AgentSubcommand::Stop(args) => crate::linux_agent::stop(cli.state_dir, args).await,
         },
         Commands::Login(args) => login(cli.state_dir, args).await,
         Commands::Logout => logout(cli.state_dir).await,

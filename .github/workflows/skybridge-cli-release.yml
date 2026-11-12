@@ -136,9 +136,9 @@ jobs:
 
       - name: Install the pinned Rust toolchain
         run: |
-          rustup toolchain install 1.94.0 --profile minimal --component clippy --component rustfmt
-          rustup override set 1.94.0
-          [[ "$(rustc --version)" == "rustc 1.94.0 "* ]]
+          rustup toolchain install 1.99.1 --profile minimal --component clippy --component rustfmt
+          rustup override set 1.99.1
+          [[ "$(rustc --version)" == "rustc 1.99.1 "* ]]
 
       - name: Install the pinned dependency auditor
         run: cargo install cargo-audit --locked --version 0.22.2
@@ -368,6 +368,27 @@ jobs:
             --target "${{ matrix.target }}" \
             --out-dir "${RUNNER_TEMP}/release-asset"
           test -f "${RUNNER_TEMP}/release-asset/${{ matrix.asset }}"
+
+      - name: Verify the exact Linux archive runtime
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          ASSET_NAME: ${{ matrix.asset }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/linux-runtime"
+          tar -xzf "${RUNNER_TEMP}/release-asset/${ASSET_NAME}" -C "${RUNNER_TEMP}/linux-runtime"
+          python rust/scripts/verify_linux_runtime.py \
+            --binary "${RUNNER_TEMP}/linux-runtime/skybridge" \
+            --output "${RUNNER_TEMP}/linux-runtime/acceptance.json"
+
+      - name: Upload Linux runtime acceptance
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: skybridge-cli-linux-runtime-${{ matrix.target }}
+          path: ${{ runner.temp }}/linux-runtime/acceptance.json
+          if-no-files-found: error
 
       - name: Notarize the signed darwin binary and record the proof
         if: matrix.target == 'aarch64-apple-darwin'

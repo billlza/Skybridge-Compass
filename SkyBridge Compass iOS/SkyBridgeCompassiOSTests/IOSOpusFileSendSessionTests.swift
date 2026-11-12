@@ -609,7 +609,8 @@ private final class OpusFileFixture {
     func assertClosed() async throws {
         let sender = try XCTUnwrap(sender), state = await sender.source.snapshot()
         XCTAssertTrue(state.resourcesReleased); XCTAssertFalse(state.cleanupPending)
-        XCTAssertFalse(sender.cleanupPending)
+        XCTAssertFalse(sender.cleanupPending,
+            "cleanup failures: \(sender.failure?.cleanupFailures ?? []); source: \(state)")
         if let link { XCTAssertTrue(link.closed) }
         XCTAssertThrowsError(try channel.requireCurrent())
     }

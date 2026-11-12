@@ -242,6 +242,18 @@ class SkyBridgeCLIReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn('components = ["clippy", "llvm-tools-preview", "rustfmt"]', toolchain)
         self.assertIn("--component llvm-tools-preview", packaging_workflow)
 
+    def test_linux_archives_are_executed_on_both_native_architectures(self) -> None:
+        packaging = PACKAGING_WORKFLOW.read_text(encoding="utf-8")
+        for runner in ("ubuntu-24.04", "ubuntu-24.04-arm"):
+            self.assertIn(f"runner: {runner}", packaging)
+        for target in ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"):
+            self.assertIn(f"target: {target}", packaging)
+        for workflow in (packaging, job_block(self.workflow, "build")):
+            self.assertIn("rust/scripts/verify_linux_runtime.py", workflow)
+            self.assertIn("--binary", workflow)
+            self.assertIn("--output", workflow)
+            self.assertIn("if-no-files-found: error", workflow)
+
     def test_release_and_packaging_verify_the_complete_rust_workspace(self) -> None:
         packaging_workflow = PACKAGING_WORKFLOW.read_text(encoding="utf-8")
         release_verify = job_block(self.workflow, "verify")

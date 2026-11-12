@@ -17,7 +17,7 @@ public enum BluetoothControlStreamError: Error, Equatable, Sendable {
 /// schedule/remove/close operations run on the same dedicated run-loop thread.
 public final class BluetoothControlFrameTransport: NSObject, StreamDelegate, Sendable {
     enum NativeEvent: Sendable {
-        case openRequested, read(Int), wrote(Int), closed(inputStatus: UInt, outputStatus: UInt), willExit
+        case workerReady, openRequested, read(Int), wrote(Int), closed(inputStatus: UInt, outputStatus: UInt), willExit
     }
     private let worker: BluetoothStreamWorker
     private let lifetime = BluetoothStreamThreadLifetime()
@@ -393,6 +393,7 @@ private final class BluetoothStreamWorker: Sendable {
         }
         do {
             try wake.installOnCurrentThread()
+            observe?(.workerReady)
             if mailbox.failure != nil { return }
             try native.withLock { try $0.open() }
             while mailbox.failure == nil {

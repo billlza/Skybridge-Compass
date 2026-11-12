@@ -1107,7 +1107,7 @@ async fn read_line(reader: &mut BufReader<UnixStream>) -> Result<String> {
 
         let newline_index = available.iter().position(|byte| *byte == b'\n');
         let bytes_to_consume = newline_index.map_or(available.len(), |index| index + 1);
-        let payload_bytes_to_append = newline_index.map_or(bytes_to_consume, |index| index);
+        let payload_bytes_to_append = newline_index.unwrap_or(bytes_to_consume);
         if line.len() + payload_bytes_to_append > MAX_RESPONSE_LINE_BYTES {
             bail!(
                 "crossnet-control response line exceeded {MAX_RESPONSE_LINE_BYTES} bytes (code: response_too_large)"

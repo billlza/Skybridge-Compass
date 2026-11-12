@@ -48,7 +48,7 @@ public struct PairingTrustApprovalSheet: View {
                     }
 
                     if shouldShowVerificationStage {
-                        Section("验证码（用于 iOS PQC 身份验证）") {
+                        Section("会话校验码（请在两端核对）") {
                             if let code = service.pendingVerificationCode, !code.isEmpty {
                                 LabeledContent("6 位验证码") {
                                     Text(code)
@@ -190,7 +190,7 @@ public struct PairingTrustApprovalSheet: View {
     
     private var shouldShowVerificationStage: Bool {
         guard service.pendingRequest?.id == request.id else { return false }
-        if isProtocolIdentityBindingPrompt {
+        if request.sessionVerification != nil || isProtocolIdentityBindingPrompt {
             return service.pendingVerificationCode?.isEmpty == false
         }
         guard let decision = service.pendingDecision else { return false }
@@ -211,6 +211,9 @@ public struct PairingTrustApprovalSheet: View {
     }
 
     private var promptText: String {
+        if request.sessionVerification != nil {
+            return "请确认两端显示的 6 位校验码完全一致，再允许此设备建立信任。选择“始终允许”会记住该设备。"
+        }
         if isProtocolIdentityBindingPrompt {
             return "请确认 Mac 与 iPhone/iPad 显示的 6 位验证码完全一致；一致后才允许建立协议身份 pin。"
         }
@@ -223,6 +226,9 @@ public struct PairingTrustApprovalSheet: View {
         }
         if service.pendingDecision == .reject {
             return "协议身份授权已拒绝，连接不会继续。"
+        }
+        if request.sessionVerification != nil {
+            return "本次设备信任确认已处理。请在另一端核对相同校验码并完成配对。"
         }
         if service.pendingVerificationSuite == "PIB-1-v3-candidate" {
             return "候选身份尚未获得授权。请在另一端显示同一验证码并批准；收到签名确认后，本机还会要求你显式批准，之后才会写入信任。"

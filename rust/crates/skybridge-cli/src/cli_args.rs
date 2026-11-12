@@ -41,8 +41,8 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Commands {
-    /// Guided terminal menus: /setting, /device, /usb, /file and /handshake.
-    #[cfg(target_os = "macos")]
+    /// Guided terminal menus for this host's runtime.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     Tui,
     Agent(AgentCommand),
     Login(LoginCommand),
@@ -76,9 +76,15 @@ pub(crate) enum Commands {
 impl Cli {
     pub(crate) fn json_output_requested(&self) -> bool {
         match &self.command {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             Commands::Tui => false,
-            Commands::Agent(_) | Commands::Login(_) | Commands::Logout => false,
+            Commands::Agent(agent) => match &agent.command {
+                AgentSubcommand::Run(_) => false,
+                AgentSubcommand::Status(output) => output.json,
+                #[cfg(target_os = "linux")]
+                AgentSubcommand::Stop(args) => args.output.json,
+            },
+            Commands::Login(_) | Commands::Logout => false,
             Commands::Device(device) => match &device.command {
                 DeviceSubcommand::Status(output) => output.json,
                 DeviceSubcommand::Discover(args) => args.output.json,

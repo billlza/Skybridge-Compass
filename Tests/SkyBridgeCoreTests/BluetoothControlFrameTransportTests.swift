@@ -78,6 +78,7 @@ final class BluetoothControlFrameTransportTests: XCTestCase {
                     if status == 0 { $0.threadIDs.insert(observedThreadID) } else { $0.threadIDErrors += 1 }
                     $0.usedMainThread = $0.usedMainThread || Thread.isMainThread
                     switch event {
+                    case .workerReady: break
                     case .openRequested: $0.opened += 1
                     case .read(let bytes): $0.readBytes += bytes
                     case .wrote(let bytes): $0.writtenBytes += bytes
@@ -376,10 +377,14 @@ final class BluetoothControlFrameTransportTests: XCTestCase {
 
     func testUnusedTransportDeinitializationClosesItsNativeStreamPair() async throws {
         let input = InputStream(data: Data()), output = OutputStream(toMemory: ())
+        let ready = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingOldest(1))
         let closed = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingOldest(1))
         let statuses = OSAllocatedUnfairLock<(UInt, UInt)?>(initialState: nil)
         var transport: BluetoothControlFrameTransport? = BluetoothControlFrameTransport(input: input, output: output,
             observeNativeIO: { event in
+                if case .openRequested = event {
+                    ready.continuation.yield(()); ready.continuation.finish()
+                }
                 if case let .closed(inputStatus, outputStatus) = event {
                     statuses.withLock { $0 = (inputStatus, outputStatus) }
                     closed.continuation.yield(()); closed.continuation.finish()
@@ -387,6 +392,9 @@ final class BluetoothControlFrameTransportTests: XCTestCase {
             })
         weak let owner = transport
         XCTAssertNotNil(owner)
+        // The transport is unused by a caller, but this branch must own opened
+        // native streams before it can require Foundation's .closed status.
+        try await awaitNativeEvent(ready.stream)
         transport = nil
         try await awaitNativeEvent(closed.stream)
         // open() and a concurrent StreamDelegate callback may temporarily hold a
@@ -396,6 +404,50 @@ final class BluetoothControlFrameTransportTests: XCTestCase {
         let result = try XCTUnwrap(statuses.withLock { $0 })
         XCTAssertEqual(result.0, Stream.Status.closed.rawValue)
         XCTAssertEqual(result.1, Stream.Status.closed.rawValue)
+    }
+
+    func testDeinitializationBeforeWorkerOpenClosesWithoutOpeningTheStreams() async throws {
+        struct Trace: Sendable {
+            var opened = 0, closed = 0
+            var statuses: (UInt, UInt)?
+            var releaseTimedOut = false
+        }
+        let trace = OSAllocatedUnfairLock(initialState: Trace())
+        let ready = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingOldest(1))
+        let closed = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingOldest(1))
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        var transport: BluetoothControlFrameTransport? = BluetoothControlFrameTransport(
+            input: InputStream(data: Data()), output: OutputStream(toMemory: ()),
+            observeNativeIO: { event in
+                switch event {
+                case .workerReady:
+                    ready.continuation.yield(()); ready.continuation.finish()
+                    let result = release.wait(timeout: .now() + 4)
+                    trace.withLock { $0.releaseTimedOut = result != .success }
+                case .openRequested:
+                    trace.withLock { $0.opened += 1 }
+                case .closed(let inputStatus, let outputStatus):
+                    trace.withLock { $0.closed += 1; $0.statuses = (inputStatus, outputStatus) }
+                    closed.continuation.yield(()); closed.continuation.finish()
+                default: break
+                }
+            })
+        weak let owner = transport
+        try await awaitNativeEvent(ready.stream)
+        transport = nil
+        XCTAssertNil(owner, "The worker's pre-open barrier must not retain the transport")
+        release.signal()
+        try await awaitNativeEvent(closed.stream)
+        let result = trace.withLock { $0 }
+        XCTAssertFalse(result.releaseTimedOut)
+        XCTAssertEqual(result.opened, 0, "Retired streams must never be opened to force a status transition")
+        XCTAssertEqual(result.closed, 1)
+        let statuses = try XCTUnwrap(result.statuses)
+        // Real Foundation memory streams retain .notOpen when closed before
+        // open. The exact cleanup callback and absent open event define this path.
+        XCTAssertEqual(statuses.0, Stream.Status.notOpen.rawValue)
+        XCTAssertEqual(statuses.1, Stream.Status.notOpen.rawValue)
     }
 
     private func memoryTransport(_ input: Data) -> BluetoothControlFrameTransport {

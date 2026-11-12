@@ -1052,6 +1052,7 @@ public actor HandshakeDriver {
             throw HandshakeError.alreadyInProgress
         }
 
+        let frozenMode = try localModePolicy.get().selection
         let operationToken = UUID()
         activeOutboundOperationToken = operationToken
         // cancel() and inbound dispatch must observe the outbound attempt before
@@ -1126,7 +1127,8 @@ public actor HandshakeDriver {
             policy: policy,
             cryptoPolicy: cryptoPolicy,
             offeredSuites: offeredSuites,
-            peerKEMPublicKeys: peerKEMPublicKeys
+            peerKEMPublicKeys: peerKEMPublicKeys,
+            pqcModeSelection: frozenMode
         )
         context = ctx
         
@@ -1362,7 +1364,8 @@ public actor HandshakeDriver {
                 identityPublicKey: identityPublicKey,
                 policy: policy,
                 cryptoPolicy: cryptoPolicy,
-                offeredSuites: offeredSuites
+                offeredSuites: offeredSuites,
+                pqcModeSelection: try localModePolicy.get().selection
             )
             context = ctx
             
@@ -2308,6 +2311,7 @@ public actor HandshakeContext {
     private let policy: HandshakePolicy
     private let cryptoPolicy: CryptoPolicy
     private let offeredSuites: [CryptoSuite]?
+    private let frozenPQCModeSelection: PQCModeSelection?
     
     /// 临时密钥对
     private var ephemeralPrivateKey: SecureBytes?
@@ -2369,7 +2373,8 @@ public actor HandshakeContext {
         policy: HandshakePolicy,
         cryptoPolicy: CryptoPolicy = .default,
         offeredSuites: [CryptoSuite]? = nil,
-        peerKEMPublicKeys: [CryptoSuite: Data] = [:]
+        peerKEMPublicKeys: [CryptoSuite: Data] = [:],
+        pqcModeSelection: PQCModeSelection? = nil
     ) {
         self.role = role
         self.cryptoProvider = cryptoProvider
@@ -2399,6 +2404,7 @@ public actor HandshakeContext {
         self.policy = policy
         self.cryptoPolicy = cryptoPolicy
         self.offeredSuites = offeredSuites
+        self.frozenPQCModeSelection = pqcModeSelection
         self.peerKEMPublicKeys = peerKEMPublicKeys
     }
 
@@ -2676,6 +2682,8 @@ public actor HandshakeContext {
         peerPolicy: HandshakePolicy? = nil,
         forAdvertising: Bool = false
     ) -> Bool {
+        if suite.isPQCGroup, let frozenPQCModeSelection,
+           !frozenPQCModeSelection.permittedSuiteWireIds.contains(suite.wireId) { return false }
         guard suite.isNegotiable,
               Self.suiteMeetsHandshakePolicy(suite, policy: policy),
               Self.suiteMeetsLocalCryptoPolicy(

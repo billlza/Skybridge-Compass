@@ -40,6 +40,7 @@ extension CrossNetworkConnectionManager {
             enableHardwareAcceleration: config.enableHardwareAcceleration,
             enableAppleSiliconOptimization: config.enableAppleSiliconOptimization,
             clipboardSyncEnabled: config.clipboardSyncEnabled,
+            keyboardCodeNamespace: config.keyboardCodeNamespace,
             damageTrackingEnabled: config.damageTrackingEnabled,
             separateCursorChannelEnabled: config.separateCursorChannelEnabled,
             interactionOverlayChannelEnabled: config.interactionOverlayChannelEnabled,

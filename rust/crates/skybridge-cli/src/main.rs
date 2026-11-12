@@ -36,6 +36,8 @@ mod file_transfer_performance;
 #[cfg(target_os = "macos")]
 mod handshake_commands;
 mod internal_commands;
+#[cfg(target_os = "linux")]
+mod linux_agent;
 #[cfg(target_os = "macos")]
 mod local_approval_commands;
 #[cfg(test)]
@@ -43,6 +45,8 @@ mod main_dispatch_tests;
 #[cfg(test)]
 mod main_tests;
 mod memory_check;
+#[cfg(target_os = "linux")]
+mod native_tui;
 mod operator_capabilities;
 mod operator_profile;
 mod operator_status;

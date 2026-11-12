@@ -16,6 +16,8 @@ pub(crate) async fn metrics(state_dir: Option<PathBuf>, as_json: bool) -> Result
     let payload = json!({
         "health_schema_version": health.schema_version,
         "status": health.status,
+        "instance_id": health.instance_id,
+        "pid": health.pid,
         "updated_at": health.updated_at.format(&time::format_description::well_known::Rfc3339)?,
         "active_sessions": health.active_sessions,
         "active_transfers": health.active_transfers,

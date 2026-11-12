@@ -73,6 +73,7 @@ public actor HandshakeContext {
     private let qPeriaptProvider: (any QPeriaptSessionBoundCryptoProvider)?
     private let qPeriaptProviderIdentity: QPeriaptProviderIdentity?
     private let frozenLocalOfferedSuites: [CryptoSuite]?
+    private let frozenPQCModeSelection: PQCModeSelection?
     private let activeProtocolSigningAlgorithm: ProtocolSigningAlgorithm?
 
  /// 对端 KEM 身份公钥（按套件）
@@ -150,6 +151,7 @@ public actor HandshakeContext {
         peerKEMPublicKeys: [CryptoSuite: Data],
         qPeriaptProvider: (any QPeriaptSessionBoundCryptoProvider)?,
         frozenLocalOfferedSuites: [CryptoSuite]?,
+        frozenPQCModeSelection: PQCModeSelection?,
         activeProtocolSigningAlgorithm: ProtocolSigningAlgorithm?
     ) {
         self.role = role
@@ -166,6 +168,7 @@ public actor HandshakeContext {
         self.qPeriaptProvider = qPeriaptProvider
         self.qPeriaptProviderIdentity = qPeriaptProvider?.qPeriaptProviderIdentity
         self.frozenLocalOfferedSuites = frozenLocalOfferedSuites
+        self.frozenPQCModeSelection = frozenPQCModeSelection
         self.activeProtocolSigningAlgorithm = activeProtocolSigningAlgorithm
     }
 
@@ -193,7 +196,8 @@ public actor HandshakeContext {
         kemIdentityStore: (any HandshakeKEMIdentityStore)? = nil,
         peerKEMPublicKeys: [CryptoSuite: Data] = [:],
         offeredSuites: [CryptoSuite]? = nil,
-        activeProtocolSigningAlgorithm: ProtocolSigningAlgorithm? = nil
+        activeProtocolSigningAlgorithm: ProtocolSigningAlgorithm? = nil,
+        pqcModeSelection: PQCModeSelection? = nil
     ) async throws -> HandshakeContext {
         // Preserve an explicit Q request even when startup admission failed.
         // Every SkyBridge initiator/responder reaches this boundary before a
@@ -298,6 +302,7 @@ public actor HandshakeContext {
             peerKEMPublicKeys: peerKEMPublicKeys,
             qPeriaptProvider: frozenQPeriaptProvider,
             frozenLocalOfferedSuites: frozenOfferedSuites,
+            frozenPQCModeSelection: pqcModeSelection,
             activeProtocolSigningAlgorithm: frozenSigningAlgorithm
         )
 
@@ -2114,8 +2119,10 @@ extension HandshakeContext {
             }
         }
 
-        guard let primarySuite = cryptoProvider.supportedSuites.first(where: \.isNegotiable)
-            ?? (cryptoProvider.activeSuite.isNegotiable ? cryptoProvider.activeSuite : nil) else {
+        guard let primarySuite = cryptoProvider.supportedSuites.first(where: {
+            $0.isNegotiable && suiteMeetsLocalCryptoPolicy($0)
+        }) ?? (cryptoProvider.activeSuite.isNegotiable && suiteMeetsLocalCryptoPolicy(cryptoProvider.activeSuite)
+            ? cryptoProvider.activeSuite : nil) else {
             throw HandshakeError.failed(.suiteNegotiationFailed)
         }
         if suites.isEmpty {
@@ -2193,6 +2200,10 @@ extension HandshakeContext {
     }
 
     private func suiteMeetsLocalCryptoPolicy(_ suite: CryptoSuite) -> Bool {
+        if suite.isPQCGroup, let frozenPQCModeSelection,
+           !frozenPQCModeSelection.permittedSuiteWireIds.contains(suite.wireId) {
+            return false
+        }
         if suite.isHybrid && !cryptoPolicy.allowExperimentalHybrid {
             return false
         }

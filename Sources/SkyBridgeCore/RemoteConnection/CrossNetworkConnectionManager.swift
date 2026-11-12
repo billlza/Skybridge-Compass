@@ -830,6 +830,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         self.readiness = readiness
     }
 
+    func testingCleanupWebRTCSession(_ sessionID: String) {
+        cleanupWebRTCSession(sessionID, reason: "test_session_retirement")
+    }
+
     func testingCurrentSignalingHandle() -> WebSocketSignalingClient.SignalingHandleID? {
         signalingLifecycle.currentHandle()
     }
@@ -3010,6 +3014,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         if currentConnection?.id == sessionID {
             currentConnection = nil
             readiness = .idle
+            switch connectionStatus {
+            case .failed:
+                break
+            default:
+                connectionStatus = .idle
+            }
         }
         if protocolIdentityStatus?.sessionID == sessionID {
             protocolIdentityStatus = nil
@@ -12248,29 +12258,37 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                     model: payload.modelName,
                                     platform: payload.platform,
                                     osVersion: payload.osVersion,
+                                    sessionVerification: .init(sessionKeys: keys),
                                     kemKeyCount: payload.kemPublicKeys.count
                                 )
-                                let decision = await PairingTrustApprovalService.shared.decide(for: request)
-                                guard self.isCurrentWebRTCControlLoopOwner(
-                                    sessionID: sessionID,
-                                    session: session,
-                                    controlTaskToken: controlTaskToken
-                                ) else {
-                                    return
-                                }
-                                self.appendSmokeStatus(
-                                    "app-pairing-decision session=\(sessionID) decision=\(decision.rawValue)"
-                                )
-                                if Self.isSmokeRuntimeEnabled {
-                                    Self.emitSmokeLog("🧪 mac pairing decision=\(decision.rawValue)")
-                                }
-                                guard decision != PairingTrustApprovalService.Decision.reject else { break }
                                 pairingBootstrapTaskToken = nil
                                 pairingBootstrapTask?.cancel()
                                 let pairingTaskToken = UUID()
                                 pairingBootstrapTaskToken = pairingTaskToken
                                 pairingBootstrapTask = Task { @MainActor [weak self] in
                                     guard let self else { return }
+                                    // Human approval must not suspend the ordered control receive
+                                    // loop: authenticated heartbeat and Ping/Pong traffic continues
+                                    // while this session-owned, cancellable task awaits the operator.
+                                    let transportIsCurrent: @MainActor @Sendable () -> Bool = {
+                                        isCurrentPairingBootstrapTaskOwner(pairingTaskToken)
+                                            && self.isCurrentWebRTCControlLoopSecureOwner(
+                                                sessionID: sessionID,
+                                                session: session,
+                                                controlTaskToken: controlTaskToken,
+                                                keys: keys
+                                            )
+                                    }
+                                    guard !Task.isCancelled, transportIsCurrent() else { return }
+                                    let decision = await PairingTrustApprovalService.shared.decide(for: request)
+                                    guard !Task.isCancelled, transportIsCurrent() else { return }
+                                    self.appendSmokeStatus(
+                                        "app-pairing-decision session=\(sessionID) decision=\(decision.rawValue)"
+                                    )
+                                    if Self.isSmokeRuntimeEnabled {
+                                        Self.emitSmokeLog("🧪 mac pairing decision=\(decision.rawValue)")
+                                    }
+                                    guard decision != PairingTrustApprovalService.Decision.reject else { return }
                                     let pairingReservation: PairingIdentityExchangeCommitCoordinator.Reservation
                                     do {
                                         pairingReservation = try await PairingIdentityExchangeCommitCoordinator
@@ -12282,15 +12300,6 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                             statusMessage: "WebRTC pairing commit admission was unavailable"
                                         )
                                         return
-                                    }
-                                    let transportIsCurrent: @MainActor @Sendable () -> Bool = {
-                                        isCurrentPairingBootstrapTaskOwner(pairingTaskToken)
-                                            && self.isCurrentWebRTCControlLoopSecureOwner(
-                                                sessionID: sessionID,
-                                                session: session,
-                                                controlTaskToken: controlTaskToken,
-                                                keys: keys
-                                            )
                                     }
                                     var commitReceipt: PairingIdentityExchangeCommitCoordinator.CommitReceipt?
                                     do {
@@ -12848,6 +12857,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                     let evt = try JSONDecoder().decode(KeyboardEventWire.self, from: rm.payload)
                                     let inputResult = WebRTCRemoteControlInputEventBridge.handleKeyboardEvent(
                                         evt,
+                                        negotiatedNamespace: self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.keyboardCodeNamespace,
                                         owner: RemoteControlInputOwner(
                                             transport: .webRTC,
                                             sessionID: sessionID,

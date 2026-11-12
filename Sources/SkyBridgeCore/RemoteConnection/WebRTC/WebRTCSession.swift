@@ -304,6 +304,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private var pendingRemoteICECandidates: [RTCIceCandidate] = []
     private var seenRemoteICECandidateKeys: Set<String> = []
     private var latestObservedRemoteICECandidateAddress: String?
+    private var selectedRemoteICECandidateAddress: String?
 #endif
     
     private var isClosed = false
@@ -520,6 +521,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             pendingRemoteICECandidates.removeAll(keepingCapacity: false)
             seenRemoteICECandidateKeys.removeAll(keepingCapacity: false)
             latestObservedRemoteICECandidateAddress = nil
+            selectedRemoteICECandidateAddress = nil
             dataChannel?.delegate = nil
             dataChannel?.close()
             dataChannel = nil
@@ -605,6 +607,11 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #endif
     }
 
+#if canImport(WebRTC) && (DEBUG || SKYBRIDGE_TESTING)
+    /// Read-only access for exercising native delegate ownership and teardown.
+    var testingPeerConnection: RTCPeerConnection? { withState { peerConnection } }
+#endif
+
 #if canImport(WebRTC)
     private func buildIceServers() throws -> [RTCIceServer] {
         var servers: [RTCIceServer] = []
@@ -685,6 +692,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         pendingRemoteICECandidates.removeAll(keepingCapacity: false)
         seenRemoteICECandidateKeys.removeAll(keepingCapacity: false)
         latestObservedRemoteICECandidateAddress = nil
+        selectedRemoteICECandidateAddress = nil
         let factory: RTCPeerConnectionFactory
         do {
             factory = try WebRTCPeerConnectionFactoryProvider.factory(
@@ -1985,6 +1993,12 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 
     public func currentSelectedRemoteCandidateAddress() async -> String? {
 #if canImport(WebRTC)
+        // Native selected-pair events retain the actual transport observation
+        // even when the statistics report has no candidate address. This state
+        // belongs to this exact peer connection and is retired on ICE invalidation.
+        if let address = withState({ isClosed ? nil : selectedRemoteICECandidateAddress }) {
+            return address
+        }
         guard let peerConnection = withState({ self.peerConnection }) else { return nil }
         return await withCheckedContinuation { continuation in
             final class ResumeState: @unchecked Sendable {
@@ -2005,8 +2019,15 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 
             let state = ResumeState()
 
-            peerConnection.statistics { report in
-                state.resume(Self.selectedRemoteCandidateAddress(from: report), continuation: continuation)
+            peerConnection.statistics { [weak self] report in
+                let selection = WebRTCICEStatistics.select(from: Self.iceStatistics(from: report))
+                if let self {
+                    let diagnostic = selection.diagnostic
+                    self.dispatchActiveLifecycleCallback { [weak self] in
+                        self?.logger.notice("ICE statistics selection: \(diagnostic, privacy: .public)")
+                    }
+                }
+                state.resume(selection.remoteAddress, continuation: continuation)
             }
 
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) {
@@ -2861,96 +2882,27 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #endif
     }
 
-    private static func detectICETransportPath(from report: RTCStatisticsReport) -> ICETransportPath {
-        let statsById = report.statistics
-
-        func stringValue(_ stat: RTCStatistics, key: String) -> String? {
-            guard let value = stat.values[key] else { return nil }
-            if let text = value as? String { return text }
-            if let number = value as? NSNumber { return number.stringValue }
-            return nil
-        }
-
-        func boolValue(_ stat: RTCStatistics, key: String) -> Bool {
-            guard let value = stat.values[key] else { return false }
-            if let number = value as? NSNumber { return number.boolValue }
-            if let text = value as? String {
-                let lowered = text.lowercased()
-                return lowered == "true" || lowered == "1"
+    private static func iceStatistics(from report: RTCStatisticsReport) -> [String: WebRTCICEStatistics.Record] {
+        let keys = [
+            "selectedCandidatePairId", "transportId", "state", "localCandidateId",
+            "remoteCandidateId", "candidateType", "address", "ip", "selected", "nominated",
+        ]
+        return report.statistics.mapValues { stat in
+            var values: [String: String] = [:]
+            for key in keys {
+                if let value = stat.values[key] as? String {
+                    values[key] = value
+                } else if (key == "selected" || key == "nominated"),
+                          let value = stat.values[key] as? NSNumber {
+                    values[key] = value.stringValue
+                }
             }
-            return false
+            return WebRTCICEStatistics.Record(type: stat.type, values: values)
         }
-
-        let candidatePairs = statsById.values.compactMap { stat -> WebRTCSelectedICETransportPathPolicy.CandidatePair? in
-            guard stat.type.lowercased() == "candidate-pair" else { return nil }
-            let state = stringValue(stat, key: "state")?.lowercased()
-            let selected = boolValue(stat, key: "selected")
-            let nominated = boolValue(stat, key: "nominated")
-            return WebRTCSelectedICETransportPathPolicy.CandidatePair(
-                isAuthoritySelected: selected || (nominated && state == "succeeded"),
-                localCandidateID: stringValue(stat, key: "localCandidateId"),
-                remoteCandidateID: stringValue(stat, key: "remoteCandidateId")
-            )
-        }
-
-        let candidatesByID = statsById.mapValues { stat in
-            WebRTCSelectedICETransportPathPolicy.Candidate(
-                candidateType: stringValue(stat, key: "candidateType")
-            )
-        }
-
-        return WebRTCSelectedICETransportPathPolicy.classify(
-            candidatePairs: candidatePairs,
-            candidatesByID: candidatesByID
-        )
     }
 
-    private static func selectedRemoteCandidateAddress(from report: RTCStatisticsReport) -> String? {
-        let statsById = report.statistics
-
-        func stringValue(_ stat: RTCStatistics, key: String) -> String? {
-            guard let value = stat.values[key] else { return nil }
-            if let text = value as? String { return text }
-            if let number = value as? NSNumber { return number.stringValue }
-            return nil
-        }
-
-        func boolValue(_ stat: RTCStatistics, key: String) -> Bool {
-            guard let value = stat.values[key] else { return false }
-            if let number = value as? NSNumber { return number.boolValue }
-            if let text = value as? String {
-                let lowered = text.lowercased()
-                return lowered == "true" || lowered == "1"
-            }
-            return false
-        }
-
-        let selectedPair = statsById.values.first { stat in
-            guard stat.type.lowercased() == "candidate-pair" else { return false }
-            let state = stringValue(stat, key: "state")?.lowercased()
-            let selected = boolValue(stat, key: "selected")
-            let nominated = boolValue(stat, key: "nominated")
-            return selected || (nominated && state == "succeeded")
-        }
-        guard let selectedPair,
-              let remoteCandidateId = stringValue(selectedPair, key: "remoteCandidateId"),
-              let candidate = statsById[remoteCandidateId] else {
-            return nil
-        }
-
-        for key in ["address", "ip"] {
-            if let value = stringValue(candidate, key: key)?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-               !value.isEmpty {
-                return value
-            }
-        }
-
-        guard let candidateLine = stringValue(candidate, key: "candidate") else { return nil }
-        let fields = candidateLine.split(separator: " ").map(String.init)
-        guard fields.count > 4 else { return nil }
-        let address = fields[4].trimmingCharacters(in: .whitespacesAndNewlines)
-        return address.isEmpty ? nil : address
+    private static func detectICETransportPath(from report: RTCStatisticsReport) -> ICETransportPath {
+        WebRTCICEStatistics.select(from: iceStatistics(from: report)).path
     }
 
     private static func nativeScreenVideoRTCStats(from report: RTCStatisticsReport) -> NativeScreenVideoRTCStats {
@@ -3162,6 +3114,9 @@ extension WebRTCSession: RTCPeerConnectionDelegate {
         scheduleState { [weak self] in
             guard let self, self.peerConnection === peerConnection, !self.isClosed else { return }
             self.logger.info("ICE connection state: \(String(describing: newState), privacy: .public)")
+            if newState != .connected && newState != .completed {
+                self.selectedRemoteICECandidateAddress = nil
+            }
             switch newState {
             case .failed:
                 self.notifyDisconnectedIfNeeded(reason: "ice_failed")
@@ -3197,6 +3152,27 @@ extension WebRTCSession: RTCPeerConnectionDelegate {
         }
     }
     public func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}
+    public func peerConnection(
+        _ peerConnection: RTCPeerConnection,
+        didChangeLocalCandidate local: RTCIceCandidate,
+        remoteCandidate remote: RTCIceCandidate,
+        lastReceivedMs: Int32,
+        changeReason: String
+    ) {
+        let candidateSDP = remote.sdp
+        scheduleState { [weak self] in
+            guard let self, self.peerConnection === peerConnection, !self.isClosed else { return }
+            do {
+                self.selectedRemoteICECandidateAddress = try Self.validatedSelectedICECandidateAddress(candidateSDP)
+                self.logger.notice("Selected ICE candidate event: address=true")
+            } catch {
+                // A new observation supersedes the old pair even when it is
+                // unusable. Never retain an earlier address as current evidence.
+                self.selectedRemoteICECandidateAddress = nil
+                self.logger.error("Selected ICE candidate event: invalid candidate; address unavailable")
+            }
+        }
+    }
     public func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {
         scheduleState { [weak self] in
             guard let self, self.peerConnection === peerConnection, !self.isClosed else { return }

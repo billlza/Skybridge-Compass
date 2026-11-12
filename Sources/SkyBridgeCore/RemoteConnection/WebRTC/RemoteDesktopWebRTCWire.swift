@@ -44,6 +44,14 @@ struct KeyboardEventWire: Codable {
     let type: KeyboardEventTypeWire
     let keyCode: Int
     let timestamp: TimeInterval
+    let keyCodeNamespace: String?
+
+    init(type: KeyboardEventTypeWire, keyCode: Int, timestamp: TimeInterval, keyCodeNamespace: String? = nil) {
+        self.type = type
+        self.keyCode = keyCode
+        self.timestamp = timestamp
+        self.keyCodeNamespace = keyCodeNamespace
+    }
 }
 
 struct ScreenDataWire: Codable, Sendable {

@@ -8,8 +8,10 @@ The Windows repository's `core/skybridge-core` diagnostic binary is not a
 substitute for that archive. Both report an explicit `operator_profile`; see
 [ADR-0003](ADR-0003-Native-Runtimes-and-Operator-Contract.md). Retain existing
 local diagnostic scripts without silently installing their binary over the
-public `skybridge` command. Linux's existing packaging definitions are retained,
-but Linux development and acceptance are deferred in the current workstream.
+public `skybridge` command. Linux headless client work has resumed; its native
+runtime, terminal menus and process acceptance are described in
+[Linux client runtime](linux-client-runtime.md). Desktop capture, audio and USB
+backend parity remain separate implementation and device-acceptance work.
 Package managers must download the exact same source-bound release artifacts instead of rebuilding the protocol core. The current workflow binds those bytes into a source/run handoff with `release-manifest.json` and `SHA256SUMS.txt`; public publication remains blocked until platform publisher-signature and notarization proofs are verified.
 
 Supported install surfaces for v1:
@@ -49,9 +51,9 @@ git clone --filter=blob:none --no-checkout \
   https://github.com/billlza/q-periapt.git \
   External/pqt_hybrid_suite
 git -C External/pqt_hybrid_suite checkout --detach \
-  5664fd86a617f92b620ea37e7692d3417d0e307d
+  7ed1f96a7ec33732f02a989dd5a4669cdcce39ad
 test "$(git -C External/pqt_hybrid_suite rev-parse HEAD)" = \
-  5664fd86a617f92b620ea37e7692d3417d0e307d
+  7ed1f96a7ec33732f02a989dd5a4669cdcce39ad
 cargo test --manifest-path rust/Cargo.toml
 cargo run --manifest-path rust/Cargo.toml -p skybridge -- version
 ```
@@ -186,7 +188,7 @@ Homebrew tap publisher:
 - packaging validation
   - `.github/workflows/skybridge-cli-packaging.yml`
   - runs on push / pull request
-  - audits locked dependencies; checks full-workspace Rust formatting, tests, and strict lint; validates npm/shell/release contracts; builds one Linux archive; stages npm and Homebrew outputs
+  - uses native x86_64 and aarch64 Linux runners; audits locked dependencies; checks full-workspace Rust formatting, tests, and strict lint; validates npm/shell/release contracts; builds each Linux archive and executes its extracted binary through the process/PTY acceptance script; stages npm and Homebrew outputs
 - release build
   - `.github/workflows/skybridge-cli-release.yml`
   - `workflow_dispatch` performs a dry-run artifact build and uploads the assembled release bundle as a workflow artifact
@@ -195,6 +197,7 @@ Homebrew tap publisher:
     - runs core/agent/crossnet/CLI tests natively on every target runner
       - non-macOS crossnet coverage proves the portable contract and platform gating only; even the macOS runner does not replace a signed Mac App socket smoke
     - builds all supported release archives
+    - exercises each extracted Linux archive with the same process/PTY acceptance script and retains a binary-hash-bound result
     - writes `SHA256SUMS.txt`
     - writes `release-manifest.json`
     - renders `skybridge.rb`
