@@ -774,7 +774,8 @@ public actor HandshakeDriver {
                 kemIdentityStore: kemIdentityStore,
                 peerKEMPublicKeys: peerKEMPublicKeys,
                 offeredSuites: offeredSuites,
-                activeProtocolSigningAlgorithm: activeProtocolSigningAlgorithm
+                activeProtocolSigningAlgorithm: activeProtocolSigningAlgorithm,
+                pqcModeSelection: try localModePolicy.get().selection
             )
         } catch {
             guard case .sendingMessageA = state else {
@@ -1203,7 +1204,8 @@ public actor HandshakeDriver {
                 kemIdentityStore: kemIdentityStore,
                 peerKEMPublicKeys: peerKEMPublicKeys,
                 offeredSuites: offeredSuites,
-                activeProtocolSigningAlgorithm: activeProtocolSigningAlgorithm
+                activeProtocolSigningAlgorithm: activeProtocolSigningAlgorithm,
+                pqcModeSelection: try localModePolicy.get().selection
             )
             guard responderOperationToken == operationToken else {
                 await ctx.zeroize()

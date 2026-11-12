@@ -2,6 +2,7 @@ import XCTest
 import Darwin
 import CryptoKit
 import enum SkyBridgeProtocolCore.PQCModeSelectionError
+import struct SkyBridgeProtocolCore.PQCModeSelection
 @testable import SkyBridgeCompass_iOS
 
 @available(iOS 17.0, *)
@@ -1558,6 +1559,25 @@ final class HandshakeCryptoPolicyParityTests: XCTestCase {
         #else
         throw XCTSkip("HAS_APPLE_PQC_SDK not enabled")
         #endif
+    }
+
+    func testResponderSelectionAppliesFrozenModeBeforeChoosingThePeerPreferredSuite() async throws {
+        let offered: [CryptoSuite] = [.xwing, .mlkem768]
+        let context = HandshakeContext(
+            role: .responder,
+            cryptoProvider: MockNativeHybridProvider(),
+            protocolSignatureProvider: PQCSignatureProvider(),
+            identityKeyHandle: nil,
+            identityPublicKey: Data(repeating: 0x23, count: 32),
+            policy: .strictPQC,
+            cryptoPolicy: HandshakeCryptoPolicyResolver.policy(for: offered),
+            offeredSuites: offered,
+            pqcModeSelection: PQCModeSelection(preference: .mlkem, strictlyMatchSelectedMode: true)
+        )
+        let message = makeMessageA(supportedSuites: offered, keyShareSuites: offered)
+        let selected = try await context.selectResponderSuite(for: message)
+        XCTAssertEqual(selected, .mlkem768)
+        await context.zeroize()
     }
 
     func testResponderSelectionRejectsSuiteOutsideFrozenLocalOffer() async throws {

@@ -358,12 +358,12 @@ final class HandshakeFinishedDeliveryTests: XCTestCase {
         var reception: Task<Void, Never>?
 
         do {
-            let messageA = try await waitForMessages(1, transport: initiatorTransport)[0]
+            let messageA = try await waitForMessages(1, transport: initiatorTransport, driver: initiator)[0]
             let receiveTask = Task {
                 await responder.handleMessage(messageA, from: peer)
             }
             reception = receiveTask
-            let responderMessages = try await waitForMessages(2, transport: responderTransport)
+            let responderMessages = try await waitForMessages(2, transport: responderTransport, driver: responder)
             await initiator.handleMessage(responderMessages[0], from: peer)
             await initiator.handleMessage(responderMessages[1], from: peer)
             let initiatorKeys = try await initiation.value
@@ -374,7 +374,7 @@ final class HandshakeFinishedDeliveryTests: XCTestCase {
                 XCTAssertEqual(binding?.local.deviceId, Self.initiatorID)
                 XCTAssertEqual(binding?.peer.authenticatedRemoteSOAPeerId, responderSOA)
             }
-            let initiatorMessages = try await waitForMessages(2, transport: initiatorTransport)
+            let initiatorMessages = try await waitForMessages(2, transport: initiatorTransport, driver: initiator)
             try await body(responder, responderTransport, initiatorMessages[1], peer, receiveTask)
         } catch {
             await initiator.cancel()
@@ -419,7 +419,8 @@ final class HandshakeFinishedDeliveryTests: XCTestCase {
 
     private func waitForMessages(
         _ count: Int,
-        transport: ControlledFinishedTransport
+        transport: ControlledFinishedTransport,
+        driver: HandshakeDriver
     ) async throws -> [Data] {
         let deadline = ContinuousClock.now + .seconds(10)
         while ContinuousClock.now < deadline {
@@ -427,7 +428,21 @@ final class HandshakeFinishedDeliveryTests: XCTestCase {
             if messages.count == count { return messages }
             try await Task.sleep(for: .milliseconds(5))
         }
-        XCTFail("The actual handshake did not reach the controlled transport boundary")
+        let observedCount = await transport.capturedMessages().count
+        let state = await driver.getCurrentState()
+        let stateName: String
+        switch state {
+        case .idle: stateName = "idle"
+        case .sendingMessageA: stateName = "sendingMessageA"
+        case .waitingMessageB: stateName = "waitingMessageB"
+        case .processingMessageA: stateName = "processingMessageA"
+        case .sendingMessageB: stateName = "sendingMessageB"
+        case .processingMessageB: stateName = "processingMessageB"
+        case .waitingFinished: stateName = "waitingFinished"
+        case .established: stateName = "established"
+        case .failed(let reason): stateName = "failed: \(reason.localizedDescription)"
+        }
+        XCTFail("The actual handshake did not reach the controlled transport boundary; expectedMessages=\(count) observedMessages=\(observedCount) state=\(stateName)")
         throw FinishedDeliveryTestFailure.timedOutWaitingForTransport
     }
 }
