@@ -830,6 +830,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         self.readiness = readiness
     }
 
+    func testingCleanupWebRTCSession(_ sessionID: String) {
+        cleanupWebRTCSession(sessionID, reason: "test_session_retirement")
+    }
+
     func testingCurrentSignalingHandle() -> WebSocketSignalingClient.SignalingHandleID? {
         signalingLifecycle.currentHandle()
     }
@@ -3010,6 +3014,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         if currentConnection?.id == sessionID {
             currentConnection = nil
             readiness = .idle
+            switch connectionStatus {
+            case .failed:
+                break
+            default:
+                connectionStatus = .idle
+            }
         }
         if protocolIdentityStatus?.sessionID == sessionID {
             protocolIdentityStatus = nil
