@@ -12848,6 +12848,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                     let evt = try JSONDecoder().decode(KeyboardEventWire.self, from: rm.payload)
                                     let inputResult = WebRTCRemoteControlInputEventBridge.handleKeyboardEvent(
                                         evt,
+                                        negotiatedNamespace: self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.keyboardCodeNamespace,
                                         owner: RemoteControlInputOwner(
                                             transport: .webRTC,
                                             sessionID: sessionID,

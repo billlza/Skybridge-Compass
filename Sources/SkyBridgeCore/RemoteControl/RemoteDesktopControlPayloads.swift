@@ -173,6 +173,8 @@ public struct RemoteDesktopStreamConfiguration: Codable, Sendable, Equatable {
     public let enableHardwareAcceleration: Bool
     public let enableAppleSiliconOptimization: Bool
     public let clipboardSyncEnabled: Bool
+    /// Physical-key namespace agreed by this exact stream transaction.
+    public let keyboardCodeNamespace: String?
     public let damageTrackingEnabled: Bool?
     public let separateCursorChannelEnabled: Bool?
     public let interactionOverlayChannelEnabled: Bool?
@@ -219,6 +221,7 @@ public struct RemoteDesktopStreamConfiguration: Codable, Sendable, Equatable {
         enableHardwareAcceleration: Bool,
         enableAppleSiliconOptimization: Bool,
         clipboardSyncEnabled: Bool,
+        keyboardCodeNamespace: String? = nil,
         damageTrackingEnabled: Bool? = nil,
         separateCursorChannelEnabled: Bool? = nil,
         interactionOverlayChannelEnabled: Bool? = nil,
@@ -263,6 +266,7 @@ public struct RemoteDesktopStreamConfiguration: Codable, Sendable, Equatable {
         self.enableHardwareAcceleration = enableHardwareAcceleration
         self.enableAppleSiliconOptimization = enableAppleSiliconOptimization
         self.clipboardSyncEnabled = clipboardSyncEnabled
+        self.keyboardCodeNamespace = keyboardCodeNamespace
         self.damageTrackingEnabled = damageTrackingEnabled
         self.separateCursorChannelEnabled = separateCursorChannelEnabled
         self.interactionOverlayChannelEnabled = interactionOverlayChannelEnabled

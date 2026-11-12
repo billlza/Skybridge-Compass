@@ -52,6 +52,8 @@ public struct RemoteDesktopStreamConfigurationAcknowledgement: Codable, Equatabl
     public let transaction: RemoteDesktopStreamConfigurationTransaction
     public let streamRefreshToken: UInt64?
     public let audioEndpointPresent: Bool
+    /// Absent for legacy peers; input usages change only after this receipt.
+    public let keyboardCodeNamespace: String?
     public let screenFrameTransport: String?
     /// Version 1 confirms that the host accepts an authenticated acknowledgement
     /// after the viewer's product renderer presents an exact sequenced frame.
@@ -69,12 +71,14 @@ public struct RemoteDesktopStreamConfigurationAcknowledgement: Codable, Equatabl
         screenFrameTransport: String?,
         framePresentationAckVersion: Int? = nil,
         controlAccess: RemoteControlAccess? = nil,
-        sessionTerminationVersion: Int? = nil
+        sessionTerminationVersion: Int? = nil,
+        keyboardCodeNamespace: String? = nil
     ) {
         self.acceptedAt = acceptedAt
         self.transaction = transaction
         self.streamRefreshToken = streamRefreshToken
         self.audioEndpointPresent = audioEndpointPresent
+        self.keyboardCodeNamespace = keyboardCodeNamespace
         self.screenFrameTransport = screenFrameTransport
         self.framePresentationAckVersion = framePresentationAckVersion
         self.controlAccess = controlAccess

@@ -1,4 +1,5 @@
 import XCTest
+import SkyBridgeProtocolCore
 @testable import SkyBridgeCore
 
 final class WebRTCRemoteControlInputEventBridgeTests: XCTestCase {
@@ -30,6 +31,24 @@ final class WebRTCRemoteControlInputEventBridgeTests: XCTestCase {
         XCTAssertEqual(event?.type, .keyUp)
         XCTAssertEqual(event?.keyCode, 36)
         XCTAssertEqual(event?.timestamp, 111)
+    }
+
+    func testPhysicalKeysRequireTheCommittedNamespaceAndNeverUseHIDAsNativeCode() throws {
+        let wire = KeyboardEventWire(type: .keyDown, keyCode: 0x04, timestamp: 111,
+                                     keyCodeNamespace: CanonicalKeyboard.namespace)
+        XCTAssertNil(WebRTCRemoteControlInputEventBridge.remoteKeyboardEvent(from: wire))
+        let event = try XCTUnwrap(WebRTCRemoteControlInputEventBridge.remoteKeyboardEvent(
+            from: wire, negotiatedNamespace: CanonicalKeyboard.namespace))
+        XCTAssertEqual(event.keyCode, 0, "HID A must become macOS virtual key 0, not virtual key 4")
+        let legacy = KeyboardEventWire(type: .keyDown, keyCode: 4, timestamp: 111)
+        XCTAssertNil(WebRTCRemoteControlInputEventBridge.remoteKeyboardEvent(
+            from: legacy, negotiatedNamespace: CanonicalKeyboard.namespace))
+        for code in [-1, 0, 0x66, 0x10004] {
+            let invalid = KeyboardEventWire(type: .keyDown, keyCode: code, timestamp: 111,
+                                           keyCodeNamespace: CanonicalKeyboard.namespace)
+            XCTAssertNil(WebRTCRemoteControlInputEventBridge.remoteKeyboardEvent(
+                from: invalid, negotiatedNamespace: CanonicalKeyboard.namespace))
+        }
     }
 
     func testCrossNetworkManagerDoesNotOwnCGEventInjectionImplementation() throws {

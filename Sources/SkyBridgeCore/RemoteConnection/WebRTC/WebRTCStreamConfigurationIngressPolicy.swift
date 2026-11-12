@@ -37,6 +37,7 @@ extension CrossNetworkConnectionManager {
             let streamRefreshToken: UInt64?
             let audioEndpointPresent: Bool
             let screenFrameTransport: String?
+            var keyboardCodeNamespace: String? = nil
 
             func payload(acceptedAt: TimeInterval) -> RemoteDesktopStreamConfigurationAcknowledgement {
                 RemoteDesktopStreamConfigurationAcknowledgement(
@@ -45,7 +46,8 @@ extension CrossNetworkConnectionManager {
                     streamRefreshToken: streamRefreshToken,
                     audioEndpointPresent: audioEndpointPresent,
                     screenFrameTransport: screenFrameTransport,
-                    framePresentationAckVersion: nil
+                    framePresentationAckVersion: nil,
+                    keyboardCodeNamespace: keyboardCodeNamespace
                 )
             }
         }
@@ -178,7 +180,9 @@ extension CrossNetworkConnectionManager {
                     transaction: transaction,
                     streamRefreshToken: effectiveConfig.streamRefreshToken,
                     audioEndpointPresent: effectiveConfig.mediaAudioEndpoint != nil,
-                    screenFrameTransport: effectiveConfig.screenFrameTransport
+                    screenFrameTransport: effectiveConfig.screenFrameTransport,
+                    keyboardCodeNamespace: effectiveConfig.keyboardCodeNamespace == CanonicalKeyboard.namespace
+                        ? CanonicalKeyboard.namespace : nil
                 )
             } else {
                 acknowledgement = nil
@@ -236,7 +240,9 @@ extension CrossNetworkConnectionManager {
                 transaction: transaction,
                 streamRefreshToken: effectiveConfig.streamRefreshToken,
                 audioEndpointPresent: effectiveConfig.mediaAudioEndpoint != nil,
-                screenFrameTransport: effectiveConfig.screenFrameTransport
+                screenFrameTransport: effectiveConfig.screenFrameTransport,
+                    keyboardCodeNamespace: effectiveConfig.keyboardCodeNamespace == CanonicalKeyboard.namespace
+                        ? CanonicalKeyboard.namespace : nil
                 )
             }
             : nil
