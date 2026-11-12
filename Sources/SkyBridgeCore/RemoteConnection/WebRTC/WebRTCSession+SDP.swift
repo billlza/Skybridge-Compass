@@ -159,6 +159,20 @@ extension WebRTCSession {
         return ValidatedRemoteSessionDescription(mediaSections: mediaSections)
     }
 
+    /// The SDK's selected-pair event has transport metadata, not a trickle
+    /// candidate's media index. Validate its candidate grammar without requiring
+    /// the nonnegative m-line index used only for remote candidate submission.
+    nonisolated static func validatedSelectedICECandidateAddress(_ candidate: String) throws -> String {
+        let normalized = try normalizedRemoteICECandidateSDP(candidate, context: "selected ICE candidate")
+        let fields = normalized.split(separator: " ", omittingEmptySubsequences: true)
+        // The shared grammar validator has already required the eight ICE fields.
+        let address = String(fields[4])
+        guard address != "0.0.0.0", address != "::" else {
+            throw WebRTCError.sdpFailed("selected ICE candidate has an unspecified address")
+        }
+        return address
+    }
+
     nonisolated static func validatedRemoteICECandidate(
         candidate: String,
         sdpMid: String?,

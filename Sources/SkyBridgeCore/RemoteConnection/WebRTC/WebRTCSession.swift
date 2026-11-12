@@ -304,6 +304,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private var pendingRemoteICECandidates: [RTCIceCandidate] = []
     private var seenRemoteICECandidateKeys: Set<String> = []
     private var latestObservedRemoteICECandidateAddress: String?
+    private var selectedRemoteICECandidateAddress: String?
 #endif
     
     private var isClosed = false
@@ -520,6 +521,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             pendingRemoteICECandidates.removeAll(keepingCapacity: false)
             seenRemoteICECandidateKeys.removeAll(keepingCapacity: false)
             latestObservedRemoteICECandidateAddress = nil
+            selectedRemoteICECandidateAddress = nil
             dataChannel?.delegate = nil
             dataChannel?.close()
             dataChannel = nil
@@ -605,6 +607,11 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #endif
     }
 
+#if canImport(WebRTC) && (DEBUG || SKYBRIDGE_TESTING)
+    /// Read-only access for exercising native delegate ownership and teardown.
+    var testingPeerConnection: RTCPeerConnection? { withState { peerConnection } }
+#endif
+
 #if canImport(WebRTC)
     private func buildIceServers() throws -> [RTCIceServer] {
         var servers: [RTCIceServer] = []
@@ -685,6 +692,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         pendingRemoteICECandidates.removeAll(keepingCapacity: false)
         seenRemoteICECandidateKeys.removeAll(keepingCapacity: false)
         latestObservedRemoteICECandidateAddress = nil
+        selectedRemoteICECandidateAddress = nil
         let factory: RTCPeerConnectionFactory
         do {
             factory = try WebRTCPeerConnectionFactoryProvider.factory(
@@ -1985,6 +1993,12 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 
     public func currentSelectedRemoteCandidateAddress() async -> String? {
 #if canImport(WebRTC)
+        // Native selected-pair events retain the actual transport observation
+        // even when the statistics report has no candidate address. This state
+        // belongs to this exact peer connection and is retired on ICE invalidation.
+        if let address = withState({ isClosed ? nil : selectedRemoteICECandidateAddress }) {
+            return address
+        }
         guard let peerConnection = withState({ self.peerConnection }) else { return nil }
         return await withCheckedContinuation { continuation in
             final class ResumeState: @unchecked Sendable {
@@ -3100,6 +3114,9 @@ extension WebRTCSession: RTCPeerConnectionDelegate {
         scheduleState { [weak self] in
             guard let self, self.peerConnection === peerConnection, !self.isClosed else { return }
             self.logger.info("ICE connection state: \(String(describing: newState), privacy: .public)")
+            if newState != .connected && newState != .completed {
+                self.selectedRemoteICECandidateAddress = nil
+            }
             switch newState {
             case .failed:
                 self.notifyDisconnectedIfNeeded(reason: "ice_failed")
@@ -3135,6 +3152,27 @@ extension WebRTCSession: RTCPeerConnectionDelegate {
         }
     }
     public func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}
+    public func peerConnection(
+        _ peerConnection: RTCPeerConnection,
+        didChangeLocalCandidate local: RTCIceCandidate,
+        remoteCandidate remote: RTCIceCandidate,
+        lastReceivedMs: Int32,
+        changeReason: String
+    ) {
+        let candidateSDP = remote.sdp
+        scheduleState { [weak self] in
+            guard let self, self.peerConnection === peerConnection, !self.isClosed else { return }
+            do {
+                self.selectedRemoteICECandidateAddress = try Self.validatedSelectedICECandidateAddress(candidateSDP)
+                self.logger.notice("Selected ICE candidate event: address=true")
+            } catch {
+                // A new observation supersedes the old pair even when it is
+                // unusable. Never retain an earlier address as current evidence.
+                self.selectedRemoteICECandidateAddress = nil
+                self.logger.error("Selected ICE candidate event: invalid candidate; address unavailable")
+            }
+        }
+    }
     public func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {
         scheduleState { [weak self] in
             guard let self, self.peerConnection === peerConnection, !self.isClosed else { return }
