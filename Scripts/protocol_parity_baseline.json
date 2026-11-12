@@ -107,9 +107,9 @@
   "HandshakeDriver.swift": {
     "forked": false,
     "ios": "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/Handshake/HandshakeDriver.swift",
-    "ios_hash": "dc4d4765d41fe681a79788fa1ff6343b094084a42450bf5eee75d5a46cac8604",
+    "ios_hash": "f2afa97f9608f1e56c727d52b93c929d1af19b347c914b628089a76d5a455d4e",
     "macos": "Sources/SkyBridgeCore/P2P/HandshakeDriver.swift",
-    "macos_hash": "b68b238be630dd92518c22588b3f48785c39ad01c918e658fa212b333dd7b688"
+    "macos_hash": "1b623c66f0ab27935ab44ec4c13eafcfa78b5a8ab053bbeb574e3092af33e0d0"
   },
   "HandshakeMessages.swift": {
     "forked": false,
