@@ -17,6 +17,22 @@ public final class PairingTrustApprovalService: ObservableObject {
         case allowOnce
         case reject
     }
+
+    /// Display evidence derived locally from the authenticated session. No keys
+    /// are retained in the UI request, and distinct transcripts cannot coalesce.
+    public struct SessionVerification: Sendable, Equatable {
+        public let code: String
+        public let suite: String
+        private let sessionID: String
+        private let transcriptHash: Data
+
+        public init(sessionKeys: SessionKeys) {
+            code = sessionKeys.pairingVerificationCode()
+            suite = sessionKeys.negotiatedSuite.rawValue
+            sessionID = sessionKeys.sessionId
+            transcriptHash = sessionKeys.transcriptHash
+        }
+    }
     
     public struct Request: Identifiable, Sendable, Equatable {
         public let id: UUID
@@ -33,6 +49,7 @@ public final class PairingTrustApprovalService: ObservableObject {
         public let protocolIdentityRequestHashHex: String?
         public let protocolIdentityCandidateHashHex: String?
         public let protocolIdentitySASTranscriptHashHex: String?
+        public let sessionVerification: SessionVerification?
         public let kemKeyCount: Int
         public let receivedAt: Date
         
@@ -51,6 +68,7 @@ public final class PairingTrustApprovalService: ObservableObject {
             protocolIdentityRequestHashHex: String? = nil,
             protocolIdentityCandidateHashHex: String? = nil,
             protocolIdentitySASTranscriptHashHex: String? = nil,
+            sessionVerification: SessionVerification? = nil,
             kemKeyCount: Int,
             receivedAt: Date = Date()
         ) {
@@ -68,6 +86,7 @@ public final class PairingTrustApprovalService: ObservableObject {
             self.protocolIdentityRequestHashHex = protocolIdentityRequestHashHex
             self.protocolIdentityCandidateHashHex = protocolIdentityCandidateHashHex
             self.protocolIdentitySASTranscriptHashHex = protocolIdentitySASTranscriptHashHex
+            self.sessionVerification = sessionVerification
             self.kemKeyCount = kemKeyCount
             self.receivedAt = receivedAt
         }
@@ -341,9 +360,9 @@ public final class PairingTrustApprovalService: ObservableObject {
         pendingDecision = nil
         isPendingResolutionInFlight = false
         pendingResolutionNotice = nil
-        pendingVerificationCode = nil
-        pendingVerificationSuite = nil
-        pendingVerificationUpdatedAt = nil
+        pendingVerificationCode = request.sessionVerification?.code
+        pendingVerificationSuite = request.sessionVerification?.suite
+        pendingVerificationUpdatedAt = request.sessionVerification == nil ? nil : Date()
         pendingRequest = request
         logger.info("🔔 Pairing/trust approval required: name=\(request.displayName, privacy: .private) deviceId=\(deviceId, privacy: .private)")
         
@@ -435,6 +454,7 @@ public final class PairingTrustApprovalService: ObservableObject {
     }
 
     private func isSameTrustRequest(_ lhs: Request, _ rhs: Request) -> Bool {
+        guard lhs.sessionVerification == rhs.sessionVerification else { return false }
         let lhsBinding = lhs.policyBindingKey?.trimmingCharacters(in: .whitespacesAndNewlines)
         let rhsBinding = rhs.policyBindingKey?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let lhsBinding, let rhsBinding, !lhsBinding.isEmpty, !rhsBinding.isEmpty {

@@ -4,6 +4,56 @@ import XCTest
 @available(macOS 14.0, iOS 17.0, *)
 @MainActor
 final class PairingTrustApprovalServiceTests: XCTestCase {
+    func testAuthenticatedSessionSASIsVisibleBeforeOperatorDecision() async throws {
+        let service = PairingTrustApprovalService.shared
+        service.userDismissedCurrentPrompt()
+        let keys = sessionKeys(transcriptByte: 3)
+        let request = PairingTrustApprovalService.Request(
+            peerEndpoint: "webrtc:session-sas", declaredDeviceId: "sas:\(UUID().uuidString)",
+            displayName: "Authenticated session", sessionVerification: .init(sessionKeys: keys), kemKeyCount: 1
+        )
+        let decision = Task { @MainActor in await service.decide(for: request) }
+        _ = try await waitForPendingRequest(service, matching: request.id)
+        XCTAssertEqual(service.pendingVerificationCode, keys.pairingVerificationCode())
+        XCTAssertEqual(service.pendingVerificationSuite, keys.negotiatedSuite.rawValue)
+        XCTAssertNotNil(service.pendingVerificationUpdatedAt)
+        XCTAssertNil(service.pendingDecision)
+        decision.cancel()
+        let result = await decision.value
+        XCTAssertEqual(result, .reject)
+        XCTAssertNil(service.pendingRequest)
+        XCTAssertNil(service.pendingVerificationCode)
+    }
+
+    func testSameDeviceWithDifferentTranscriptCannotCoalesceOrReplaceSAS() async throws {
+        let service = PairingTrustApprovalService.shared
+        service.userDismissedCurrentPrompt()
+        let device = "sas-owner:\(UUID().uuidString)"
+        let keys = sessionKeys(transcriptByte: 3)
+        let first = PairingTrustApprovalService.Request(
+            peerEndpoint: "first", declaredDeviceId: device, displayName: "First",
+            sessionVerification: .init(sessionKeys: keys), kemKeyCount: 1
+        )
+        let other = PairingTrustApprovalService.Request(
+            peerEndpoint: "other", declaredDeviceId: device, displayName: "Other",
+            sessionVerification: .init(sessionKeys: sessionKeys(transcriptByte: 4)), kemKeyCount: 1
+        )
+        let decision = Task { @MainActor in await service.decide(for: first) }
+        _ = try await waitForPendingRequest(service, matching: first.id)
+        let otherDecision = await service.decide(for: other)
+        XCTAssertEqual(otherDecision, .reject)
+        XCTAssertEqual(service.pendingRequest?.id, first.id)
+        XCTAssertEqual(service.pendingVerificationCode, keys.pairingVerificationCode())
+        decision.cancel()
+        _ = await decision.value
+    }
+
+    private func sessionKeys(transcriptByte: UInt8) -> SessionKeys {
+        SessionKeys(sendKey: Data(repeating: 1, count: 32), receiveKey: Data(repeating: 2, count: 32),
+                    negotiatedSuite: .x25519Ed25519, role: .responder,
+                    transcriptHash: Data(repeating: transcriptByte, count: 32))
+    }
+
     func testStaleResolutionCannotChangeCurrentPolicy() async throws {
         let service = PairingTrustApprovalService.shared
         service.userDismissedCurrentPrompt()

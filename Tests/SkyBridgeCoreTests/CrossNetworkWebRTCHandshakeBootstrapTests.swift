@@ -2880,7 +2880,7 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
             "Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"
         )
         let pairingCase = try sourceSlice(
-            from: "guard decision != PairingTrustApprovalService.Decision.reject else",
+            from: "let request = PairingTrustApprovalService.Request(",
             to: "case .heartbeat(let payload):",
             in: source
         )
@@ -2898,6 +2898,13 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertTrue(pairingCase.contains("let pairingTaskToken = UUID()"))
         XCTAssertTrue(pairingCase.contains("guard isCurrentPairingBootstrapTaskOwner(pairingTaskToken)"))
         XCTAssertTrue(pairingCase.contains("pairingBootstrapTask?.cancel()"))
+        let taskStart = try XCTUnwrap(pairingCase.range(of: "pairingBootstrapTask = Task {"))
+        let approvalWait = try XCTUnwrap(pairingCase.range(of: "await PairingTrustApprovalService.shared.decide(for: request)"))
+        XCTAssertLessThan(taskStart.lowerBound, approvalWait.lowerBound,
+                          "Human approval must run inside the owned task so the receive loop continues handling heartbeats.")
+        XCTAssertTrue(pairingCase[approvalWait.upperBound...].contains(
+            "guard !Task.isCancelled, transportIsCurrent() else { return }"
+        ))
         XCTAssertTrue(
             pairingCase.contains(
                 "pairingBootstrapTask = Task { @MainActor [weak self] in"
